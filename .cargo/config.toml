@@ -1,0 +1,19 @@
+[unstable]
+build-std-features = ["compiler-builtins-mem"]
+build-std = ["core","alloc", "compiler_builtins"]
+unstable-options = true
+
+[build]
+target = "target.json"
+incremental = true
+
+[profile.dev]
+incremental = true
+debug-assertions = true
+
+[profile.release]
+incremental = true
+debug-assertions = false
+
+[alias]
+verify = "v build"
