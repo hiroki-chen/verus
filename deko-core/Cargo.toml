@@ -1,0 +1,11 @@
+[package]
+name = "deko-core"
+edition = "2021"
+
+[package.metadata.verus]
+verify = true
+
+[dependencies]
+vstd = { workspace = true }
+builtin = { workspace = true }
+builtin_macros = { workspace = true }

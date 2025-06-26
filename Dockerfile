@@ -1,8 +1,7 @@
 # Pull base image from Ubuntu 24.04
 FROM ubuntu:24.04
 
-COPY . /app
-
+SHELL ["/bin/bash", "-c"]
 RUN apt-get update
 RUN apt-get install -y \
     build-essential \
@@ -17,18 +16,31 @@ RUN apt-get install -y \
     curl \
     python3-pip \
     python3-venv \
-    wget
+    wget \
+    git \
+    gcc-multilib
 
 # Install Rust
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain nightly -y
+ENV PATH="/root/.cargo/bin:${PATH}"
 
-# Install Verus.
-RUN wget https://github.com/verus-lang/verus/releases/download/release%2F0.2025.06.23.2e59154/verus-0.2025.06.23.2e59154-x86-linux.zip -O verus.zip
-RUN unzip verus.zip -d /app/.bin
-RUN rm verus.zip
+WORKDIR /root
+RUN git clone https://github.com/hiroki-chen/verus.git --branch main
+WORKDIR /root/verus/source
+RUN rustup -V
+RUN ./tools/get-z3.sh
+RUN source ../tools/activate
 
-ENV PATH="/app/.bin/verus-x86-linux:/app/.bin:/root/.cargo/bin:${PATH}"
+ENV PATH="/root/verus/tools/vargo/target/release:${PATH}"
+RUN vargo build --release
+RUN touch /root/verus/source/target/release/verus-root
 
 WORKDIR /app
 # Install the required toolchain
-RUN rustup toolchain install nightly-2025-02-14
+RUN rustup -V
+RUN curl --proto '=https' --tlsv1.2 -LsSf https://github.com/verus-lang/verusfmt/releases/download/v0.5.7/verusfmt-installer.sh | sh
+
+ENV PATH="/root/verus/source/target/release:/root/verus/source:${PATH}"
+
+# install rust-src for nightly
+RUN rustup component add rust-src --toolchain nightly-2025-02-14
