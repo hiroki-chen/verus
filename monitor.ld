@@ -4,7 +4,7 @@ ENTRY(_start)
 SECTIONS
 {
 	. = 0x0;
-	_monitor_start = .;
+	sm_entry = .;
 	.text	:
 	{
 		*(.text .text.*)
@@ -32,7 +32,7 @@ SECTIONS
 		*(.gnu.hash*)
 		*(.hash)
 	}
-	_monitor_end = .;
+	sm_end = .;
 	.debug	:
 	{
 		*(.debug .debug* )

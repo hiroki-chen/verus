@@ -6,6 +6,6 @@ edition = "2021"
 verify = true
 
 [dependencies]
-vstd = { workspace = true }
+vstd = { workspace = true, features = ["alloc"] }
 builtin = { workspace = true }
 builtin_macros = { workspace = true }

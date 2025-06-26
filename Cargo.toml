@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["deko-core"]
+members = ["deko-core", "deko-monitor"]
 
 [workspace.dependencies]
 # Verus repos
