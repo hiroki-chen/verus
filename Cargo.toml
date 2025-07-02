@@ -15,6 +15,8 @@ syn_verus = { git = "https://github.com/ziqiaozhou/verus", rev = "7c4a5274a4d745
 ] }
 prettyplease_verus = { git = "https://github.com/ziqiaozhou/verus", rev = "7c4a5274a4d74522f3965eb038bb7e22fa5eebef" }
 
+deko-core = { path = "deko-core" }
+
 # the profile used for `cargo build`
 [profile.dev]
 panic = "abort"    # disable stack unwinding on panic

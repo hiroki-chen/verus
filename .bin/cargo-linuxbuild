@@ -1,0 +1,28 @@
+#!/bin/bash
+
+
+pushd deko-linux/linux > /dev/null
+
+git config --global --add safe.directory /app/deko-linux/linux
+git checkout a03a1933bc8aa6bac68c707b2fd3978eb16aedeb
+# The directory for our build output
+BUILD_DIR="../../target/x86_64-sev-deko/linuxkernel"
+
+# The source of your trusted configuration
+SOURCE_CONFIG="../../.config/LINUX.config"
+
+# Create the output directory if it doesn't exist
+mkdir -p "$BUILD_DIR"
+
+# Step 1: Copy the source config to the destination.
+# The '&&' ensures we only proceed if the copy succeeds.
+cp "$SOURCE_CONFIG" "$BUILD_DIR/.config" && \
+\
+# Step 2: HUGELY IMPORTANT!
+# Update the .config file for the current kernel version non-interactively.
+make O="$BUILD_DIR" olddefconfig && \
+\
+# Step 3: Now that the .config is present and correct, build the kernel.
+make O="$BUILD_DIR" -j$(nproc) CC=gcc-9
+
+popd > /dev/null

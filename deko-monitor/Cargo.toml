@@ -6,3 +6,4 @@ edition = "2021"
 verify = true
 
 [dependencies]
+deko-core = { workspace = true }

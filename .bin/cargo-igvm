@@ -1,0 +1,18 @@
+#!/bin/bash
+
+
+# Check if igvmgen is installed
+if ! command -v igvmgen &> /dev/null; then
+    echo "igvmgen is not installed. Please install it first."
+    exit 1
+fi
+
+igvmgen \
+    -k target/x86_64-sev-deko/release/deko-monitor \
+    -o target/x86_64-sev-deko/release/deko-monitor.igvm \
+    -vtl 2 \
+    -boot_mode x64 \
+    -pgtable_level 4 \
+    -append "root=/dev/sda rw debugpat" \
+    -inform verismo \
+    -shared_payload target/x86_64-sev-deko/linuxkernel/arch/x86_64/boot/bzImage

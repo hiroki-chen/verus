@@ -44,3 +44,17 @@ ENV PATH="/root/verus/source/target/release:/root/verus/source:${PATH}"
 
 # install rust-src for nightly
 RUN rustup component add rust-src --toolchain nightly-2025-02-14
+
+# Install IGVMGEN
+WORKDIR /root
+RUN wget https://repo.anaconda.com/archive/Anaconda3-2025.06-0-Linux-x86_64.sh -O anaconda.sh
+RUN bash anaconda.sh -b -p /opt/conda
+ENV PATH="/opt/conda/bin:${PATH}"
+
+RUN git clone https://github.com/hiroki-chen/igvm-tooling.git -b verismo-igvm
+WORKDIR /root/igvm-tooling/src
+RUN apt install -y acpica-tools bc
+RUN pip3 install ./
+
+WORKDIR /app
+ENV PATH="/app/.bin:${PATH}"

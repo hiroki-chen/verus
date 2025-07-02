@@ -1,0 +1,4 @@
+[submodule "deko-linux/linux"]
+	path = deko-linux/linux
+	url = https://github.com/ziqiaozhou/linux.git
+	branch = vmpl2/verismo-rebase
