@@ -56,5 +56,24 @@ WORKDIR /root/igvm-tooling/src
 RUN apt install -y acpica-tools bc
 RUN pip3 install ./
 
+WORKDIR /root
+RUN git clone https://github.com/coconut-svsm/svsm.git
+WORKDIR /root/svsm
+# Clone packit
+RUN git submodule update --init -- packit
+RUN cargo install --path ./igvmbuilder --locked
+
+WORKDIR /root
+RUN git clone https://github.com/coconut-svsm/edk2.git --single-branch -b svsm
+WORKDIR /root/edk2
+RUN git submodule update --init --recursive
+RUN apt install -y uuid-dev build-essential nasm ninja-build meson
+RUN PYTHON3_ENABLE=TRUE PYTHON_COMMAND=python3 make -j $(getconf _NPROCESSORS_ONLN) -C BaseTools
+RUN . ./edksetup.sh --reconfig && \
+    build -a X64 -b DEBUG -t GCC5 -D DEBUG_ON_SERIAL_PORT -D DEBUG_VERBOSE -DTPM2_ENABLE -p OvmfPkg/OvmfPkgX64.dsc
+
+RUN mkdir -p /root/ovmf
+RUN cp Build/OvmfX64/DEBUG_GCC5/FV/OVMF.fd /root/ovmf/OVMF.fd
+
 WORKDIR /app
 ENV PATH="/app/.bin:${PATH}"

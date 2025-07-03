@@ -14,7 +14,7 @@
                     "analyzerTargetDir": true
                 },
                 "cargo": {
-                    "target": "x86_64-sev-deko.json"
+                    "target": ".config/x86_64-sev-deko.json"
                 }
             }
         }
