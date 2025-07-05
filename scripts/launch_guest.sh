@@ -1,24 +1,15 @@
 #!/bin/bash
+# Adapted from https://github.com/confidential-containers/td-shim/blob/main/sh_script/launch-rust-td.sh
 
-QEMU="/home/haobchen/.local/bin/qemu-system-x86_64"
-IGVM="target/x86_64-sev-deko/release/deko.igvm"
-
-if [ ! -f "${IGVM}" ]; then
-    echo "IGVM configuration file not found at ${IGVM}. Please build the IGVM configuration first."
-    exit 1
-fi
+QEMU="/usr/local/bin/qemu-system-x86_64"
+BINARY="target/x86_64-tdx-deko/release/boot.img"
+BIOS="/cc/tdx-linux/edk2/OVMF.fd"
 
 # QEMU CONFIG
-SMP="16"
-MEMORY="16G"
-SEV="1"
-SEV_OBJ=""
-MACHINE="type=q35,igvm-cfg=igvm0,memory-backend=ram1"
-
-if [ "${SEV}" == "1" ]; then
-    MACHINE+=",confidential-guest-support=sev0"
-    SEV_OBJ+="-object sev-snp-guest,id=sev0,cbitpos=51,reduced-phys-bits=1"
-fi
+CORES=4
+THREADS=2
+SOCKETS=2
+MEM=64G
 
 if [ ! -f "${QEMU}" ]; then
     echo "QEMU binary not found at ${QEMU}. Please install QEMU and set the correct path."
@@ -27,16 +18,19 @@ fi
 
 set -x
 
-$QEMU -enable-kvm \
-    -cpu EPYC-v4,host-phys-bits=true \
-    -smp ${SMP} \
-    -m ${MEMORY} \
-    -machine ${MACHINE} \
-    -nographic \
+$QEMU \
     -enable-kvm \
-    -device virtio-scsi-pci,id=scsi0,disable-legacy=on,iommu_platform=on \
-    -object memory-backend-memfd,id=ram1,size=${MEMORY},share=on,prealloc=false,reserve=false \
-    -object igvm-cfg,id=igvm0,file=${IGVM} \
-    ${SEV_OBJ} \
-    -netdev user,id=vmnic -device e1000,netdev=vmnic,romfile= \
-    -no-reboot
+    -smp cores=${CORES},threads=${THREADS},sockets=${SOCKETS} \
+    -m ${MEMORY} \
+    -cpu host \
+    -nographic \
+    -object memory-backend-ram,id=mem0,size=${MEMORY} \
+    -machine q35,kernel-irqchip=split,confidential-guest-support=tdx,memory-backend=mem0 \
+    -bios ${BIOS} \
+    -vga none \
+    -nodefaults \
+    -serial stdio \
+    -object iommufd,id=iommufd0 \
+    -device pcie-root-port,id=pci.1,bus=pcie.0 \
+    -object '{"qom-type":"tdx-guest","id":"tdx"}' \
+    -kernel target/x86_64-unknown-uefi/release/deko-stage1.efi

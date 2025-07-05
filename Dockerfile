@@ -75,5 +75,8 @@ RUN . ./edksetup.sh --reconfig && \
 RUN mkdir -p /root/ovmf
 RUN cp Build/OvmfX64/DEBUG_GCC5/FV/OVMF.fd /root/ovmf/OVMF.fd
 
+RUN apt install -y mtools dosfstools
+
 WORKDIR /app
+RUN rustup target add x86_64-unknown-uefi --toolchain nightly-2025-02-14
 ENV PATH="/app/.bin:${PATH}"

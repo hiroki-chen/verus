@@ -1,0 +1,6 @@
+[x] Check if it is really necessary for us to support IGVM. If so, how.
+[x] Check `td-shim` crate.
+  - [ ] What confuses me here is that this crate can be built as "Linux Boot Protocol" and "to launch an executable payload" or "ELF format payload". What are the differences?
+
+[X] Check if we really need to support TDVF section 5 as QEMU hasn't added support for direct Linux boot yet, but CloudHypervisor has.
+

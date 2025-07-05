@@ -11,6 +11,9 @@ pub mod boot;
 pub mod cpu;
 pub mod policy;
 
+#[cfg(feature = "tdx")]
+pub mod tdx;
+
 use alloc::alloc::GlobalAlloc;
 
 use vstd::prelude::*;

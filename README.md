@@ -38,4 +38,19 @@ In order to create a working Linux guest image, security monitor for SEV-SNP, an
 
 which will build and install an SVSM-supported QEMU under `~/.local/bin` and a minimal Linux kernel under `./build/linux/arch/x86/boot/bzImage`.
 
-Afterwards you need to pack the kernel and the monitor image into an IGVM file for the QEMU to prepare for the guest state.
+Afterwards you need to pack the kernel and the monitor image into a TDVF file for the QEMU to prepare for the guest state.
+
+```sh
+./scripts/stage1.sh
+```
+which will produce `target/x86_64-tdx-deko/release/deko.bin` as the BIOS file which contains the deko-monitor and the loader for the user-level OS kernel.
+
+# Acknowledgement
+
+This project is based on the following projects:
+
+- coconut-svsm
+- VeriSMo
+- linux-svsm
+
+The authors would like to extend their sincere gratitude to the authors of the above projects.

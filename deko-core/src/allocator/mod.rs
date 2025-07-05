@@ -11,7 +11,6 @@ pub struct Allocator {}
 pub ghost struct AllocatorSpec {}
 
 } // verus!
-
 /// Implementations
 verus! {
 

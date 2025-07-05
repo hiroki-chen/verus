@@ -1,0 +1,16 @@
+[package]
+name = "deko-stage1"
+version = "0.1.0"
+edition = "2021"
+
+
+[package.metadata.verus]
+verify = false
+
+[dependencies]
+uefi = { version = "0.35.0", features = ["logger"] }
+
+[profile.release]
+lto = true
+panic = "abort"
+strip = true
