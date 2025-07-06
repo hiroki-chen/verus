@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 
 const DEFAULT_LOADER_PATH: &str = "target/x86_64-unknown-uefi/release/deko-stage1.efi";
-const DEFAULT_DEKO_MONITOR_PATH: &str = "target/x86_64-tdx-deko/release/deko.bin";
+const DEFAULT_DEKO_MONITOR_PATH: &str = "target/x86_64-tdx-deko/release/deko-monitor";
 
 #[derive(Debug)]
 struct FinalQemuConfig {
@@ -195,10 +195,10 @@ fn build(target: BuildTarget, release: bool) -> Result<()> {
             cmd.status().context("Failed to build Stage1")?;
         }
         BuildTarget::Deko => {
-            // Change the working directory to the deko-core package
-            let deko_core_path = project_root().join("deko-core");
+            // Change the working directory to the deko-monitor package
+            let deko_core_path = project_root().join("deko-monitor");
             std::env::set_current_dir(&deko_core_path)
-                .context("Failed to change directory to deko-core")?;
+                .context("Failed to change directory to deko-monitor")?;
             let mut cmd = std::process::Command::new("cargo");
             cmd.arg("verus").arg("build").arg("--target").arg("../.cargo/x86_64-tdx-deko.json");
 
@@ -310,7 +310,7 @@ fn create_bootable(loader_path: &str, deko_monitor_path: &str) -> Result<()> {
     dest_file.truncate()?;
     std::io::copy(&mut fs::File::open(loader_path)?, &mut dest_file)?;
 
-    let mut dest_file = root_dir.create_file("deko-core.bin")?;
+    let mut dest_file = root_dir.create_file("deko.bin")?;
     dest_file.truncate()?;
     std::io::copy(&mut fs::File::open(deko_monitor_path)?, &mut dest_file)?;
 
