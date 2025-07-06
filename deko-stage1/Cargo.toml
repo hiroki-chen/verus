@@ -8,7 +8,9 @@ edition = "2021"
 verify = false
 
 [dependencies]
+deko-meta = { workspace = true }
 uefi = { version = "0.35.0", features = ["logger"] }
+uefi-raw = { version = "0.11.0" }
 
 [profile.release]
 lto = true

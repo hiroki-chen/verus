@@ -1,0 +1,10 @@
+[package]
+name = "deko-meta"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+vstd = { workspace = true }
+
+[package.metadata.verus]
+verify = true

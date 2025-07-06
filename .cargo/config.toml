@@ -1,0 +1,21 @@
+[build]
+target-dir = "target"
+incremental = true
+
+[alias]
+# build-stage1-release = "build --package deko-stage1 --target x86_64-unknown-uefi --release"
+# build-stage1-debug = "build --package deko-stage1 --target x86_64-unknown-uefi"
+
+# build-deko-release = "verus build --package deko-core --target .cargo/x86_64-tdx-deko.json --release -Zbuild-std"
+# build-deko-debug = "verus build --package deko-core --target .cargo/x86_64-tdx-deko.json"
+
+xtask = "run --package xtask --"
+
+qemu = "xtask qemu"
+create-bootable = "xtask create-bootable"
+
+build-stage1-release = "xtask build --target stage1 --release"
+build-stage1-debug = "xtask build --target stage1"
+
+build-deko-release = "xtask build --target deko --release"
+build-deko-debug = "xtask build --target deko"

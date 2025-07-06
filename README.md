@@ -5,13 +5,13 @@
 We have provided you with a Dockerfile to build the image and play with the code. To build the image, run:
 
 ```bash
-docker build -t deko-dev .
+docker build -f Dockerfile -t deko-dev . --build-arg HOST_UID=`id -u` --build-arg HOST_GID=`id -g`
 ```
 
 Then you should be able to have the verus environment and launch the docker environment with the current directory mounted:
 
 ```bash
-$ docker run -v $(pwd):/app -it deko-dev /bin/bash
+$ docker run --user "$(id -u):$(id -g)" -v $(pwd):/app -it deko-dev /bin/bash
 root@4187ae31e1c8:/app#
 ```
 
