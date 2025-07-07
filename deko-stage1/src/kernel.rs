@@ -14,6 +14,7 @@ use uefi_raw::protocol::file_system::FileAttribute;
 use uefi_raw::table::configuration::ConfigurationTable;
 use uefi_raw::table::system::SystemTable;
 use xmas_elf::header::Type;
+use xmas_elf::program::{self, SegmentData};
 use xmas_elf::ElfFile;
 
 pub struct DekoKernel<'deko> {
@@ -31,13 +32,78 @@ impl<'deko> DekoKernel<'deko> {
         // Do a sanity check on the ELF.
         let ty = elf.header.pt2.type_().as_type();
         if ty != Type::Executable && ty != Type::SharedObject {
-            panic!("Invalid ELF type: expected Executable, found {:?}", ty);
+            panic!("Invalid ELF type: expected `Executable` or `SharedObject`, found {:?}", ty);
         }
+
+        println!("[+] Kernel header: {:#x?}", elf.header.pt2);
 
         Self { elf, size: raw_bytes.len(), start_address: raw_bytes.as_ptr() }
     }
 
+    /// Unpack and load the kernel image into the memory
+    fn load(&self) -> Result<()> {
+        let paddr_base = self.start_address as u64;
+
+        for segment in self.elf.program_iter() {
+            if segment.get_type().expect("Failed to get segment type") == program::Type::Load {
+                // Skip non-loadable segments.
+                let mem_size = segment.mem_size();
+                let file_size = segment.file_size();
+                let paddr = segment.physical_addr();
+                let vaddr = segment.virtual_addr();
+
+                assert_eq!(paddr, vaddr, "Kernel segments must be identity-mapped for booting");
+
+                println!(
+                    "[+] Segment: type={:?}, paddr={:#x}, vaddr={:#x}, mem_size={:#x}, file_size={:#x}",
+                    segment.get_type().expect("Failed to get segment type"),
+                    paddr,
+                    vaddr,
+                    mem_size,
+                    file_size
+                );
+
+                let page_count = ((mem_size - 1) / 0x1000) + 1;
+                boot::allocate_pages(
+                    AllocateType::Address(paddr),
+                    MemoryType::LOADER_CODE,
+                    page_count as usize,
+                )
+                .expect("Failed to allocate memory for kernel segment");
+
+                // --- Step 2b: Copy the segment data from the file buffer ---
+                // xmas-elf gives us the content of the segment directly from the file buffer.
+                let segment_data_in_file = if let SegmentData::Undefined(d) =
+                    segment.get_data(&self.elf).expect("Failed to get segment data from ELF file")
+                {
+                    d
+                } else {
+                    panic!("Unexpected segment data type");
+                };
+
+                // The destination is the physical address we just allocated.
+                let dest_slice =
+                    unsafe { core::slice::from_raw_parts_mut(paddr as *mut u8, mem_size as usize) };
+
+                // Copy the part of the segment that exists in the file
+                dest_slice[..file_size as usize].copy_from_slice(segment_data_in_file);
+
+                // --- Step 2c: Zero out the .BSS section ---
+                // If mem_size > file_size, the remaining space is the .bss section
+                // and must be zeroed.
+                if mem_size > file_size {
+                    let bss_start_offset = file_size as usize;
+                    dest_slice[bss_start_offset..].fill(0);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub unsafe fn enter(&self) -> ! {
+        self.load().expect("Failed to load Deko kernel");
+
         // In the context of UEFI (Unified Extensible Firmware Interface),
         // the memory_map_size parameter specifies the size of the memory
         // map that is provided by the UEFI firmware. The memory map is a
@@ -59,15 +125,14 @@ impl<'deko> DekoKernel<'deko> {
         // inside the deko monitor itself so at this timepoint the addresses
         // are all real physical addresses and no page tables enabled.
         asm!(
-            "mov rax, {}; ud2",
-            in(reg) self.start_address,
+            // "mov rsp, 0xdeadbeef",
+            "jmp {}",
+            "ud2",
+            in(reg)  self.elf.header.pt2.entry_point(),
             // We also have an implicit argument here.
             in("rdi") &header as *const Header as u64,
+            options(noreturn),
         );
-
-        loop {
-            // This loop is here to prevent the kernel from returning.
-        }
     }
 }
 

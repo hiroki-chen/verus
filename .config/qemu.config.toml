@@ -1,3 +1,2 @@
 memory = "64G"
-debug = true
-port = 9899
+debug = false
