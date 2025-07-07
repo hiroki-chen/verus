@@ -3,14 +3,16 @@
 use vstd::prelude::*;
 
 verus! {
+
+pub const BOOT_VERSION: u8 = 0x1;
     
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Header {
     /// The version of the boot protocol.
     pub version: u8,
     /// The boot flags.
-    pub cmdline: *const u8,
+    // pub cmdline: *const u8,
     /// The length of the cmdline string.
     pub cmdline_len: u64,
     /// The address of the Root System Description Pointer used in the ACPI programming interface.

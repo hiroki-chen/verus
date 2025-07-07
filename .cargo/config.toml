@@ -12,6 +12,7 @@ incremental = true
 xtask = "run --package xtask --"
 
 qemu = "xtask qemu"
+qemu-debug = "xtask qemu --debug"
 create-bootable = "xtask create-bootable"
 
 build-stage1-release = "xtask build --target stage1 --release"

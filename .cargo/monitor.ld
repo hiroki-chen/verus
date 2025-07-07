@@ -15,7 +15,6 @@ SECTIONS
 	{ 
 		*(.rodata .rodata.*)
 		*(.data .data.*)
-		
 	}
 	.rela	:
 	{

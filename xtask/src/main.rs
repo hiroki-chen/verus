@@ -1,7 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 
@@ -16,6 +16,8 @@ struct FinalQemuConfig {
     enable_tdx: bool,
     enable_graphics: bool, // Unified graphic/nographic switch
     drive: Vec<DriveConfig>,
+    debug: bool,
+    port: u16, // Default port for GDB server
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -34,6 +36,8 @@ struct PartialQemuConfig {
     enable_tdx: Option<bool>,
     enable_graphics: Option<bool>,
     drive: Option<Vec<DriveConfig>>,
+    debug: Option<bool>,
+    port: Option<u16>,
 }
 
 #[derive(ValueEnum, Debug, Clone)]
@@ -84,6 +88,8 @@ impl Default for FinalQemuConfig {
                 format: "raw".to_string(),
                 interface: "virtio".to_string(),
             }],
+            debug: false,
+            port: 0,
         }
     }
 }
@@ -121,7 +127,7 @@ fn main() -> Result<()> {
             println!("Running QEMU with the specified configuration...");
 
             let config_path = config_path.unwrap_or_else(|| {
-                project_root().join(".config/qemu_config.toml").display().to_string()
+                project_root().join(".config/qemu.config.toml").display().to_string()
             });
 
             qemu(&config_path).context("Failed to run QEMU")
@@ -170,6 +176,12 @@ fn load_qemu_config(path: &str) -> Result<FinalQemuConfig> {
         config.drive = drive;
     }
 
+    if let Some(debug) = partial.debug {
+        config.debug = debug;
+        config.port =
+            partial.port.ok_or(anyhow::anyhow!("Port must be specified when debug is enabled"))?;
+    }
+
     Ok(config)
 }
 
@@ -192,7 +204,11 @@ fn build(target: BuildTarget, release: bool) -> Result<()> {
             }
 
             println!("Building Stage1 with command: {:?}", cmd);
-            cmd.status().context("Failed to build Stage1")?;
+            if !cmd.status()?.success() {
+                bail!("Failed to build stage1");
+            }
+
+            Ok(())
         }
         BuildTarget::Deko => {
             // Change the working directory to the deko-monitor package
@@ -209,10 +225,13 @@ fn build(target: BuildTarget, release: bool) -> Result<()> {
             }
 
             println!("Building Deko with command: {:?}", cmd);
-            cmd.status().context("Failed to build Deko")?;
+            if !cmd.status()?.success() {
+                bail!("Cannot build deko");
+            }
+
+            Ok(())
         }
     }
-    Ok(())
 }
 
 fn qemu(config_path: &str) -> Result<()> {
@@ -255,13 +274,22 @@ fn qemu(config_path: &str) -> Result<()> {
         cmd.arg("-machine").arg(format!(
             "type=q35,confidential-guest-support=tdx,kernel_irqchip=split,memory-backend=ram0"
         ));
-        cmd.args(["-object", "tdx-guest,id=tdx"]);
+
+        let tdx_arg = if config.debug { "tdx-guest,id=tdx,debug=on" } else { "tdx-guest,id=tdx" };
+
+        cmd.args(["-object", tdx_arg]);
         cmd.args(["-object", "iommufd,id=iommufd0"]);
         cmd.arg("-object").arg(format!("memory-backend-ram,id=ram0,size={}", config.memory));
     } else {
         // Standard (non-TDX) machine configuration
         cmd.arg("-machine").arg("type=q35,kernel_irqchip=split");
         cmd.arg("-m").arg(&config.memory);
+    }
+
+    if config.debug {
+        // Additional debugging options
+        cmd.args(["-s", "-S"]); // -s for gdb server, -S for pause on startup
+        println!("Debugging mode enabled: QEMU will start with GDB server and paused state.");
     }
 
     println!("Executing command: {:?}", cmd);
@@ -275,6 +303,10 @@ fn qemu(config_path: &str) -> Result<()> {
 }
 
 fn create_bootable(loader_path: &str, deko_monitor_path: &str) -> Result<()> {
+    // First ensure that our package is fresh.
+    build(BuildTarget::Deko, true)?;
+    build(BuildTarget::Stage1, true)?;
+
     // Logic to create a bootable image using the provided paths
     let loader_path = project_root().join(loader_path);
     let deko_monitor_path = project_root().join(deko_monitor_path);

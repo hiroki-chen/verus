@@ -1,10 +1,12 @@
 #![no_std]
 #![no_main]
 
+use core::arch::asm;
 use core::ffi::c_void;
 use core::panic::PanicInfo;
 
 use deko_core::*;
+use deko_meta::*;
 
 // core::arch::global_asm!(include_str!("entry.S"), options(att_syntax));
 
@@ -16,17 +18,13 @@ fn panic(info: &PanicInfo) -> ! { loop {} }
 
 /// This is the main entry function of the monitor and the bootstrap code should
 /// eventually jump to this destination.
-/// 
+///
 /// The bootstrap should prepare the context to satisfy `_start()`'s expectation:
 /// - the memory is in 1:1 identity mapping mode with paging enabled
 /// - the stack is ready for use
 #[no_mangle]
-#[cfg_attr(target_os = "uefi", export_name = "efi_main")]
-pub extern "win64" fn _start(
-    boot_fv: *const c_void,
-    top_of_stack: *const c_void,
-    init_vp: *const c_void,
-    info: usize,
-) -> ! {
+pub unsafe extern "C" fn _start(header: *const Header) -> ! {
+    asm!("ud2"); // for testing.
+
     loop {}
 }
