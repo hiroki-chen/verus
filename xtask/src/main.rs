@@ -178,8 +178,6 @@ fn load_qemu_config(path: &str) -> Result<FinalQemuConfig> {
 
     if let Some(debug) = partial.debug {
         config.debug = debug;
-        config.port =
-            partial.port.ok_or(anyhow::anyhow!("Port must be specified when debug is enabled"))?;
     }
 
     Ok(config)

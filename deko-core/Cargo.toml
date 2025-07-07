@@ -10,6 +10,8 @@ vstd = { workspace = true, features = ["alloc"] }
 builtin = { workspace = true }
 builtin_macros = { workspace = true }
 
+deko-meta = { workspace = true}
+
 [features]
 default = ["tdx"]
 tdx = []
