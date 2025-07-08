@@ -10,7 +10,7 @@
     "linker-flavor": "ld.lld",
     "linker": "rust-lld",
     "pre-link-args": {
-        "ld.lld": ["--script=.config/monitor.ld", "--gc-sections", "-pie"]
+        "ld.lld": ["--script=.cargo/monitor.ld", "--gc-sections", "-pie"]
     },
     "panic-strategy": "abort",
     "disable-redzone": true,

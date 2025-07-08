@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["deko-core", "deko-meta", "deko-monitor", "deko-stage1", "xtask"]
+members = ["deko-core", "deko-meta", "deko-monitor", "xtask"]
 
 [workspace.dependencies]
 # Verus repos

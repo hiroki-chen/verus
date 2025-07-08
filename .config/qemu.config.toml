@@ -1,2 +1,2 @@
 memory = "64G"
-debug = false
+debug = true
