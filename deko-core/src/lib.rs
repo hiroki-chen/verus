@@ -69,7 +69,7 @@ verus! {
 #[verifier::exec_allows_no_decreases_clause]
 #[verifier::external_body]
 pub fn deko_main(header: &'static Header) -> ! {
-    if ! check_tdcall() {
+    if !check_tdcall() {
         unsafe {
             core::arch::asm!("ud2", options(nomem, nostack, preserves_flags));
         }

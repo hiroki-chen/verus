@@ -42,8 +42,6 @@ impl<'deko> DekoKernel<'deko> {
 
     /// Unpack and load the kernel image into the memory
     fn load(&self) -> Result<()> {
-        let paddr_base = self.start_address as u64;
-
         for segment in self.elf.program_iter() {
             if segment.get_type().expect("Failed to get segment type") == program::Type::Load {
                 // Skip non-loadable segments.

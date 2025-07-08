@@ -141,7 +141,7 @@ impl From<u64> for TdCallError {
 ///
 /// TODO: for `requires` we need to add the precondition that the leaf function
 /// is always within what we have defined.
-#[verifier::external]
+#[verifier::external_body]
 #[inline(always)]
 pub fn tdcall(args: &mut TdcallArgs) -> (ret: u64)
     ensures
@@ -160,6 +160,21 @@ pub fn check_tdcall() -> bool {
 
     // Call the TDCALL instruction and check if it returns 0 (success).
     tdcall(&mut args) == 0
+}
+
+// pub fn veinfo()
+
+/// Get the VP (Virtual Processor) information.
+pub fn vpinfo() -> u64 {
+    let mut args = TdcallArgs::default();
+    args.rax = TdcallNum::VpInfo as u64;
+
+    // Call the TDCALL instruction and check if it returns 0 (success).
+    if tdcall(&mut args) == 0 {
+        args.rcx
+    } else {
+        0 // Return 0 on error
+    }
 }
 
 } // verus!

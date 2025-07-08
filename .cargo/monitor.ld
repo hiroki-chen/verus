@@ -16,7 +16,7 @@ SECTIONS
 {
     /* This is the most important line! */
     /* It sets the location counter to 2 MiB. */
-    . = 0x200000;
+    . = 8m + 32k;
 
     .text : ALIGN(4K) {
         KEEP(*(.text.entry)) /* Keep the entry point at the very start */
