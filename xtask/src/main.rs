@@ -98,7 +98,7 @@ impl Default for FinalQemuConfig {
             enable_graphics: false, // Default to nographic
             drive: vec![],
             igvm_path: project_root()
-                .join("target/release/x86_64-sev-deko/release/igvm.igvm")
+                .join("target/x86_64-sev-deko/release/igvm.igvm")
                 .display()
                 .to_string(),
             debug: false,
@@ -307,7 +307,7 @@ impl Builder {
 
         // Logic to create a bootable image using the provided paths
         let deko_monitor_path = project_root().join(deko_monitor_path);
-        let boot_img_path = project_root().join("target/release/x86_64-sev-deko/release/igvm.igvm");
+        let boot_img_path = project_root().join("target/x86_64-sev-deko/release/igvm.igvm");
         // Get full path to OVMF
         let ovmf_path = shellexpand::tilde(ovmf_path);
 
