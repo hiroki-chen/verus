@@ -16,3 +16,5 @@ deko-meta = { workspace = true}
 default = ["snp"]
 tdx = []
 snp = []
+# Enable logging?
+log = []

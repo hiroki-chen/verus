@@ -6,7 +6,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 
 const DEFAULT_OVMF_PATH: &str = "~/.local/share/ovmf/OVMF.fd";
-const DEFAULT_DEKO_MONITOR_PATH: &str = "target/x86_64-sev-deko/release/deko-monitor";
+/// This is for SEV stage 2 boot.
+const DEFAULT_DEKO_MONITOR_PATH: &str =
+    "/home/haobchen/cage-sev/target/x86_64-sev-deko/release/deko-monitor.bin";
 
 #[derive(Debug)]
 struct FinalQemuConfig {
@@ -80,7 +82,7 @@ impl Default for FinalQemuConfig {
             enable_sev: true,
             enable_graphics: false, // Default to nographic
             drive: vec![],
-            igvm_path: project_root().join("target/release/boot.igvm").display().to_string(),
+            igvm_path: project_root().join("target/release/igvm.igvm").display().to_string(),
             debug: false,
         }
     }
@@ -182,8 +184,8 @@ fn build(target: BuildTarget, release: bool) -> Result<()> {
     match target {
         BuildTarget::Deko => {
             // Change the working directory to the deko-monitor package
-            let deko_core_path = project_root().join("deko-monitor");
-            std::env::set_current_dir(&deko_core_path)
+            let deko_monitor = project_root().join("deko-monitor");
+            std::env::set_current_dir(&deko_monitor)
                 .context("Failed to change directory to deko-monitor")?;
             let mut cmd = std::process::Command::new("cargo");
             cmd.arg("verus").arg("build").arg("--target").arg("../.cargo/x86_64-sev-deko.json");
@@ -197,6 +199,17 @@ fn build(target: BuildTarget, release: bool) -> Result<()> {
             println!("Building Deko with command: {:?}", cmd);
             if !cmd.status()?.success() {
                 bail!("Cannot build deko");
+            }
+
+            // Creating flat image
+            cmd = std::process::Command::new("objcopy");
+            cmd.arg("-O")
+                .arg("binary")
+                .arg("../target/x86_64-sev-deko/release/deko-monitor")
+                .arg("../target/x86_64-sev-deko/release/deko-monitor.bin");
+            println!("Creating flat image with command: {:?}", cmd);
+            if !cmd.status()?.success() {
+                bail!("Cannot create flat image for deko-monitor");
             }
 
             Ok(())
@@ -214,7 +227,7 @@ fn qemu(config_path: &str) -> Result<()> {
     println!("Configuration: {:#?}", config);
 
     let mut cmd = std::process::Command::new("qemu-system-x86_64");
-    cmd.args(["-accel", "kvm", "-cpu", "EPYC-v4,host-phys-bits=true"]);
+    cmd.args(["-accel", "kvm", "-cpu", "host"]);
     cmd.arg("-smp").arg(config.smp_cores.to_string());
 
     // Add drives
@@ -287,9 +300,9 @@ fn create_bootable(ovmf_path: &str, deko_monitor_path: &str) -> Result<()> {
     let mut cmd = std::process::Command::new("igvmbuilder");
     cmd.args(["--sort", "--policy", "0x30000", "--snp"]);
     cmd.args(["--firmware", ovmf_path.to_string().as_str()]);
+    // Stage 2 has some problems.
     cmd.args(["--stage2", deko_monitor_path.to_str().unwrap()]);
-    // TODO: Now a placeholder.
-    cmd.args(["--kernel", deko_monitor_path.to_str().unwrap()]);
+    cmd.args(["--kernel", "/home/haobchen/cage-sev/target/x86_64-sev-deko/release/deko-monitor"]);
     cmd.args(["--output", boot_img_path.to_str().unwrap()]);
     cmd.arg("qemu");
 

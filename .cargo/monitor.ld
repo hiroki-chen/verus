@@ -1,43 +1,53 @@
-/*
- * Kernel Linker Script for x86-64
- * Loads the kernel at physical address 2 MiB
- */
-ENTRY(_start)
-OUTPUT_FORMAT(elf64-x86-64)
+/* SPDX-License-Identifier: MIT OR Apache-2.0 */
 
-PHDRS
-{
-    text PT_LOAD FLAGS(5); /* R+X */
-    rodata PT_LOAD FLAGS(4); /* R */
-    data PT_LOAD FLAGS(6); /* R+W */
-}
+/*
+ * Copyright (c) 2022-2023 SUSE LLC
+ *
+ * Author: Joerg Roedel <jroedel@suse.de>
+ */
+
+OUTPUT_ARCH(i386:x86-64)
 
 SECTIONS
 {
-    /* This is the most important line! */
-    /* It sets the location counter to 2 MiB. */
-    . = 0x200000;
+	/* Base address is 8 MB + 32 KB */
+	. = 8m + 32k;
+	.stext = .;
+	.text : {
+		*(.startup.*)
+		*(.text)
+		*(.text.*)
+		. = ALIGN(16);
+		early_exception_table_start = .;
+		KEEP(*(__early_exception_table))
+		early_exception_table_end = .;
+		. = ALIGN(16);
+		exception_table_start = .;
+		KEEP(*(__exception_table))
+		exception_table_end = .;
+	}
+	. = ALIGN(16);
+	.data : { *(.data) }
+	edata = .;
+	. = ALIGN(16);
+	.bss : {
+		_bss = .;
+		*(.bss) *(.bss.[0-9a-zA-Z_]*)
+		. = ALIGN(16);
+		_ebss = .;
+	}
+	/* Move rodata to follow bss so that the in-memory image has the same
+	 * length as the ELF image.  This is required so that the IGVM
+	 * builder does not have to parse the ELF file to know how much space
+	 * to reserve for BSS. */
+	. = ALIGN(16);
+	.rodata : { *(.rodata) }
 
-    .text : ALIGN(4K) {
-        KEEP(*(.text.entry)) /* Keep the entry point at the very start */
-        *(.text .text.*)
-    } :text
-
-    .rodata : ALIGN(4K) {
-        *(.rodata .rodata.*)
-    } :rodata
-
-    .data : ALIGN(4K) {
-        *(.data .data.*)
-    } :data
-
-    .bss : ALIGN(4K) {
-        *(.bss .bss.*)
-        *(COMMON)
-    } :data
-
-    /DISCARD/ : {
-        *(.comment)
-        *(.note*)
+    /DISCARD/ :
+    {
+        *(.eh_frame)
+        *(.eh_frame_hdr)
     }
 }
+
+ENTRY(startup_32)

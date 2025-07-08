@@ -34,6 +34,7 @@ pub mod allocator;
 pub mod boot;
 pub mod cell;
 pub mod cpu;
+pub mod hal;
 pub mod policy;
 pub mod sync;
 
@@ -70,6 +71,9 @@ verus! {
 #[verifier::exec_allows_no_decreases_clause]
 #[verifier::external_body]
 pub fn deko_main(header: &'static Header) -> ! {
+    unsafe {
+        // core::arch::asm!("ud2");
+    }
 
     // Initialize the global allocator.
     // This is crucial as we now are still under UEFI mm which means
