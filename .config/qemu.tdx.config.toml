@@ -1,0 +1,6 @@
+memory = "64G"
+debug = false
+drive = [
+  { file = "target/x86_64-tdx-deko/release/boot.img", format = "raw", interface = "virtio" },
+]
+bios_path = "/cc/tdx-linux/edk2/OVMF.fd"
