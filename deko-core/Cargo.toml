@@ -13,6 +13,8 @@ builtin_macros = { workspace = true }
 deko-meta = { workspace = true}
 
 [features]
-default = ["tdx"]
+default = ["snp"]
 tdx = []
 snp = []
+# Enable logging?
+log = []

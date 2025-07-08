@@ -4,15 +4,14 @@
 use core::arch::asm;
 use core::panic::PanicInfo;
 
+use deko_core::*;
 use deko_meta::*;
 
-// core::arch::global_asm!(include_str!("entry.S"), options(att_syntax));
+#[cfg(all(feature = "tdx", feature = "snp"))]
+compile_error!("Cannot enable both TDX and SEV features at the same time!");
 
-/// Custom panic handler that will be called on panic.
-///
-/// For the time being we just enter an infinite loop.
-#[panic_handler]
-fn panic(info: &PanicInfo) -> ! { loop {} }
+#[cfg(feature = "snp")]
+core::arch::global_asm!(include_str!("stage2.S"), options(att_syntax));
 
 /// This is the main entry function of the monitor and the bootstrap code should
 /// eventually jump to this destination.
@@ -21,6 +20,10 @@ fn panic(info: &PanicInfo) -> ! { loop {} }
 /// - the memory is in 1:1 identity mapping mode with paging enabled
 /// - the stack is ready for use
 #[no_mangle]
-pub unsafe extern "C" fn _start(header: *const Header) -> ! {
-    deko_core::deko_main(&* header);
-}
+pub unsafe extern "C" fn _start(header: *const Header) -> ! { deko_core::deko_main(&*header); }
+
+/// Custom panic handler that will be called on panic.
+///
+/// For the time being we just enter an infinite loop.
+#[panic_handler]
+fn panic(info: &PanicInfo) -> ! { loop {} }

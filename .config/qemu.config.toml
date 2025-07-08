@@ -1,2 +1,3 @@
 memory = "64G"
 debug = false
+# igvm_path = "coconut-qemu.igvm"

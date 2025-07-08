@@ -1,23 +1,24 @@
-use std::fs::{self, OpenOptions};
+use std::fs::{self};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 
-const DEFAULT_LOADER_PATH: &str = "target/x86_64-unknown-uefi/release/deko-stage1.efi";
-const DEFAULT_DEKO_MONITOR_PATH: &str = "target/x86_64-tdx-deko/release/deko-monitor";
+const DEFAULT_OVMF_PATH: &str = "~/.local/share/ovmf/OVMF.fd";
+/// This is for SEV stage 2 boot.
+const DEFAULT_DEKO_MONITOR_PATH: &str =
+    "/home/haobchen/cage-sev/target/x86_64-sev-deko/release/deko-monitor.bin";
 
 #[derive(Debug)]
 struct FinalQemuConfig {
     memory: String,
     smp_cores: u32,
-    bios_path: PathBuf,
-    enable_tdx: bool,
+    enable_sev: bool,
     enable_graphics: bool, // Unified graphic/nographic switch
     drive: Vec<DriveConfig>,
     debug: bool,
-    port: u16, // Default port for GDB server
+    igvm_path: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -32,17 +33,15 @@ struct DriveConfig {
 struct PartialQemuConfig {
     memory: Option<String>,
     smp_cores: Option<u32>,
-    bios_path: Option<PathBuf>,
     enable_tdx: Option<bool>,
     enable_graphics: Option<bool>,
     drive: Option<Vec<DriveConfig>>,
     debug: Option<bool>,
-    port: Option<u16>,
+    igvm_path: Option<String>,
 }
 
 #[derive(ValueEnum, Debug, Clone)]
 enum BuildTarget {
-    Stage1,
     Deko,
 }
 
@@ -57,7 +56,7 @@ struct Cli {
 enum Commands {
     CreateBootable {
         #[arg(short, long)]
-        loader_path: Option<String>,
+        ovmf_path: Option<String>,
         #[arg(short, long)]
         deko_monitor_path: Option<String>,
     },
@@ -80,16 +79,11 @@ impl Default for FinalQemuConfig {
         FinalQemuConfig {
             memory: "4G".to_string(),
             smp_cores: 4,
-            bios_path: PathBuf::from("/cc/tdx-linux/edk2/OVMF.fd"),
-            enable_tdx: true,
+            enable_sev: true,
             enable_graphics: false, // Default to nographic
-            drive: vec![DriveConfig {
-                file: project_root().join("target/release/boot.img"),
-                format: "raw".to_string(),
-                interface: "virtio".to_string(),
-            }],
+            drive: vec![],
+            igvm_path: project_root().join("target/release/igvm.igvm").display().to_string(),
             debug: false,
-            port: 0,
         }
     }
 }
@@ -98,9 +92,9 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::CreateBootable { loader_path, deko_monitor_path } => {
-            if let Some(loader) = &loader_path {
-                println!("Using loader path: {}", loader);
+        Commands::CreateBootable { ovmf_path, deko_monitor_path } => {
+            if let Some(loader) = &ovmf_path {
+                println!("Using OVMF path: {}", loader);
             } else {
                 println!("No loader path provided, using default.");
             }
@@ -112,7 +106,7 @@ fn main() -> Result<()> {
             }
 
             create_bootable(
-                loader_path.as_deref().unwrap_or(DEFAULT_LOADER_PATH),
+                ovmf_path.as_deref().unwrap_or(DEFAULT_OVMF_PATH),
                 deko_monitor_path.as_deref().unwrap_or(DEFAULT_DEKO_MONITOR_PATH),
             )
         }
@@ -161,16 +155,15 @@ fn load_qemu_config(path: &str) -> Result<FinalQemuConfig> {
     if let Some(smp) = partial.smp_cores {
         config.smp_cores = smp;
     }
-    if let Some(bios) = partial.bios_path {
-        config.bios_path = bios;
-    }
     if let Some(tdx) = partial.enable_tdx {
-        config.enable_tdx = tdx;
+        config.enable_sev = tdx;
     }
     if let Some(graphics) = partial.enable_graphics {
         config.enable_graphics = graphics;
     }
-
+    if let Some(igvm_path) = partial.igvm_path {
+        config.igvm_path = igvm_path;
+    }
     // For drive, the user's config completely replaces the default.
     if let Some(drive) = partial.drive {
         config.drive = drive;
@@ -189,32 +182,13 @@ fn project_root() -> PathBuf {
 
 fn build(target: BuildTarget, release: bool) -> Result<()> {
     match target {
-        BuildTarget::Stage1 => {
-            let mut cmd = std::process::Command::new("cargo");
-            cmd.arg("build")
-                .arg("--package")
-                .arg("deko-stage1")
-                .arg("--target")
-                .arg("x86_64-unknown-uefi");
-
-            if release {
-                cmd.arg("--release");
-            }
-
-            println!("Building Stage1 with command: {:?}", cmd);
-            if !cmd.status()?.success() {
-                bail!("Failed to build stage1");
-            }
-
-            Ok(())
-        }
         BuildTarget::Deko => {
             // Change the working directory to the deko-monitor package
-            let deko_core_path = project_root().join("deko-monitor");
-            std::env::set_current_dir(&deko_core_path)
+            let deko_monitor = project_root().join("deko-monitor");
+            std::env::set_current_dir(&deko_monitor)
                 .context("Failed to change directory to deko-monitor")?;
             let mut cmd = std::process::Command::new("cargo");
-            cmd.arg("verus").arg("build").arg("--target").arg("../.cargo/x86_64-tdx-deko.json");
+            cmd.arg("verus").arg("build").arg("--target").arg("../.cargo/x86_64-sev-deko.json");
 
             if release {
                 cmd.arg("--release");
@@ -225,6 +199,17 @@ fn build(target: BuildTarget, release: bool) -> Result<()> {
             println!("Building Deko with command: {:?}", cmd);
             if !cmd.status()?.success() {
                 bail!("Cannot build deko");
+            }
+
+            // Creating flat image
+            cmd = std::process::Command::new("objcopy");
+            cmd.arg("-O")
+                .arg("binary")
+                .arg("../target/x86_64-sev-deko/release/deko-monitor")
+                .arg("../target/x86_64-sev-deko/release/deko-monitor.bin");
+            println!("Creating flat image with command: {:?}", cmd);
+            if !cmd.status()?.success() {
+                bail!("Cannot create flat image for deko-monitor");
             }
 
             Ok(())
@@ -244,7 +229,6 @@ fn qemu(config_path: &str) -> Result<()> {
     let mut cmd = std::process::Command::new("qemu-system-x86_64");
     cmd.args(["-accel", "kvm", "-cpu", "host"]);
     cmd.arg("-smp").arg(config.smp_cores.to_string());
-    cmd.arg("-bios").arg(&config.bios_path);
 
     // Add drives
     for (i, drive) in config.drive.iter().enumerate() {
@@ -267,19 +251,17 @@ fn qemu(config_path: &str) -> Result<()> {
     // Low-level machine and serial config
     cmd.args(["-serial", "stdio", "-nodefaults", "-no-reboot"]);
 
-    // TDX specific configuration
-    if config.enable_tdx {
+    // SEV specific configuration
+    if config.enable_sev {
         cmd.arg("-machine").arg(format!(
-            "type=q35,confidential-guest-support=tdx,kernel_irqchip=split,memory-backend=ram0"
+            "type=q35,confidential-guest-support=sev,kernel_irqchip=split,igvm-cfg=igvm,memory-backend=ram"
         ));
 
-        let tdx_arg = if config.debug { "tdx-guest,id=tdx,debug=on" } else { "tdx-guest,id=tdx" };
-
-        cmd.args(["-object", tdx_arg]);
-        cmd.args(["-object", "iommufd,id=iommufd0"]);
-        cmd.arg("-object").arg(format!("memory-backend-ram,id=ram0,size={}", config.memory));
+        cmd.args(["-object", "sev-snp-guest,id=sev,reduced-phys-bits=1,cbitpos=51"]);
+        cmd.arg("-object").arg(format!("memory-backend-memfd,id=ram,size={}", config.memory));
+        cmd.arg("-object").arg(format!("igvm-cfg,id=igvm,file={}", config.igvm_path));
     } else {
-        // Standard (non-TDX) machine configuration
+        // Standard (non-SEV) machine configuration
         cmd.arg("-machine").arg("type=q35,kernel_irqchip=split");
         cmd.arg("-m").arg(&config.memory);
     }
@@ -300,50 +282,35 @@ fn qemu(config_path: &str) -> Result<()> {
     Ok(())
 }
 
-fn create_bootable(loader_path: &str, deko_monitor_path: &str) -> Result<()> {
+/// TODO: For SEV we can use IGVM file format so there is no need to support legacy EFI.
+fn create_bootable(ovmf_path: &str, deko_monitor_path: &str) -> Result<()> {
     // First ensure that our package is fresh.
     build(BuildTarget::Deko, true)?;
-    build(BuildTarget::Stage1, true)?;
 
     // Logic to create a bootable image using the provided paths
-    let loader_path = project_root().join(loader_path);
     let deko_monitor_path = project_root().join(deko_monitor_path);
-    let boot_img_path = project_root().join("target/release/boot.img");
+    let boot_img_path = project_root().join("target/release/igvm.igvm");
+    // Get full path to OVMF
+    let ovmf_path = shellexpand::tilde(ovmf_path);
 
-    println!("Creating bootable image with:");
-    println!("Loader Path: {:?}", loader_path);
+    println!("Creating IGVM image with:");
     println!("Deko Monitor Path: {:?}", deko_monitor_path);
-    println!("Boot Image Path: {:?}", boot_img_path);
+    println!("IGVM Image Path: {:?}", boot_img_path);
 
-    let img_file = OpenOptions::new()
-        .read(true) // We need to read from it after formatting.
-        .write(true) // We need to write to it to format and copy files.
-        .create(true) // Create it if it doesn't exist.
-        .truncate(true) // Truncate it to zero if it already exists.
-        .open(&boot_img_path)
-        .context("Failed to create or open boot image file")?;
-    // Zeros out the file to ensure it's empty
-    let img_len = 1024 * 1024 * 64; // 64 MB
-    img_file.set_len(img_len as u64).context("Failed to set boot image file size")?;
+    let mut cmd = std::process::Command::new("igvmbuilder");
+    cmd.args(["--sort", "--policy", "0x30000", "--snp"]);
+    cmd.args(["--firmware", ovmf_path.to_string().as_str()]);
+    // Stage 2 has some problems.
+    cmd.args(["--stage2", deko_monitor_path.to_str().unwrap()]);
+    cmd.args(["--kernel", "/home/haobchen/cage-sev/target/x86_64-sev-deko/release/deko-monitor"]);
+    cmd.args(["--output", boot_img_path.to_str().unwrap()]);
+    cmd.arg("qemu");
 
-    let format_options = fatfs::FormatVolumeOptions::new();
-    fatfs::format_volume(&img_file, format_options).context("Failed to format boot image")?;
+    println!("Executing command: {:?}", cmd);
 
-    let fs = fatfs::FileSystem::new(&img_file, fatfs::FsOptions::new())
-        .context("Failed to initialize filesystem")?;
-    let root_dir = fs.root_dir();
-    let efi_dir = root_dir.create_dir("EFI").context("Failed to create EFI directory")?;
-    let boot_dir = efi_dir.create_dir("BOOT").context("Failed to create BOOT directory")?;
+    let mut child = cmd.spawn().context("Failed to spawn igvmbuilder")?;
+    child.wait().context("igvmbuilder process failed")?;
 
-    let mut dest_file =
-        boot_dir.create_file("BOOTX64.EFI").context("Failed to create BOOTX64.EFI file")?;
-    dest_file.truncate()?;
-    std::io::copy(&mut fs::File::open(loader_path)?, &mut dest_file)?;
-
-    let mut dest_file = root_dir.create_file("deko.bin")?;
-    dest_file.truncate()?;
-    std::io::copy(&mut fs::File::open(deko_monitor_path)?, &mut dest_file)?;
-
-    println!("--- Boot Image created at {:?} ---", boot_img_path);
+    println!("--- IGVM Image created at {:?} ---", boot_img_path);
     Ok(())
 }

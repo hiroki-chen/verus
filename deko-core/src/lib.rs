@@ -12,21 +12,21 @@
 //! │ │                                    │ │
 //! │ └────────────────────────────────────┘ │
 //! │                                        │
-//! │                               TDX  CVM │
+//! │                                    CVM │
 //! └────────────────────────────────────────┘
 //! ┌────────────────────────────────────────┐
 //! │                                        │
 //! │               Hypervisor               │
 //! │                                        │
 //! └────────────────────────────────────────┘
-//!
-//! We implement the deko monitor as an L1 guest in the TDX architecture based on the
-//! TD partition model.
 #![no_std]
 #![feature(abi_x86_interrupt)]
 
 #[cfg(target_arch = "x86")]
 compile_error!("Cannot be compiled against non x86_64 architecture!");
+
+#[cfg(all(feature = "tdx", feature = "snp"))]
+compile_error!("Cannot enable both TDX and SEV features at the same time!");
 
 extern crate alloc;
 
@@ -34,16 +34,18 @@ pub mod allocator;
 pub mod boot;
 pub mod cell;
 pub mod cpu;
+pub mod hal;
 pub mod policy;
 pub mod sync;
 
+#[cfg(feature = "snp")]
+pub mod snp;
 #[cfg(feature = "tdx")]
 pub mod tdx;
 
 use alloc::alloc::GlobalAlloc;
 
 use deko_meta::Header;
-use tdx::tdcall::check_tdcall;
 use vstd::prelude::*;
 
 /// A global allocator for the monitor.
@@ -69,11 +71,10 @@ verus! {
 #[verifier::exec_allows_no_decreases_clause]
 #[verifier::external_body]
 pub fn deko_main(header: &'static Header) -> ! {
-    if !check_tdcall() {
-        unsafe {
-            core::arch::asm!("ud2", options(nomem, nostack, preserves_flags));
-        }
+    unsafe {
+        // core::arch::asm!("ud2");
     }
+
     // Initialize the global allocator.
     // This is crucial as we now are still under UEFI mm which means
     // vaddr == paddr.
