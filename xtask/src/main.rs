@@ -10,7 +10,7 @@ const DEFAULT_STAGE1_PATH: &str =
 const DEFAULT_OVMF_PATH: &str = "~/.local/share/ovmf/OVMF.fd";
 /// This is for SEV stage 2 boot.
 const DEFAULT_DEKO_MONITOR_PATH: &str =
-    "/home/haobchen/cage-sev/target/x86_64-sev-deko/release/deko-monitor.bin";
+    "/home/haobchen/cage-sev/target/x86_64-snp-deko/release/deko-monitor.bin";
 
 #[derive(Debug)]
 struct FinalQemuConfig {
@@ -98,7 +98,7 @@ impl Default for FinalQemuConfig {
             enable_graphics: false, // Default to nographic
             drive: vec![],
             igvm_path: project_root()
-                .join("target/x86_64-sev-deko/release/igvm.igvm")
+                .join("target/x86_64-snp-deko/release/igvm.igvm")
                 .display()
                 .to_string(),
             debug: false,
@@ -125,7 +125,9 @@ impl Builder {
                 cmd.arg("verus")
                     .arg("build")
                     .arg("--target")
-                    .arg(format!("../.cargo/{}.json", self.target_arch));
+                    .arg(format!("../.cargo/x86_64-{}-deko.json", self.target_arch))
+                    .arg("--features")
+                    .arg(self.target_arch.as_str());
 
                 if release {
                     cmd.arg("--release");
@@ -138,13 +140,13 @@ impl Builder {
                     bail!("Cannot build deko");
                 }
 
-                if self.target_arch.contains("sev") {
+                if self.target_arch.contains("snp") {
                     // Creating flat image
                     cmd = std::process::Command::new("objcopy");
                     cmd.arg("-O")
                         .arg("binary")
-                        .arg("../target/x86_64-sev-deko/release/deko-monitor")
-                        .arg("../target/x86_64-sev-deko/release/deko-monitor.bin");
+                        .arg("../target/x86_64-snp-deko/release/deko-monitor")
+                        .arg("../target/x86_64-snp-deko/release/deko-monitor.bin");
 
                     println!("Creating flat image with command: {:?}", cmd);
                     if !cmd.status()?.success() {
@@ -160,7 +162,9 @@ impl Builder {
                     .arg("--package")
                     .arg("deko-stage1")
                     .arg("--target")
-                    .arg("x86_64-unknown-uefi");
+                    .arg("x86_64-unknown-uefi")
+                    .arg("--features")
+                    .arg(self.target_arch.as_str());
 
                 if release {
                     cmd.arg("--release");
@@ -211,7 +215,7 @@ impl Builder {
         cmd.args(["-serial", "stdio", "-nodefaults", "-no-reboot"]);
 
         if config.enable_cvm {
-            if self.target_arch.contains("sev") {
+            if self.target_arch.contains("snp") {
                 qemu_sev(&config, &mut cmd);
             } else if self.target_arch.contains("tdx") {
                 qemu_tdx(&config, &mut cmd);
@@ -243,7 +247,7 @@ impl Builder {
         stage1_path: &str,
     ) -> Result<()> {
         match &self.target_arch {
-            target if target.contains("sev") => self
+            target if target.contains("snp") => self
                 .create_bootable_sev(ovmf_path, deko_monitor_path)
                 .context("Failed to create bootable SEV image"),
             target if target.contains("tdx") => {
@@ -307,7 +311,7 @@ impl Builder {
 
         // Logic to create a bootable image using the provided paths
         let deko_monitor_path = project_root().join(deko_monitor_path);
-        let boot_img_path = project_root().join("target/x86_64-sev-deko/release/igvm.igvm");
+        let boot_img_path = project_root().join("target/x86_64-snp-deko/release/igvm.igvm");
         // Get full path to OVMF
         let ovmf_path = shellexpand::tilde(ovmf_path);
 
@@ -322,7 +326,7 @@ impl Builder {
         cmd.args(["--stage2", deko_monitor_path.to_str().unwrap()]);
         cmd.args([
             "--kernel",
-            "/home/haobchen/cage-sev/target/x86_64-sev-deko/release/deko-monitor",
+            "/home/haobchen/cage-sev/target/x86_64-snp-deko/release/deko-monitor",
         ]);
         cmd.args(["--output", boot_img_path.to_str().unwrap()]);
         cmd.arg("qemu");
@@ -363,8 +367,8 @@ fn qemu_tdx(config: &FinalQemuConfig, cmd: &mut std::process::Command) {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let target_arch = match cli.target_arch {
-        TargetArch::Tdx => "x86_64-tdx-deko",
-        TargetArch::Snp => "x86_64-sev-deko",
+        TargetArch::Tdx => "tdx",
+        TargetArch::Snp => "snp",
     };
 
     let builder = Builder::new(target_arch.to_string());
