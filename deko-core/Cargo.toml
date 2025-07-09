@@ -10,11 +10,14 @@ vstd = { workspace = true, features = ["alloc"] }
 builtin = { workspace = true }
 builtin_macros = { workspace = true }
 
-deko-meta = { workspace = true}
+deko-meta = { workspace = true }
+deko-macros = { workspace = true }
+deko-proofs = { workspace = true }
+deko-logging = { workspace = true, optional = true }
 
 [features]
 default = ["snp"]
 tdx = []
 snp = []
 # Enable logging?
-log = []
+logging = ["deko-logging"]

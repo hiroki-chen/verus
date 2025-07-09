@@ -4,6 +4,8 @@
 //! will be forwarded to the untrusted hypervisor to communicate with the TDX module.
 use vstd::prelude::*;
 
+use super::Tdx;
+
 core::arch::global_asm!(include_str!("tdcall.S"), options(att_syntax));
 
 extern "C" {
@@ -133,47 +135,49 @@ impl From<u64> for TdCallError {
     }
 }
 
-/// Wrapper for the TDX call interface.
-///
-/// Unfortunately we cannot verify the correctness of the assembly code so we
-/// assume it's implemeneted in the correct way and we only specify the spec
-/// for the function.
-///
-/// TODO: for `requires` we need to add the precondition that the leaf function
-/// is always within what we have defined.
-#[verifier::external_body]
-#[inline(always)]
-pub fn tdcall(args: &mut TdcallArgs) -> (ret: u64)
-    ensures
-        ret === 0 ==> args.rax == 1,
-        ret === 1 ==> args.rcx == 0,
-{
-    // The assembly code will handle the actual TDCALL call.
-    unsafe { td_call_asm(args) >> 32 }
-}
+impl Tdx {
+    /// Wrapper for the TDX call interface.
+    ///
+    /// Unfortunately we cannot verify the correctness of the assembly code so we
+    /// assume it's implemeneted in the correct way and we only specify the spec
+    /// for the function.
+    ///
+    /// TODO: for `requires` we need to add the precondition that the leaf function
+    /// is always within what we have defined.
+    #[verifier::external_body]
+    #[inline(always)]
+    pub fn tdcall(args: &mut TdcallArgs) -> (ret: u64)
+        ensures
+            ret === 0 ==> args.rax == 1,
+            ret === 1 ==> args.rcx == 0,
+    {
+        // The assembly code will handle the actual TDCALL call.
+        unsafe { td_call_asm(args) >> 32 }
+    }
 
-#[verifier::external]
-/// Check if the TDCALL instruction is supported by the CPU.
-pub fn check_tdcall() -> bool {
-    let mut args = TdcallArgs::default();
-    args.rax = TdcallNum::VpInfo as u64;
+    #[verifier::external]
+    /// Check if the TDCALL instruction is supported by the CPU.
+    pub fn check_tdcall() -> bool {
+        let mut args = TdcallArgs::default();
+        args.rax = TdcallNum::VpInfo as u64;
 
-    // Call the TDCALL instruction and check if it returns 0 (success).
-    tdcall(&mut args) == 0
-}
+        // Call the TDCALL instruction and check if it returns 0 (success).
+        tdcall(&mut args) == 0
+    }
 
-// pub fn veinfo()
+    // pub fn veinfo()
+    /// Get the VP (Virtual Processor) information.
+    pub fn vpinfo() -> u64 {
+        let mut args = TdcallArgs::default();
+        args.rax = TdcallNum::VpInfo as u64;
 
-/// Get the VP (Virtual Processor) information.
-pub fn vpinfo() -> u64 {
-    let mut args = TdcallArgs::default();
-    args.rax = TdcallNum::VpInfo as u64;
+        // Call the TDCALL instruction and check if it returns 0 (success).
+        if tdcall(&mut args) == 0 {
+            args.rcx
+        } else {
+            0  // Return 0 on error
 
-    // Call the TDCALL instruction and check if it returns 0 (success).
-    if tdcall(&mut args) == 0 {
-        args.rcx
-    } else {
-        0 // Return 0 on error
+        }
     }
 }
 

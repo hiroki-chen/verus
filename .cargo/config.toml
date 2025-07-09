@@ -3,7 +3,7 @@ target-dir = "target"
 incremental = true
 
 [alias]
-xtask = "run --package xtask --"
+xtask = "run --package xtask --release --"
 
 qemu-tdx = "xtask --target-arch tdx qemu --config-path .config/qemu.tdx.config.toml"
 qemu-snp = "xtask --target-arch snp qemu --config-path .config/qemu.snp.config.toml"
@@ -15,3 +15,8 @@ build-deko-tdx-release = "xtask --target-arch tdx build --target deko --release"
 build-deko-snp-release = "xtask --target-arch snp build --target deko --release"
 build-deko-tdx-debug = "xtask --target-arch tdx build --target deko"
 build-deko-snp-debug = "xtask --target-arch snp build --target deko"
+
+pretty = "xtask pretty"
+
+# TODO: Fork another version. This will download unncessary git submodules recursively.
+install-igvmbuilder = "install --git https://github.com/coconut-svsm/svsm.git igvmbuilder"

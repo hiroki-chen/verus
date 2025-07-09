@@ -1,0 +1,16 @@
+[package]
+name = "deko-proofs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+vstd = { workspace = true }
+builtin = { workspace = true }
+
+[package.metadata.verus]
+verify = true
+
+[features]
+default = []
+snp = []
+tdx = []

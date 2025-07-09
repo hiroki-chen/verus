@@ -45,6 +45,19 @@ Afterwards you need to pack the kernel and the monitor image into a TDVF file fo
 ```
 which will produce `target/x86_64-tdx-deko/release/deko.bin` as the BIOS file which contains the deko-monitor and the loader for the user-level OS kernel.
 
+
+## Project Layout
+
+We aim to support both TDX and SNP so we carefully designed the hardware abstraction layer to minimize the disrupt caused by platform differences. The purpose of each crate is listed below.
+
+- `deko-core`: main implementation of the deko monitor. We hide hardware implementation details using `deko-core/src/hal.rs`.
+- `deko-logging`: a serial port logger for debugging only.
+- `deko-macros`: a collection of procedural macros for generating proofs and specs quickly.
+- `deko-meta`: boot header.
+- `deko-monitor`: stage 2 bootloader for setting up the initial context for deko entry function.
+- `deko-proofs`: the toolbox for formal specs, mathematical reasonings, etc.
+- `deko-stage`: the UEFI bootloader for bootstrapping deko monitor inside TDX CVMs.
+
 # Acknowledgement
 
 This project is based on the following projects:

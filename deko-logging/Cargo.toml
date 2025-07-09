@@ -1,0 +1,10 @@
+[package]
+name = "deko-logging"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+log = { version = "0.4.27", default-features = false }
+spin = { version = "0.10.0", default-features = false, features = ["mutex"] }
+uart_16550 = { version = "0.3.2", default-features = false }
+x86_64 = "0.15.2"

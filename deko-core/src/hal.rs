@@ -14,6 +14,10 @@ pub enum PlatformType {
 pub trait PlatformApi: Sync + Send {
     /// Returns the platform type of the current platform.
     fn platform_type(&self) -> PlatformType;
+
+    /// Initializes the platform. This function should be called once at the
+    /// beginning of the program to set up the platform-specific environment.
+    fn init_platform(&self);
 }
 
 } // verus!

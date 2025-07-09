@@ -62,7 +62,7 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
     #[arg(short, long, value_enum)]
-    target_arch: TargetArch,
+    target_arch: Option<TargetArch>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -87,6 +87,8 @@ enum Commands {
         #[arg(short, long)]
         release: bool,
     },
+
+    Pretty,
 }
 
 impl Default for FinalQemuConfig {
@@ -127,7 +129,8 @@ impl Builder {
                     .arg("--target")
                     .arg(format!("../.cargo/x86_64-{}-deko.json", self.target_arch))
                     .arg("--features")
-                    .arg(self.target_arch.as_str());
+                    .arg(self.target_arch.as_str())
+                    .arg("--no-default-features");
 
                 if release {
                     cmd.arg("--release");
@@ -366,7 +369,7 @@ fn qemu_tdx(config: &FinalQemuConfig, cmd: &mut std::process::Command) {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let target_arch = match cli.target_arch {
+    let target_arch = match cli.target_arch.unwrap_or(TargetArch::Tdx) {
         TargetArch::Tdx => "tdx",
         TargetArch::Snp => "snp",
     };
@@ -409,7 +412,39 @@ fn main() -> Result<()> {
             builder.qemu(&config_path).context("Failed to run QEMU")
         }
         Commands::Build { target, release } => builder.build(target, release),
+        Commands::Pretty => pretty().context("Failed to run pretty command"),
     }
+}
+
+fn pretty() -> Result<()> {
+    let root = project_root();
+
+    // Find all *.rs files recursively.
+    let mut rs_files = vec![];
+    for entry in walkdir::WalkDir::new(&root) {
+        let entry = entry.context("Failed to read directory")?;
+
+        if entry.file_type().is_file()
+            && entry.path().extension().and_then(|s| s.to_str()) == Some("rs")
+            && entry.path().to_str().unwrap().contains("deko")
+            && !entry.path().to_str().unwrap().contains("target")
+            && !entry.path().to_str().unwrap().contains("deko-macros")
+        {
+            rs_files.push(entry.into_path());
+        }
+    }
+
+    // Run formatter on each file.
+    for file in rs_files {
+        let mut cmd = std::process::Command::new("verusfmt");
+        cmd.arg(file.to_str().unwrap());
+        cmd.arg(file.to_str().unwrap()); // same output
+        if !cmd.status().context("Failed to run rustfmt")?.success() {
+            bail!("Failed to format file: {:?}", file);
+        }
+    }
+
+    Ok(())
 }
 
 fn load_qemu_config(path: &str) -> Result<FinalQemuConfig> {

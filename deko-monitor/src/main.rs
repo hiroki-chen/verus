@@ -20,7 +20,16 @@ core::arch::global_asm!(include_str!("stage2.S"), options(att_syntax));
 /// - the memory is in 1:1 identity mapping mode with paging enabled
 /// - the stack is ready for use
 #[no_mangle]
-pub unsafe extern "C" fn _start(header: *const Header) -> ! { deko_core::deko_main(&*header); }
+pub unsafe extern "C" fn _start(header: *const Header) -> ! {
+    // This is to avoid the compiler from being confuseed with
+    // non-existing arguments for verus verification. We do not
+    // want to import anything from verus in this crate.
+    core::arch::asm!(
+      "call {f}",
+      f = in(reg) deko_core::deko_main as usize,
+      options(noreturn)
+    );
+}
 
 /// Custom panic handler that will be called on panic.
 ///

@@ -1,6 +1,15 @@
 [workspace]
 resolver = "2"
-members = ["deko-core", "deko-meta", "deko-monitor", "xtask", "deko-stage1"]
+members = [
+    "deko-core",
+    "deko-meta",
+    "deko-monitor",
+    "deko-stage1",
+    "deko-macros",
+    "deko-proofs",
+    "xtask",
+    "deko-logging",
+]
 
 [workspace.dependencies]
 # Verus repos
@@ -16,7 +25,10 @@ syn_verus = { git = "https://github.com/ziqiaozhou/verus", rev = "7c4a5274a4d745
 prettyplease_verus = { git = "https://github.com/ziqiaozhou/verus", rev = "7c4a5274a4d74522f3965eb038bb7e22fa5eebef" }
 
 deko-core = { path = "deko-core" }
+deko-logging = { path = "deko-logging" }
+deko-macros = { path = "deko-macros" }
 deko-meta = { path = "deko-meta" }
+deko-proofs = { path = "deko-proofs" }
 
 # the profile used for `cargo build`
 [profile.dev]

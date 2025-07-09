@@ -21,6 +21,7 @@
 //! └────────────────────────────────────────┘
 #![no_std]
 #![feature(abi_x86_interrupt)]
+#![feature(never_type)]
 
 #[cfg(target_arch = "x86")]
 compile_error!("Cannot be compiled against non x86_64 architecture!");
@@ -35,6 +36,7 @@ pub mod boot;
 pub mod cell;
 pub mod cpu;
 pub mod hal;
+pub mod logging;
 pub mod policy;
 pub mod sync;
 
@@ -46,6 +48,7 @@ pub mod tdx;
 use alloc::alloc::GlobalAlloc;
 
 use deko_meta::Header;
+use deko_proofs::cpu::CpuCore;
 use vstd::prelude::*;
 
 /// A global allocator for the monitor.
@@ -70,16 +73,17 @@ verus! {
 /// 8. Prepare for loading the Linux kernel which is packaed as the final payload.
 #[verifier::exec_allows_no_decreases_clause]
 #[verifier::external_body]
-pub fn deko_main(header: &'static Header) -> ! {
-    unsafe {
-        // core::arch::asm!("ud2");
-    }
-
+pub fn deko_main(
+    header: &'static Header,
+    Tracked(application_processors): Tracked<Map<int, CpuCore>>,
+) -> (__: !)
+    ensures
+        false,  // <- as we never return
+{
     // Initialize the global allocator.
     // This is crucial as we now are still under UEFI mm which means
     // vaddr == paddr.
     // cpu_idle();
-
     loop {
     }
 }

@@ -14,6 +14,11 @@ impl PlatformApi for Tdx {
     fn platform_type(&self) -> PlatformType {
         PlatformType::Tdx
     }
+
+    fn init_platform(&self) {
+        // Initialize the TDX platform.
+        todo!()
+    }
 }
 
 } // verus!

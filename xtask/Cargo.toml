@@ -12,4 +12,5 @@ igvm = "0.3.4"
 serde = { version = "1.0.219", features = ["derive"] }
 shellexpand = "3.1.1"
 toml = "0.8.23"
+walkdir = "2.5.0"
 xshell = "0.2.7"

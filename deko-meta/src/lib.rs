@@ -5,7 +5,7 @@ use vstd::prelude::*;
 verus! {
 
 pub const BOOT_VERSION: u8 = 0x1;
-    
+
 #[repr(C)]
 #[derive(Debug, Default)]
 pub struct Header {
