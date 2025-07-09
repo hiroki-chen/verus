@@ -9,7 +9,8 @@ qemu-tdx = "xtask --target-arch tdx qemu --config-path .config/qemu.tdx.config.t
 qemu-snp = "xtask --target-arch snp qemu --config-path .config/qemu.snp.config.toml"
 
 create-bootable-tdx = "xtask  --target-arch tdx create-bootable --deko-monitor-path target/x86_64-tdx-deko/release/deko-monitor"
-create-bootable-snp = "xtask  --target-arch snp create-bootable --deko-monitor-path target/x86_64-sev-deko/release/deko-monitor.bin"
+create-bootable-snp = "xtask  --target-arch snp create-bootable --deko-monitor-path target/x86_64-snp-deko/release/deko-monitor.bin"
+create-bootable-snp-test = "xtask  --target-arch snp create-bootable --deko-monitor-path /data/cc/svsm/bin/stage2"
 
 build-deko-tdx-release = "xtask --target-arch tdx build --target deko --release"
 build-deko-snp-release = "xtask --target-arch snp build --target deko --release"

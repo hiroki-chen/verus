@@ -2,13 +2,13 @@
 resolver = "2"
 members = [
     "deko-core",
+    "deko-logging",
     "deko-meta",
     "deko-monitor",
-    "deko-stage1",
     "deko-macros",
-    "deko-proofs",
+    "deko-stage1",
+    "deko-std",
     "xtask",
-    "deko-logging",
 ]
 
 [workspace.dependencies]
@@ -28,7 +28,7 @@ deko-core = { path = "deko-core" }
 deko-logging = { path = "deko-logging" }
 deko-macros = { path = "deko-macros" }
 deko-meta = { path = "deko-meta" }
-deko-proofs = { path = "deko-proofs" }
+deko-std = { path = "deko-std" }
 
 # the profile used for `cargo build`
 [profile.dev]

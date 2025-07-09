@@ -1,6 +1,7 @@
+use deko_std::cpu::CpuCore;
 use vstd::prelude::*;
 
-use super::{Snp, __RmpAttribute};
+use super::Snp;
 
 verus! {
 
@@ -26,8 +27,8 @@ impl Snp {
         vaddr: u64,
         psize: u64,
         // attr: __RmpAttribute,
-        Tracked(core): Tracked<()>,
-        Tracked(core2): Tracked<()>,
+        Tracked(core): Tracked<CpuCore>,
+        Tracked(core2): Tracked<CpuCore>,
         Tracked(perm): Tracked<()>,
     ) -> (ret: u64)
         requires

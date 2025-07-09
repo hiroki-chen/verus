@@ -55,7 +55,7 @@ We aim to support both TDX and SNP so we carefully designed the hardware abstrac
 - `deko-macros`: a collection of procedural macros for generating proofs and specs quickly.
 - `deko-meta`: boot header.
 - `deko-monitor`: stage 2 bootloader for setting up the initial context for deko entry function.
-- `deko-proofs`: the toolbox for formal specs, mathematical reasonings, etc.
+- `deko-std`: the toolbox for formal specs, mathematical reasonings, etc.
 - `deko-stage`: the UEFI bootloader for bootstrapping deko monitor inside TDX CVMs.
 
 # Acknowledgement

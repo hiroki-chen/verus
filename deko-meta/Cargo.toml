@@ -5,6 +5,9 @@ edition = "2024"
 
 [dependencies]
 vstd = { workspace = true }
+builtin = { workspace = true }
+
+deko-std = { workspace = true }
 
 [package.metadata.verus]
 verify = true

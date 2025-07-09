@@ -20,7 +20,7 @@ pub enum VmPrivilegeLevel {
     NonRoot,
 }
 
-pub ghost struct CpuCoreStatus{
+pub ghost struct CpuCoreStatus {
     /// The privilege level of the CPU core.
     pub privilege_level: PrivilegeLevel,
     /// The VM privilege level of the CPU core.
@@ -95,8 +95,7 @@ impl<T: WellFormed> RegisterValueView<T> {
         self.value
     }
 
-    pub open spec fn wf(&self) -> bool
-    {
+    pub open spec fn wf(&self) -> bool {
         // The view is well-formed if the value is well-formed.
         self.value.wf()
     }
@@ -117,7 +116,7 @@ pub tracked struct CpuCoreId {
 }
 
 impl Register {
-    pub spec fn wf(&self) -> bool;
+    pub uninterp spec fn wf(&self) -> bool;
 
     pub open spec fn view<T>(&self) -> RegisterValueView<T> {
         RegisterValueView {
@@ -128,26 +127,26 @@ impl Register {
         }
     }
 
-    pub spec fn name(&self) -> RegisterName;
+    pub uninterp spec fn name(&self) -> RegisterName;
 
-    pub spec fn shared(&self) -> bool;
+    pub uninterp spec fn shared(&self) -> bool;
 
     /// Parent CPU id.
-    pub spec fn cpu(&self) -> nat;
+    pub uninterp spec fn cpu(&self) -> nat;
 
     pub open spec fn wf_notshared(&self) -> bool {
         &&& self.wf()
         &&& !self.shared()
     }
 
-    pub spec fn value<T: Sized>(&self) -> T;
+    pub uninterp spec fn value<T: Sized>(&self) -> T;
 
     #[verifier(external_body)]
     pub broadcast proof fn axiom_eq<T>(x: Self, y: Self)
         requires
             x.view::<T>() === y.view::<T>(),
         ensures
-            x === y,
+            (x === y),
     {
     }
 
@@ -160,7 +159,7 @@ impl Register {
 }
 
 impl CpuCoreId {
-    pub spec fn view(&self) -> CpuCoreStatus;
+    pub uninterp spec fn view(&self) -> CpuCoreStatus;
 }
 
 } // verus!

@@ -1,12 +1,13 @@
 use core::sync::atomic::AtomicU32;
 
-use deko_macros::bits;
-use deko_proofs::prelude::*;
 use vstd::prelude::*;
 
 use crate::hal::{PlatformApi, PlatformType};
 
 pub mod snpcall;
+
+#[cfg(feature = "logging")]
+pub(crate) mod logging;
 
 extern "C" {
     /// A global flag to indicate whether the AP has been started.
@@ -14,17 +15,6 @@ extern "C" {
 }
 
 verus! {
-
-// #[bits(RmpAttribute, u64)]
-#[repr(C, align(1))]
-pub struct __RmpAttribute {
-    // #[bit(0, 7)]
-    pub vmpl: u64,
-    // #[bit(8, 15)]
-    pub perm: u64,
-    // #[bit(16, 16)]
-    pub vmsa: u64,
-}
 
 pub struct Snp;
 

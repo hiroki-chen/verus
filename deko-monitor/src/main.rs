@@ -1,10 +1,8 @@
 #![no_std]
 #![no_main]
 
-use core::arch::asm;
 use core::panic::PanicInfo;
 
-use deko_core::*;
 use deko_meta::*;
 
 #[cfg(all(feature = "tdx", feature = "snp"))]
@@ -20,7 +18,7 @@ core::arch::global_asm!(include_str!("stage2.S"), options(att_syntax));
 /// - the memory is in 1:1 identity mapping mode with paging enabled
 /// - the stack is ready for use
 #[no_mangle]
-pub unsafe extern "C" fn _start(header: *const Header) -> ! {
+pub unsafe extern "C" fn _start(header: *const HeaderRaw) -> ! {
     // This is to avoid the compiler from being confuseed with
     // non-existing arguments for verus verification. We do not
     // want to import anything from verus in this crate.

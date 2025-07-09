@@ -13,7 +13,7 @@ pub struct Spin {
 }
 
 impl Spin {
-    pub spec fn id(self) -> int;
+    pub uninterp spec fn id(self) -> int;
 
     #[verifier::external_body]
     pub const fn new() -> (ret: Self) {

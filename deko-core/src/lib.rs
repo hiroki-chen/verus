@@ -45,10 +45,8 @@ pub mod snp;
 #[cfg(feature = "tdx")]
 pub mod tdx;
 
-use alloc::alloc::GlobalAlloc;
-
-use deko_meta::Header;
-use deko_proofs::cpu::CpuCore;
+use deko_meta::HeaderRaw;
+use deko_std::prelude::*;
 use vstd::prelude::*;
 
 /// A global allocator for the monitor.
@@ -74,12 +72,24 @@ verus! {
 #[verifier::exec_allows_no_decreases_clause]
 #[verifier::external_body]
 pub fn deko_main(
-    header: &'static Header,
+    header: DekoPtrRaw<HeaderRaw>,
+    Tracked(header_permission): Tracked<Header>,
     Tracked(application_processors): Tracked<Map<int, CpuCore>>,
-) -> (__: !)
+) -> (__discard: !)
+    requires
+        header.is_constant() && header.wf(),
     ensures
         false,  // <- as we never return
 {
+    // TODO: The platform should be initialized like this:
+    // let platform_type = SvsmPlatformType::from(launch_info.platform_type);
+    #[cfg(feature = "logging")]
+    // Initialize the logger if logging is enabled.
+    crate::logging::init_logger();
+
+    // Log the initialization message.
+    // crate::logging::log(log::Level::Info, format_args!("Deko Monitor initialized!"));
+
     // Initialize the global allocator.
     // This is crucial as we now are still under UEFI mm which means
     // vaddr == paddr.

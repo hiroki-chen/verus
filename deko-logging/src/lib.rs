@@ -1,62 +1,78 @@
 #![no_std]
 
+// In some module, e.g., your main lib.rs or a new logger.rs
+
+use core::fmt;
+
+use log::{Level, LevelFilter, Metadata, Record, SetLoggerError};
 use spin::Mutex;
 use uart_16550::SerialPort;
-use x86_64::instructions::interrupts::without_interrupts;
-use x86_64::instructions::port::Port;
 
-pub const COM0_ADDR: u16 = 0x3f8;
-pub const COM1_ADDR: u16 = 0x2f8;
-pub const SERIAL_COM_0_UUID: &str = "097e522c-6380-417d-9077-5b76565ba5be";
-pub const SERIAL_COM_1_UUID: &str = "a7e92bf8-5991-45cf-b38a-7b3c8255cb14";
-
-/// COM (communication port)[1][2] is the original, yet still common, name of the serial port interface on PC-compatible
-/// computers. It can refer not only to physical ports, but also to emulated ports, such as ports created by Bluetooth or
-/// USB adapters.
-pub struct ComPort {
-    serial_port: Mutex<SerialPort>,
-    /// Base address: 0x*f8.
-    addr: u16,
-    /// UUID.
-    uuid: &'static str,
+pub struct Logger {
+    // The serial port is wrapped in a Mutex for safe concurrent access.
+    port: Mutex<SerialPort>,
 }
 
-impl ComPort {
-    pub fn new(addr: u16, uuid: &'static str) -> Self {
-        let serial_port = Mutex::new(unsafe { SerialPort::new(addr) });
-        serial_port.lock().init();
-        Self { serial_port, addr, uuid }
+// Implement the `Log` trait for our Logger. This is what the `log`
+// crate will call.
+impl log::Log for Logger {
+    fn enabled(&self, metadata: &Metadata) -> bool {
+        // We can enable logs based on their level here if we want.
+        // For now, let's enable everything.
+        true
     }
 
-    pub fn get_addr(&self) -> u16 { self.addr }
+    fn log(&self, record: &Record) {
+        if self.enabled(record.metadata()) {
+            let mut port = self.port.lock();
 
-    /// Should not use keyboard interrupts.
-    pub fn read(&self) -> u8 { 0 }
-
-    pub fn write(&self, bytes: &[u8]) {
-        // We should disable interrupts here.
-        without_interrupts(|| {
-            for byte in bytes.iter() {
-                self.serial_port.lock().send(*byte);
+            match record.level() {
+                Level::Error => port.send(b'E'),
+                Level::Warn => port.send(b'W'),
+                Level::Info => port.send(b'I'),
+                Level::Debug => port.send(b'D'),
+                Level::Trace => port.send(b'T'),
             }
-        });
-    }
 
-    pub fn enable_irq(&self) {
-        let addr = self.addr;
-        // Interrupt enable register.
-        let mut ier = Port::<u8>::new(addr + 0x1);
-        unsafe {
-            ier.write(0x07);
+            // Send a space after the log level.
+            port.send(b' ');
+
+            // Write each byte of the string to the serial port.
+            for byte in record.args().as_str().unwrap().bytes() {
+                // Write the byte to the serial port.
+                port.send(byte);
+            }
         }
     }
+
+    fn flush(&self) {}
 }
 
-pub fn init_serial_ports() {
-    let com0 = ComPort::new(COM0_ADDR, SERIAL_COM_0_UUID);
-    let com1 = ComPort::new(COM1_ADDR, SERIAL_COM_1_UUID);
+// Global static instance of our logger.
+static LOGGER: Logger = Logger {
+    // The COM1 port address is 0x3F8. This is a standard.
+    // The `SerialPort::new` function is `const`, so we can use it in a static.
+    port: Mutex::new(unsafe { SerialPort::new(0x3F8) }),
+};
 
-    // Enable IRQs.
-    com0.enable_irq();
-    com1.enable_irq();
+// Public function to initialize the logging system.
+pub fn init() {
+    // Before we set the logger, we must initialize the serial port hardware.
+    LOGGER.port.lock().init();
+    loop {}
+
+    // Set our custom logger as the global logger.
+    log::set_logger(&LOGGER);
+
+    // Set the maximum log level.
+    log::set_max_level(LevelFilter::Trace); // Log everything.
+
+    // Now we can use the log macros!
+    log::info!("Logger initialized!");
+}
+
+pub fn log(level: Level, args: fmt::Arguments) {
+    // This function can be used to log messages directly.
+    // It will use the global logger we set up.
+    log::log!(level, "{}", args);
 }

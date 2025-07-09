@@ -12,12 +12,13 @@ builtin_macros = { workspace = true }
 
 deko-meta = { workspace = true }
 deko-macros = { workspace = true }
-deko-proofs = { workspace = true }
+deko-std = { workspace = true }
 deko-logging = { workspace = true, optional = true }
+log = { version = "0.4.27", optional = true }
 
 [features]
-default = ["snp"]
+default = ["snp", "logging"]
 tdx = []
 snp = []
 # Enable logging?
-logging = ["deko-logging"]
+logging = ["deko-logging", "log"]
