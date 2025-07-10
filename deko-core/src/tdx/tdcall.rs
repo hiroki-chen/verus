@@ -162,7 +162,7 @@ impl Tdx {
         args.rax = TdcallNum::VpInfo as u64;
 
         // Call the TDCALL instruction and check if it returns 0 (success).
-        tdcall(&mut args) == 0
+        Self::tdcall(&mut args) == 0
     }
 
     // pub fn veinfo()
@@ -172,7 +172,7 @@ impl Tdx {
         args.rax = TdcallNum::VpInfo as u64;
 
         // Call the TDCALL instruction and check if it returns 0 (success).
-        if tdcall(&mut args) == 0 {
+        if Self::tdcall(&mut args) == 0 {
             args.rcx
         } else {
             0  // Return 0 on error

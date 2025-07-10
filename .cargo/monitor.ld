@@ -50,4 +50,4 @@ SECTIONS
     }
 }
 
-ENTRY(startup_32)
+ENTRY(entry)

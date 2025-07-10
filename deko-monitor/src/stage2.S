@@ -3,9 +3,9 @@
 .code32
 
 .org 0
-.globl startup_32
+.globl entry
 
-startup_32:
+entry:
   movl %esp, %ebp
 
   movl $gdt64_desc, %eax

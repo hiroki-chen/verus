@@ -10,6 +10,8 @@ compile_error!("Cannot enable both TDX and SEV features at the same time!");
 
 #[cfg(feature = "snp")]
 core::arch::global_asm!(include_str!("stage2.S"), options(att_syntax));
+#[cfg(feature = "tdx")]
+core::arch::global_asm!(include_str!("stage2-tdx.S"), options(att_syntax));
 
 /// This is the main entry function of the monitor and the bootstrap code should
 /// eventually jump to this destination.

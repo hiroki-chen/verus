@@ -17,3 +17,6 @@ xmas-elf = "0.10.0"
 lto = true
 panic = "abort"
 strip = true
+
+[features]
+tdx = []

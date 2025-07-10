@@ -18,7 +18,6 @@ impl PlatformApi for Tdx {
 
     fn init_platform(&self) {
         // Initialize the TDX platform.
-        todo!()
     }
 }
 

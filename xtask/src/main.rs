@@ -129,7 +129,7 @@ impl Builder {
                     .arg("--target")
                     .arg(format!("../.cargo/x86_64-{}-deko.json", self.target_arch))
                     .arg("--features")
-                    .arg(self.target_arch.as_str())
+                    .arg(format!("{},logging", self.target_arch))
                     .arg("--no-default-features");
 
                 if release {
@@ -264,6 +264,7 @@ impl Builder {
 
     fn create_bootable_tdx(&self, deko_monitor_path: &str, stage1_path: &str) -> Result<()> {
         self.build(BuildTarget::Stage1, true)?;
+        self.build(BuildTarget::Deko, true)?;
 
         // Logic to create a bootable image using the provided paths
         let loader_path = project_root().join(stage1_path);

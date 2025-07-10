@@ -3,10 +3,18 @@
 // In some module, e.g., your main lib.rs or a new logger.rs
 
 use core::fmt;
+use core::fmt::Write;
 
-use log::{Level, LevelFilter, Metadata, Record, SetLoggerError};
+use log::{Level, LevelFilter, Metadata, Record};
 use spin::Mutex;
 use uart_16550::SerialPort;
+
+const RESET_COLOR: &str = "\x1B[0m";
+const ERROR_COLOR: &str = "\x1B[31m"; // Red
+const WARN_COLOR: &str = "\x1B[33m"; // Yellow
+const INFO_COLOR: &str = "\x1B[32m"; // Green
+const DEBUG_COLOR: &str = "\x1B[34m"; // Blue
+const TRACE_COLOR: &str = "\x1B[36m"; // Cyan
 
 pub struct Logger {
     // The serial port is wrapped in a Mutex for safe concurrent access.
@@ -26,22 +34,27 @@ impl log::Log for Logger {
         if self.enabled(record.metadata()) {
             let mut port = self.port.lock();
 
-            match record.level() {
-                Level::Error => port.send(b'E'),
-                Level::Warn => port.send(b'W'),
-                Level::Info => port.send(b'I'),
-                Level::Debug => port.send(b'D'),
-                Level::Trace => port.send(b'T'),
-            }
+            // 1. Write the color code.
+            // The `write!` macro is perfect for this too.
+            let _ = write!(
+                port,
+                "{}",
+                match record.level() {
+                    Level::Error => ERROR_COLOR,
+                    Level::Warn => WARN_COLOR,
+                    Level::Info => INFO_COLOR,
+                    Level::Debug => DEBUG_COLOR,
+                    Level::Trace => TRACE_COLOR,
+                }
+            );
 
-            // Send a space after the log level.
-            port.send(b' ');
+            // 2. THIS IS THE CRITICAL FIX:
+            //    Use the `write!` macro to stream the formatted arguments
+            //    directly to the serial port.
+            let _ = write!(port, "{}", *record.args());
 
-            // Write each byte of the string to the serial port.
-            for byte in record.args().as_str().unwrap().bytes() {
-                // Write the byte to the serial port.
-                port.send(byte);
-            }
+            // 3. Write the reset code and a newline.
+            let _ = writeln!(port, "{}", RESET_COLOR);
         }
     }
 
@@ -59,20 +72,29 @@ static LOGGER: Logger = Logger {
 pub fn init() {
     // Before we set the logger, we must initialize the serial port hardware.
     LOGGER.port.lock().init();
-    loop {}
 
     // Set our custom logger as the global logger.
-    log::set_logger(&LOGGER);
+    log::set_logger(&LOGGER).unwrap();
 
     // Set the maximum log level.
     log::set_max_level(LevelFilter::Trace); // Log everything.
 
-    // Now we can use the log macros!
-    log::info!("Logger initialized!");
+    log::info!("[DEKO-Monitor] Logger initialized successfully!");
 }
 
 pub fn log(level: Level, args: fmt::Arguments) {
-    // This function can be used to log messages directly.
-    // It will use the global logger we set up.
-    log::log!(level, "{}", args);
+    // This is the correct, panic-free way to log from a function
+    // that receives fmt::Arguments.
+
+    // 1. Build a log Record manually.
+    //    We explicitly give our `args` to the builder. The logger backend
+    //    knows how to consume this directly without re-formatting it.
+    let record = Record::builder()
+        .args(args)
+        .level(level)
+        .target(module_path!()) // or some other useful target
+        .build();
+
+    // 2. Send the record directly to the initialized logger.
+    log::logger().log(&record);
 }

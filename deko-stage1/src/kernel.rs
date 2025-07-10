@@ -42,35 +42,61 @@ impl<'deko> DekoKernel<'deko> {
 
     /// Unpack and load the kernel image into the memory
     fn load(&self) -> Result<()> {
+        // --- Pass 1: Determine the total memory footprint of all LOAD segments ---
+        let mut min_paddr = u64::MAX;
+        let mut max_end_addr = 0;
+        let mut has_loadable_segment = false;
+
+        // First iteration: Find the memory bounds
         for segment in self.elf.program_iter() {
-            if segment.get_type().expect("Failed to get segment type") == program::Type::Load {
-                // Skip non-loadable segments.
-                let mem_size = segment.mem_size();
-                let file_size = segment.file_size();
+            if segment.get_type().unwrap_or(program::Type::Null) == program::Type::Load {
+                has_loadable_segment = true;
+                min_paddr = core::cmp::min(min_paddr, segment.physical_addr());
+                max_end_addr =
+                    core::cmp::max(max_end_addr, segment.physical_addr() + segment.mem_size());
+            }
+        }
+
+        if !has_loadable_segment {
+            // Using panic is fine here as this is a fatal, unrecoverable error.
+            panic!("Kernel ELF contains no loadable segments.");
+        }
+        println!("[+] Kernel requires memory from {:#x} to {:#x}", min_paddr, max_end_addr);
+
+        // --- Allocate the entire contiguous block of memory at once ---
+
+        // Align the start address down and the end address up to page boundaries.
+        let alloc_paddr = min_paddr & !0xFFF;
+        let alloc_end_addr = (max_end_addr + 0xFFF) & !0xFFF;
+        let page_count = ((alloc_end_addr - alloc_paddr) / 0x1000) as usize;
+
+        println!("[+] Allocating {} pages at physical address {:#x}", page_count, alloc_paddr);
+
+        boot::allocate_pages(
+            AllocateType::Address(alloc_paddr),
+            MemoryType::LOADER_DATA, // Use LOADER_DATA for the whole block
+            page_count,
+        )
+        .expect("Failed to allocate contiguous memory block for kernel");
+
+        // --- Pass 2: Copy segment data into the freshly allocated memory ---
+
+        // Second iteration: Copy the data
+        for segment in self.elf.program_iter() {
+            if segment.get_type().unwrap_or(program::Type::Null) == program::Type::Load {
+                let mem_size = segment.mem_size() as usize;
+                let file_size = segment.file_size() as usize;
                 let paddr = segment.physical_addr();
                 let vaddr = segment.virtual_addr();
 
                 assert_eq!(paddr, vaddr, "Kernel segments must be identity-mapped for booting");
 
                 println!(
-                    "[+] Segment: type={:?}, paddr={:#x}, vaddr={:#x}, mem_size={:#x}, file_size={:#x}",
-                    segment.get_type().expect("Failed to get segment type"),
-                    paddr,
-                    vaddr,
-                    mem_size,
-                    file_size
+                    "[+] Loading Segment: paddr={:#x}, mem_size={:#x}, file_size={:#x}",
+                    paddr, mem_size, file_size,
                 );
 
-                let page_count = ((mem_size - 1) / 0x1000) + 1;
-                boot::allocate_pages(
-                    AllocateType::Address(paddr),
-                    MemoryType::LOADER_CODE,
-                    page_count as usize,
-                )
-                .expect("Failed to allocate memory for kernel segment");
-
-                // --- Step 2b: Copy the segment data from the file buffer ---
-                // xmas-elf gives us the content of the segment directly from the file buffer.
+                // Get the segment's data from the ELF file buffer.
                 let segment_data_in_file = if let SegmentData::Undefined(d) =
                     segment.get_data(&self.elf).expect("Failed to get segment data from ELF file")
                 {
@@ -79,22 +105,22 @@ impl<'deko> DekoKernel<'deko> {
                     panic!("Unexpected segment data type");
                 };
 
-                // The destination is the physical address we just allocated.
+                // Create a slice representing the destination memory for this segment.
                 let dest_slice =
-                    unsafe { core::slice::from_raw_parts_mut(paddr as *mut u8, mem_size as usize) };
+                    unsafe { core::slice::from_raw_parts_mut(paddr as *mut u8, mem_size) };
 
-                // Copy the part of the segment that exists in the file
-                dest_slice[..file_size as usize].copy_from_slice(segment_data_in_file);
+                // Copy the part of the segment that exists in the file.
+                dest_slice[..file_size].copy_from_slice(segment_data_in_file);
 
-                // --- Step 2c: Zero out the .BSS section ---
-                // If mem_size > file_size, the remaining space is the .bss section
-                // and must be zeroed.
+                // Zero out the .BSS section if it exists (mem_size > file_size).
                 if mem_size > file_size {
-                    let bss_start_offset = file_size as usize;
+                    let bss_start_offset = file_size;
                     dest_slice[bss_start_offset..].fill(0);
                 }
             }
         }
+
+        println!("[+] Kernel loaded successfully into memory.");
 
         Ok(())
     }

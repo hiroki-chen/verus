@@ -36,6 +36,7 @@ pub mod boot;
 pub mod cell;
 pub mod cpu;
 pub mod hal;
+#[macro_use]
 pub mod logging;
 pub mod policy;
 pub mod sync;
@@ -83,12 +84,11 @@ pub fn deko_main(
 {
     // TODO: The platform should be initialized like this:
     // let platform_type = SvsmPlatformType::from(launch_info.platform_type);
-    #[cfg(feature = "logging")]
     // Initialize the logger if logging is enabled.
     crate::logging::init_logger();
 
     // Log the initialization message.
-    // crate::logging::log(log::Level::Info, format_args!("Deko Monitor initialized!"));
+    crate::info!("Deko Monitor is starting...");
 
     // Initialize the global allocator.
     // This is crucial as we now are still under UEFI mm which means
