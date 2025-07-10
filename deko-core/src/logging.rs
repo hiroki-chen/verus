@@ -1,7 +1,6 @@
 //! Debug logging feature for the monitor; enable only for debugging purposes only. You should disable this for safety reasons.
 //!
 //! This crate currently DOES NOT use the `vstd` crate to verify its implementation as it is designed solely for debugging.
-
 use vstd::prelude::*;
 
 verus! {
@@ -24,9 +23,7 @@ pub fn log(level: log::Level, args: core::fmt::Arguments) {
     deko_logging::log(level, format_args!("[DEKO-Monitor] {}", args));
 }
 
-
 } // verus!
-
 #[cfg(feature = "logging")]
 #[macro_export]
 macro_rules! info {
