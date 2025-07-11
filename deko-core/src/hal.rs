@@ -1,6 +1,9 @@
+use deko_std::sync::POnceCell;
 use vstd::prelude::*;
 
 verus! {
+
+pub exec static PLATFORM: POnceCell<PlatformType> = POnceCell::new();
 
 pub enum PlatformType {
     Tdx,

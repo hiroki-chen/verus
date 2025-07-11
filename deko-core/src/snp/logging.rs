@@ -18,6 +18,7 @@ pub struct GHCBIo;
 pub fn init_logger() {
 }
 
+#[verifier::external]
 #[allow(unused)]
 #[cfg(feature = "logging")]
 impl GHCBIo {

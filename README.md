@@ -1,4 +1,14 @@
-# Deko: Formally Verified SM-Based Intra-VM Compartmentalization for CVMs
+# Deko: Attesting Runtime Isolation Policies for Secure CVMs.
+
+Deko is a reference monitor for modern Confidential VMs (e.g., Intel TDX, AMD SEV-SNP) to perform *runtime attesation* on user-defined privacy policies (access control over sensitive data, information flow control, etc.). It utilizes modern hardware features that support finer-grained privilege isolation inside the CVM to bypass the untrusted guest kernel's interference with user-level applications while preserving its functionalities. We utilize TDP for TDX and VMPL for SNP to implement Deko as a privileged monitor. Furthermore, since this monitor is security-critical, we use Verus to formally verify the correctness properties.
+
+## System Requirements
+
+We expect the developers to have SNP or TDX-supported hardware available to build and play with Deko.
+
+- CPU: Intel Xeon 5th Gen or Later with TDX Module >= 1.5 / AMD EPYC 7000/9000 Series with SNP firmware >= 1.51
+- RAM: At least 4 GB allocated for the VM.
+- Host OS: Ubuntu 24.04 with supported kernel (see below to build the required kernel).
 
 ## Build
 

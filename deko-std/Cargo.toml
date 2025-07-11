@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 vstd = { workspace = true }
 builtin = { workspace = true }
+builtin_macros = { workspace = true }
+state_machines_macros = { workspace = true }
 
 [package.metadata.verus]
 verify = true

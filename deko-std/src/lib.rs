@@ -1,11 +1,19 @@
+//! This is an extension to the Verus standard library that consists mainly of
+//! various useful utilities and abstractions for system programming. This crate
+//! provides the following modules:
+//!
+//! - `sync`: Provides synchronization primitives such as `Mutex`, `RwLock`, and `OnceCell`.
 #![no_std]
+#![allow(non_snake_case)]
 #![allow(unused_imports)]
+#![allow(unexpected_cfgs)]
 
 pub mod bits;
 pub mod boot;
 pub mod cpu;
 pub mod misc;
 pub mod ptr;
+pub mod sync;
 pub mod wf;
 
 // Export everything.
