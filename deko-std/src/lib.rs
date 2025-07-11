@@ -7,6 +7,13 @@
 #![allow(non_snake_case)]
 #![allow(unused_imports)]
 #![allow(unexpected_cfgs)]
+#![cfg_attr(feature = "alloc", feature(allocator_api))]
+
+#[cfg(feature = "alloc")]
+extern crate alloc;
+
+#[cfg(feature = "alloc")]
+pub mod boxed;
 
 pub mod bits;
 pub mod boot;

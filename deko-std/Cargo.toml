@@ -13,6 +13,7 @@ state_machines_macros = { workspace = true }
 verify = true
 
 [features]
-default = []
+default = ["alloc"]
 snp = []
 tdx = []
+alloc = ["vstd/alloc"]

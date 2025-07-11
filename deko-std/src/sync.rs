@@ -1,22 +1,35 @@
 //! This crate implements several important synchronization primitives:
 //!
 //! - `Mutex`: A mutual exclusion lock that can be used to protect shared data.
-//! - `RwLock`: A read-write lock that allows multiple readers or a single writer.
+//! - `RwLock`: A read-write lock that allows multiple readers or a single writer <- exported from vstd.
 //! - `POnceCell`: A synchronization primitive that allows a piece of code to be executed only once.
 use builtin_macros::*;
 use state_machines_macros::*;
 use vstd::atomic::{AtomicCellId, PAtomicBool, PermissionBool};
+#[cfg(feature = "alloc")]
+use vstd::atomic::{PAtomicU64, PermissionU64};
 use vstd::cell::{CellId, PCell, PointsTo};
 use vstd::invariant::{AtomicInvariant, InvariantPredicate};
 use vstd::modes::*;
 use vstd::multiset::*;
 use vstd::prelude::*;
+use vstd::shared::Shared;
 use vstd::simple_pptr::MemContents;
+#[cfg(feature = "alloc")]
+use vstd::simple_pptr::PPtr;
 use vstd::*;
 
 verus! {
 
 pub spec const ATOMIC_CELL_ID: int = 0x114514;
+
+pub spec const ARC_ID: int = 0x1919810;
+
+pub const UNINIT: u64 = 0;
+
+pub const OCCUPIED: u64 = 1;
+
+pub const INITED: u64 = 2;
 
 pub struct MutexInv;
 
@@ -160,15 +173,15 @@ pub closed spec fn wf(&self) -> bool {
     invariant on state with (cell) is (v: u64, g: OnceCellState<V>) {
         match g {
             OnceCellState::Uninit(points_to) => {
-                v == 0
+                v == UNINIT
                     && points_to.id() == cell.id()
                     && points_to.mem_contents() === MemContents::Init(None)
             }
             OnceCellState::Occupied => {
-                v == 1
+                v == OCCUPIED
             }
             OnceCellState::Init(points_to) => {
-                v == 2
+                v == INITED
                     && points_to.id() == cell.id()
                     && matches!(points_to.mem_contents(), MemContents::Init(Some(_)))
             }
@@ -181,9 +194,14 @@ pub closed spec fn wf(&self) -> bool {
 /// multi-threaded contexts; it is safe to declare these traits so long as
 /// `self.wf()` holds.
 #[verifier::external]
-unsafe impl<V> Send for POnceCell<V> {}
+unsafe impl<V> Send for POnceCell<V> {
+
+}
+
 #[verifier::external]
-unsafe impl<V> Sync for POnceCell<V> {}
+unsafe impl<V> Sync for POnceCell<V> {
+
+}
 
 impl<V> POnceCell<V> {
     /// Constructs a new `POonceCell` in the uninitialized state.
@@ -194,7 +212,7 @@ impl<V> POnceCell<V> {
         let (cell, Tracked(points_to)) = PCell::new(None);
         let state = vstd::atomic_ghost::AtomicU64::new(
             Ghost(cell),
-            0,
+            UNINIT,
             Tracked(OnceCellState::Uninit(points_to)),
         );
 
@@ -212,13 +230,13 @@ impl<V> POnceCell<V> {
             &self.state => load(); ghost g => {}
         };
 
-        if cur_state != 0 {
+        if cur_state != UNINIT {
             return ;
         } else {
             let tracked mut points_to = None;
             let res =
                 atomic_with_ghost! {
-                &self.state => compare_exchange(0, 1);
+                &self.state => compare_exchange(UNINIT, OCCUPIED);
                 returning res; ghost g => {
                     g = match g {
                         OnceCellState::Uninit(points_to_inner) => {
@@ -236,9 +254,12 @@ impl<V> POnceCell<V> {
             if !res.is_err() {
                 let tracked mut points_to = points_to.tracked_unwrap();
                 self.cell.replace(Tracked(&mut points_to), Some(value));
+                // Extending the permission to static because `OnceLock` is
+                // often shared among threads and we want to ensure that
+                // the value is accessible globally.
                 let tracked static_points_to = tracked_static_ref(points_to);
                 atomic_with_ghost! {
-                    &self.state => store(2); ghost g => {
+                    &self.state => store(INITED); ghost g => {
                         g = OnceCellState::Init(static_points_to);
                     }
                 }
@@ -256,7 +277,8 @@ impl<V> POnceCell<V> {
             self.wf(),
     {
         let tracked mut points_to = None;
-        let res = atomic_with_ghost! {
+        let res =
+            atomic_with_ghost! {
             &self.state => load(); ghost g => {
                 match g {
                     OnceCellState::Init(points_to_opt) => {
@@ -267,7 +289,7 @@ impl<V> POnceCell<V> {
             }
         };
 
-        if res == 2 {
+        if res == INITED {
             let tracked points_to = points_to.tracked_unwrap();
             let tracked static_points_to = tracked_static_ref(points_to);
 
@@ -279,3 +301,95 @@ impl<V> POnceCell<V> {
 }
 
 } // verus!
+#[cfg(feature = "alloc")]
+verus! {
+
+use crate::boxed::Box;
+
+#[verifier::reject_recursive_types(V)]
+pub struct ArcInner<V> {
+    pub count: PAtomicU64,
+    /// The actual data.
+    pub data: V,
+}
+
+#[verifier::reject_recursive_types(V)]
+pub tracked struct ArcStatus<V> {
+    pub count: PermissionU64,
+    pub data: vstd::simple_pptr::PointsTo<ArcInner<V>>,
+}
+
+struct_with_invariants! {
+/// A thread-safe reference-counting pointer. 'Arc' stands for 'Atomically
+/// Reference Counted'.
+///
+/// The type `Arc<T>` provides shared ownership of a value of type `T`,
+/// allocated in the heap. Invoking [`clone`][clone] on `Arc` produces
+/// a new `Arc` instance, which points to the same allocation on the heap as the
+/// source `Arc`, while increasing a reference count. When the last `Arc`
+/// pointer to a given allocation is destroyed, the value stored in that allocation (often
+/// referred to as "inner value") is also dropped.
+///
+/// Shared references in Rust disallow mutation by default, and `Arc` is no
+/// exception: you cannot generally obtain a mutable reference to something
+/// inside an `Arc`. If you do need to mutate through an `Arc`, you have several options:
+///
+/// 1. Use interior mutability with synchronization primitives like [`Mutex`][mutex],
+///    [`RwLock`][rwlock], or one of the [`Atomic`][atomic] types.
+///
+/// 2. Use clone-on-write semantics with [`Arc::make_mut`] which provides efficient mutation
+///    without requiring interior mutability. This approach clones the data only when
+///    needed (when there are multiple references) and can be more efficient when mutations
+///    are infrequent.
+///
+/// 3. Use [`Arc::get_mut`] when you know your `Arc` is not shared (has a reference count of 1),
+///    which provides direct mutable access to the inner value without any cloning.
+#[verifier::reject_recursive_types(V)]
+pub struct Arc<V> {
+    /// The atomic holder of the `Arc` which contains the reference count and the inner value.
+    pub ptr: PPtr<ArcInner<V>>,
+    /// Tracks the state.
+    pub state: vstd::atomic_ghost::AtomicU64<_, Shared<ArcStatus<V>>, _>,
+}
+
+pub closed spec fn wf(&self) -> bool {
+    invariant on state with (ptr) is (count: u64, status: Shared<ArcStatus<V>>) {
+        // No dangling pointer.
+        &&& status@.data.is_init()
+        // Ensure that we always have a valid pointer to the inner value.
+        // Also this remains the same data for all clones.
+        &&& ptr === status@.data.pptr()
+        // Ensure that the reference count is valid.
+        &&& count >= 0 &&& count == status@.count.value()
+    }
+}
+
+}
+
+impl<V: Sized> Arc<V> {
+    #[verifier::external_body]
+    pub const fn new(value: V) -> (result: Self)
+        ensures
+            result.wf(),
+    {
+        // We will leak the memory created by a Box
+        
+
+        todo!()
+        // let (count, Tracked(count_perm)) = PAtomicU64::new(1);
+        // let (cell, Tracked(points_to)) = PCell::new(ArcInner {
+        //     count,
+        //     data: value,
+        // });
+        // let state = vstd::atomic_ghost::AtomicU64::new(
+        //     Ghost(cell),
+        //     1,
+        //     Tracked(Shared::new(ArcStatus { count: count_perm, data: points_to })),
+        // );
+        // Self { ptr, state }
+
+    }
+}
+
+} // verus!
+pub use vstd::rwlock::RwLock;
