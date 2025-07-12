@@ -3,11 +3,21 @@
 //! This crate currently DOES NOT use the `vstd` crate to verify its implementation as it is designed solely for debugging.
 use vstd::prelude::*;
 
+#[cfg(feature = "logging")]
+mod warning {
+    #![deprecated = "
+        Logging is an unverified feature and should not be enabled in production code.
+        It is only used for debugging purposes.
+    "]
+}
+
 verus! {
 
 #[verifier::external_body]
 #[cfg(feature = "logging")]
 pub fn init_logger() {
+    use self::warning;
+
     deko_logging::init();
 }
 
