@@ -13,10 +13,10 @@ members = [
 
 [workspace.dependencies]
 # Verus repos
-vstd = { git = "https://github.com/hiroki-chen/verus", rev = "b185da5", default-features = false }
-builtin = { git = "https://github.com/hiroki-chen/verus", rev = "b185da5" }
-builtin_macros = { git = "https://github.com/hiroki-chen/verus", rev = "b185da5" }
-state_machines_macros = { git = "https://github.com/hiroki-chen/verus", rev = "b185da5" }
+vstd = { git = "https://github.com/hiroki-chen/verus", default-features = false }
+builtin = { git = "https://github.com/hiroki-chen/verus"  }
+builtin_macros = { git = "https://github.com/hiroki-chen/verus" }
+state_machines_macros = { git = "https://github.com/hiroki-chen/verus" }
 
 syn_verus = { git = "https://github.com/ziqiaozhou/verus", rev = "7c4a5274a4d74522f3965eb038bb7e22fa5eebef", features = [
     "full",

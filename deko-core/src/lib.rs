@@ -47,18 +47,31 @@ pub mod snp;
 pub mod tdx;
 
 use deko_meta::HeaderRaw;
-// use deko_std::prelude::*;
+use deko_std::sync::*;
 use vstd::prelude::*;
 use vstd::simple_pptr::{PPtr, PointsTo};
 
-use crate::hal::{PlatformType, PLATFORM};
+use crate::hal::PlatformType;
+
+verus! {
+
+/// A global platform type that is initialized at the beginning of the program.
+///
+/// # Note
+///
+/// This is due to a bug in verus as it panics on cross-module static variable
+/// references so we have to pin every static variable to the current module.
+pub exec static PLATFORM: OnceLock<PlatformType>
+    ensures
+        PLATFORM.wf(),
+{
+    OnceLock::new()
+}
 
 /// A global allocator for the monitor.
 #[verifier::external]
 #[global_allocator]
-pub static ALLOC: crate::allocator::Allocator = crate::allocator::Allocator::new();
-
-verus! {
+pub exec static ALLOC: crate::allocator::Allocator = crate::allocator::Allocator::new();
 
 /// The entry point of our monitor (BSP will enter this first).
 ///
@@ -79,7 +92,7 @@ verus! {
 /// - `header`: A permissioned pointer to the header of the monitor, which contains metadata about the monitor.
 /// - `header_permission`: A tracked struct for determining the access permission of our header (read-only).
 #[verifier::exec_allows_no_decreases_clause]
-#[verifier::external_body]
+// #[verifier::external_body]
 pub fn deko_main(
     header: PPtr<HeaderRaw>,
     Tracked(header_content): Tracked<&PointsTo<HeaderRaw>>,  // ensures read-only.
@@ -88,12 +101,18 @@ pub fn deko_main(
         header_content.is_init(),
         header === header_content.pptr(),
     ensures
-        false,  // <- as we never return
+        false,
 {
+
     // TODO: The platform should be initialized like this:
     // let platform_type = SvsmPlatformType::from(launch_info.platform_type);
     // Initialize the logger if logging is enabled.
     crate::logging::init_logger();
+
+
+    PLATFORM.init(PlatformType::Snp);
+
+    // let aaa = PLATFORM.get();
 
     // Log the initialization message.
     // crate::logging::log(log::Level::Info, format_args!("Deko Monitor initialized!"));
@@ -107,11 +126,12 @@ pub fn deko_main(
 }
 
 /// The entry function of other application processors for SMP systems.
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[verifier::external_body]
 pub unsafe extern "C" fn _ap_start() -> ! {
     loop {
     }
 }
+
 
 } // verus!

@@ -19,6 +19,7 @@ pub mod bits;
 pub mod boot;
 pub mod cpu;
 pub mod misc;
+pub mod proofs;
 pub mod ptr;
 pub mod sync;
 pub mod wf;

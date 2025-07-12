@@ -86,7 +86,7 @@ impl<T: WellFormed + IsConstant> Clone for DekoPtrRaw<T> {
 }
 
 impl<T: WellFormed + IsConstant> DekoPtrDest<T> {
-    pub open spec fn view(&self) -> DekoPtrData<T>;
+    pub uninterp spec fn view(&self) -> DekoPtrData<T>;
 }
 
 #[verifier::external_body]

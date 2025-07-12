@@ -190,6 +190,12 @@ pub closed spec fn wf(&self) -> bool {
 }
 }
 
+/// Export the `OnceCell` type as `OnceCell` for compatibility.
+pub type OnceCell<V> = POnceCell<V>;
+
+/// Export the `POonceCell` type as `OnceLock` for compatibility.
+pub type OnceLock<V> = POnceCell<V>;
+
 /// A `POonceCell` is a permissioned version of `OnceCell` that can be used in
 /// multi-threaded contexts; it is safe to declare these traits so long as
 /// `self.wf()` holds.
@@ -221,8 +227,6 @@ impl<V> POnceCell<V> {
 
     pub fn init(&self, value: V)
         requires
-            self.wf(),
-        ensures
             self.wf(),
     {
         let cur_state =
@@ -373,8 +377,6 @@ impl<V: Sized> Arc<V> {
             result.wf(),
     {
         // We will leak the memory created by a Box
-        
-
         todo!()
         // let (count, Tracked(count_perm)) = PAtomicU64::new(1);
         // let (cell, Tracked(points_to)) = PCell::new(ArcInner {

@@ -5,13 +5,13 @@ use vstd::prelude::*;
 
 verus! {
 
-#[verifier::external]
+#[verifier::external_body]
 #[cfg(feature = "logging")]
 pub fn init_logger() {
     deko_logging::init();
 }
 
-#[verifier::external]
+#[verifier::external_body]
 #[cfg(not(feature = "logging"))]
 pub fn init_logger() {
     // No-op if logging is disabled.

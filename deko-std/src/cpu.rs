@@ -139,23 +139,24 @@ impl Register {
         &&& !self.shared()
     }
 
-    pub uninterp spec fn value<T: Sized>(&self) -> T;
+    pub uninterp spec fn value<T: Sized>(
+        &self,
+    ) -> T;
+    // #[verifier(external_body)]
+    // pub broadcast proof fn axiom_eq<T>(x: Self, y: Self)
+    //     requires
+    //         x.view::<T>() === y.view::<T>(),
+    //     ensures
+    //         (x === y),
+    // {
+    // }
+    // #[verifier(external_body)]
+    // pub broadcast proof fn axiom_wf<T: WellFormed>(&self)
+    //     ensures
+    //         self.wf() == self.view::<T>().wf(),
+    // {
+    // }
 
-    #[verifier(external_body)]
-    pub broadcast proof fn axiom_eq<T>(x: Self, y: Self)
-        requires
-            x.view::<T>() === y.view::<T>(),
-        ensures
-            (x === y),
-    {
-    }
-
-    #[verifier(external_body)]
-    pub broadcast proof fn axiom_wf<T: WellFormed>(&self)
-        ensures
-            self.wf() == self.view::<T>().wf(),
-    {
-    }
 }
 
 impl CpuCoreId {
