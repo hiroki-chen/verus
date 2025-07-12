@@ -10,9 +10,6 @@
 #![cfg_attr(feature = "alloc", feature(allocator_api))]
 
 #[cfg(feature = "alloc")]
-extern crate alloc;
-
-#[cfg(feature = "alloc")]
 pub mod boxed;
 
 pub mod bits;
@@ -30,7 +27,9 @@ pub mod prelude {
     pub use crate::bits::*;
     pub use crate::boot::*;
     pub use crate::cpu::*;
+    pub use crate::mem::*;
     pub use crate::misc::*;
     pub use crate::ptr::*;
+    pub use crate::sync::*;
     pub use crate::wf::*;
 }

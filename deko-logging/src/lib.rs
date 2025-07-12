@@ -24,7 +24,7 @@ pub struct Logger {
 // Implement the `Log` trait for our Logger. This is what the `log`
 // crate will call.
 impl log::Log for Logger {
-    fn enabled(&self, metadata: &Metadata) -> bool {
+    fn enabled(&self, _metadata: &Metadata) -> bool {
         // We can enable logs based on their level here if we want.
         // For now, let's enable everything.
         true

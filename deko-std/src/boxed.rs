@@ -1,9 +1,8 @@
 //! Heap-allocated objects like boxes.
-use alloc::alloc::{Allocator, Global};
-
 // use alloc::boxed::Box as BoxInner;
 use vstd::prelude::*;
-use vstd::simple_pptr::PPtr;
+
+use crate::ptr::DekoPPtr;
 
 verus! {
 
@@ -11,7 +10,7 @@ verus! {
 ///
 /// Note that this is our wrapper around the Box coming from standard library.
 #[verifier::reject_recursive_types(V)]
-pub struct Box<V>(PPtr<V>);
+pub struct Box<V>(DekoPPtr<V>);
 
 impl<V> Box<V> {
     pub closed spec fn wf(&self) -> bool {

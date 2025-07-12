@@ -309,6 +309,7 @@ impl<V> POnceCell<V> {
 verus! {
 
 use crate::boxed::Box;
+use crate::prelude::*;
 
 #[verifier::reject_recursive_types(V)]
 pub struct ArcInner<V> {
@@ -372,7 +373,9 @@ pub closed spec fn wf(&self) -> bool {
 
 impl<V: Sized> Arc<V> {
     #[verifier::external_body]
-    pub const fn new(value: V) -> (result: Self)
+    pub const fn new<A: WellFormed + Heap>(value: V, allocator: &DekoAllocator<A>) -> (result: Self)
+        requires
+            allocator.wf(),
         ensures
             result.wf(),
     {

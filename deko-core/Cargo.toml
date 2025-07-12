@@ -6,13 +6,13 @@ edition = "2021"
 verify = true
 
 [dependencies]
-vstd = { workspace = true, features = ["alloc"] }
+vstd = { workspace = true }
 builtin = { workspace = true }
 builtin_macros = { workspace = true }
 
 deko-meta = { workspace = true }
 deko-macros = { workspace = true }
-deko-std = { workspace = true }
+deko-std = { workspace = true, features = ["alloc"] }
 deko-logging = { workspace = true, optional = true }
 log = { version = "0.4.27", optional = true }
 

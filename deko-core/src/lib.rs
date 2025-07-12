@@ -24,22 +24,18 @@
 #![feature(allocator_api)]
 #![feature(never_type)]
 
-#[cfg(target_arch = "x86")]
+#[cfg(not(target_arch = "x86_64"))]
 compile_error!("Cannot be compiled against non x86_64 architecture!");
 
 #[cfg(all(feature = "tdx", feature = "snp"))]
 compile_error!("Cannot enable both TDX and SEV features at the same time!");
 
-extern crate alloc;
-
 pub mod allocator;
 pub mod boot;
-pub mod cell;
 pub mod cpu;
 pub mod hal;
 pub mod logging;
 pub mod policy;
-pub mod sync;
 pub(crate) mod theories;
 
 #[cfg(feature = "snp")]
@@ -48,14 +44,22 @@ pub mod snp;
 pub mod tdx;
 
 use deko_meta::HeaderRaw;
+use deko_std::prelude::*;
 use deko_std::ptr::{DekoPPtr, DekoPointsTo};
-use deko_std::sync::*;
 use vstd::prelude::*;
 
-use crate::allocator::imp::DekoAllocatorImpl;
+use crate::allocator::heap::DekoHeap;
 use crate::hal::PlatformType;
 
 verus! {
+
+/// A global allocator that is used to allocate memory for the monitor.
+pub exec static DEKO_ALLOCATOR: DekoAllocator<DekoHeap<12>>
+    ensures
+        DEKO_ALLOCATOR.wf(),
+{
+    DekoAllocator::new(DekoHeap::<12>::new())
+}
 
 /// A global platform type that is initialized at the beginning of the program.
 ///
@@ -69,12 +73,6 @@ pub exec static PLATFORM: OnceLock<PlatformType>
 {
     OnceLock::new()
 }
-
-/// A global allocator for the monitor.
-#[verifier::external]
-#[global_allocator]
-pub exec static ALLOC: crate::allocator::DekoAllocator<DekoAllocatorImpl> =
-    crate::allocator::DekoAllocator::new(DekoAllocatorImpl::new());
 
 /// The entry point of our monitor (BSP will enter this first).
 ///
@@ -126,11 +124,4 @@ pub fn deko_main(
     }
 }
 
-// The entry function of other application processors for SMP systems.
-// #[unsafe(no_mangle)]
-// #[verifier::external_body]
-// pub unsafe extern "C" fn _ap_start() -> ! {
-//     loop {
-//     }
-// }
 } // verus!

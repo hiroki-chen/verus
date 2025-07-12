@@ -7,7 +7,7 @@ use vstd::raw_ptr::{
 use vstd::simple_pptr::{PPtr, PointsTo};
 use vstd::view::View;
 
-use crate::mem::PermissionDekoMem;
+use crate::mem::{DekoAllocator, PermissionDekoMem};
 use crate::prelude::*;
 
 verus! {
@@ -161,7 +161,12 @@ verus! {
 
 impl<V> DekoPPtr<V> {
     /// Constructs a possibly uninitialized `DekoPPtr<V>`.
-    pub fn empty() -> (pt: (Self, Tracked<DekoPointsTo<V>>))
+    pub fn empty<A: WellFormed + Heap>(allocator: &DekoAllocator<A>) -> (pt: (
+        Self,
+        Tracked<DekoPointsTo<V>>,
+    ))
+        requires
+            allocator.wf(),
         ensures
             pt.1@.pptr() == pt.0@,
             pt.1@.is_uninit(),
@@ -171,11 +176,11 @@ impl<V> DekoPPtr<V> {
 
         match core::mem::size_of::<V>() {
             v if v != 0 => {
-                let (p, Tracked(points_to_raw), Tracked(dealloc)) = crate::mem::allocate(
+                let (p, Tracked(points_to_raw), Tracked(dealloc)) = allocator.alloc(
                     core::mem::size_of::<V>(),
                     core::mem::align_of::<V>(),
                 );
-                let Tracked(exposed) = vstd::raw_ptr::expose_provenance(p);
+                let Tracked(exposed) = vstd::raw_ptr::expose_provenance::<u8>(p);
                 let tracked points_to = points_to_raw.into_typed::<V>(p.addr());
                 proof {
                     points_to.is_nonnull();
@@ -213,13 +218,18 @@ impl<V> DekoPPtr<V> {
     }
 
     /// Allocates heap memory for type `V`, leaving it initialized with the given value `v`.
-    pub fn new(v: V) -> (pt: (Self, Tracked<DekoPointsTo<V>>))
+    pub fn new<A: WellFormed + Heap>(v: V, allocator: &DekoAllocator<A>) -> (pt: (
+        Self,
+        Tracked<DekoPointsTo<V>>,
+    ))
+        requires
+            allocator.wf(),
         ensures
             pt.1@.pptr() == pt.0@,
             pt.1@.mem_contents() == MemContents::Init(v),
         opens_invariants none
     {
-        let (p, Tracked(mut pt)) = Self::empty();
+        let (p, Tracked(mut pt)) = Self::empty(allocator);
         p.put(Tracked(&mut pt), v);
         (p, Tracked(pt))
     }
