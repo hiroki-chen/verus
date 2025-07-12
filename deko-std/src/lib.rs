@@ -18,6 +18,7 @@ pub mod boxed;
 pub mod bits;
 pub mod boot;
 pub mod cpu;
+pub mod mem;
 pub mod misc;
 pub mod proofs;
 pub mod ptr;

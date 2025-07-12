@@ -1,7 +1,7 @@
 //! Heap-allocated objects like boxes.
 use alloc::alloc::{Allocator, Global};
-use alloc::boxed::Box as BoxInner;
 
+// use alloc::boxed::Box as BoxInner;
 use vstd::prelude::*;
 use vstd::simple_pptr::PPtr;
 
@@ -11,13 +11,12 @@ verus! {
 ///
 /// Note that this is our wrapper around the Box coming from standard library.
 #[verifier::reject_recursive_types(V)]
-#[verifier::external_body]
-pub struct Box<V> {
-    box_inner: BoxInner<V>,
-}
+pub struct Box<V>(PPtr<V>);
 
 impl<V> Box<V> {
-    pub uninterp spec fn wf(&self) -> bool;
+    pub closed spec fn wf(&self) -> bool {
+        self.0.addr() != 0
+    }
 
     pub uninterp spec fn id(&self) -> int;
 

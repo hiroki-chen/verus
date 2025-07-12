@@ -92,23 +92,21 @@ pub exec static ALLOC: crate::allocator::Allocator = crate::allocator::Allocator
 /// - `header`: A permissioned pointer to the header of the monitor, which contains metadata about the monitor.
 /// - `header_permission`: A tracked struct for determining the access permission of our header (read-only).
 #[verifier::exec_allows_no_decreases_clause]
-// #[verifier::external_body]
 pub fn deko_main(
     header: PPtr<HeaderRaw>,
-    Tracked(header_content): Tracked<&PointsTo<HeaderRaw>>,  // ensures read-only.
+    Tracked(header_content): Tracked<
+        &PointsTo<HeaderRaw>,
+    >,  // ensures read-only. todo: perhaps qualify the full path of this type?
 ) -> (__discard: !)
     requires
         header_content.is_init(),
         header === header_content.pptr(),
-    ensures
-        false,
-{
+// nothing to be ensured here.
 
+{
     // TODO: The platform should be initialized like this:
     // let platform_type = SvsmPlatformType::from(launch_info.platform_type);
-    // Initialize the logger if logging is enabled.
     crate::logging::init_logger();
-
 
     PLATFORM.init(PlatformType::Snp);
 
@@ -125,13 +123,11 @@ pub fn deko_main(
     }
 }
 
-/// The entry function of other application processors for SMP systems.
-#[unsafe(no_mangle)]
-#[verifier::external_body]
-pub unsafe extern "C" fn _ap_start() -> ! {
-    loop {
-    }
-}
-
-
+// The entry function of other application processors for SMP systems.
+// #[unsafe(no_mangle)]
+// #[verifier::external_body]
+// pub unsafe extern "C" fn _ap_start() -> ! {
+//     loop {
+//     }
+// }
 } // verus!
