@@ -21,6 +21,7 @@
 //! └────────────────────────────────────────┘
 #![no_std]
 #![feature(abi_x86_interrupt)]
+#![feature(allocator_api)]
 #![feature(never_type)]
 
 #[cfg(target_arch = "x86")]
@@ -47,10 +48,11 @@ pub mod snp;
 pub mod tdx;
 
 use deko_meta::HeaderRaw;
+use deko_std::ptr::{DekoPPtr, DekoPointsTo};
 use deko_std::sync::*;
 use vstd::prelude::*;
-use vstd::simple_pptr::{PPtr, PointsTo};
 
+use crate::allocator::imp::DekoAllocatorImpl;
 use crate::hal::PlatformType;
 
 verus! {
@@ -71,7 +73,8 @@ pub exec static PLATFORM: OnceLock<PlatformType>
 /// A global allocator for the monitor.
 #[verifier::external]
 #[global_allocator]
-pub exec static ALLOC: crate::allocator::Allocator = crate::allocator::Allocator::new();
+pub exec static ALLOC: crate::allocator::DekoAllocator<DekoAllocatorImpl> =
+    crate::allocator::DekoAllocator::new(DekoAllocatorImpl::new());
 
 /// The entry point of our monitor (BSP will enter this first).
 ///
@@ -93,16 +96,16 @@ pub exec static ALLOC: crate::allocator::Allocator = crate::allocator::Allocator
 /// - `header_permission`: A tracked struct for determining the access permission of our header (read-only).
 #[verifier::exec_allows_no_decreases_clause]
 pub fn deko_main(
-    header: PPtr<HeaderRaw>,
+    header: DekoPPtr<HeaderRaw>,
     Tracked(header_content): Tracked<
-        &PointsTo<HeaderRaw>,
+        &DekoPointsTo<HeaderRaw>,
     >,  // ensures read-only. todo: perhaps qualify the full path of this type?
 ) -> (__discard: !)
     requires
         header_content.is_init(),
-        header === header_content.pptr(),
-// nothing to be ensured here.
-
+        header@ === header_content.pptr(),
+    ensures
+        false,
 {
     // TODO: The platform should be initialized like this:
     // let platform_type = SvsmPlatformType::from(launch_info.platform_type);

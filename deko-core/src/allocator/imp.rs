@@ -1,21 +1,36 @@
-use alloc::alloc::{GlobalAlloc, Layout};
+use alloc::alloc::{Allocator, GlobalAlloc, Layout};
 
+use deko_std::prelude::WellFormed;
+use deko_std::sync::{Arc, Mutex};
 use vstd::prelude::*;
 
-use super::Allocator;
+use crate::allocator::DekoAlloc;
 
 verus! {
 
-#[verifier::external]
-unsafe impl GlobalAlloc for Allocator {
-    #[verifier::external]
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        unimplemented!("GlobalAlloc::alloc is not implemented in this example");
-    }
+pub struct DekoAllocatorImpl {
+    allocator: Mutex<()>,
+}
 
-    #[verifier::external]
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unimplemented!("GlobalAlloc::dealloc is not implemented in this example");
+impl DekoAlloc for DekoAllocatorImpl {
+    
+}
+
+impl WellFormed for DekoAllocatorImpl {
+    closed spec fn wf(&self) -> bool {
+        self.allocator.wf()
+    }
+}
+
+impl DekoAllocatorImpl {
+    // todo
+    pub const fn new() -> (s: Self)
+        ensures
+            s.wf(),
+    {
+        Self {
+            allocator: Mutex::new(()),
+        }
     }
 }
 

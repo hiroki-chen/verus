@@ -16,13 +16,15 @@ verus! {
 ///
 /// In order to access (read or write) the value behind the pointer, the user needs a special ghost permission token
 /// `DekoPointsTo<V>`.
-pub struct DekoPPtr<V>(pub PPtr<V>);
+///
+/// TODO: Add a permission memory token or some "privilege layer" checking.
+pub struct DekoPPtr<V>(PPtr<V>);
 
 pub struct DekoPointsTo<V> {
     points_to: raw_ptr::PointsTo<V>,
     exposed: IsExposed,
     dealloc: Option<Dealloc>,
-    permission: PermissionDekoMem,
+    mem_perm: PermissionDekoMem,
 }
 
 impl<V> Clone for DekoPPtr<V> {
@@ -39,9 +41,27 @@ impl<V> Copy for DekoPPtr<V> {
 }
 
 impl<V> DekoPPtr<V> {
+    /// Try to borrow this pointer.
+    #[inline(always)]
+    pub fn borrow<'a>(self, Tracked(perm): Tracked<&'a DekoPointsTo<V>>) -> (v: &'a V)
+        requires
+            perm.pptr() == self@,
+            perm.is_init(),
+            perm.mem_wf(),
+        ensures
+            *v == perm.value(),
+        opens_invariants none
+        no_unwind
+    {
+        proof {
+            use_type_invariant(&*perm);
+        }
+        let ptr: *mut V = vstd::raw_ptr::with_exposed_provenance(self.0.0, Tracked(perm.exposed));
+        vstd::raw_ptr::ptr_ref(ptr, Tracked(&perm.points_to))
+    }
+
     /// Use `addr()` instead
-    #[verifier::inline]
-    pub open spec fn spec_addr(p: DekoPPtr<V>) -> usize {
+    pub closed spec fn spec_addr(p: DekoPPtr<V>) -> usize {
         p.0.addr()
     }
 
@@ -85,6 +105,10 @@ impl<V> DekoPointsTo<V> {
         PPtr(self.addr(), PhantomData)
     }
 
+    pub closed spec fn mem_wf(&self) -> bool {
+        self.mem_perm.wf()
+    }
+
     pub closed spec fn addr(self) -> usize {
         self.points_to.ptr().addr()
     }
@@ -116,13 +140,17 @@ impl<V> DekoPointsTo<V> {
     pub open spec fn is_init(&self) -> bool {
         self.mem_contents().is_init()
     }
+
+    pub open spec fn value(&self) -> V {
+        self.mem_contents().value()
+    }
 }
 
 // Quick way to invoke inner's specs and methods.
 impl<T> View for DekoPPtr<T> {
     type V = PPtr<T>;
 
-    open spec fn view(&self) -> Self::V {
+    closed spec fn view(&self) -> Self::V {
         self.0
     }
 }
@@ -157,7 +185,7 @@ impl<V> DekoPPtr<V> {
                     points_to,
                     exposed,
                     dealloc: Some(dealloc),
-                    permission: PermissionDekoMem::Foo,
+                    mem_perm: PermissionDekoMem::Foo,
                 };
                 let pptr = DekoPPtr(PPtr(p as usize, PhantomData));
 
@@ -175,7 +203,7 @@ impl<V> DekoPPtr<V> {
                     points_to,
                     exposed: IsExposed::null(),
                     dealloc: None,
-                    permission: PermissionDekoMem::Foo,
+                    mem_perm: PermissionDekoMem::Foo,
                 };
                 let pptr = DekoPPtr(PPtr(p, PhantomData));
 
