@@ -9,6 +9,8 @@
 #![allow(unexpected_cfgs)]
 #![cfg_attr(feature = "alloc", feature(allocator_api))]
 
+use vstd::prelude::*;
+
 #[cfg(feature = "alloc")]
 pub mod boxed;
 
@@ -32,4 +34,13 @@ pub mod prelude {
     pub use crate::ptr::*;
     pub use crate::sync::*;
     pub use crate::wf::*;
+    pub use crate::*;
 }
+
+verus! {
+
+pub trait Predicate<V>: Sized {
+    spec fn inv(self, v: V) -> bool;
+}
+
+} // verus!

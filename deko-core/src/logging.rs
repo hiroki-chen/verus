@@ -16,6 +16,7 @@ verus! {
 #[verifier::external_body]
 #[cfg(feature = "logging")]
 pub fn init_logger() {
+    #[allow(unused_imports)]
     use self::warning;
 
     deko_logging::init();

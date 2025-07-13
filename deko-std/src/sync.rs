@@ -33,12 +33,12 @@ pub const INITED: u64 = 2;
 
 pub struct MutexInv;
 
-impl<V> InvariantPredicate<
-    (AtomicCellId, CellId),
+impl<V, F: Predicate<V>> InvariantPredicate<
+    (AtomicCellId, CellId, Ghost<F>),
     (PermissionBool, Option<PointsTo<V>>),
 > for MutexInv {
     open spec fn inv(
-        cell_ids: (AtomicCellId, CellId),
+        cell_ids: (AtomicCellId, CellId, Ghost<F>),
         perms: (PermissionBool, Option<PointsTo<V>>),
     ) -> bool {
         // Ensures that the atomic cell id matches the cell id
@@ -46,34 +46,48 @@ impl<V> InvariantPredicate<
             // Lock is taken
             None => perms.0.value() == true,
             // Lock is not taken
-            Some(points_to) => points_to.id() == cell_ids.1 && points_to.is_init()
-                && !perms.0.value(),
+            Some(points_to) => {
+                &&& points_to.id() == cell_ids.1
+                &&& !perms.0.value()
+                &&& points_to.mem_contents() matches MemContents::Init(value)
+                &&& cell_ids.2@.inv(value)
+            },
         }
     }
 }
 
+/// A spin-based lock providing mutually exclusive access to data.
+///
+/// The implementation uses either a ticket mutex or a regular spin-based primitive.
 #[verifier::reject_recursive_types(V)]
-pub struct Mutex<V> {
+pub struct Mutex<V, F: Predicate<V>> {
     pub atomic: PAtomicBool,
     pub cell: PCell<V>,
     pub inv: Tracked<
-        AtomicInvariant<(AtomicCellId, CellId), (PermissionBool, Option<PointsTo<V>>), MutexInv>,
+        AtomicInvariant<
+            (AtomicCellId, CellId, Ghost<F>),
+            (PermissionBool, Option<PointsTo<V>>),
+            MutexInv,
+        >,
     >,
 }
 
-impl<V> Mutex<V> {
+impl<V, F: Predicate<V>> Mutex<V, F> {
     pub closed spec fn wf(&self) -> bool {
-        self.inv@.constant() == (self.atomic.id(), self.cell.id())
+        &&& self.inv@.constant().0 == self.atomic.id()
+        &&& self.inv@.constant().1 == self.cell.id()
     }
 
-    pub const fn new(value: V) -> (result: Self)
+    pub const fn new(value: V, Ghost(f): Ghost<F>) -> (result: Self)
+        requires
+            f.inv(value),
         ensures
             result.wf(),
     {
         let (atomic, Tracked(atomic_perm)) = PAtomicBool::new(false);
         let (cell, Tracked(cell_perm)) = PCell::new(value);
         let tracked inv = AtomicInvariant::new(
-            (atomic.id(), cell.id()),
+            (atomic.id(), cell.id(), Ghost(f)),
             (atomic_perm, Some(cell_perm)),
             ATOMIC_CELL_ID,
         );
@@ -118,6 +132,8 @@ impl<V> Mutex<V> {
             self.wf(),
             points_to@.id() == self.cell.id(),
             points_to@.is_init(),
+            points_to@.mem_contents() matches MemContents::Init(value)
+                && self.inv@.constant().2@.inv(value),
     {
         open_atomic_invariant!(self.inv.borrow() => perms => {
             let tracked (mut atomic_permission, _) = perms;
@@ -164,8 +180,8 @@ struct_with_invariants! {
 /// assert(value.is_some());   // unsatisfied precondition, as MY_ONCE is uninitialized.
 /// ```
 #[verifier::reject_recursive_types(V)]
-pub struct POnceCell<V: 'static> {
-    pub cell: PCell<Option<V>>,
+pub struct POnceCell<V: 'static, F: Predicate<V>> {
+    pub cell: (Ghost<F>, PCell<Option<V>>),
     pub state: vstd::atomic_ghost::AtomicU64<_, OnceCellState<V>, _>,
 }
 
@@ -173,17 +189,18 @@ pub closed spec fn wf(&self) -> bool {
     invariant on state with (cell) is (v: u64, g: OnceCellState<V>) {
         match g {
             OnceCellState::Uninit(points_to) => {
-                v == UNINIT
-                    && points_to.id() == cell.id()
-                    && points_to.mem_contents() === MemContents::Init(None)
+                &&& v == UNINIT
+                &&& points_to.id() == cell.1.id()
+                &&& points_to.mem_contents() matches MemContents::Init(None)
             }
             OnceCellState::Occupied => {
-                v == OCCUPIED
+                &&& v == OCCUPIED
             }
             OnceCellState::Init(points_to) => {
-                v == INITED
-                    && points_to.id() == cell.id()
-                    && matches!(points_to.mem_contents(), MemContents::Init(Some(_)))
+                &&& v == INITED
+                &&& points_to.id() == cell.1.id()
+                &&& points_to.mem_contents() matches MemContents::Init(Some(value))
+                &&& cell.0@.inv(value)
             }
         }
     }
@@ -191,42 +208,49 @@ pub closed spec fn wf(&self) -> bool {
 }
 
 /// Export the `OnceCell` type as `OnceCell` for compatibility.
-pub type OnceCell<V> = POnceCell<V>;
+pub type OnceCell<V, F> = POnceCell<V, F>;
 
 /// Export the `POonceCell` type as `OnceLock` for compatibility.
-pub type OnceLock<V> = POnceCell<V>;
+pub type OnceLock<V, F> = POnceCell<V, F>;
 
 /// A `POonceCell` is a permissioned version of `OnceCell` that can be used in
 /// multi-threaded contexts; it is safe to declare these traits so long as
 /// `self.wf()` holds.
 #[verifier::external]
-unsafe impl<V> Send for POnceCell<V> {
+unsafe impl<V, F: Predicate<V>> Send for POnceCell<V, F> {
 
 }
 
 #[verifier::external]
-unsafe impl<V> Sync for POnceCell<V> {
+unsafe impl<V, F: Predicate<V>> Sync for POnceCell<V, F> {
 
 }
 
-impl<V> POnceCell<V> {
+impl<V, F: Predicate<V>> POnceCell<V, F> {
+    pub closed spec fn inv(&self, v: V) -> bool {
+        self.cell.0@.inv(v)
+    }
+
     /// Constructs a new `POonceCell` in the uninitialized state.
-    pub const fn new() -> (result: Self)
+    pub const fn new(Ghost(f): Ghost<F>) -> (result: Self)
         ensures
             result.wf(),
+            result.cell.0@ === f,
     {
         let (cell, Tracked(points_to)) = PCell::new(None);
+        let tracked state = OnceCellState::Uninit(points_to);
         let state = vstd::atomic_ghost::AtomicU64::new(
-            Ghost(cell),
+            Ghost((Ghost(f), cell)),
             UNINIT,
-            Tracked(OnceCellState::Uninit(points_to)),
+            Tracked(state),
         );
 
-        Self { cell, state }
+        Self { cell: (Ghost(f), cell), state }
     }
 
     pub fn init(&self, value: V)
         requires
+            self.inv(value),
             self.wf(),
     {
         let cur_state =
@@ -257,7 +281,7 @@ impl<V> POnceCell<V> {
 
             if !res.is_err() {
                 let tracked mut points_to = points_to.tracked_unwrap();
-                self.cell.replace(Tracked(&mut points_to), Some(value));
+                self.cell.1.replace(Tracked(&mut points_to), Some(value));
                 // Extending the permission to static because `OnceLock` is
                 // often shared among threads and we want to ensure that
                 // the value is accessible globally.
@@ -297,7 +321,7 @@ impl<V> POnceCell<V> {
             let tracked points_to = points_to.tracked_unwrap();
             let tracked static_points_to = tracked_static_ref(points_to);
 
-            self.cell.borrow(Tracked(static_points_to)).as_ref()
+            self.cell.1.borrow(Tracked(static_points_to)).as_ref()
         } else {
             None
         }
@@ -398,3 +422,5 @@ impl<V: Sized> Arc<V> {
 
 } // verus!
 pub use vstd::rwlock::RwLock;
+
+use crate::Predicate;

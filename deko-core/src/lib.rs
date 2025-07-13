@@ -48,31 +48,9 @@ use deko_std::prelude::*;
 use deko_std::ptr::{DekoPPtr, DekoPointsTo};
 use vstd::prelude::*;
 
-use crate::allocator::heap::DekoHeap;
 use crate::hal::PlatformType;
 
 verus! {
-
-/// A global allocator that is used to allocate memory for the monitor.
-pub exec static DEKO_ALLOCATOR: DekoAllocator<DekoHeap<12>>
-    ensures
-        DEKO_ALLOCATOR.wf(),
-{
-    DekoAllocator::new(DekoHeap::<12>::new())
-}
-
-/// A global platform type that is initialized at the beginning of the program.
-///
-/// # Note
-///
-/// This is due to a bug in verus as it panics on cross-module static variable
-/// references so we have to pin every static variable to the current module.
-pub exec static PLATFORM: OnceLock<PlatformType>
-    ensures
-        PLATFORM.wf(),
-{
-    OnceLock::new()
-}
 
 /// The entry point of our monitor (BSP will enter this first).
 ///
@@ -102,14 +80,15 @@ pub fn deko_main(
     requires
         header_content.is_init(),
         header@ === header_content.pptr(),
+        header_content.value().wf(),
+        header_content.mem_wf(),
     ensures
         false,
 {
-    // TODO: The platform should be initialized like this:
-    // let platform_type = SvsmPlatformType::from(launch_info.platform_type);
     crate::logging::init_logger();
 
-    PLATFORM.init(PlatformType::Snp);
+    let platform_type = header.borrow(Tracked(&header_content));
+    let platform_type = PlatformType::from(platform_type.platform_type);
 
     // let aaa = PLATFORM.get();
 

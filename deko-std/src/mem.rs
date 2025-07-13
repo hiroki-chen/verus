@@ -28,6 +28,14 @@ use vstd::raw_ptr::{Dealloc, DeallocData, PointsToRaw, Provenance, IsExposed};
 use core::marker::PhantomData;
 use vstd::simple_pptr::{PPtr, MemContents};
 
+pub struct AllocatorPredicate;
+
+impl<V: WellFormed + Heap> Predicate<V> for AllocatorPredicate {
+    closed spec fn inv(self, v: V) -> bool {
+        true
+    }
+}
+
 /// The _true_ global allocator for Deko.
 ///
 /// For safety reasons we explicitly disallow _any_ attempt to use the default
@@ -48,22 +56,75 @@ use vstd::simple_pptr::{PPtr, MemContents};
 ///     pub exec static ALLOCATOR: Lazy<DekoAllocator> = Lazy::new(|| DekoAllocator::new());
 /// ```
 #[verifier::reject_recursive_types(V)]
-pub struct DekoAllocator<V> {
-    allocator: Mutex<V>,
+pub struct DekoAllocator<V: WellFormed + Heap> {
+    allocator: Mutex<V, AllocatorPredicate>,
 }
 
 pub trait Heap {
 
 }
+/// A heap that uses buddy system with configurable order.
+///
+/// Before using this heap make sure that the system's memory is
+/// properly initialized, paging is enabled, etc.
+///
+/// `ORDER` is the order of the heap, which is the base-2 logarithm of the
+/// size of the heap. Note that the maximum block size is exactly one byte smaller!
+/// For example, if `ORDER` is 12, then the heap size is 2^12 - 1 = 4095 bytes (~4 KiB).
+///
+/// # Examples
+///
+/// ```rust
+/// use deko_core::allocator::heap::DekoHeap;
+///
+/// static mut BUF: [u8; 4096] = [0; 4096];
+///
+/// let heap = DekoHeap::<12>::new(BUF.as_mut_ptr() as usize, BUF.len());
+/// let allocator = deko_std::allocator::DekoAllocator::new(heap);
+/// ```
+///
+/// # References
+///
+/// - rcore-os/buddy_system_allocator
+pub struct DekoHeap<const ORDER: usize> {}
 
-impl<V: WellFormed + Heap> DekoAllocator<V> {
-    pub const fn new(v: V) -> (s: Self)
-        requires
-            v.wf(),
+impl<const ORDER: usize> Heap for DekoHeap<ORDER> {
+
+}
+
+impl<const ORDER: usize> DekoHeap<ORDER> {
+    /// Creates a new heap.
+    pub const fn new() -> (s: Self)
         ensures
             s.wf(),
     {
-        Self { allocator: Mutex::new(v) }
+        Self {  }
+    }
+}
+
+impl<const ORDER: usize> WellFormed for DekoHeap<ORDER> {
+    closed spec fn wf(&self) -> bool {
+        true
+    }
+}
+
+/// A global allocator that is used to allocate memory for the monitor.
+pub exec static DEKO_ALLOCATOR: DekoAllocator<DekoHeap<12>>
+    ensures
+        DEKO_ALLOCATOR.wf(),
+{
+    DekoAllocator::new(DekoHeap::<12>::new(), Ghost(AllocatorPredicate {  }))
+}
+
+impl<V: WellFormed + Heap> DekoAllocator<V> {
+    pub const fn new(v: V, Ghost(pred): Ghost<AllocatorPredicate>) -> (s: Self)
+        requires
+            v.wf(),
+            pred.inv(v),
+        ensures
+            s.wf(),
+    {
+        Self { allocator: Mutex::new(v, Ghost(pred)) }
     }
 
     /// This API is *hidden* because we do not want the caller to manipulate any
@@ -102,7 +163,7 @@ impl<V: WellFormed + Heap> DekoAllocator<V> {
     }
 }
 
-impl<A: WellFormed> WellFormed for DekoAllocator<A> {
+impl<A: WellFormed + Heap> WellFormed for DekoAllocator<A> {
     closed spec fn wf(&self) -> bool {
         self.allocator.wf()
     }
