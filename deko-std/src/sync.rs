@@ -32,13 +32,21 @@ pub const OCCUPIED: u64 = 1;
 pub const INITED: u64 = 2;
 
 // ANCHOR: fields
-tokenized_state_machine!(Rc<V: WellFormed> {
+tokenized_state_machine!(
+    Rc<V, F>
+    where
+        V: WellFormed,
+        F: Predicate<V>,
+    {
     fields {
         #[sharding(variable)]
         pub counter: nat,
 
         #[sharding(storage_option)]
         pub storage: Option<V>,
+
+        #[sharding(constant)]
+        pub inv: F,
 
         #[sharding(multiset)]
         pub reader: Multiset<V>,
@@ -47,40 +55,37 @@ tokenized_state_machine!(Rc<V: WellFormed> {
 
     #[invariant]
     pub fn reader_agrees_storage(&self) -> bool {
-        forall |t: V| #[trigger] self.reader.count(t) > 0 ==> self.storage == Some(t) && t.wf()
+        forall |t: V| #[trigger] self.reader.count(t) > 0 ==>
+            self.storage == Some(t) && t.wf() && self.inv.inv(t)
     }
 
     #[invariant]
     pub fn counter_agrees_storage(&self) -> bool {
-        self.counter == 0 ==> self.storage is None
-    }
-
-    #[invariant]
-    pub fn counter_agrees_storage_rev(&self) -> bool {
-        self.storage is None ==> self.counter == 0
+        self.counter == 0 <==> self.storage is None
     }
 
     #[invariant]
     pub fn counter_agrees_reader_count(&self) -> bool {
         self.storage matches Some(v) ==>
-            self.reader.count(self.storage->0) == self.counter && v.wf()
+            self.reader.count(self.storage->0) == self.counter && v.wf() && self.inv.inv(v)
     }
 
-    init!{
-        initialize_empty() {
+    init! {
+        initialize_empty(f: F) {
             init counter = 0;
             init storage = Option::None;
             init reader = Multiset::empty();
-            // init inv = core::marker::PhantomData;
+            init inv = f;
         }
     }
 
     #[inductive(initialize_empty)]
-    fn initialize_empty_inductive(post: Self) { }
+    fn initialize_empty_inductive(post: Self, f: F) { }
 
     transition! {
         do_deposit(x: V) {
             require(pre.counter == 0);
+            require(pre.inv.inv(x));
             require(x.wf());
             update counter = 1;
             deposit storage += Some(x);
@@ -91,6 +96,7 @@ tokenized_state_machine!(Rc<V: WellFormed> {
     #[inductive(do_deposit)]
     fn do_deposit_inductive(pre: Self, post: Self, x: V) {
         assert(x.wf());
+        assert(post.inv.inv(x));
     }
 
     property! {
@@ -119,6 +125,7 @@ tokenized_state_machine!(Rc<V: WellFormed> {
     transition! {
         dec_basic(x: V) {
             require(pre.counter >= 2);
+            require(pre.inv.inv(x));
             remove reader -= {x};
             update counter = (pre.counter - 1) as nat;
         }
@@ -128,6 +135,7 @@ tokenized_state_machine!(Rc<V: WellFormed> {
         dec_to_zero(x: V) {
             remove reader -= {x};
             require(pre.counter < 2);
+            require(pre.inv.inv(x));
             assert(pre.counter == 1);
             update counter = 0;
             withdraw storage -= Some(x);
@@ -456,33 +464,50 @@ pub struct ArcInner<V> {
     pub data: V,
 }
 
-impl<V> ArcInner<V> {
-    pub open spec fn wf(&self, cell: PAtomicU64) -> bool {
-        self.count == cell
+/// A wrapped predicate for the `Arc` type.
+///
+/// Why do we need this type? This is because we have to reason about the inner permissioned
+/// types but for the user API we expose the predicate like `V -> bool` so we need a proxy
+/// to convert `V -> bool` into `DekoPointsTo<ArcInner<V>> -> bool`. This ghost struct does
+/// the conversion; also, since this is a ghost type, we can use it to reason about the
+#[verifier::reject_recursive_types(V)]
+pub ghost struct ArcPredicateWrapper<V, F> where V: WellFormed, F: Predicate<V> {
+    v: V,
+    f: F,
+}
+
+// Lift the predicate to the `DekoPointsTo<ArcInner<V>>` type.
+impl<V, F> Predicate<DekoPointsTo<ArcInner<V>>> for ArcPredicateWrapper<V, F> where
+    V: WellFormed,
+    F: Predicate<V>,
+ {
+    closed spec fn inv(self, points_to: DekoPointsTo<ArcInner<V>>) -> bool {
+        self.f.inv(points_to.value().data)
     }
 }
 
 #[verifier::reject_recursive_types(V)]
-pub tracked struct ArcStatus<V> {
+pub tracked struct ArcStatus<V, F> where V: WellFormed, F: Predicate<V> {
     pub count: PermissionU64,
     /// A state machine to track the state of the `Arc`.
     /// This allows us to reason about the reference counter.
-    pub data: Rc::counter<DekoPointsTo<ArcInner<V>>>,
+    pub data: Rc::counter<
+        DekoPointsTo<ArcInner<V>>,
+        ArcPredicateWrapper<V, F>,
+    >,
     // pub f: Ghost<F>,
 }
 
-impl<V> ArcStatus<V> {
+impl<V, F> ArcStatus<V, F> where V: WellFormed, F: Predicate<V> {
     pub open spec fn wf(
         &self,
-        inst: Rc::Instance<DekoPointsTo<ArcInner<V>>>,
+        inst: Rc::Instance<DekoPointsTo<ArcInner<V>>, ArcPredicateWrapper<V, F>>,
         cell: PAtomicU64,
     ) -> bool {
         &&& self.count@.patomic == cell.id()
         &&& self.data.instance_id() == inst.id()
-        &&& self.count@.value as nat
-            == self.data.value()
+        &&& self.count@.value as nat == self.data.value()
         &&& 0 < self.count@.value < u64::MAX
-        // &&& self.f@.inv(inst.value().data)
     }
 }
 
@@ -519,34 +544,40 @@ struct_with_invariants! {
 ///
 /// FIXME: This is still a WIP;
 #[verifier::reject_recursive_types(V)]
-pub struct Arc<V> {
+pub struct Arc<V, F>
+where
+    V: WellFormed,
+    F: Predicate<V>,
+{
     /// The atomic holder of the `Arc` which contains the reference count and the inner value.
-    ptr: DekoPPtr<ArcInner<V>>,
+    ptr: (DekoPPtr<ArcInner<V>>, Ghost<F>),
     /// The invariant that should be kept for the inner value.
-    inv: Tracked<Shared<AtomicInvariant<_, ArcStatus<V>, _>>>,
+    inv: Tracked<Shared<AtomicInvariant<_, ArcStatus<V, F>, _>>>,
 
     // state machines.
-    inst: Tracked<Rc::Instance<DekoPointsTo<ArcInner<V>>>>,
-    reader: Tracked<Rc::reader<DekoPointsTo<ArcInner<V>>>>,
+    inst: Tracked<Rc::Instance<DekoPointsTo<ArcInner<V>>, ArcPredicateWrapper<V, F>>>,
+    reader: Tracked<Rc::reader<DekoPointsTo<ArcInner<V>>, ArcPredicateWrapper<V, F>>>,
     cell: Ghost<PAtomicU64>,
 }
 
+#[verifier::type_invariant]
 pub closed spec fn wf(&self) -> bool {
     predicate {
-        &&& self.reader@.element().pptr() == self.ptr@
+        &&& self.reader@.element().pptr() == self.ptr.0@
         &&& self.reader@.element().is_init()
         &&& self.reader@.element().value().count == self.cell
         &&& self.reader@.instance_id() == self.inst@.id()
         &&& self.reader@.element().wf()
+        &&& self.ptr.1@.inv(self@)
     }
 
-    invariant on inv with (inst, cell) specifically (self.inv@@) is (value: ArcStatus<V>) {
+    invariant on inv with (inst, cell) specifically (self.inv@@) is (value: ArcStatus<V, F>) {
         value.wf(inst@, cell@)
     }
 }
 }
 
-impl<U> View for Arc<U> {
+impl<U, F> View for Arc<U, F> where U: WellFormed, F: Predicate<U> {
     type V = U;
 
     closed spec fn view(&self) -> Self::V {
@@ -554,20 +585,39 @@ impl<U> View for Arc<U> {
     }
 }
 
-impl<V> Arc<V> {
+impl<V, F> Arc<V, F> where V: WellFormed, F: Predicate<V> {
+    pub closed spec fn inv(&self, v: V) -> bool {
+        self.ptr.1@.inv(v)
+    }
+
+    pub closed spec fn f(&self) -> Ghost<F> {
+        self.ptr.1
+    }
+
     /// Constructs a new `Arc<T>` with the given value and invariant.
-    pub fn new<A: WellFormed + Heap>(v: V, allocator: &DekoHeapAllocator<A>) -> (s: Self)
+    pub fn new<A: WellFormed + Heap>(
+        v: V,
+        allocator: &DekoHeapAllocator<A>,
+        Ghost(f): Ghost<F>,
+    ) -> (s: Self)
         requires
+            f.inv(v),
             allocator.wf(),
         ensures
             s.wf(),
             s@ == v,
+            s.f() == f,
+            s.inv(v),
     {
         let (counter, Tracked(counter_perm)) = PAtomicU64::new(1);
         let arc_inner = ArcInner { count: counter, data: v };
+        let ghost wrapper = ArcPredicateWrapper { v, f };
         let (pptr, Tracked(points_to)) = DekoPPtr::new(arc_inner, allocator);
 
-        let tracked (Tracked(inst), Tracked(mut token), _) = Rc::Instance::initialize_empty(None);
+        let tracked (Tracked(inst), Tracked(mut token), _) = Rc::Instance::<
+            DekoPointsTo<ArcInner<V>>,
+            ArcPredicateWrapper<V, F>,
+        >::initialize_empty(wrapper, None);
         let tracked reader = inst.do_deposit(points_to, &mut token, points_to);
         let tracked status = ArcStatus { count: counter_perm, data: token };
 
@@ -577,7 +627,7 @@ impl<V> Arc<V> {
         let tracked inv = Shared::new(inv);
 
         Arc {
-            ptr: pptr,
+            ptr: (pptr, Ghost(f)),
             inv: Tracked(inv),
             inst: Tracked(inst),
             reader: Tracked(reader),
@@ -601,7 +651,7 @@ impl<V> Arc<V> {
             let tracked reader = self.reader.borrow();
             let tracked perm = inst.reader_guard(reader.element(), &reader);
 
-            let inner_ref = self.ptr.borrow(Tracked(perm));
+            let inner_ref = self.ptr.0.borrow(Tracked(perm));
 
             let count;
             open_atomic_invariant! {
@@ -654,7 +704,7 @@ impl<V> Arc<V> {
 
             if res.is_ok() {
                 return Arc {
-                    ptr: self.ptr, // ptr is Copy
+                    ptr: self.ptr,  // ptr is Copy
                     inv: Tracked(self.inv.borrow().clone()),
                     inst: self.inst.clone(),
                     reader: Tracked(new_reader.tracked_unwrap()),
@@ -664,6 +714,7 @@ impl<V> Arc<V> {
         }
     }
 }
+
 } // verus!
 pub use vstd::rwlock::RwLock;
 
