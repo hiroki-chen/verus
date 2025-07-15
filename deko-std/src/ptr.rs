@@ -270,6 +270,30 @@ impl<V> DekoPPtr<V> {
         p.put(Tracked(&mut pt), v);
         (p, Tracked(pt))
     }
+
+    /// De-allocates the memory pointed to by `self`.
+    /// TODO: IMPLEMENT THIS.
+    #[verifier::external_body]
+    pub fn drop<A: WellFormed + Heap>(
+        self,
+        Tracked(perm): Tracked<&mut DekoPointsTo<V>>,
+        allocator: &DekoHeapAllocator<A>,
+    )
+        requires
+            old(perm).pptr() == self@,
+            old(perm).is_init(),
+            old(perm).mem_wf(),
+            allocator.wf(),
+        ensures
+            perm.mem_contents() == MemContents::Uninit::<V>,
+        opens_invariants none
+    {
+        // proof {
+        //     use_type_invariant(&*perm);
+        // }
+        // let ptr = vstd::raw_ptr::with_exposed_provenance(self.0.0, Tracked(perm.exposed));
+        // vstd::raw_ptr::dealloc(ptr, Tracked(&mut perm.points_to), allocator);
+    }
 }
 
 } // verus!

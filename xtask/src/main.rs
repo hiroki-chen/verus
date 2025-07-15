@@ -1,8 +1,9 @@
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use git2::Repository;
 use serde::Deserialize;
 
 const DEFAULT_STAGE1_PATH: &str =
@@ -11,6 +12,7 @@ const DEFAULT_OVMF_PATH: &str = "~/.local/share/ovmf/OVMF.fd";
 /// This is for SEV stage 2 boot.
 const DEFAULT_DEKO_MONITOR_PATH: &str =
     "/home/haobchen/cage-sev/target/x86_64-snp-deko/release/deko-monitor.bin";
+const DEFAULT_VERUS_REPO: &str = "https://github.com/hiroki-chen/verus.git";
 
 #[derive(Debug)]
 struct FinalQemuConfig {
@@ -89,6 +91,15 @@ enum Commands {
     },
 
     Pretty,
+
+    Bootstrap {
+        #[arg(short, long)]
+        // The path where the toolchain needs to be installed.
+        prefix: String,
+        #[arg(short, long)]
+        // The commit to checkout after cloning the repository.
+        commit: Option<String>,
+    },
 }
 
 impl Default for FinalQemuConfig {
@@ -414,7 +425,55 @@ fn main() -> Result<()> {
         }
         Commands::Build { target, release } => builder.build(target, release),
         Commands::Pretty => pretty().context("Failed to run pretty command"),
+        Commands::Bootstrap { prefix, commit } => {
+            bootstrap(&prefix, commit.as_ref().map(|x| x.as_str())).context("Failed to bootstrap")
+        }
     }
+}
+
+fn bootstrap(prefix: &str, commit: Option<&str>) -> Result<()> {
+    println!("Bootstrapping with prefix: {}", prefix);
+    {
+        let verus_dir = PathBuf::from(prefix).join("verus");
+        let mut repo = Repository::clone(DEFAULT_VERUS_REPO, verus_dir)?;
+        if let Some(commit) = commit {
+            repo.set_head_detached(repo.revparse_single(commit)?.id())?;
+            println!("Checked out commit: {}", commit);
+        } else {
+            println!("No specific commit provided, using the latest.");
+        }
+    }
+
+    // Get z3.
+    std::env::set_current_dir(PathBuf::from(prefix).join("verus/source/tools"))
+        .context("Failed to change directory to tools")?;
+    let mut cmd = std::process::Command::new("bash");
+    cmd.arg("get_z3.sh");
+    if !cmd.status().context("Failed to run get_z3.sh")?.success() {
+        bail!("Failed to get z3");
+    }
+
+    // 1. Build vargo.
+    std::env::set_current_dir(PathBuf::from(prefix).join("verus/tools/vargo"))
+        .context("Failed to change directory to verus")?;
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.arg("build").arg("--release");
+
+    if !cmd.status().context("Failed to run cargo build")?.success() {
+        bail!("Failed to build vargo");
+    }
+
+    // 2. Build verus
+    std::env::set_current_dir(PathBuf::from(prefix).join("verus/source"))?;
+    cmd = std::process::Command::new("../tools/vargo/target/release/vargo");
+    cmd.arg("build")
+        .arg("--release");
+
+    if !cmd.status().context("Failed to run vargo build")?.success() {
+        bail!("Failed to build verus");
+    }
+
+    Ok(())
 }
 
 fn pretty() -> Result<()> {
