@@ -31,6 +31,119 @@ pub const OCCUPIED: u64 = 1;
 
 pub const INITED: u64 = 2;
 
+// ANCHOR: fields
+tokenized_state_machine!(Rc<V: WellFormed> {
+    fields {
+        #[sharding(variable)]
+        pub counter: nat,
+
+        #[sharding(storage_option)]
+        pub storage: Option<V>,
+
+        #[sharding(multiset)]
+        pub reader: Multiset<V>,
+    }
+// ANCHOR_END: fields
+
+    #[invariant]
+    pub fn reader_agrees_storage(&self) -> bool {
+        forall |t: V| #[trigger] self.reader.count(t) > 0 ==> self.storage == Some(t) && t.wf()
+    }
+
+    #[invariant]
+    pub fn counter_agrees_storage(&self) -> bool {
+        self.counter == 0 ==> self.storage is None
+    }
+
+    #[invariant]
+    pub fn counter_agrees_storage_rev(&self) -> bool {
+        self.storage is None ==> self.counter == 0
+    }
+
+    #[invariant]
+    pub fn counter_agrees_reader_count(&self) -> bool {
+        self.storage matches Some(v) ==>
+            self.reader.count(self.storage->0) == self.counter && v.wf()
+    }
+
+    init!{
+        initialize_empty() {
+            init counter = 0;
+            init storage = Option::None;
+            init reader = Multiset::empty();
+            // init inv = core::marker::PhantomData;
+        }
+    }
+
+    #[inductive(initialize_empty)]
+    fn initialize_empty_inductive(post: Self) { }
+
+    transition! {
+        do_deposit(x: V) {
+            require(pre.counter == 0);
+            require(x.wf());
+            update counter = 1;
+            deposit storage += Some(x);
+            add reader += {x};
+        }
+    }
+
+    #[inductive(do_deposit)]
+    fn do_deposit_inductive(pre: Self, post: Self, x: V) {
+        assert(x.wf());
+    }
+
+    property! {
+        reader_guard(x: V) {
+            have reader >= {x};
+            guard storage >= Some(x);
+        }
+    }
+
+    transition! {
+        do_clone(x: V) {
+            have reader >= {x};
+            add reader += {x};
+            update counter = pre.counter + 1;
+        }
+    }
+
+    #[inductive(do_clone)]
+    fn do_clone_inductive(pre: Self, post: Self, x: V) {
+        assert(pre.reader.count(x) > 0);
+        assert(pre.storage == Option::Some(x));
+        assert(pre.storage is Some);
+        assert(pre.counter > 0);
+    }
+
+    transition! {
+        dec_basic(x: V) {
+            require(pre.counter >= 2);
+            remove reader -= {x};
+            update counter = (pre.counter - 1) as nat;
+        }
+    }
+
+    transition! {
+        dec_to_zero(x: V) {
+            remove reader -= {x};
+            require(pre.counter < 2);
+            assert(pre.counter == 1);
+            update counter = 0;
+            withdraw storage -= Some(x);
+        }
+    }
+
+    #[inductive(dec_basic)]
+    fn dec_basic_inductive(pre: Self, post: Self, x: V) {
+        assert(pre.reader.count(x) > 0);
+        assert(pre.storage == Option::Some(x));
+    }
+
+    #[inductive(dec_to_zero)]
+    fn dec_to_zero_inductive(pre: Self, post: Self, x: V) { }
+});
+
 pub struct MutexInv;
 
 impl<V, F: Predicate<V>> InvariantPredicate<
@@ -337,18 +450,44 @@ use crate::prelude::*;
 
 #[verifier::reject_recursive_types(V)]
 pub struct ArcInner<V> {
+    /// The strong counter.
     pub count: PAtomicU64,
     /// The actual data.
     pub data: V,
 }
 
+impl<V> ArcInner<V> {
+    pub open spec fn wf(&self, cell: PAtomicU64) -> bool {
+        self.count == cell
+    }
+}
+
 #[verifier::reject_recursive_types(V)]
 pub tracked struct ArcStatus<V> {
     pub count: PermissionU64,
-    pub data: vstd::simple_pptr::PointsTo<ArcInner<V>>,
+    /// A state machine to track the state of the `Arc`.
+    /// This allows us to reason about the reference counter.
+    pub data: Rc::counter<DekoPointsTo<ArcInner<V>>>,
+    // pub f: Ghost<F>,
+}
+
+impl<V> ArcStatus<V> {
+    pub open spec fn wf(
+        &self,
+        inst: Rc::Instance<DekoPointsTo<ArcInner<V>>>,
+        cell: PAtomicU64,
+    ) -> bool {
+        &&& self.count@.patomic == cell.id()
+        &&& self.data.instance_id() == inst.id()
+        &&& self.count@.value as nat
+            == self.data.value()
+        &&& 0 < self.count@.value < u64::MAX
+        // &&& self.f@.inv(inst.value().data)
+    }
 }
 
 struct_with_invariants! {
+
 /// A thread-safe reference-counting pointer. 'Arc' stands for 'Atomically
 /// Reference Counted'.
 ///
@@ -373,53 +512,158 @@ struct_with_invariants! {
 ///
 /// 3. Use [`Arc::get_mut`] when you know your `Arc` is not shared (has a reference count of 1),
 ///    which provides direct mutable access to the inner value without any cloning.
+///
+/// This type also accepts an invariant `F` for the inner value `V`so that we are able to
+/// reason about what is preserved during the reference counting operations. For more information
+/// on invariants, see the [`Predicate`] trait.
+///
+/// FIXME: This is still a WIP;
 #[verifier::reject_recursive_types(V)]
 pub struct Arc<V> {
     /// The atomic holder of the `Arc` which contains the reference count and the inner value.
-    pub ptr: PPtr<ArcInner<V>>,
-    /// Tracks the state.
-    pub state: vstd::atomic_ghost::AtomicU64<_, Shared<ArcStatus<V>>, _>,
+    ptr: DekoPPtr<ArcInner<V>>,
+    /// The invariant that should be kept for the inner value.
+    inv: Tracked<Shared<AtomicInvariant<_, ArcStatus<V>, _>>>,
+
+    // state machines.
+    inst: Tracked<Rc::Instance<DekoPointsTo<ArcInner<V>>>>,
+    reader: Tracked<Rc::reader<DekoPointsTo<ArcInner<V>>>>,
+    cell: Ghost<PAtomicU64>,
 }
 
 pub closed spec fn wf(&self) -> bool {
-    invariant on state with (ptr) is (count: u64, status: Shared<ArcStatus<V>>) {
-        // No dangling pointer.
-        &&& status@.data.is_init()
-        // Ensure that we always have a valid pointer to the inner value.
-        // Also this remains the same data for all clones.
-        &&& ptr === status@.data.pptr()
-        // Ensure that the reference count is valid.
-        &&& count >= 0 &&& count == status@.count.value()
+    predicate {
+        &&& self.reader@.element().pptr() == self.ptr@
+        &&& self.reader@.element().is_init()
+        &&& self.reader@.element().value().count == self.cell
+        &&& self.reader@.instance_id() == self.inst@.id()
+        &&& self.reader@.element().wf()
+    }
+
+    invariant on inv with (inst, cell) specifically (self.inv@@) is (value: ArcStatus<V>) {
+        value.wf(inst@, cell@)
+    }
+}
+}
+
+impl<U> View for Arc<U> {
+    type V = U;
+
+    closed spec fn view(&self) -> Self::V {
+        self.reader@.element().value().data
     }
 }
 
-}
-
-impl<V: Sized> Arc<V> {
-    #[verifier::external_body]
-    pub const fn new<A: WellFormed + Heap>(value: V, allocator: &DekoAllocator<A>) -> (result: Self)
+impl<V> Arc<V> {
+    /// Constructs a new `Arc<T>` with the given value and invariant.
+    pub fn new<A: WellFormed + Heap>(v: V, allocator: &DekoHeapAllocator<A>) -> (s: Self)
         requires
             allocator.wf(),
         ensures
-            result.wf(),
+            s.wf(),
+            s@ == v,
     {
-        // We will leak the memory created by a Box
-        todo!()
-        // let (count, Tracked(count_perm)) = PAtomicU64::new(1);
-        // let (cell, Tracked(points_to)) = PCell::new(ArcInner {
-        //     count,
-        //     data: value,
-        // });
-        // let state = vstd::atomic_ghost::AtomicU64::new(
-        //     Ghost(cell),
-        //     1,
-        //     Tracked(Shared::new(ArcStatus { count: count_perm, data: points_to })),
-        // );
-        // Self { ptr, state }
+        let (counter, Tracked(counter_perm)) = PAtomicU64::new(1);
+        let arc_inner = ArcInner { count: counter, data: v };
+        let (pptr, Tracked(points_to)) = DekoPPtr::new(arc_inner, allocator);
 
+        let tracked (Tracked(inst), Tracked(mut token), _) = Rc::Instance::initialize_empty(None);
+        let tracked reader = inst.do_deposit(points_to, &mut token, points_to);
+        let tracked status = ArcStatus { count: counter_perm, data: token };
+
+        let tr_inst = Tracked(inst);
+        let tr_counter = Ghost(counter);
+        let tracked inv = AtomicInvariant::new((tr_inst, tr_counter), status, ARC_ID);
+        let tracked inv = Shared::new(inv);
+
+        Arc {
+            ptr: pptr,
+            inv: Tracked(inv),
+            inst: Tracked(inst),
+            reader: Tracked(reader),
+            cell: Ghost(counter),
+        }
+    }
+
+    #[verifier::exec_allows_no_decreases_clause]
+    pub fn clone(&self) -> (s: Self)
+        requires
+            self.wf(),
+        ensures
+            s.wf(),
+            s@ == self@,
+    {
+        loop
+            invariant
+                self.wf(),
+        {
+            let tracked inst = self.inst.borrow();
+            let tracked reader = self.reader.borrow();
+            let tracked perm = inst.reader_guard(reader.element(), &reader);
+
+            let inner_ref = self.ptr.borrow(Tracked(perm));
+
+            let count;
+            open_atomic_invariant! {
+                self.inv.borrow().borrow() => g => {
+                    let tracked ArcStatus {
+                        count: mut atomic_count,
+                        data: mut token,
+                    } = g;
+
+                    count = inner_ref.count.load(Tracked(&mut atomic_count));
+
+                    proof {
+                        g = ArcStatus { count: atomic_count, data: token };
+                    }
+                }
+            };
+
+            // Ensure that the reference count is valid.
+            assume(count < u64::MAX - 1);
+
+            let tracked mut new_reader = None;
+            let res;
+            open_atomic_invariant! {
+                self.inv.borrow().borrow() => g => {
+                    let tracked ArcStatus {
+                        count: mut atomic_count,
+                        data: mut token,
+                    } = g;
+
+                    res = inner_ref.count.compare_exchange_weak(
+                        Tracked(&mut atomic_count),
+                        count,
+                        count + 1,
+                    );
+
+                    proof {
+                        if res.is_ok() {
+                            new_reader = Some(self.inst.borrow().do_clone(
+                                reader.element(),
+                                &mut token,
+                                &reader));
+                        }
+                    }
+
+                    proof {
+                        g = ArcStatus { count: atomic_count, data: token };
+                    }
+                }
+            };
+
+            if res.is_ok() {
+                return Arc {
+                    ptr: self.ptr, // ptr is Copy
+                    inv: Tracked(self.inv.borrow().clone()),
+                    inst: self.inst.clone(),
+                    reader: Tracked(new_reader.tracked_unwrap()),
+                    cell: Ghost(self.cell@),
+                };
+            }
+        }
     }
 }
-
 } // verus!
 pub use vstd::rwlock::RwLock;
 

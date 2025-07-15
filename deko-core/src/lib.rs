@@ -89,6 +89,7 @@ pub fn deko_main(
 
     let platform_type = header.borrow(Tracked(&header_content));
     let platform_type = PlatformType::from(platform_type.platform_type);
+    hal::init_platform(platform_type);
 
     // let aaa = PLATFORM.get();
 

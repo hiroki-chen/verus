@@ -4,6 +4,8 @@
 
 [X] Check if we really need to support TDVF section 5 as QEMU hasn't added support for direct Linux boot yet, but CloudHypervisor has.
 [ ] Implement debug logging (due to the lack of gdb support we have to resort to debug logging)!
-  [ ] Enable serial ports
+  [x] Enable serial ports => FOR TDX
   [ ] Lock (in SMP systems)
   This can be an unverified logger as we don't need it in production environment. So it is safe to keep one.
+
+[ ] Verus has some issue supporting cross-reference for statics. The current workaround is to define and use statics in the same module.

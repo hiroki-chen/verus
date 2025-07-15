@@ -7,7 +7,7 @@ use vstd::raw_ptr::{
 use vstd::simple_pptr::{PPtr, PointsTo};
 use vstd::view::View;
 
-use crate::mem::{DekoAllocator, PermissionDekoMem};
+use crate::mem::{DekoHeapAllocator, PermissionDekoMem};
 use crate::prelude::*;
 
 verus! {
@@ -25,6 +25,13 @@ pub struct DekoPointsTo<V> {
     exposed: IsExposed,
     dealloc: Option<Dealloc>,
     mem_perm: PermissionDekoMem,
+}
+
+impl<V> WellFormed for DekoPointsTo<V> {
+    #[verifier::inline]
+    open spec fn wf(&self) -> bool {
+        self.mem_wf()
+    }
 }
 
 impl<V> Clone for DekoPPtr<V> {
@@ -97,9 +104,38 @@ impl<V> DekoPPtr<V> {
         let ptr: *mut V = vstd::raw_ptr::with_exposed_provenance(self.0.0, Tracked(perm.exposed));
         vstd::raw_ptr::ptr_mut_write(ptr, Tracked(&mut perm.points_to), v);
     }
+
+    #[inline(always)]
+    pub fn write(&self, Tracked(perm): Tracked<&mut DekoPointsTo<V>>, v: V)
+        requires
+            old(perm).pptr() == self@,
+        ensures
+            perm.pptr() == old(perm).pptr(),
+            perm.mem_contents() == MemContents::Init(v),
+        opens_invariants none
+        no_unwind
+    {
+        proof {
+            use_type_invariant(&*perm);
+            perm.leak_contents();
+        }
+        self.put(Tracked(perm), v);
+    }
 }
 
 impl<V> DekoPointsTo<V> {
+    /// "Forgets" about the value stored behind the pointer.
+    /// Updates the `PointsTo` value to [`MemContents::Uninit`](MemContents::Uninit).
+    /// Note that this is a `proof` function, i.e., it is operationally a no-op in executable code.
+    pub proof fn leak_contents(tracked &mut self)
+        ensures
+            self.pptr() == old(self).pptr(),
+            self.is_uninit(),
+    {
+        use_type_invariant(&*self);
+        self.points_to.leak_contents();
+    }
+
     #[verifier::inline]
     pub open spec fn pptr(&self) -> PPtr<V> {
         PPtr(self.addr(), PhantomData)
@@ -161,7 +197,7 @@ verus! {
 
 impl<V> DekoPPtr<V> {
     /// Constructs a possibly uninitialized `DekoPPtr<V>`.
-    pub fn empty<A: WellFormed + Heap>(allocator: &DekoAllocator<A>) -> (pt: (
+    pub fn empty<A: WellFormed + Heap>(allocator: &DekoHeapAllocator<A>) -> (pt: (
         Self,
         Tracked<DekoPointsTo<V>>,
     ))
@@ -218,7 +254,7 @@ impl<V> DekoPPtr<V> {
     }
 
     /// Allocates heap memory for type `V`, leaving it initialized with the given value `v`.
-    pub fn new<A: WellFormed + Heap>(v: V, allocator: &DekoAllocator<A>) -> (pt: (
+    pub fn new<A: WellFormed + Heap>(v: V, allocator: &DekoHeapAllocator<A>) -> (pt: (
         Self,
         Tracked<DekoPointsTo<V>>,
     ))
@@ -227,6 +263,7 @@ impl<V> DekoPPtr<V> {
         ensures
             pt.1@.pptr() == pt.0@,
             pt.1@.mem_contents() == MemContents::Init(v),
+            pt.1@.mem_wf(),
         opens_invariants none
     {
         let (p, Tracked(mut pt)) = Self::empty(allocator);

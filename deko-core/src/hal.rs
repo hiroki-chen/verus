@@ -4,7 +4,7 @@ use vstd::prelude::*;
 verus! {
 
 #[repr(u64)]
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub enum PlatformType {
     Tdx = 0x0001,
     Snp = 0x0002,
@@ -15,11 +15,10 @@ pub struct PlatformPredicate;
 
 impl Predicate<PlatformType> for PlatformPredicate {
     open spec fn inv(self, platform_type: PlatformType) -> bool {
-        // match platform_type {
-        //     PlatformType::Tdx | PlatformType::Snp => true,
-        //     _ => false,
-        // }
-        true
+        match platform_type {
+            PlatformType::Tdx | PlatformType::Snp => true,
+            _ => false,
+        }
     }
 }
 
@@ -56,6 +55,36 @@ pub trait PlatformApi: Sync + Send {
     /// Initializes the platform. This function should be called once at the
     /// beginning of the program to set up the platform-specific environment.
     fn init_platform(&self);
+}
+
+fn init_early_idt() {
+}
+
+/// Sets up the environment for the platform which will setup the GDT, kernel mapping, paging,
+/// kernel loading, heaps, etc.
+fn setup_env() {
+}
+
+#[verifier::external_body]
+pub fn init_platform(platform_type: PlatformType) {
+    // This is buggy as verus has problem dealing with statics.
+    // We will remove `external_body` once the bug is fixed.
+    PLATFORM.init(platform_type);
+
+    // Set up early IDTs.
+    init_early_idt();
+
+    setup_env();
+
+    match platform_type {
+        PlatformType::Tdx => {
+            // Initialize TDX platform.
+        },
+        PlatformType::Snp => {
+            // Initialize SNP platform.
+        },
+        _ => {},
+    }
 }
 
 } // verus!

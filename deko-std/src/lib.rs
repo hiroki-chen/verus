@@ -14,6 +14,7 @@ use vstd::prelude::*;
 #[cfg(feature = "alloc")]
 pub mod boxed;
 
+pub mod array;
 pub mod bits;
 pub mod boot;
 pub mod cpu;
@@ -26,8 +27,11 @@ pub mod wf;
 
 // Export everything.
 pub mod prelude {
+    pub use crate::array::*;
     pub use crate::bits::*;
     pub use crate::boot::*;
+    #[cfg(feature = "alloc")]
+    pub use crate::boxed::*;
     pub use crate::cpu::*;
     pub use crate::mem::*;
     pub use crate::misc::*;
@@ -39,8 +43,33 @@ pub mod prelude {
 
 verus! {
 
+use crate::prelude::*;
+
 pub trait Predicate<V>: Sized {
     spec fn inv(self, v: V) -> bool;
 }
+
+/// A helper predicate that always returns true for any value of type `V`.
+/// This is used when there is no predicate on the value should be used.
+pub struct TrivialPredicate<V: WellFormed>(core::marker::PhantomData<V>);
+
+impl<V: WellFormed> Predicate<V> for TrivialPredicate<V> {
+    #[verifier::inline]
+    open spec fn inv(self, __discard: V) -> bool {
+        true
+    }
+}
+
+// == Type alias for trivial types that do not require any predicate. ==
+#[cfg(feature = "alloc")]
+pub type BoxNoPred<V> = Box<V, TrivialPredicate<V>>;
+
+// #[cfg(feature = "alloc")]
+// pub type ArcNoPred<V> = Arc<V, TrivialPredicate<V>>;
+pub type MutexNoPred<V> = Mutex<V, TrivialPredicate<V>>;
+
+pub type OnceLockNoPred<V> = OnceLock<V, TrivialPredicate<V>>;
+
+pub type RwLockNoPred<V> = RwLock<V, TrivialPredicate<V>>;
 
 } // verus!

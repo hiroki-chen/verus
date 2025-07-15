@@ -2,7 +2,10 @@
 // use alloc::boxed::Box as BoxInner;
 use vstd::prelude::*;
 
-use crate::ptr::DekoPPtr;
+use crate::mem::{DekoHeapAllocator, Heap};
+use crate::ptr::{DekoPPtr, DekoPointsTo};
+use crate::wf::WellFormed;
+use crate::Predicate;
 
 verus! {
 
@@ -10,16 +13,66 @@ verus! {
 ///
 /// Note that this is our wrapper around the Box coming from standard library.
 #[verifier::reject_recursive_types(V)]
-pub struct Box<V>(DekoPPtr<V>);
+pub struct Box<V, F> {
+    ptr: DekoPPtr<V>,
+    inv: Ghost<F>,
+}
 
-impl<V> Box<V> {
+/// A thin wrapper around `DekoPointsTo<V>` that is used to track the points-to relation
+/// of a `Box<V, F>`.
+pub tracked struct BoxPointsTo<V> {
+    points_to: DekoPointsTo<V>,
+}
+
+impl<T: WellFormed, F> View for Box<T, F> {
+    type V = DekoPPtr<T>;
+
+    closed spec fn view(&self) -> Self::V {
+        self.ptr
+    }
+}
+
+impl<T: WellFormed> View for BoxPointsTo<T> {
+    type V = DekoPointsTo<T>;
+
+    closed spec fn view(&self) -> Self::V {
+        self.points_to
+    }
+}
+
+impl<V: WellFormed, F: Predicate<V>> Box<V, F> {
     pub closed spec fn wf(&self) -> bool {
-        self.0.addr() != 0
+        true
     }
 
-    pub uninterp spec fn id(&self) -> int;
+    pub closed spec fn inv(&self, v: V) -> bool {
+        self.inv@.inv(v)
+    }
 
-    pub uninterp spec fn view(&self) -> V;
+    /// Allocates memory on the heap and then places `x` into it.
+    ///
+    /// The users need to provide the allocator with an invariant function `f` that
+    /// is used to verify the memory contents.
+    pub fn new<A: WellFormed + Heap>(
+        x: V,
+        allocator: &DekoHeapAllocator<A>,
+        Ghost(f): Ghost<F>,
+    ) -> (s: (Self, Tracked<BoxPointsTo<V>>))
+        requires
+            allocator.wf(),
+            f.inv(x),
+        ensures
+            s.0.wf(),
+            s.0.inv(x),
+            s.1@@.pptr() === s.0@@,
+            s.1@@.is_init(),
+    {
+        let (pptr, Tracked(pptr_perm)) = DekoPPtr::new(x, allocator);
+
+        let tracked boxed_pt = BoxPointsTo { points_to: pptr_perm };
+
+        (Self { ptr: pptr, inv: Ghost(f) }, Tracked(boxed_pt))
+    }
 }
 
 } // verus!
