@@ -76,6 +76,8 @@ impl<V: WellFormed + InitLazy + 'static, F: Predicate<V>> LazyCell<V, F> {
     pub fn get<'a>(&'a self) -> (s: &'a V)
         requires
             self.wf(),
+        ensures
+            self.inv(*s),
     {
         loop
             invariant
@@ -136,6 +138,10 @@ impl<V: WellFormed + InitLazy + 'static, F: Predicate<V>> LazyCell<V, F> {
 
             return self.cell.0.borrow(Tracked(static_points_to)).as_ref().unwrap();
         }
+    }
+
+    pub closed spec fn inv(&self, v: V) -> bool {
+        self.cell.1@.inv(v)
     }
 }
 

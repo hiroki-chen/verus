@@ -7,7 +7,7 @@ use vstd::raw_ptr::{
 use vstd::simple_pptr::{PPtr, PointsTo};
 use vstd::view::View;
 
-use crate::mem::{DekoHeapAllocator, PermissionDekoMem};
+use crate::mem::{DefaultDekoHeapAllocator, DekoHeapAllocator, PermissionDekoMem};
 use crate::prelude::*;
 
 verus! {
@@ -48,6 +48,42 @@ impl<V> Copy for DekoPPtr<V> {
 }
 
 impl<V> DekoPPtr<V> {
+    /// Casts a raw address into a `DekoPPtr<V>`.
+    ///
+    /// This is extremely unsafe as it does not check whether the address is valid or not; however, this
+    /// functionality is indeed useful for some low-level operations. For example, for heap allocations,
+    /// we have to manage the free lists but as we do not have system-wide allocators, we have to directly
+    /// cast these addresses into `DekoPPtr<V>`s from .bss.
+    /// 
+    /// Also note that we assume the address is valid and the memory is _uninitialized_.
+    #[inline(always)]
+    #[verifier::external_body]
+    pub unsafe fn from_raw_uninit(addr: u64) -> (pt: (Self, Tracked<DekoPointsTo<V>>))
+        ensures
+            pt.1@.pptr() == pt.0@,
+            pt.1@.is_uninit(),
+    // We don't put dealloc here as we do't "own" it.
+
+        opens_invariants none
+    {
+        let Tracked(points_to_raw) = Tracked::<PointsToRaw>::assume_new();
+        let Tracked(dealloc) = Tracked::<Dealloc>::assume_new();
+
+        let Tracked(exposed) = vstd::raw_ptr::expose_provenance::<u8>(addr as _);
+        let tracked points_to = points_to_raw.into_typed::<V>(addr as usize);
+
+        let tracked pt = DekoPointsTo {
+            points_to,
+            exposed,
+            dealloc: Some(dealloc),
+            mem_perm: PermissionDekoMem::Foo,
+        };
+
+        let pptr = DekoPPtr(PPtr(addr as usize, PhantomData));
+
+        (pptr, Tracked(pt))
+    }
+
     /// Try to borrow this pointer.
     #[inline(always)]
     pub fn borrow<'a>(self, Tracked(perm): Tracked<&'a DekoPointsTo<V>>) -> (v: &'a V)
@@ -70,6 +106,30 @@ impl<V> DekoPPtr<V> {
     /// Use `addr()` instead
     pub closed spec fn spec_addr(p: DekoPPtr<V>) -> usize {
         p.0.addr()
+    }
+
+    /// Moves v out of the location pointed to by the pointer self and returns it.
+    ///
+    /// Requires the memory to be initialized, and leaves it uninitialized.
+    #[inline(always)]
+    pub fn take(self, Tracked(perm): Tracked<&mut DekoPointsTo<V>>) -> (v: V)
+        requires
+            old(perm).pptr() == self@,
+            old(perm).is_init(),
+            old(perm).mem_wf(),
+        ensures
+            perm.pptr() == old(perm).pptr(),  // the pointer remains the same
+            v == old(perm).value(),
+            perm.is_uninit(),
+            perm.mem_wf(),
+        opens_invariants none
+        no_unwind
+    {
+        proof {
+            use_type_invariant(&*perm);
+        }
+        let ptr: *mut V = vstd::raw_ptr::with_exposed_provenance(self.0.0, Tracked(perm.exposed));
+        vstd::raw_ptr::ptr_mut_read(ptr, Tracked(&mut perm.points_to))
     }
 
     /// Cast a pointer to an integer.
@@ -197,10 +257,7 @@ verus! {
 
 impl<V> DekoPPtr<V> {
     /// Constructs a possibly uninitialized `DekoPPtr<V>`.
-    pub fn empty<A: WellFormed + Heap>(allocator: &DekoHeapAllocator<A>) -> (pt: (
-        Self,
-        Tracked<DekoPointsTo<V>>,
-    ))
+    pub fn empty(allocator: &DefaultDekoHeapAllocator) -> (pt: (Self, Tracked<DekoPointsTo<V>>))
         requires
             allocator.wf(),
         ensures
@@ -254,10 +311,7 @@ impl<V> DekoPPtr<V> {
     }
 
     /// Allocates heap memory for type `V`, leaving it initialized with the given value `v`.
-    pub fn new<A: WellFormed + Heap>(v: V, allocator: &DekoHeapAllocator<A>) -> (pt: (
-        Self,
-        Tracked<DekoPointsTo<V>>,
-    ))
+    pub fn new(v: V, allocator: &DefaultDekoHeapAllocator) -> (pt: (Self, Tracked<DekoPointsTo<V>>))
         requires
             allocator.wf(),
         ensures
@@ -272,27 +326,46 @@ impl<V> DekoPPtr<V> {
     }
 
     /// De-allocates the memory pointed to by `self`.
-    /// TODO: IMPLEMENT THIS.
-    #[verifier::external_body]
-    pub fn drop<A: WellFormed + Heap>(
-        self,
-        Tracked(perm): Tracked<&mut DekoPointsTo<V>>,
-        allocator: &DekoHeapAllocator<A>,
-    )
+    ///
+    /// # Safety
+    ///
+    /// This function call added the explicit pre-condition `perm.is_uninit()` to ensure that
+    /// target itself has called its clenaup logics. This function cleans up the memory taken
+    /// by that tyep `V` but DOES NOT call `V::drop()`.
+    ///
+    /// To properly take care of the memory, you should call move `V` out of the pointer and
+    /// then discard `V` elsewhere.
+    pub fn drop(self, Tracked(perm): Tracked<DekoPointsTo<V>>, allocator: &DefaultDekoHeapAllocator)
         requires
-            old(perm).pptr() == self@,
-            old(perm).is_init(),
-            old(perm).mem_wf(),
+            (perm).pptr() == self@,
+            (perm).is_uninit(),
+            (perm).mem_wf(),
             allocator.wf(),
         ensures
             perm.mem_contents() == MemContents::Uninit::<V>,
         opens_invariants none
     {
-        // proof {
-        //     use_type_invariant(&*perm);
-        // }
-        // let ptr = vstd::raw_ptr::with_exposed_provenance(self.0.0, Tracked(perm.exposed));
-        // vstd::raw_ptr::dealloc(ptr, Tracked(&mut perm.points_to), allocator);
+        proof {
+            use_type_invariant(&perm);
+        }
+
+        let size = core::mem::size_of::<V>();
+        let align = core::mem::align_of::<V>();
+
+        if size > 0 {
+            let tracked dealloc = perm.dealloc.tracked_unwrap();
+            let tracked raw = perm.points_to.into_raw();
+            let tracked exposed = perm.exposed;
+            let ptr = vstd::raw_ptr::with_exposed_provenance(self.0.0, Tracked(exposed));
+            allocator.dealloc(ptr, size, align, Tracked(raw), Tracked(dealloc));
+        } else {
+            // for ZST the memory is not allocated so it is safe to assume
+            // that the memory is uninitialized.
+            proof {
+                assume(perm.mem_contents() matches MemContents::Uninit::<V>);
+            }
+        }
+
     }
 }
 

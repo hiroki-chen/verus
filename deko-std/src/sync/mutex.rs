@@ -106,19 +106,19 @@ impl<V, F: Predicate<V>> Mutex<V, F> {
 
     }
 
-    pub fn release(&self, points_to: Tracked<PointsTo<V>>)
+    pub fn release(&self, Tracked(points_to): Tracked<PointsTo<V>>)
         requires
             self.wf(),
-            points_to@.id() == self.cell.id(),
-            points_to@.is_init(),
-            points_to@.mem_contents() matches MemContents::Init(value)
+            points_to.id() == self.cell.id(),
+            points_to.is_init(),
+            points_to.mem_contents() matches MemContents::Init(value)
                 && self.inv@.constant().2@.inv(value),
     {
         open_atomic_invariant!(self.inv.borrow() => perms => {
             let tracked (mut atomic_permission, _) = perms;
             self.atomic.store(Tracked(&mut atomic_permission), false);
             proof {
-                perms = (atomic_permission, Some(points_to.get()));
+                perms = (atomic_permission, Some(points_to));
             }
         });
     }

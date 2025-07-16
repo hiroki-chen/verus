@@ -2,10 +2,7 @@
 // use alloc::boxed::Box as BoxInner;
 use vstd::prelude::*;
 
-use crate::mem::{DekoHeapAllocator, Heap};
-use crate::ptr::{DekoPPtr, DekoPointsTo};
-use crate::wf::WellFormed;
-use crate::Predicate;
+use crate::prelude::*;
 
 verus! {
 
@@ -53,11 +50,10 @@ impl<V: WellFormed, F: Predicate<V>> Box<V, F> {
     ///
     /// The users need to provide the allocator with an invariant function `f` that
     /// is used to verify the memory contents.
-    pub fn new<A: WellFormed + Heap>(
-        x: V,
-        allocator: &DekoHeapAllocator<A>,
-        Ghost(f): Ghost<F>,
-    ) -> (s: (Self, Tracked<BoxPointsTo<V>>))
+    pub fn new(x: V, allocator: &DefaultDekoHeapAllocator, Ghost(f): Ghost<F>) -> (s: (
+        Self,
+        Tracked<BoxPointsTo<V>>,
+    ))
         requires
             allocator.wf(),
             f.inv(x),

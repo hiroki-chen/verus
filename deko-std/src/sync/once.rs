@@ -160,6 +160,7 @@ impl<V, F: Predicate<V>> OnceCell<V, F> {
             self.wf(),
         ensures
             self.wf(),
+            result matches Some(res) ==> self.inv(*res),
     {
         let tracked mut points_to = None;
         let res =

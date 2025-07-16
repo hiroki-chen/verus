@@ -18,6 +18,7 @@ pub mod array;
 pub mod bits;
 pub mod boot;
 pub mod cpu;
+pub mod list;
 pub mod mem;
 pub mod misc;
 pub mod proofs;
@@ -33,6 +34,7 @@ pub mod prelude {
     #[cfg(feature = "alloc")]
     pub use crate::boxed::*;
     pub use crate::cpu::*;
+    pub use crate::list::*;
     pub use crate::mem::*;
     pub use crate::misc::*;
     pub use crate::ptr::*;

@@ -273,11 +273,7 @@ impl<V, F> Arc<V, F> where V: WellFormed, F: Predicate<V> {
     }
 
     /// Constructs a new `Arc<T>` with the given value and invariant.
-    pub fn new<A: WellFormed + Heap>(
-        v: V,
-        allocator: &DekoHeapAllocator<A>,
-        Ghost(f): Ghost<F>,
-    ) -> (s: Self)
+    pub fn new(v: V, allocator: &DefaultDekoHeapAllocator, Ghost(f): Ghost<F>) -> (s: Self)
         requires
             f.inv(v),
             allocator.wf(),
