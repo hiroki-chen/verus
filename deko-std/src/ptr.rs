@@ -54,7 +54,7 @@ impl<V> DekoPPtr<V> {
     /// functionality is indeed useful for some low-level operations. For example, for heap allocations,
     /// we have to manage the free lists but as we do not have system-wide allocators, we have to directly
     /// cast these addresses into `DekoPPtr<V>`s from .bss.
-    /// 
+    ///
     /// Also note that we assume the address is valid and the memory is _uninitialized_.
     #[inline(always)]
     #[verifier::external_body]
@@ -118,11 +118,13 @@ impl<V> DekoPPtr<V> {
             old(perm).pptr() == self@,
             old(perm).is_init(),
             old(perm).mem_wf(),
+            old(perm).wf(),
         ensures
             perm.pptr() == old(perm).pptr(),  // the pointer remains the same
             v == old(perm).value(),
             perm.is_uninit(),
             perm.mem_wf(),
+            perm.wf(),
         opens_invariants none
         no_unwind
     {
@@ -170,9 +172,11 @@ impl<V> DekoPPtr<V> {
     pub fn write(&self, Tracked(perm): Tracked<&mut DekoPointsTo<V>>, v: V)
         requires
             old(perm).pptr() == self@,
+            old(perm).wf(),
         ensures
             perm.pptr() == old(perm).pptr(),
             perm.mem_contents() == MemContents::Init(v),
+            perm.wf(),
         opens_invariants none
         no_unwind
     {

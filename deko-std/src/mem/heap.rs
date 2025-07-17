@@ -70,7 +70,11 @@ pub struct DekoHeap<const ORDER: usize> {
     ///
     /// Note that LinkedList must not be allocated on the heap before
     /// heap is initialized.
-    free_list: Array<LinkedList<u64>, ORDER>,
+    ///
+    /// The node itself does not contain any value and the address and
+    /// size information is already stored in the pointer and the list
+    /// it belongs to. The value is thus a ZST.
+    free_list: Array<LinkedList<()>, ORDER>,
     /// The start address of the heap.
     heap_base: u64,
     /// The size of the heap.
@@ -197,13 +201,11 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         let mut old = self.free_list.update(top_order, dummy_list);
         // The entire heap is one large block. Its order is the highest one.
         // Create a pointer to the start of the heap. This will be our single node.
-        let (block_ptr, Tracked(mut points_to)) = DekoPPtr::<u64>::from_raw_uninit(
-            heap_start,
-        );
-        
+        let (block_ptr, Tracked(mut points_to)) = DekoPPtr::<Node<()>>::from_raw_uninit(heap_start);
+
         proof {
             // Workaround for well-formedness from possibly invalid address.
-            assume(points_to.value().wf());
+            assume(points_to.value().value.wf());
             assume(points_to.is_init());
         }
 
@@ -214,10 +216,8 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
 
     /// Creates a new, _empty_ heap.
     ///
-    /// Because Array owns the opauqe [T; N] type we have no control over
-    /// the post-condition it may create so f.inv(s) will fail if we remove
-    /// the `#[verifier::external_body]` attribute although this seems very
-    /// obivious that `forall |i: int| 0 <= i < N ==> s.free_list@.index(i) == None::<u64>`.
+    /// Because Array owns the opauqe [T; N] and we use const array-fill expression,
+    /// verus cannot reason anything about it so we just mark this function as trusted.
     #[verifier::external_body]
     pub const fn new(Ghost(f): Ghost<DekoHeapPredicate::<DekoHeap<ORDER>>>) -> (s: Self)
         requires
