@@ -10,16 +10,17 @@ verus! {
 #[verifier::reject_recursive_types(V)]
 pub struct Node<V: WellFormed> {
     /// The previous node in the linked list.
-    prev: Option<DekoPPtr<Node<V>>>,
+    pub prev: Option<DekoPPtr<Node<V>>>,
     /// The next node in the linked list.
-    next: Option<DekoPPtr<Node<V>>>,
-    value: V,
+    pub next: Option<DekoPPtr<Node<V>>>,
+    pub value: V,
 }
 
 impl<T: WellFormed> View for Node<T> {
     type V = T;
 
-    closed spec fn view(&self) -> Self::V {
+    #[verifier::inline]
+    open spec fn view(&self) -> Self::V {
         self.value
     }
 }
@@ -106,26 +107,42 @@ impl<V: WellFormed> LinkedList<V> {
         }
     }
 
-    // /// Pushes to the end of the linked list without allocating any memory.
-    // pub fn push_no_alloc(&mut self, v: DekoPPtr<Node<V>>, Tracked(perm): Tracked<DekoPointsTo<Node<V>>>)
-    // requires
-    //     old(self).wf(),
-    //     v@ == perm.pptr(),
-    //     perm.is_init(),
-    // ensures
-    //     self.wf(),
-    //     self@ = old(self)@.push(perm.value().value),
-    // {
+    fn push_empty(&mut self, v: V)
+        requires
+            old(self).wf(),
+            old(self)@.len() == 0,
+            v.wf(),
+    {
 
-    // }
+    }
 
-    // pub fn push(&mut self, v: V, allocator: &DefaultDekoHeapAllocator)
-    // requires
-    //     allocator.wf(),
-        
-    // {
-        
-    // }
+    /// Pushes to the front of the linked list without allocating any memory.
+    pub fn push_front_no_alloc(
+        &mut self,
+        v: DekoPPtr<V>,
+        perm: Tracked<DekoPointsTo<V>>,
+    )
+        requires
+            old(self).wf(),
+            perm@.wf(),
+            perm@.value().wf(),
+            v@ == perm@.pptr(),
+            perm@.is_init(),
+        ensures
+            self.wf(),
+            self@ == seq![perm@.value()].add(old(self)@),
+    {
+        match self.head {
+            None => {
+                let Tracked(mut perm) = perm;
+                let v = v.take(Tracked(&mut perm)); // we "take" this value out of the pointer.
+                self.push_empty(v);
+            },
+            Some(old_head_ptr) => {
+
+            }
+        }
+    }
 }
 
 impl<V: WellFormed> WellFormed for LinkedList<V> {

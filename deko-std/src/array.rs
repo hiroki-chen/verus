@@ -9,6 +9,13 @@ verus! {
 #[verifier::reject_recursive_types(T)]
 pub struct Array<T: WellFormed, const N: usize>(pub [T; N]);
 
+impl<T: WellFormed, const N: usize> WellFormed for Array<T, N> {
+    open spec fn wf(&self) -> bool {
+        &&& self@ =~= Seq::new(N as nat, |i| self.idx(i))
+        &&& forall|i: int| 0 <= i < N as int ==> #[trigger] self@.index(i).wf()
+    }
+}
+
 impl<T: WellFormed, const N: usize> Array<T, N> {
     pub open spec fn len(&self) -> usize {
         N
@@ -20,7 +27,7 @@ impl<T: WellFormed, const N: usize> Array<T, N> {
     #[verifier::external_body]
     pub const fn new(value: [T; N]) -> (s: Self)
         ensures
-            s@ =~= Seq::new(N as nat, |i| s.idx(i)),
+            s.wf(),
     {
         Self(value)
     }
@@ -30,6 +37,23 @@ impl<T: WellFormed, const N: usize> Array<T, N> {
     #[verifier::inline]
     pub open spec fn to_seq(&self) -> Seq<T> {
         self@
+    }
+
+    #[verifier::external_body]
+    #[inline(always)]
+    pub fn update(&mut self, i: usize, value: T) -> (t: T)
+        requires
+            0 <= i < old(self)@.len() as usize,
+            old(self).wf(),
+            value.wf(),
+        ensures
+            old(self)@.index(i as int) == t,
+            self@.index(i as int) == value,
+            self.wf(),
+            self@ == old(self)@.update(i as int, value),
+    {
+        // not supported by verus yet
+        core::mem::replace(&mut self.0[i], value)
     }
 }
 

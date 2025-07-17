@@ -62,6 +62,7 @@ impl<V> DekoPPtr<V> {
         ensures
             pt.1@.pptr() == pt.0@,
             pt.1@.is_uninit(),
+            pt.1@.wf(),
     // We don't put dealloc here as we do't "own" it.
 
         opens_invariants none
@@ -210,7 +211,7 @@ impl<V> DekoPointsTo<V> {
     }
 
     #[verifier::type_invariant]
-    closed spec fn wf(self) -> bool {
+    closed spec fn type_inv(self) -> bool {
         &&& self.points_to.ptr()@.provenance == self.exposed.provenance()
         &&& match self.dealloc {
             Some(dealloc) => {

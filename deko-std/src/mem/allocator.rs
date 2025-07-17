@@ -145,7 +145,7 @@ pub exec static DEKO_ALLOCATOR: DekoHeapAllocator<
         DEKO_ALLOCATOR.wf(),
 {
     let ghost f = DekoHeapPredicate::<DekoHeap<HEAP_SIZE>>(core::marker::PhantomData);
-    let heap = DekoHeap::<HEAP_SIZE>::new(16, Ghost(f));
+    let heap = DekoHeap::<HEAP_SIZE>::new(Ghost(f));
 
     DekoHeapAllocator::new(heap, Ghost(f))
 }
