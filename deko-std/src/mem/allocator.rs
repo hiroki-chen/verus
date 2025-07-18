@@ -101,7 +101,7 @@ pub tracked struct PermissionDekoMemoryRegion {}
 /// The default of the heap that can we manage.
 ///
 /// 2 ^ 33 - 1 = 17179869183 bytes (~4 GiB).
-pub const HEAP_SIZE: usize = 33;
+pub const HEAP_SIZE: usize = 32;
 
 /// The _true_ global allocator for Deko that manages the heap.
 ///

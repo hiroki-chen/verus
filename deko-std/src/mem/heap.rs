@@ -10,7 +10,7 @@ pub const HEAP_ALIGNMENT: u64 = 0x1000;
 /// The size of a block of a given order.
 #[verifier::inline]
 pub open spec fn block_size(order: nat) -> nat {
-    (1 << order as u64) as nat
+    vstd::arithmetic::power2::pow2(order)
 }
 
 #[verifier::inline]
@@ -156,7 +156,7 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         // The total heap size is now derived directly from ORDER.
         // A buddy system typically manages a power-of-two-sized region.
         // Let's assume the largest block is 2^(ORDER-1) and the smallest is 2^0 = 1.
-        &&& self.heap_size == (1u64 << (ORDER - 1))
+        &&& self.heap_size == vstd::arithmetic::power::pow(2, ORDER as nat) - 1
         &&& self.min_block_size == 1
     }
 
@@ -256,7 +256,7 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         requires
     // We need ORDER > 0 to have at least one block size.
 
-            ORDER > 0,
+            0 < ORDER <= 32, 
         ensures
             s.wf(),
             f.inv(s),
@@ -266,7 +266,7 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
             free_list: Array::new([const { LinkedList::new() };ORDER]),
             heap_base: 0x0,
             // The total size is determined by the largest possible block.
-            heap_size: 1u64 << (ORDER - 1),
+            heap_size: 2u64.pow(ORDER as u32) - 1,
             // With this geometry, the smallest block is size 1.
             min_block_size: 1,
         }
@@ -297,6 +297,7 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         ensures
             s == self.allocation_size_spec(size, align),
             s > 0,
+            vstd::arithmetic::logarithm::log(2, s as int) >= self.min_block_size,
     {
         if align > size {
             size = align;
@@ -307,7 +308,17 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
             size
         };
 
-        size.next_power_of_two()
+        let r = size.next_power_of_two();
+
+        proof {
+            lemma_next_power_of_two_then_log2_greater(
+                size as u64,
+                self.min_block_size as u64,
+                r as u64,
+            );
+        }
+
+        r
     }
 
     /// The "order" of an allocation is how many times we need to double
@@ -319,15 +330,26 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
             self.valid_size_and_align(size, align),
             self.wf(),
         ensures
-            self.wf(),
-            0 <= r <= ORDER - 1,  // TODO
+            0 <= r <= ORDER - 1,
     {
-        let res = self.allocation_size(size, align).ilog2();
+        let size = self.allocation_size(size, align);
+        let res = size.ilog2();
 
-        // TODO!
         proof {
-            assume(res >= self.min_block_size);
-            assume(res - self.min_block_size < ORDER as u64);
+            assert((self.heap_size as nat) < (vstd::arithmetic::power::pow(2, ORDER as nat) as nat));
+            assert((size as nat) <= (self.heap_size) as nat);
+            assert(((vstd::arithmetic::power::pow(2, res as nat)) as nat) <= size as nat) by {
+                assert(res == vstd::arithmetic::logarithm::log(2, size as int));
+                lemma_pow_log(2, size as nat);
+            }
+
+            assert(res <= ORDER) by {
+                vstd::arithmetic::power::lemma_pow_increases_converse(
+                2,
+                res as nat,
+                ORDER as nat,
+                );
+            }
         }
 
         res as u64 - self.min_block_size
@@ -358,6 +380,7 @@ impl<const ORDER: usize> WellFormed for DekoHeap<ORDER> {
         &&& self.heap_size_valid(self.heap_size)
         &&& self.free_list_valid()
         &&& ORDER - 1 >= 0
+        &&& self.min_block_size >= 1
         &&& self.free_list@.len() == ORDER as int
     }
 }
