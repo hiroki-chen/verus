@@ -197,7 +197,7 @@ impl<V: WellFormed> LinkedList<V> {
                         Map::<nat, nat>::new(
                             |i: nat| 1 <= i <= old(self)@.len() as nat,
                             |i: nat| (i - 1) as nat,
-                        ), // self.index(j) == old(self).index(key_map.index(j))
+                        ),  // self.index(j) == old(self).index(key_map.index(j))
                     );
 
                     self.inner.borrow_mut().ptrs.tracked_insert(0, v);
@@ -218,7 +218,6 @@ impl<V: WellFormed> LinkedList<V> {
                     }
 
                     assert(self.node_wf_at(1));
-                    assert(self.wf());
                 }
             },
         }

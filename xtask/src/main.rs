@@ -435,7 +435,7 @@ fn bootstrap(prefix: &str, commit: Option<&str>) -> Result<()> {
     println!("Bootstrapping with prefix: {}", prefix);
     {
         let verus_dir = PathBuf::from(prefix).join("verus");
-        let mut repo = Repository::clone(DEFAULT_VERUS_REPO, verus_dir)?;
+        let repo = Repository::clone(DEFAULT_VERUS_REPO, verus_dir)?;
         if let Some(commit) = commit {
             repo.set_head_detached(repo.revparse_single(commit)?.id())?;
             println!("Checked out commit: {}", commit);

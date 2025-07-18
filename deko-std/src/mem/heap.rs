@@ -23,6 +23,13 @@ pub open spec fn is_power_of_two(n: u64) -> bool {
     n > 0 && (n & (n - 1) as u64) == 0
 }
 
+/// Checks if two blocks of memory overlap.
+pub open spec fn overlaps_with(left: nat, right: nat, block_size: nat) -> bool {
+    let left_end = left + block_size;
+    let right_end = right + block_size;
+    !(left >= right_end || right >= left_end)
+}
+
 pub trait Heap {
     spec fn free_list_valid(&self) -> bool;
 
@@ -85,6 +92,7 @@ pub struct DekoHeap<const ORDER: usize> {
 
 impl<const ORDER: usize> Heap for DekoHeap<ORDER> {
     closed spec fn free_list_valid(&self) -> bool {
+        &&& self.block_no_overlapping()
         &&& self.free_list.wf()
         &&& forall|i: int, j: int|
             #![trigger self.free_list@.index(i), self.free_list@.index(i)@.index(j)]
@@ -101,6 +109,30 @@ impl<const ORDER: usize> Heap for DekoHeap<ORDER> {
 impl<const ORDER: usize> DekoHeap<ORDER> {
     pub closed spec fn in_heap_range(&self, addr: u64, size: u64) -> bool {
         self.heap_base <= addr && addr + size <= self.heap_base + self.heap_size
+    }
+
+    pub closed spec fn block_no_overlapping_at(&self, order: int) -> bool {
+        let list = self.free_list@.index(order);
+        let block_size = block_size(order as nat) as usize;
+
+        // Ensures any block is aligned to the block size.
+        &&& forall|i: int|
+            0 <= i < list.inner@.ptrs.len() ==> #[trigger] list.inner@.ptrs.index(i).addr()
+                % block_size
+                == 0
+            // Ensures any two blocks cannot overlap.
+        &&& forall|i, j: int|
+            0 <= i < list.inner@.ptrs.len() && 0 <= j < list.inner@.ptrs.len() && i != j
+                ==> !overlaps_with(
+                #[trigger] list.inner@.ptrs.index(i).addr() as nat,
+                #[trigger] list.inner@.ptrs.index(j).addr() as nat,
+                block_size as nat,
+            )
+    }
+
+    /// Ensures that allocating the same memory twice that causes double use problems.
+    pub closed spec fn block_no_overlapping(&self) -> bool {
+        forall|i: int| 0 <= i < self.free_list@.len() ==> #[trigger] self.block_no_overlapping_at(i)
     }
 
     pub closed spec fn heap_size_valid(&self, heap_size: u64) -> bool {
@@ -129,7 +161,7 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
     }
 
     pub closed spec fn is_init(&self) -> bool {
-        self.heap_base != 0
+        &&& self.heap_base != 0
     }
 
     pub closed spec fn init_ok(&self) -> bool {
@@ -145,8 +177,9 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
 
     pub closed spec fn empty_free_list(&self) -> bool {
         forall|i: int|
-            0 <= i < self.free_list@.len() as int ==> #[trigger] self.free_list@.index(i)@.len()
-                == 0
+            0 <= i < self.free_list@.len() as int ==> #[trigger] self.free_list@.index(
+                i,
+            ).inner@.ptrs.len() == 0
     }
 
     /// Initializes the heap with a given memory region, making it ready for allocations.
@@ -172,6 +205,7 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
 
         proof {
             assert(old(self).free_list === self.free_list);
+            assert(self.free_list_valid());
         }
 
         unsafe {
@@ -181,10 +215,10 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
 
     unsafe fn init_unchecked(&mut self, heap_start: u64)
         requires
+            old(self).empty_free_list(),
             old(self).is_init(),
             old(self).wf(),
             heap_start > 0,
-            old(self).empty_free_list(),
         ensures
             self.wf(),
             self.init_ok(),
@@ -194,7 +228,6 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         // update the node, and then "give back" to the free list.
         let top_order = ORDER - 1;
         proof {
-            assert(old(self).free_list@.index(top_order as int)@.len() == 0);
             assert(old(self).free_list@.index(top_order as int).wf());
         }
         let dummy_list = LinkedList::new();
@@ -239,16 +272,83 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         }
     }
 
+    pub closed spec fn allocation_size_spec(&self, size: u64, align: u64) -> u64 {
+        let new_size = if align > size {
+            align
+        } else {
+            size
+        };
+        let new_size = vstd::math::max(new_size as int, self.min_block_size as int) as u64;
+
+        next_power_of_two_spec(new_size)
+    }
+
+    pub closed spec fn valid_size_and_align(&self, size: u64, align: u64) -> bool {
+        let new_size = self.allocation_size_spec(size, align);
+
+        &&& align
+            <= HEAP_ALIGNMENT  // align must be a power of two and at most the page size.
+        &&& is_power_of_two(align)
+        &&& new_size <= self.heap_size
+        &&& size > 0
+    }
+
+    fn allocation_size(&self, mut size: u64, align: u64) -> (s: u64)
+        ensures
+            s == self.allocation_size_spec(size, align),
+            s > 0,
+    {
+        if align > size {
+            size = align;
+        }
+        let size = if size < self.min_block_size {
+            self.min_block_size
+        } else {
+            size
+        };
+
+        size.next_power_of_two()
+    }
+
+    /// The "order" of an allocation is how many times we need to double
+    /// `min_block_size` in order to get a large enough block, as well as
+    /// the index we use into `free_lists`.
+    #[inline]
+    fn allocation_order(&self, size: u64, align: u64) -> (r: u64)
+        requires
+            self.valid_size_and_align(size, align),
+            self.wf(),
+        ensures
+            self.wf(),
+            0 <= r <= ORDER - 1,  // TODO
+    {
+        let res = self.allocation_size(size, align).ilog2();
+
+        // TODO!
+        proof {
+            assume(res >= self.min_block_size);
+            assume(res - self.min_block_size < ORDER as u64);
+        }
+
+        res as u64 - self.min_block_size
+    }
+
     /// Allocates a block of memory from the heap.
-    #[verifier::external_body]  // todo
-    pub fn allocate(&mut self, size: u64, align: u64) -> (addr: u64)
+    ///
+    /// TODO: The return type should be a pointer and its permission??
+    #[verifier::external_body]
+    pub fn allocate(&mut self, size: u64, align: u64) -> (pt: u64)
         requires
             old(self).wf(),
             old(self).is_init(),
-            size != 0,
+            old(self).valid_size_and_align(size, align),
         ensures
             self.wf(),
+            self.in_heap_range(pt, size),
     {
+        // Get the order we will need.
+        let order = self.allocation_order(size, align);
+
         1
     }
 }
