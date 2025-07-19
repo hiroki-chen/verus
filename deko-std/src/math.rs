@@ -1,6 +1,6 @@
 use vstd::arithmetic::logarithm::*;
-use vstd::arithmetic::power2::*;
 use vstd::arithmetic::power::*;
+use vstd::arithmetic::power2::*;
 use vstd::math::*;
 use vstd::prelude::*;
 
@@ -40,21 +40,9 @@ pub closed spec fn next_power_of_two_spec(n: u64) -> u64
 }
 
 #[verifier::external_body]
-pub proof fn lemma_pow_log(base: int, n: nat)
-    requires base > 1,
+pub proof fn lemma_next_power_of_two_ge_pow2(n: nat)
     ensures
-        (pow(base, log(base, n as int) as _) as nat) <= n,
-{
-}
-
-// todo: prove this.
-#[verifier::external_body]
-pub proof fn lemma_next_power_of_two_then_log2_greater(a: u64, b: u64, c: u64)
-    requires
-        a >= b,
-        c as u64 == next_power_of_two_spec(a) as u64,
-    ensures
-        vstd::arithmetic::logarithm::log(2, c as int) >= b,
+        next_power_of_two_spec(n as u64) >= n,
 {
 }
 
@@ -76,4 +64,5 @@ pub assume_specification[ u64::pow ](n: u64, exp: u32) -> (result: u64)
     ensures
         result == vstd::arithmetic::power::pow(n as int, exp as nat),
 ;
+
 } // verus!

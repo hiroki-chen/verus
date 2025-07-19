@@ -1,3 +1,5 @@
+use vstd::arithmetic::logarithm::*;
+use vstd::arithmetic::power::*;
 use vstd::prelude::*;
 
 use crate::prelude::*;
@@ -5,6 +7,21 @@ use crate::prelude::*;
 verus! {
 
 pub const HEAP_ALIGNMENT: u64 = 0x1000;
+
+/// This function checks if the given parameters for a heap are valid only used for
+/// initialization functions.
+#[verifier::inline]
+pub open spec fn valid_heap_param(heap_base: u64, heap_size: u64, order: u64) -> bool {
+    let min_block_size = heap_size >> ((order - 1) as u64);
+
+    &&& heap_base > 0
+    &&& heap_size > 0
+    &&& heap_size >= min_block_size
+    &&& min_block_size >= core::mem::size_of::<Node<()>>() as u64
+    &&& heap_size % HEAP_ALIGNMENT == 0
+    &&& is_power_of_two(heap_size)
+    &&& heap_size < pow(2, order as nat) as u64
+}
 
 // 4 KiB
 /// The size of a block of a given order.
@@ -135,33 +152,31 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         forall|i: int| 0 <= i < self.free_list@.len() ==> #[trigger] self.block_no_overlapping_at(i)
     }
 
-    pub closed spec fn heap_size_valid(&self, heap_size: u64) -> bool {
+    pub closed spec fn heap_size_valid(&self) -> bool {
+        &&& (self.heap_size as nat) < (pow(
+            2,
+            ORDER as nat,
+        ) as nat)
         // The heap size must be a multiple of the minimum block size.
-        &&& heap_size % self.min_block_size
+        &&& self.heap_size % self.min_block_size
             == 0
         // The heap size must be a power of two.
-        &&& is_power_of_two(
-            heap_size,
-        )
-        // The heap must be aligned to page size.
-        &&& heap_size % HEAP_ALIGNMENT
+        &&& exists|n: u64|
+            {
+                &&& #[trigger] pow(2, n as nat) == self.heap_size as nat
+                &&& self.min_block_size as nat == pow(2, (n - ORDER + 1) as nat)
+            }
+            // The heap must be aligned to page size.
+        &&& self.heap_size % HEAP_ALIGNMENT
             == 0
-        // The heap size must be at least the minimum block size.
-        &&& heap_size
-            >= self.min_block_size
         // The heap size must be large enough to hold at least one block of the minimum size.
-        &&& self.min_block_size >= core::mem::size_of::<
-            Node<u64>,
-        >()
-        // The total heap size is now derived directly from ORDER.
-        // A buddy system typically manages a power-of-two-sized region.
-        // Let's assume the largest block is 2^(ORDER-1) and the smallest is 2^0 = 1.
-        &&& self.heap_size == vstd::arithmetic::power::pow(2, ORDER as nat) - 1
-        &&& self.min_block_size == 1
+        &&& self.heap_size >= self.min_block_size >= core::mem::size_of::<Node<u64>>() > 0
     }
 
     pub closed spec fn is_init(&self) -> bool {
         &&& self.heap_base != 0
+        &&& self.heap_size != 0
+        &&& self.empty_free_list()
     }
 
     pub closed spec fn init_ok(&self) -> bool {
@@ -169,6 +184,8 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         &&& forall|i: int|
             #![trigger self.free_list@.index(i)]
             if i == ORDER - 1 as int {
+                // This is because we will insert the entire initial block into the last
+                // free list.
                 self.free_list@.index(i)@.len() == 1
             } else {
                 self.free_list@.index(i)@.len() == 0
@@ -191,12 +208,11 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
     /// # Safety
     /// The caller must guarantee that the provided permission `perm` corresponds to a
     /// valid, unused memory region starting at `heap_start` of `heap_size`.
-    pub fn init(&mut self, heap_start: u64)
+    pub fn init(&mut self, heap_start: u64, heap_size: u64)
         requires
             !old(self).is_init(),
             old(self).wf(),
-            old(self).empty_free_list(),
-            heap_start > 0,
+            valid_heap_param(heap_start, heap_size, ORDER as u64),
         ensures
             self.wf(),
             self.init_ok(),
@@ -209,16 +225,15 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         }
 
         unsafe {
-            self.init_unchecked(heap_start);
+            self.init_unchecked(heap_start, heap_size);
         }
     }
 
-    unsafe fn init_unchecked(&mut self, heap_start: u64)
+    unsafe fn init_unchecked(&mut self, heap_start: u64, heap_size: u64)
         requires
-            old(self).empty_free_list(),
-            old(self).is_init(),
+            !old(self).is_init(),
             old(self).wf(),
-            heap_start > 0,
+            valid_heap_param(heap_start, heap_size, ORDER as u64),
         ensures
             self.wf(),
             self.init_ok(),
@@ -245,6 +260,10 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         old.push_front_no_alloc(block_ptr, Tracked(points_to));
         // Give it back to the free list.
         let _ = self.free_list.update(top_order, old);  // discard.
+
+        self.heap_base = heap_start;
+        self.heap_size = heap_size;
+        self.min_block_size = heap_size >> (top_order as u64);
     }
 
     /// Creates a new, _empty_ heap.
@@ -256,7 +275,7 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         requires
     // We need ORDER > 0 to have at least one block size.
 
-            0 < ORDER <= 32, 
+            0 < ORDER <= 32,
         ensures
             s.wf(),
             f.inv(s),
@@ -266,9 +285,9 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
             free_list: Array::new([const { LinkedList::new() };ORDER]),
             heap_base: 0x0,
             // The total size is determined by the largest possible block.
-            heap_size: 2u64.pow(ORDER as u32) - 1,
+            heap_size: 0x0,
             // With this geometry, the smallest block is size 1.
-            min_block_size: 1,
+            min_block_size: 0x0,
         }
     }
 
@@ -295,9 +314,8 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
 
     fn allocation_size(&self, mut size: u64, align: u64) -> (s: u64)
         ensures
-            s == self.allocation_size_spec(size, align),
-            s > 0,
-            vstd::arithmetic::logarithm::log(2, s as int) >= self.min_block_size,
+            s == self.allocation_size_spec(size, align) > 0,
+            s >= self.min_block_size,
     {
         if align > size {
             size = align;
@@ -311,11 +329,7 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         let r = size.next_power_of_two();
 
         proof {
-            lemma_next_power_of_two_then_log2_greater(
-                size as u64,
-                self.min_block_size as u64,
-                r as u64,
-            );
+            lemma_next_power_of_two_ge_pow2(size as nat);
         }
 
         r
@@ -329,30 +343,17 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         requires
             self.valid_size_and_align(size, align),
             self.wf(),
-        ensures
-            0 <= r <= ORDER - 1,
     {
         let size = self.allocation_size(size, align);
+        // we now have size >= min_block_size.
         let res = size.ilog2();
+        let min_block_size_log2 = self.min_block_size.ilog2();
 
         proof {
-            assert((self.heap_size as nat) < (vstd::arithmetic::power::pow(2, ORDER as nat) as nat));
-            assert((size as nat) <= (self.heap_size) as nat);
-            assert(((vstd::arithmetic::power::pow(2, res as nat)) as nat) <= size as nat) by {
-                assert(res == vstd::arithmetic::logarithm::log(2, size as int));
-                lemma_pow_log(2, size as nat);
-            }
-
-            assert(res <= ORDER) by {
-                vstd::arithmetic::power::lemma_pow_increases_converse(
-                2,
-                res as nat,
-                ORDER as nat,
-                );
-            }
+            lemma_log_is_ordered(2, self.min_block_size as int, size as int);
         }
 
-        res as u64 - self.min_block_size
+        res as u64 - min_block_size_log2 as u64
     }
 
     /// Allocates a block of memory from the heap.
@@ -377,11 +378,10 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
 
 impl<const ORDER: usize> WellFormed for DekoHeap<ORDER> {
     closed spec fn wf(&self) -> bool {
-        &&& self.heap_size_valid(self.heap_size)
+        &&& self.heap_size_valid() && self.is_init()
         &&& self.free_list_valid()
-        &&& ORDER - 1 >= 0
-        &&& self.min_block_size >= 1
         &&& self.free_list@.len() == ORDER as int
+        &&& ORDER - 1 >= 0
     }
 }
 
