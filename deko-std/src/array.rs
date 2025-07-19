@@ -17,7 +17,14 @@ impl<T: WellFormed, const N: usize> WellFormed for Array<T, N> {
 }
 
 impl<T: WellFormed, const N: usize> Array<T, N> {
-    pub open spec fn len(&self) -> usize {
+    pub open spec fn spec_len(&self) -> usize {
+        N
+    }
+
+    pub fn len(&self) -> (res: usize)
+        ensures
+            self.spec_len() == res,
+    {
         N
     }
 
@@ -37,6 +44,34 @@ impl<T: WellFormed, const N: usize> Array<T, N> {
     #[verifier::inline]
     pub open spec fn to_seq(&self) -> Seq<T> {
         self@
+    }
+
+    #[verifier::external_body]
+    #[inline(always)]
+    pub fn index(&self, i: usize) -> (t: &T)
+        requires
+            0 <= i < self.spec_len() as usize,
+            self.wf(),
+        ensures
+            *t == self@.index(i as int),
+    {
+        &self.0[i]
+    }
+
+    #[verifier::external_body]
+    pub fn update_in_place(&mut self, i: usize, f: impl Fn(&mut T) -> ())
+        requires
+            0 <= i < old(self).spec_len() as usize,
+            old(self).wf(),
+            call_requires(f, (v,)),
+        ensures
+            self.wf(),
+            // find a way to express this
+            // self@.index(i as int) == f(old(self)@.index(i as int)),
+    {
+        use core::ops::IndexMut;
+        // not supported by verus yet ??
+        f(self.0.index_mut(i));
     }
 
     #[verifier::external_body]
@@ -71,7 +106,7 @@ impl<T: WellFormed, const N: usize> View for Array<T, N> {
     type V = Seq<T>;
 
     closed spec fn view(&self) -> Self::V {
-        Seq::new(self.len() as nat, |i| self.idx(i))
+        Seq::new(self.spec_len() as nat, |i| self.idx(i))
     }
 }
 

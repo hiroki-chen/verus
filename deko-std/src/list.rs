@@ -72,7 +72,6 @@ impl<V: WellFormed> LinkedList<V> {
         &&& self.head.is_none()
         &&& self.tail.is_none()
         &&& self.inner@.ptrs.len() == 0
-        &&& self.inner@.perms.len() == 0
     }
 
     pub open spec fn spec_len(&self) -> nat {
@@ -131,6 +130,103 @@ impl<V: WellFormed> LinkedList<V> {
             self.inner.borrow_mut().ptrs.tracked_push(v);
             self.inner.borrow_mut().perms.tracked_insert((self.inner@.ptrs.len() - 1) as _, perm);
         }
+    }
+
+    /// Pops the first element of the linked list.
+    ///
+    /// This API is marked `no_alloc` because it does not allocate any memory, and thus it
+    /// requires the caller to manage the raw pointer; de-allocating it when it is no longer needed.
+    pub fn pop_front_no_alloc(&mut self) -> (res: (
+        DekoPPtr<Node<V>>,
+        Tracked<DekoPointsTo<Node<V>>>,
+    ))
+        requires
+            old(self).wf(),
+            !old(self).is_empty(),
+        ensures
+            res.1@.value().value == old(self)@.index(0),
+            self@ == old(self)@.remove(0),
+            self.wf(),
+    {
+        proof {
+            // Unfold that definition so we indeed know that the head node is well formed.
+            // so we can remove it from the permission map.
+            assert(self.node_wf_at(0));
+        }
+
+        let head = self.head.unwrap();
+        let tracked head_points_to = self.inner.borrow_mut().perms.tracked_remove(0);
+        let v = head.borrow(Tracked(&mut head_points_to));
+
+        match v.next {
+            None => {
+                self.head = None;
+                self.tail = None;
+
+                proof {
+                    assert(self.inner@.ptrs.len() == 1);
+                }
+            },
+            Some(next) => {
+                assert(old(self)@.len() > 1);
+                assert(old(self).node_wf_at(1));  // for dom().contains(1).
+
+                self.head = Some(next);
+                let tracked mut next_points_to = self.inner.borrow_mut().perms.tracked_remove(1);
+
+                // Modify the next node so that its prev becomes None and it should be the head node.
+                let mut next_node = next.take(Tracked(&mut next_points_to));
+                next_node.prev = None;
+                next.write(Tracked(&mut next_points_to), next_node);
+
+                // Now we update the ghost states.
+                proof {
+                    // We update the points to map.
+                    self.inner.borrow_mut().perms.tracked_insert(1, next_points_to);
+
+                    // Now update the permission map by shifting the keys.
+                    assert forall|i: nat|
+                        1 <= i < old(self)@.len() implies self.inner@.perms.dom().contains(i) by {
+                        assert(old(self).node_wf_at(i));
+                    }
+
+                    // Update keys. => self.index(j) == old(self).index(key_map.index(i + 1)) by left.
+                    self.inner.borrow_mut().perms.tracked_map_keys_in_place(
+                        Map::<nat, nat>::new(
+                            |i: nat| 0 <= i && i < old(self)@.len() - 1,
+                            |i: nat| (i + 1) as nat,
+                        ),
+                    );
+                }
+            },
+        }
+
+        // Update pointers.
+        proof {
+            // let this = self.inner.borrow_mut().ptrs.tracked_remove(0);
+            // self.inner.borrow_mut().ptrs = (self)@.remove(0);
+            self.inner.borrow_mut().ptrs.tracked_pop_front();
+
+            if self.inner@.ptrs.len() > 0 {
+                assert(self.node_wf_at(0));
+                assert(forall|i: nat|
+                    0 < i < self@.len() && old(self).node_wf_at(i + 1)
+                        ==> #[trigger] self.node_wf_at(i));
+
+                assert forall|i: int| 0 <= i && i < self@.len() implies #[trigger] self@[i] == old(
+                    self,
+                )@.subrange(1, old(self)@.len() as int)[i] by {
+                    assert(old(self).node_wf_at(i as nat + 1));
+                };
+                assert(self@ =~= old(self)@.remove(0));
+                assert(self.tail == Some(self.inner@.ptrs[self.inner@.ptrs.len() as int - 1]));
+                assert(self.head == Some(self.inner@.ptrs[0]));
+            } else {
+                assert(self.wf());
+            }
+        }
+
+        (head, Tracked(head_points_to))
     }
 
     /// Pushes to the front of the linked list without allocating any memory.
@@ -231,7 +327,6 @@ impl<V: WellFormed> WellFormed for LinkedList<V> {
             &&& self.head.is_none()
             &&& self.tail.is_none()
             &&& self.inner@.ptrs.len() == 0
-            &&& self.inner@.perms.len() == 0
         } else {
             &&& self.head == Some(self.inner@.ptrs[0])
             &&& self.tail == Some(self.inner@.ptrs[self.inner@.ptrs.len() as int - 1])

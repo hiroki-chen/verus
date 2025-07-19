@@ -27,7 +27,7 @@ pub open spec fn valid_heap_param(heap_base: u64, heap_size: u64, order: u64) ->
 /// The size of a block of a given order.
 #[verifier::inline]
 pub open spec fn block_size(order: nat) -> nat {
-    vstd::arithmetic::power2::pow2(order)
+    pow(2, order) as nat
 }
 
 #[verifier::inline]
@@ -124,13 +124,18 @@ impl<const ORDER: usize> Heap for DekoHeap<ORDER> {
 }
 
 impl<const ORDER: usize> DekoHeap<ORDER> {
+    /// The size of the blocks we allocate for a given order.
+    pub closed spec fn order_size(&self, order: nat) -> nat {
+        block_size(order + log(2, self.min_block_size as int) as nat)
+    }
+
     pub closed spec fn in_heap_range(&self, addr: u64, size: u64) -> bool {
         self.heap_base <= addr && addr + size <= self.heap_base + self.heap_size
     }
 
     pub closed spec fn block_no_overlapping_at(&self, order: int) -> bool {
         let list = self.free_list@.index(order);
-        let block_size = block_size(order as nat) as usize;
+        let block_size = self.order_size(order as nat) as usize;
 
         // Ensures any block is aligned to the block size.
         &&& forall|i: int|
@@ -370,7 +375,32 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
             self.in_heap_range(pt, size),
     {
         // Get the order we will need.
-        let order = self.allocation_order(size, align);
+        let order_needed = self.allocation_order(size, align) as usize;
+
+        // Start with the smallest acceptable block size, and search
+        // upwards until we reach blocks the size of the entire heap.
+        for order in order_needed..self.free_list.len()
+            invariant
+                self.wf(),
+        {
+            // Do we have a block of this size? Check head.
+            if self.free_list.index(order).head.is_none() {
+                assert(self.free_list.index(order).is_empty());
+
+                continue ;
+            }
+            // Let's pop out the first block.
+
+            let front = self.free_list.update_in_place(
+                order,
+                |list|
+                    {
+                        list.pop_front_no_alloc();
+                    },
+            );
+
+            todo!()
+        }
 
         1
     }
