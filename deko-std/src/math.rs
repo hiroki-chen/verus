@@ -6,44 +6,33 @@ use vstd::prelude::*;
 
 verus! {
 
-pub open spec fn is_power_of_two_spec(n: u64) -> bool
-    decreases n,
-{
-    if n <= 0 {
-        false
-    } else if n == 1 {
-        true
-    } else {
-        is_power_of_two_spec(n / 2)
-    }
+#[verifier::inline]
+pub open spec fn is_power_of_two_spec(n: nat) -> bool {
+    exists|exp: nat| n == #[trigger] pow(2, exp)
 }
 
-/// Returns the next power of two greater than or equal to `n`.
-pub closed spec fn next_power_of_two_spec(n: u64) -> u64
-    decreases n,
-{
-    if n <= 1 {
+pub open spec fn next_power_of_two_spec(n: nat) -> nat {
+    if n == 0 || n == 1 {
         1
-    } else if n == 2 {
-        2
-    } else if is_power_of_two_spec(n) {
-        // n is already a power of two
-        n
     } else {
-        proof {
-            assert(n > 2 ==> (n / 2 + 1) < n) by (nonlinear_arith);
+        let exp = log(2, n as int) as nat;
+        if pow(2, exp) == n {
+            pow(2, exp) as nat
+        } else {
+            pow(2, exp + 1) as nat
         }
-        let next = next_power_of_two_spec(((n / 2 + 1)) as u64);
-
-        (next * 2) as u64
     }
 }
 
-#[verifier::external_body]
-pub proof fn lemma_next_power_of_two_ge_pow2(n: nat)
-    ensures
-        next_power_of_two_spec(n as u64) >= n,
-{
+#[verifier::inline]
+/// Returns the next power of two greater than or equal to `n`.
+pub open spec fn next_power_of_two_correct(n: nat, res: nat) -> bool {
+    exists|e: nat|
+        if n == #[trigger] pow(2, e) {
+            res == n
+        } else {
+            res == pow(2, e + 1) && pow(2, e) < n < res
+        }
 }
 
 pub assume_specification[ u64::ilog2 ](n: u64) -> (result: u32)
@@ -55,9 +44,8 @@ pub assume_specification[ u64::ilog2 ](n: u64) -> (result: u32)
 
 pub assume_specification[ u64::next_power_of_two ](n: u64) -> (result: u64)
     ensures
-        result > 0,
-        is_power_of_two_spec(result),
-        result == next_power_of_two_spec(n) as u64,
+        result == next_power_of_two_spec(n as nat),
+        next_power_of_two_correct(n as nat, result as nat),
 ;
 
 pub assume_specification[ u64::pow ](n: u64, exp: u32) -> (result: u64)

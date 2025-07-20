@@ -20,7 +20,7 @@ pub open spec fn valid_heap_param(heap_base: u64, heap_size: u64, order: u64) ->
     &&& min_block_size >= core::mem::size_of::<Node<()>>() as u64
     &&& heap_size % HEAP_ALIGNMENT == 0
     &&& is_power_of_two(heap_size)
-    &&& heap_size < pow(2, order as nat) as u64
+    &&& heap_size >= pow(2, order as nat) as u64
 }
 
 // 4 KiB
@@ -158,10 +158,6 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
     }
 
     pub closed spec fn heap_size_valid(&self) -> bool {
-        &&& (self.heap_size as nat) < (pow(
-            2,
-            ORDER as nat,
-        ) as nat)
         // The heap size must be a multiple of the minimum block size.
         &&& self.heap_size % self.min_block_size
             == 0
@@ -170,6 +166,7 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
             {
                 &&& #[trigger] pow(2, n as nat) == self.heap_size as nat
                 &&& self.min_block_size as nat == pow(2, (n - ORDER + 1) as nat)
+                &&& n >= ORDER - 1
             }
             // The heap must be aligned to page size.
         &&& self.heap_size % HEAP_ALIGNMENT
@@ -304,7 +301,7 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         };
         let new_size = vstd::math::max(new_size as int, self.min_block_size as int) as u64;
 
-        next_power_of_two_spec(new_size)
+        next_power_of_two_spec(new_size as nat) as u64
     }
 
     pub closed spec fn valid_size_and_align(&self, size: u64, align: u64) -> bool {
@@ -318,9 +315,12 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
     }
 
     fn allocation_size(&self, mut size: u64, align: u64) -> (s: u64)
+        requires
+            self.valid_size_and_align(size, align),
         ensures
-            s == self.allocation_size_spec(size, align) > 0,
-            s >= self.min_block_size,
+            s == self.allocation_size_spec(size, align),
+            is_power_of_two_spec(s as nat),
+            self.min_block_size <= s <= self.heap_size,
     {
         if align > size {
             size = align;
@@ -331,13 +331,7 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
             size
         };
 
-        let r = size.next_power_of_two();
-
-        proof {
-            lemma_next_power_of_two_ge_pow2(size as nat);
-        }
-
-        r
+        size.next_power_of_two()
     }
 
     /// The "order" of an allocation is how many times we need to double
@@ -348,6 +342,8 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         requires
             self.valid_size_and_align(size, align),
             self.wf(),
+        ensures
+            0 <= r < ORDER as u64,
     {
         let size = self.allocation_size(size, align);
         // we now have size >= min_block_size.
@@ -355,7 +351,42 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         let min_block_size_log2 = self.min_block_size.ilog2();
 
         proof {
-            lemma_log_is_ordered(2, self.min_block_size as int, size as int);
+            // Recover the exponents for the heap and the size to better
+            // assist us in the log reasnoning.
+            let exp_heap = choose|exp_heap: nat| #[trigger]
+                pow(2, exp_heap) == self.heap_size as nat && self.min_block_size as nat == pow(
+                    2,
+                    (exp_heap - ORDER + 1) as nat,
+                ) && exp_heap >= ORDER - 1;
+            let exp_size = choose|exp_size: nat| #[trigger] pow(2, exp_size) == size;
+
+            assert(min_block_size_log2 as nat == exp_heap - ORDER + 1) by {
+                lemma_log_pow(2, (exp_heap - ORDER + 1) as nat);
+            }
+            assert(exp_size == res) by {
+                lemma_log_pow(2, exp_size as nat);
+            }
+
+            // now we need to show that
+            // 0 <= exp_size - (exp_heap - ORDER + 1) < ORDER
+            //      1. left side:
+            assert(exp_size >= exp_heap - ORDER + 1) by {
+                // note that s.0 == size >= self.min_block_size
+                lemma_log_is_ordered(2, self.min_block_size as int, size as int);
+                // Then we cancel the pow in log.
+                lemma_log_pow(2, (exp_heap - ORDER + 1) as nat);
+                lemma_log_pow(2, exp_size as nat);
+            }
+            //      2. right side: exp_size < exp_heap + 1 <= exp_sie <= exp_heap.
+            assert(exp_size - (exp_heap - ORDER + 1) < ORDER) by {
+                // first note that
+                assert(size <= self.heap_size);
+                // then we apply the log lemma.
+                lemma_log_is_ordered(2, size as int, self.heap_size as int);
+                // then we cancel both side.
+                lemma_log_pow(2, exp_size as nat);
+                lemma_log_pow(2, exp_heap as nat);
+            }
         }
 
         res as u64 - min_block_size_log2 as u64
@@ -364,7 +395,7 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
     /// Allocates a block of memory from the heap.
     ///
     /// TODO: The return type should be a pointer and its permission??
-    #[verifier::external_body]
+    // #[verifier::external_body]
     pub fn allocate(&mut self, size: u64, align: u64) -> (pt: u64)
         requires
             old(self).wf(),
@@ -377,29 +408,26 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         // Get the order we will need.
         let order_needed = self.allocation_order(size, align) as usize;
 
+        let mut order = order_needed;
+        let len = self.free_list.len();
         // Start with the smallest acceptable block size, and search
         // upwards until we reach blocks the size of the entire heap.
-        for order in order_needed..self.free_list.len()
+        while order < len
             invariant
                 self.wf(),
+                order <= len,
+                order_needed <= order,
+                len == self.free_list@.len(),
+            decreases len - order,
         {
             // Do we have a block of this size? Check head.
-            if self.free_list.index(order).head.is_none() {
-                assert(self.free_list.index(order).is_empty());
-
-                continue ;
+            if !self.free_list.index(order).head.is_none() {
+                assert(!self.free_list@.index(order as int).is_empty());
+                // Let's pop out the first block.
             }
-            // Let's pop out the first block.
+            // todo!()
 
-            let front = self.free_list.update_in_place(
-                order,
-                |list|
-                    {
-                        list.pop_front_no_alloc();
-                    },
-            );
-
-            todo!()
+            order += 1;
         }
 
         1
