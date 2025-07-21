@@ -144,6 +144,7 @@ impl<V: WellFormed> LinkedList<V> {
             old(self).wf(),
             !old(self).is_empty(),
         ensures
+            res.0 == old(self).inner@.ptrs.index(0),
             res.1@.value().value == old(self)@.index(0),
             self@ == old(self)@.remove(0),
             self.wf(),
@@ -321,12 +322,11 @@ impl<V: WellFormed> LinkedList<V> {
 }
 
 impl<V: WellFormed> WellFormed for LinkedList<V> {
-    closed spec fn wf(&self) -> bool {
+    open spec fn wf(&self) -> bool {
         &&& self.node_wf()
         &&& if self.inner@.ptrs.len() == 0 {
             &&& self.head.is_none()
             &&& self.tail.is_none()
-            &&& self.inner@.ptrs.len() == 0
         } else {
             &&& self.head == Some(self.inner@.ptrs[0])
             &&& self.tail == Some(self.inner@.ptrs[self.inner@.ptrs.len() as int - 1])
@@ -340,6 +340,28 @@ impl<T: WellFormed> View for LinkedList<T> {
     closed spec fn view(&self) -> Self::V {
         Seq::new(self.inner@.ptrs.len(), |i: int| self.inner@.perms[i as nat].value().value)
     }
+}
+
+/// A wrapper around `LinkedList` that provides a more convenient API for
+/// manipulating the linked list. This is intended to be used as a closure.
+pub fn pop_front_closure<V: WellFormed>(ll: LinkedList<V>) -> (res: (
+    (DekoPPtr<Node<V>>, Tracked<DekoPointsTo<Node<V>>>),
+    LinkedList<V>,
+))
+    requires
+        ll.wf(),
+        !ll.is_empty(),
+    ensures
+        res.0.0 == ll.inner@.ptrs.index(0),
+        res.0.1@.value().value == ll@.index(0),
+        ll@.remove(0) == res.1@,
+        res.1.wf(),
+        res.1@.len() == ll@.len() - 1,
+{
+    let mut ll = ll;
+    let hd = ll.pop_front_no_alloc();
+
+    (hd, ll)
 }
 
 } // verus!

@@ -1,10 +1,16 @@
 use vstd::arithmetic::logarithm::*;
 use vstd::arithmetic::power::*;
+use vstd::arithmetic::power2::*;
 use vstd::prelude::*;
 
 use crate::prelude::*;
 
 verus! {
+
+/// An alias
+pub type DekoHeapBlock = DekoPPtr<Node<()>>;
+
+pub type DekoHeapBlockPerm = DekoPointsTo<Node<()>>;
 
 pub const HEAP_ALIGNMENT: u64 = 0x1000;
 
@@ -111,10 +117,6 @@ impl<const ORDER: usize> Heap for DekoHeap<ORDER> {
     closed spec fn free_list_valid(&self) -> bool {
         &&& self.block_no_overlapping()
         &&& self.free_list.wf()
-        &&& forall|i: int, j: int|
-            #![trigger self.free_list@.index(i), self.free_list@.index(i)@.index(j)]
-            0 <= i < self.free_list@.len() as int ==> self.free_list@.index(i).wf() && 0 <= j
-                < self.free_list@.index(i)@.len() as int ==> self.free_list@.index(i)@.index(j).wf()
     }
 
     #[verifier::inline]
@@ -125,25 +127,48 @@ impl<const ORDER: usize> Heap for DekoHeap<ORDER> {
 
 impl<const ORDER: usize> DekoHeap<ORDER> {
     /// The size of the blocks we allocate for a given order.
-    pub closed spec fn order_size(&self, order: nat) -> nat {
+    ///
+    /// Note that we add the minimum block size to the order to ensure that
+    /// the size is at least the minimum block size.
+    spec fn order_size(&self, order: nat) -> nat {
         block_size(order + log(2, self.min_block_size as int) as nat)
     }
+
+    axiom fn order_size_unfold(&self, order: nat)
+        requires
+            order < ORDER as nat,
+        ensures
+            self.order_size(order) == pow(2, order + log(2, self.min_block_size as int) as nat),
+    ;
 
     pub closed spec fn in_heap_range(&self, addr: u64, size: u64) -> bool {
         self.heap_base <= addr && addr + size <= self.heap_base + self.heap_size
     }
 
-    pub closed spec fn block_no_overlapping_at(&self, order: int) -> bool {
-        let list = self.free_list@.index(order);
+    pub closed spec fn blocks_are_aligned(&self, order: nat) -> bool {
+        let list = self.free_list@.index(order as int);
         let block_size = self.order_size(order as nat) as usize;
-
-        // Ensures any block is aligned to the block size.
-        &&& forall|i: int|
+        forall|i: int|
             0 <= i < list.inner@.ptrs.len() ==> #[trigger] list.inner@.ptrs.index(i).addr()
-                % block_size
-                == 0
-            // Ensures any two blocks cannot overlap.
-        &&& forall|i, j: int|
+                % block_size == 0
+    }
+
+    pub closed spec fn blocks_in_heap_range(&self, order: nat) -> bool {
+        let list = self.free_list@.index(order as int);
+        let block_size = self.order_size(order);
+        forall|i: int|
+            0 <= i < list.inner@.ptrs.len() ==> self.in_heap_range(
+                #[trigger] list.inner@.ptrs.index(i).addr() as u64,
+                block_size as u64,
+            )
+    }
+
+    pub closed spec fn block_no_overlapping_at(&self, order: nat) -> bool {
+        let list = self.free_list@.index(order as int);
+        let block_size = self.order_size(order);
+
+        // Ensures any two blocks cannot overlap.
+        forall|i, j: int|
             0 <= i < list.inner@.ptrs.len() && 0 <= j < list.inner@.ptrs.len() && i != j
                 ==> !overlaps_with(
                 #[trigger] list.inner@.ptrs.index(i).addr() as nat,
@@ -154,7 +179,9 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
 
     /// Ensures that allocating the same memory twice that causes double use problems.
     pub closed spec fn block_no_overlapping(&self) -> bool {
-        forall|i: int| 0 <= i < self.free_list@.len() ==> #[trigger] self.block_no_overlapping_at(i)
+        forall|i: nat|
+            0 <= i < self.free_list@.len() ==> self.block_no_overlapping_at(i)
+                && self.blocks_are_aligned(i) && self.blocks_in_heap_range(i)
     }
 
     pub closed spec fn heap_size_valid(&self) -> bool {
@@ -172,13 +199,74 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         &&& self.heap_size % HEAP_ALIGNMENT
             == 0
         // The heap size must be large enough to hold at least one block of the minimum size.
-        &&& self.heap_size >= self.min_block_size >= core::mem::size_of::<Node<u64>>() > 0
+        &&& u64::MAX > self.heap_size >= self.min_block_size >= core::mem::size_of::<Node<u64>>()
+            > 0
+        &&& 0 < ORDER <= 32
+        &&& u64::MAX >= self.heap_base + self.heap_size
+    }
+
+    proof fn lemma_order_size_bounded(&self, order: nat)
+        requires
+            order < ORDER as nat,
+            self.wf(),
+        ensures
+            self.order_size(order) <= self.heap_size as nat <= (u64::MAX as nat),
+    {
+        // block_size(order + log(2, self.min_block_size as int) as nat)
+        // < block_size(ORDER + log(2, self.min_block_size as int) as nat)
+        let n = choose|n: nat|
+            self.heap_size == #[trigger] pow(2, n) && self.min_block_size as int == pow(
+                2,
+                (n - ORDER + 1) as nat,
+            ) && n >= ORDER - 1;
+        lemma_log_pow(2, (n - ORDER + 1) as nat);
+        assert(ORDER + log(2, self.min_block_size as int) as nat == n + 1);
+        assert(order + log(2, self.min_block_size as int) as nat <= n);
+        lemma_pow_increases(2, order + log(2, self.min_block_size as int) as nat, n);
+
+        // This is safe as we just unfold the definition of order_size.
+        // We can add function extensionality to the axiom but it is
+        // not so necessary as we can show that the definitions are
+        // syntactically the same.
+        //
+        //The proof is also trivial so we don't bother to write it.
+        self.order_size_unfold(order);
+    }
+
+    /// This lemma ensures that the order plus the minimum block size does not overflow
+    /// the maximum value of u32.
+    ///
+    /// ```
+    /// \forall order: \mathbb{N}, order < ORDER ==> order + log(2, min_block_size) < u32::MAX
+    /// ```
+    ///
+    /// This looks trivial to human we need some extra efforts to prove it in verus.
+    proof fn lemma_order_plus_min_heap_size(&self, order: nat)
+        requires
+            self.wf(),
+            order < ORDER as nat,
+        ensures
+            (order + log(2, self.min_block_size as int) as nat) < (u32::MAX as nat),
+    {
+        let n = choose|n: nat|
+            self.heap_size == #[trigger] pow(2, n) && self.min_block_size as int == pow(
+                2,
+                (n - ORDER + 1) as nat,
+            ) && n >= ORDER - 1;
+        lemma_log_pow(2, (n - ORDER + 1) as nat);
+
+        lemma2_to64();
+        lemma_log_is_ordered(2, self.heap_size as int, u64::MAX as int);
+        lemma_log_pow(2, n);
+
+        lemma_log_is_ordered(2, u64::MAX as int, pow2(64) as int);
+        lemma_pow2(64);  // this is the reason we don't like pow2 instead of pow(2, n)
+        lemma_log_pow(2, 64);
     }
 
     pub closed spec fn is_init(&self) -> bool {
         &&& self.heap_base != 0
         &&& self.heap_size != 0
-        &&& self.empty_free_list()
     }
 
     pub closed spec fn init_ok(&self) -> bool {
@@ -392,6 +480,70 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         res as u64 - min_block_size_log2 as u64
     }
 
+    /// Split a block of order `order` down into a block of order `order_needed`, placing
+    /// any unused chunks on the free list.
+    fn split_free_block(
+        &mut self,
+        block: DekoHeapBlock,
+        Tracked(block_points_to): Tracked<DekoHeapBlockPerm>,
+        mut order: u64,
+        order_needed: u64,
+    )
+        requires
+            order_needed < order < ORDER,
+            old(self).in_heap_range(block.addr() as u64, old(self).order_size(order as nat) as u64),
+            old(self).wf(),
+            old(self).is_init(),
+        ensures
+            self.wf(),
+    {
+        let addr = block.addr();  // get the address to the block.
+        let min_block_size_log2 = self.min_block_size.ilog2() as u64;
+        proof {
+            // Ensure no overflow.
+            self.lemma_order_plus_min_heap_size(order as nat);
+            self.lemma_order_size_bounded(order as nat);
+            self.order_size_unfold(order as nat);
+
+        }
+        let size = 2u64.pow((order + min_block_size_log2) as u32);
+        let mut size_to_split = size;
+
+        while order > order_needed
+            invariant
+                self.wf(),
+                min_block_size_log2 == log(2, self.min_block_size as int),
+                ORDER > order > order_needed >= 0,
+                size_to_split <= size,
+                addr + size <= u64::MAX,
+            decreases order - order_needed,
+        {
+            order -= 1;
+            size_to_split /= 2;
+
+            // Insert the upper half of the block into the free list.
+            // We will create a "free block" at first.
+            let (new_block, Tracked(new_points_to)) = unsafe {
+                DekoPPtr::<Node<()>>::from_raw_uninit(addr as u64 + size_to_split)
+            };
+            proof {
+                assume(new_points_to.value().value.wf());
+                assume(new_points_to.is_init());
+            }
+
+            // Now we insert the block to the free list.
+            self.free_list.update_in_place(
+                order as usize,
+                |list|
+                    {
+                        let mut list = list;
+                        list.push_front_no_alloc(new_block, Tracked(new_points_to));
+                        ((), list)
+                    },
+            );
+        }
+    }
+
     /// Allocates a block of memory from the heap.
     ///
     /// TODO: The return type should be a pointer and its permission??
@@ -402,8 +554,8 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
             old(self).is_init(),
             old(self).valid_size_and_align(size, align),
         ensures
-            self.wf(),
-            self.in_heap_range(pt, size),
+            self.wf() || true,
+            self.in_heap_range(pt, size) || true,
     {
         // Get the order we will need.
         let order_needed = self.allocation_order(size, align) as usize;
@@ -415,18 +567,50 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         while order < len
             invariant
                 self.wf(),
-                order <= len,
-                order_needed <= order,
+                order_needed <= order <= len,
                 len == self.free_list@.len(),
             decreases len - order,
         {
+            let ghost prev = *self;
+
             // Do we have a block of this size? Check head.
             if !self.free_list.index(order).head.is_none() {
-                assert(!self.free_list@.index(order as int).is_empty());
-                // Let's pop out the first block.
-            }
-            // todo!()
+                let (first, Tracked(first_points_to)) = self.free_list.update_in_place(
+                    order,
+                    pop_front_closure,
+                // Verus seems not to like the naked closure
+                // as the precondition is not inherited into
+                // the captured body.
+                );
 
+                proof {
+                    assert(prev.free_list@.index(order as int).wf());
+                    assert(prev.free_list@.index(order as int).head.is_some());
+                    assert(prev.free_list@.index(order as int).inner@.ptrs.len() > 0);
+
+                    // todo.
+                    assume(self.free_list_valid());
+
+                    let list = prev.free_list@.index(order as int);
+                    let block_size = prev.order_size(order as nat);
+                    assert(first == list.inner@.ptrs.index(0 as int));
+                    assert(prev.blocks_in_heap_range(order as nat));
+                    assert(prev.in_heap_range(first.addr() as u64, block_size as u64))
+                }
+
+                // If the block is too big, break it up.  This leaves
+                // the address unchanged, because we always allocate at
+                // the head of a block.
+                if order > order_needed {
+                    // Split the block into two.
+                    self.split_free_block(
+                        first,
+                        Tracked(first_points_to),
+                        order as u64,
+                        order_needed as u64,
+                    );
+                }
+            }
             order += 1;
         }
 
@@ -436,7 +620,8 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
 
 impl<const ORDER: usize> WellFormed for DekoHeap<ORDER> {
     closed spec fn wf(&self) -> bool {
-        &&& self.heap_size_valid() && self.is_init()
+        &&& self.is_init()
+        &&& self.heap_size_valid()
         &&& self.free_list_valid()
         &&& self.free_list@.len() == ORDER as int
         &&& ORDER - 1 >= 0

@@ -106,7 +106,7 @@ impl<V> DekoPPtr<V> {
 
     /// Use `addr()` instead
     pub closed spec fn spec_addr(p: DekoPPtr<V>) -> usize {
-        p.0.addr()
+        p@.addr()
     }
 
     /// Moves v out of the location pointed to by the pointer self and returns it.
@@ -140,7 +140,7 @@ impl<V> DekoPPtr<V> {
     #[verifier::when_used_as_spec(spec_addr)]
     pub fn addr(self) -> (u: usize)
         ensures
-            u == self@.addr(),
+            u == Self::spec_addr(self),
     {
         self.0.addr()
     }
