@@ -70,6 +70,11 @@ impl<T: WellFormed, const N: usize> Array<T, N> {
             self.wf(),
             f.ensures((old(self)@.index(i as int),), (t, self@.index(i as int))),
             self@.len() == old(self)@.len(),
+            // others remain unchanged.
+            forall|j: int|
+                0 <= j < old(self)@.len() as int && j != i as int ==> self@.index(j) == old(
+                    self,
+                )@.index(j),
     {
         let bad = unsafe { core::mem::MaybeUninit::<T>::uninit().assume_init() };
         let v = core::mem::replace(&mut self.0[i], bad);

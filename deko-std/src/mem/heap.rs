@@ -117,6 +117,8 @@ impl<const ORDER: usize> Heap for DekoHeap<ORDER> {
     closed spec fn free_list_valid(&self) -> bool {
         &&& self.block_no_overlapping()
         &&& self.free_list.wf()
+        &&& forall|i: int|
+            0 <= i < self.free_list@.len() ==> #[trigger] self.free_list@.index(i).wf()
     }
 
     #[verifier::inline]
@@ -134,6 +136,25 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         block_size(order + log(2, self.min_block_size as int) as nat)
     }
 
+    /// This `list_extensionality_*`-family function ensures that if a and b
+    /// shares the same parameters then for any free list, if a.prop(foo)
+    /// holds then b.prop(foo) also holds.
+    // axiom fn list_extensionality_blocks_no_overlapping_at(a: &Self, b: &Self, order: nat)
+    //     requires
+    //         a.wf(),
+    //         a.is_init(),
+    //         a.heap_size == b.heap_size,
+    //         a.heap_base == b.heap_base,
+    //         a.min_block_size == b.min_block_size,
+    //         0 <= order < a.free_list@.len(),
+    //         a.free_list@.index(order as int).blocks_no_overlapping_at(order) ==> ensures,
+    // ;
+    /// This axiom unfolds the definition of `order_size` for a given order.
+    ///
+    /// In fact proving this requires computation but by syntactical structures
+    /// we can easily conclude that they must be the same definition while Verus
+    /// does not automatically see this. Too improve proof performance we add
+    /// this as an axiom for later usage.
     axiom fn order_size_unfold(&self, order: nat)
         requires
             order < ORDER as nat,
@@ -141,21 +162,39 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
             self.order_size(order) == pow(2, order + log(2, self.min_block_size as int) as nat),
     ;
 
+    axiom fn list_extensionality(a: &Self, b: &Self, order: nat, list: &LinkedList<()>)
+        requires
+            a.wf(),
+            a.is_init(),
+            a.heap_size == b.heap_size,
+            a.heap_base == b.heap_base,
+            a.min_block_size == b.min_block_size,
+            a.free_list@.len() == b.free_list@.len(),
+            0 <= order < a.free_list@.len(),
+        ensures
+            a.blocks_no_overlapping_at(list, a.order_size(order)) && a.blocks_are_aligned(
+                list,
+                a.order_size(order),
+            ) && a.blocks_in_heap_range(list, a.order_size(order)) ==> b.blocks_no_overlapping_at(
+                list,
+                a.order_size(order),
+            ) && b.blocks_are_aligned(list, a.order_size(order)) && b.blocks_in_heap_range(
+                list,
+                a.order_size(order),
+            ),
+    ;
+
     pub closed spec fn in_heap_range(&self, addr: u64, size: u64) -> bool {
         self.heap_base <= addr && addr + size <= self.heap_base + self.heap_size
     }
 
-    pub closed spec fn blocks_are_aligned(&self, order: nat) -> bool {
-        let list = self.free_list@.index(order as int);
-        let block_size = self.order_size(order as nat) as usize;
+    pub closed spec fn blocks_are_aligned(&self, list: &LinkedList<()>, block_size: nat) -> bool {
         forall|i: int|
-            0 <= i < list.inner@.ptrs.len() ==> #[trigger] list.inner@.ptrs.index(i).addr()
-                % block_size == 0
+            0 <= i < list.inner@.ptrs.len() ==> #[trigger] list.inner@.ptrs.index(i).addr() % (
+            block_size as usize) == 0
     }
 
-    pub closed spec fn blocks_in_heap_range(&self, order: nat) -> bool {
-        let list = self.free_list@.index(order as int);
-        let block_size = self.order_size(order);
+    pub closed spec fn blocks_in_heap_range(&self, list: &LinkedList<()>, block_size: nat) -> bool {
         forall|i: int|
             0 <= i < list.inner@.ptrs.len() ==> self.in_heap_range(
                 #[trigger] list.inner@.ptrs.index(i).addr() as u64,
@@ -163,10 +202,12 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
             )
     }
 
-    pub closed spec fn block_no_overlapping_at(&self, order: nat) -> bool {
-        let list = self.free_list@.index(order as int);
-        let block_size = self.order_size(order);
-
+    /// Ensures that the blocks in the free list at a given order do not overlap.
+    pub closed spec fn blocks_no_overlapping_at(
+        &self,
+        list: &LinkedList<()>,
+        block_size: nat,
+    ) -> bool {
         // Ensures any two blocks cannot overlap.
         forall|i, j: int|
             0 <= i < list.inner@.ptrs.len() && 0 <= j < list.inner@.ptrs.len() && i != j
@@ -180,8 +221,13 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
     /// Ensures that allocating the same memory twice that causes double use problems.
     pub closed spec fn block_no_overlapping(&self) -> bool {
         forall|i: nat|
-            0 <= i < self.free_list@.len() ==> self.block_no_overlapping_at(i)
-                && self.blocks_are_aligned(i) && self.blocks_in_heap_range(i)
+            0 <= i < self.free_list@.len() ==> {
+                let list = #[trigger] self.free_list@.index(i as int);
+
+                &&& self.blocks_no_overlapping_at(&list, self.order_size(i as nat))
+                &&& self.blocks_are_aligned(&list, self.order_size(i as nat))
+                &&& self.blocks_in_heap_range(&list, self.order_size(i as nat))
+            }
     }
 
     pub closed spec fn heap_size_valid(&self) -> bool {
@@ -585,17 +631,6 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
 
                 proof {
                     assert(prev.free_list@.index(order as int).wf());
-                    assert(prev.free_list@.index(order as int).head.is_some());
-                    assert(prev.free_list@.index(order as int).inner@.ptrs.len() > 0);
-
-                    // todo.
-                    assume(self.free_list_valid());
-
-                    let list = prev.free_list@.index(order as int);
-                    let block_size = prev.order_size(order as nat);
-                    assert(first == list.inner@.ptrs.index(0 as int));
-                    assert(prev.blocks_in_heap_range(order as nat));
-                    assert(prev.in_heap_range(first.addr() as u64, block_size as u64))
                 }
 
                 // If the block is too big, break it up.  This leaves

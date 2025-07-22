@@ -9,6 +9,7 @@ use crate::prelude::*;
 verus! {
 
 #[verifier::reject_recursive_types(V)]
+#[verifier::ext_equal]
 pub struct Node<V: WellFormed> {
     /// The previous node in the linked list.
     pub prev: Option<DekoPPtr<Node<V>>>,
@@ -27,12 +28,14 @@ impl<T: WellFormed> View for Node<T> {
 }
 
 #[verifier::reject_recursive_types(V)]
+#[verifier::ext_equal]
 pub tracked struct LinkedListInner<V: WellFormed> {
     pub ptrs: Seq<DekoPPtr<Node<V>>>,
     pub perms: Map<nat, DekoPointsTo<Node<V>>>,
 }
 
 #[verifier::reject_recursive_types(V)]
+#[verifier::ext_equal]
 pub struct LinkedList<V: WellFormed> {
     pub head: Option<DekoPPtr<Node<V>>>,
     pub tail: Option<DekoPPtr<Node<V>>>,
@@ -120,6 +123,7 @@ impl<V: WellFormed> LinkedList<V> {
         ensures
             self.wf(),
             self@ =~= old(self)@.push(perm@.value().value),
+            self.inner@.ptrs == old(self).inner@.ptrs.push(v),
     {
         self.tail = Some(v);
         self.head = Some(v);
@@ -147,6 +151,7 @@ impl<V: WellFormed> LinkedList<V> {
             res.0 == old(self).inner@.ptrs.index(0),
             res.1@.value().value == old(self)@.index(0),
             self@ == old(self)@.remove(0),
+            self.inner@.ptrs == old(self).inner@.ptrs.remove(0),
             self.wf(),
     {
         proof {
@@ -245,6 +250,7 @@ impl<V: WellFormed> LinkedList<V> {
         ensures
             self.wf(),
             self@ == seq![perm@.value().value].add(old(self)@),
+            self.inner@.ptrs == seq![v].add(old(self).inner@.ptrs),
     {
         let Tracked(mut points_to) = perm;
         let val = v.take(Tracked(&mut points_to));
@@ -322,6 +328,8 @@ impl<V: WellFormed> LinkedList<V> {
 }
 
 impl<V: WellFormed> WellFormed for LinkedList<V> {
+    /// TODO: Add an axiom for this self@.len() == self.inner@.ptrs.len().
+    /// If this is missing the trigger cannot be automatically matches by Verus
     open spec fn wf(&self) -> bool {
         &&& self.node_wf()
         &&& if self.inner@.ptrs.len() == 0 {
@@ -342,6 +350,15 @@ impl<T: WellFormed> View for LinkedList<T> {
     }
 }
 
+impl<T: WellFormed> DeepView for LinkedList<T> {
+    type V = Seq<DekoPPtr<Node<T>>>;
+
+    /// This allows us to view the linked list as a sequence of pointers to nodes.
+    open spec fn deep_view(&self) -> Self::V {
+        self.inner@.ptrs
+    }
+}
+
 /// A wrapper around `LinkedList` that provides a more convenient API for
 /// manipulating the linked list. This is intended to be used as a closure.
 pub fn pop_front_closure<V: WellFormed>(ll: LinkedList<V>) -> (res: (
@@ -357,6 +374,7 @@ pub fn pop_front_closure<V: WellFormed>(ll: LinkedList<V>) -> (res: (
         ll@.remove(0) == res.1@,
         res.1.wf(),
         res.1@.len() == ll@.len() - 1,
+        res.1.inner@.ptrs == ll.inner@.ptrs.remove(0),
 {
     let mut ll = ll;
     let hd = ll.pop_front_no_alloc();
