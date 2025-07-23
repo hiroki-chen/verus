@@ -136,56 +136,44 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         block_size(order + log(2, self.min_block_size as int) as nat)
     }
 
-    /// This `list_extensionality_*`-family function ensures that if a and b
-    /// shares the same parameters then for any free list, if a.prop(foo)
-    /// holds then b.prop(foo) also holds.
-    // axiom fn list_extensionality_blocks_no_overlapping_at(a: &Self, b: &Self, order: nat)
+    /// A helper axiom to unfold the order_size function.
+    /// 
+    /// `compute` does not automatically prove this because of data type
+    /// converion confusion but by definition of the `order_size` function
+    /// we can easily do this. Proving is also feasible but we don't bother
+    /// to do so.
+    axiom fn order_size_unfold(&self, order: nat)
+        requires
+            0 <= order < ORDER as nat,
+        ensures
+            self.order_size(order) == pow(2, order + log(2, self.min_block_size as int) as nat),
+    ;
+
+    // axiom fn list_extensionality(a: &Self, b: &Self, order: nat, list: &LinkedList<()>)
     //     requires
     //         a.wf(),
     //         a.is_init(),
     //         a.heap_size == b.heap_size,
     //         a.heap_base == b.heap_base,
     //         a.min_block_size == b.min_block_size,
+    //         a.free_list@.len() == b.free_list@.len(),
     //         0 <= order < a.free_list@.len(),
-    //         a.free_list@.index(order as int).blocks_no_overlapping_at(order) ==> ensures,
+    //     ensures
+    //         a.blocks_no_overlapping_at(list, a.order_size(order)) && a.blocks_are_aligned(
+    //             list,
+    //             a.order_size(order),
+    //         ) && a.blocks_in_heap_range(list, a.order_size(order)) ==> b.blocks_no_overlapping_at(
+    //             list,
+    //             a.order_size(order),
+    //         ) && b.blocks_are_aligned(list, a.order_size(order)) && b.blocks_in_heap_range(
+    //             list,
+    //             a.order_size(order),
+    //         ),
     // ;
-    /// This axiom unfolds the definition of `order_size` for a given order.
-    ///
-    /// In fact proving this requires computation but by syntactical structures
-    /// we can easily conclude that they must be the same definition while Verus
-    /// does not automatically see this. Too improve proof performance we add
-    /// this as an axiom for later usage.
-    axiom fn order_size_unfold(&self, order: nat)
-        requires
-            order < ORDER as nat,
-        ensures
-            self.order_size(order) == pow(2, order + log(2, self.min_block_size as int) as nat),
-    ;
 
-    axiom fn list_extensionality(a: &Self, b: &Self, order: nat, list: &LinkedList<()>)
-        requires
-            a.wf(),
-            a.is_init(),
-            a.heap_size == b.heap_size,
-            a.heap_base == b.heap_base,
-            a.min_block_size == b.min_block_size,
-            a.free_list@.len() == b.free_list@.len(),
-            0 <= order < a.free_list@.len(),
-        ensures
-            a.blocks_no_overlapping_at(list, a.order_size(order)) && a.blocks_are_aligned(
-                list,
-                a.order_size(order),
-            ) && a.blocks_in_heap_range(list, a.order_size(order)) ==> b.blocks_no_overlapping_at(
-                list,
-                a.order_size(order),
-            ) && b.blocks_are_aligned(list, a.order_size(order)) && b.blocks_in_heap_range(
-                list,
-                a.order_size(order),
-            ),
-    ;
-
-    pub closed spec fn in_heap_range(&self, addr: u64, size: u64) -> bool {
-        self.heap_base <= addr && addr + size <= self.heap_base + self.heap_size
+    pub closed spec fn in_heap_range(&self, addr: nat, size: nat) -> bool {
+        &&& self.heap_base as nat <= addr
+        &&& addr + size <= (self.heap_base + self.heap_size) as nat
     }
 
     pub closed spec fn blocks_are_aligned(&self, list: &LinkedList<()>, block_size: nat) -> bool {
@@ -197,8 +185,8 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
     pub closed spec fn blocks_in_heap_range(&self, list: &LinkedList<()>, block_size: nat) -> bool {
         forall|i: int|
             0 <= i < list.inner@.ptrs.len() ==> self.in_heap_range(
-                #[trigger] list.inner@.ptrs.index(i).addr() as u64,
-                block_size as u64,
+                #[trigger] list.inner@.ptrs.index(i).addr() as nat,
+                block_size,
             )
     }
 
@@ -216,6 +204,13 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
                 #[trigger] list.inner@.ptrs.index(j).addr() as nat,
                 block_size as nat,
             )
+    }
+
+    pub closed spec fn params_eq(&self, other: &Self) -> bool {
+        &&& self.heap_base == other.heap_base
+        &&& self.heap_size == other.heap_size
+        &&& self.min_block_size == other.min_block_size
+        &&& self.free_list@.len() == other.free_list@.len()
     }
 
     /// Ensures that allocating the same memory twice that causes double use problems.
@@ -277,6 +272,15 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         //
         //The proof is also trivial so we don't bother to write it.
         self.order_size_unfold(order);
+    }
+
+    #[verifier::external_body]
+    proof fn lemma_order_size_increases(&self, e1: nat, e2: nat)
+        requires
+            e1 <= e2 <= ORDER as nat,
+        ensures
+            self.order_size(e1) <= self.order_size(e2),
+    {
     }
 
     /// This lemma ensures that the order plus the minimum block size does not overflow
@@ -472,14 +476,15 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
     /// `min_block_size` in order to get a large enough block, as well as
     /// the index we use into `free_lists`.
     #[inline]
-    fn allocation_order(&self, size: u64, align: u64) -> (r: u64)
+    fn allocation_order(&self, old_size: u64, align: u64) -> (r: u64)
         requires
-            self.valid_size_and_align(size, align),
+            self.valid_size_and_align(old_size, align),
             self.wf(),
         ensures
             0 <= r < ORDER as u64,
+            self.order_size(r as nat) >= old_size,
     {
-        let size = self.allocation_size(size, align);
+        let size = self.allocation_size(old_size, align);
         // we now have size >= min_block_size.
         let res = size.ilog2();
         let min_block_size_log2 = self.min_block_size.ilog2();
@@ -521,6 +526,10 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
                 lemma_log_pow(2, exp_size as nat);
                 lemma_log_pow(2, exp_heap as nat);
             }
+
+            // todo: prove that:
+            assume(self.order_size((res as u64 - min_block_size_log2 as u64) as nat) as u64
+                >= old_size);
         }
 
         res as u64 - min_block_size_log2 as u64
@@ -537,11 +546,12 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
     )
         requires
             order_needed < order < ORDER,
-            old(self).in_heap_range(block.addr() as u64, old(self).order_size(order as nat) as u64),
+            old(self).in_heap_range(block.addr() as nat, old(self).order_size(order as nat)),
             old(self).wf(),
             old(self).is_init(),
         ensures
             self.wf(),
+            self.params_eq(&old(self)),
     {
         let addr = block.addr();  // get the address to the block.
         let min_block_size_log2 = self.min_block_size.ilog2() as u64;
@@ -592,7 +602,6 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
 
     /// Allocates a block of memory from the heap.
     ///
-    /// TODO: The return type should be a pointer and its permission??
     // #[verifier::external_body]
     pub fn allocate(&mut self, size: u64, align: u64) -> (pt: u64)
         requires
@@ -600,8 +609,9 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
             old(self).is_init(),
             old(self).valid_size_and_align(size, align),
         ensures
-            self.wf() || true,
-            self.in_heap_range(pt, size) || true,
+            self.wf(),
+            pt != 0 ==> self.in_heap_range(pt as nat, size as nat),
+            self.params_eq(&old(self)),
     {
         // Get the order we will need.
         let order_needed = self.allocation_order(size, align) as usize;
@@ -615,6 +625,8 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
                 self.wf(),
                 order_needed <= order <= len,
                 len == self.free_list@.len(),
+                self.params_eq(&old(self)),
+                self.order_size(order_needed as nat) >= size,
             decreases len - order,
         {
             let ghost prev = *self;
@@ -631,6 +643,7 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
 
                 proof {
                     assert(prev.free_list@.index(order as int).wf());
+                    self.lemma_order_size_increases(order_needed as nat, order as nat);
                 }
 
                 // If the block is too big, break it up.  This leaves
@@ -645,11 +658,16 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
                         order_needed as u64,
                     );
                 }
+
+                return first.addr() as u64;
             }
             order += 1;
         }
 
-        1
+        // If we reach here, we have not found a block of the requested size.
+        // Memory exhaustion is very hard to detect in static analysis so we
+        // just return 0 to indicate that we cannot allocate anything.
+        0
     }
 }
 

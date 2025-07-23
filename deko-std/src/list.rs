@@ -51,6 +51,15 @@ impl<V: WellFormed> LinkedList<V> {
         }
     }
 
+    pub broadcast proof fn lemma_length_is_ptr_len(&self)
+        requires
+            self.wf(),
+        ensures
+            self@.len() == #[trigger] self.inner@.ptrs.len(),
+    {
+        assert(self.inner@.ptrs.len() as nat == self@.len());
+    }
+
     pub open spec fn node_wf_at(&self, i: nat) -> bool {
         &&& self.inner@.perms[i].wf()
         &&& self.inner@.perms.dom().contains(i)
