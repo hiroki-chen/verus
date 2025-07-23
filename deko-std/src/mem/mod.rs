@@ -44,6 +44,11 @@
 //! Note that in the L2 VM's points of view, the Deko Mem is the only memory
 //! region that it can access and starts at 0x0.
 //!
+//!
+//! The buddy allocation algorithm is heavily referenced from:
+//!     https://github.com/DrChat/buddyalloc.git
+//!
+//! We thank the author(s) for their work and the license is MIT.
 #[cfg(feature = "alloc")]
 pub mod allocator;
 pub mod heap;

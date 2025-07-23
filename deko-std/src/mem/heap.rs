@@ -137,14 +137,12 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
     }
 
     /// A helper axiom to unfold the order_size function.
-    /// 
+    ///
     /// `compute` does not automatically prove this because of data type
     /// converion confusion but by definition of the `order_size` function
     /// we can easily do this. Proving is also feasible but we don't bother
     /// to do so.
     axiom fn order_size_unfold(&self, order: nat)
-        requires
-            0 <= order < ORDER as nat,
         ensures
             self.order_size(order) == pow(2, order + log(2, self.min_block_size as int) as nat),
     ;
@@ -170,7 +168,6 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
     //             a.order_size(order),
     //         ),
     // ;
-
     pub closed spec fn in_heap_range(&self, addr: nat, size: nat) -> bool {
         &&& self.heap_base as nat <= addr
         &&& addr + size <= (self.heap_base + self.heap_size) as nat
@@ -459,6 +456,7 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
             s == self.allocation_size_spec(size, align),
             is_power_of_two_spec(s as nat),
             self.min_block_size <= s <= self.heap_size,
+            s >= size,
     {
         if align > size {
             size = align;
@@ -485,7 +483,7 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
             self.order_size(r as nat) >= old_size,
     {
         let size = self.allocation_size(old_size, align);
-        // we now have size >= min_block_size.
+        // we now have size >= min_block_size && size >= old_size.
         let res = size.ilog2();
         let min_block_size_log2 = self.min_block_size.ilog2();
 
@@ -527,9 +525,9 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
                 lemma_log_pow(2, exp_heap as nat);
             }
 
-            // todo: prove that:
-            assume(self.order_size((res as u64 - min_block_size_log2 as u64) as nat) as u64
-                >= old_size);
+            assert(size >= old_size);
+            lemma_log_is_ordered(2, old_size as int, size as int);
+            self.order_size_unfold(res as nat);
         }
 
         res as u64 - min_block_size_log2 as u64
@@ -560,7 +558,6 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
             self.lemma_order_plus_min_heap_size(order as nat);
             self.lemma_order_size_bounded(order as nat);
             self.order_size_unfold(order as nat);
-
         }
         let size = 2u64.pow((order + min_block_size_log2) as u32);
         let mut size_to_split = size;
@@ -597,6 +594,69 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
                         ((), list)
                     },
             );
+        }
+    }
+
+    proof fn lemma_buddy_offset_in_bounds(&self, size: u64, relative_offset: u64, n: nat)
+        requires
+    // Assumption 1: heap_size is a power of two.
+            0 <= n < 64,
+            pow(2, n) == self.heap_size as nat,
+            // Assumption 2: The block size is less than the total heap size.
+            size < self.heap_size,
+            // Assumption 3: The block's offset is within the heap's boundaries.
+            relative_offset < self.heap_size,
+        ensures
+            (relative_offset ^ size) < self.heap_size,
+    {
+        let heap_size = self.heap_size;
+        assert((relative_offset ^ size) == (relative_offset | size) - (relative_offset & size))
+            by (bit_vector);
+        lemma_lt_is_power_of_two_bitor(heap_size, relative_offset, size, n as u64);
+    }
+
+    /// Given a `block` with the specified `order`, find the "buddy" block,
+    /// that is, the other half of the block we originally split it from,
+    /// and also the block we could potentially merge it with.
+    fn buddy(&self, order: u64, ptr: u64) -> (r: u64)
+        requires
+            self.wf(),
+            order < ORDER as u64,
+            ptr >= self.heap_base,
+        ensures
+            ptr + self.order_size(order as nat) >= self.heap_base + self.heap_size ==> r == 0,
+    {
+        proof {
+            self.lemma_order_plus_min_heap_size(order as nat);
+            self.lemma_order_size_bounded(order as nat);
+            self.order_size_unfold(order as nat);
+        }
+
+        let min_block_size_log2 = self.min_block_size.ilog2() as u64;
+        let size = 2u64.pow((order + min_block_size_log2) as u32) as u64;
+
+        if ptr >= u64::MAX - size || ptr + size >= self.heap_base + self.heap_size {
+            // No buddy at all.
+            0
+        } else {
+            // Fun: We can find our buddy by xoring the right bit in our
+            // offset from the base of the heap.
+            let relative_offset = ptr - self.heap_base;
+            let buddy_offset = relative_offset ^ size;
+
+            proof {
+                let n = choose|n: nat| pow(2, n) == self.heap_size;
+                lemma2_to64();
+                lemma_pow2(64);
+                lemma_log_is_ordered(2, u64::MAX as int, pow(2, 64));
+                lemma_log_is_ordered(2, self.heap_size as int, u64::MAX as int);
+                lemma_log_pow(2, n);
+                lemma_log_pow(2, 64);
+
+                self.lemma_buddy_offset_in_bounds(size, relative_offset, n);
+            }
+
+            self.heap_base + buddy_offset
         }
     }
 
@@ -658,7 +718,6 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
                         order_needed as u64,
                     );
                 }
-
                 return first.addr() as u64;
             }
             order += 1;
@@ -668,6 +727,42 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         // Memory exhaustion is very hard to detect in static analysis so we
         // just return 0 to indicate that we cannot allocate anything.
         0
+    }
+
+    /// Deallocate a block allocated using `allocate`.
+    pub fn deallocate(&mut self, ptr: u64, size: u64, align: u64)
+        requires
+            old(self).valid_size_and_align(size, align),
+            old(self).wf(),
+            old(self).is_init(),
+            old(self).in_heap_range(ptr as nat, size as nat),
+        ensures
+            self.wf(),
+            self.params_eq(&old(self)),
+    {
+        let initial_order = self.allocation_order(size, align);
+
+        // The fun part: When deallocating a block, we also want to check
+        // to see if its "buddy" is on the free list.  If the buddy block
+        // is also free, we merge them and continue walking up.
+        //
+        // `block` is the biggest merged block we have so far.
+        let mut order = initial_order;
+        let len = self.free_list.len() as _;
+        while order < len
+            invariant
+                len == self.free_list@.len(),
+                self.wf(),
+                order >= initial_order,
+                self.params_eq(&old(self)),
+                self.in_heap_range(ptr as nat, size as nat),
+                self.order_size(initial_order as nat) >= size,
+            decreases len - order,
+        {
+            let buddy = self.buddy(order, ptr);
+
+            order += 1;
+        }
     }
 }
 
