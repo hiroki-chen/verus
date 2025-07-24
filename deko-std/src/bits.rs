@@ -46,14 +46,18 @@ pub proof fn lemma_lt_is_power_of_two_bitor(p: u64, x: u64, y: u64, n: u64)
         // solver attempts to prove Q ==> P. Verus will also check (using its
         // normal solver) that Q holds from the prior proof context."
         assert((x | y) == 0) by (bit_vector)
-            requires x == 0 && y == 0;
+            requires
+                x == 0 && y == 0,
+        ;
     } else {
         lemma_u64_pow2_no_overflow(n as _);
         lemma_u64_shl_is_mul(1u64, n);
         lemma_pow2(n as nat);
 
         assert((x | y) < p) by (bit_vector)
-            requires p == (1u64 << n) && x < p && y < p
+            requires
+                p == (1u64 << n) && x < p && y < p,
+
     }
 }
 

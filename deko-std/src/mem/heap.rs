@@ -600,6 +600,7 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
     proof fn lemma_buddy_offset_in_bounds(&self, size: u64, relative_offset: u64, n: nat)
         requires
     // Assumption 1: heap_size is a power of two.
+
             0 <= n < 64,
             pow(2, n) == self.heap_size as nat,
             // Assumption 2: The block size is less than the total heap size.
@@ -661,8 +662,6 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
     }
 
     /// Allocates a block of memory from the heap.
-    ///
-    // #[verifier::external_body]
     pub fn allocate(&mut self, size: u64, align: u64) -> (pt: u64)
         requires
             old(self).wf(),
@@ -761,6 +760,24 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         {
             let buddy = self.buddy(order, ptr);
 
+            // We have found a valid buddy block to be merged with.
+            if buddy != 0 {
+                // Check if the buddy block is indeed free.
+                if let Some(idx) = self.free_list.index(order as usize).find_by_addr(ptr) {
+                    // We have a buddy that is free.
+                    // let (buddy_ptr, Tracked(buddy_points_to)) = self.free_list.update_in_place(
+                    //     order as usize,
+                    //     |list|
+                    //         {
+                    //             let mut list = list;
+                    //             let res = list.remove(idx);
+                    //             (res, list)
+                    //         },
+                    // );
+                } else {
+                    // We just insert the block into the free list.
+                }
+            }
             order += 1;
         }
     }

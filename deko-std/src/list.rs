@@ -40,6 +40,7 @@ pub struct LinkedList<V: WellFormed> {
     pub head: Option<DekoPPtr<Node<V>>>,
     pub tail: Option<DekoPPtr<Node<V>>>,
     pub inner: Tracked<LinkedListInner<V>>,
+    pub len: usize,
 }
 
 impl<V: WellFormed> LinkedList<V> {
@@ -116,7 +117,18 @@ impl<V: WellFormed> LinkedList<V> {
             inner: Tracked(
                 LinkedListInner { ptrs: Seq::tracked_empty(), perms: Map::tracked_empty() },
             ),
+            len: 0,
         }
+    }
+
+    #[inline(always)]
+    pub fn len(&self) -> (len: usize)
+        requires
+            self.wf(),
+        ensures
+            len == self@.len(),
+    {
+        self.len
     }
 
     fn push_empty(&mut self, v: DekoPPtr<Node<V>>, perm: Tracked<DekoPointsTo<Node<V>>>)
@@ -137,6 +149,7 @@ impl<V: WellFormed> LinkedList<V> {
         self.tail = Some(v);
         self.head = Some(v);
         let Tracked(perm) = perm;
+        self.len = self.len + 1;
 
         // Update ghost states.
         proof {
@@ -169,6 +182,7 @@ impl<V: WellFormed> LinkedList<V> {
             assert(self.node_wf_at(0));
         }
 
+        self.len = self.len - 1;
         let head = self.head.unwrap();
         let tracked head_points_to = self.inner.borrow_mut().perms.tracked_remove(0);
         let v = head.borrow(Tracked(&mut head_points_to));
@@ -244,6 +258,204 @@ impl<V: WellFormed> LinkedList<V> {
         (head, Tracked(head_points_to))
     }
 
+    /// Removes the element at the given index from the linked list.
+    ///
+    /// This is the slowest part of a primitive buddy allocator, because it runs in
+    /// O(log N) time where N is the number of blocks of a given size.
+    pub fn remove(&mut self, i: usize) -> (ret: (DekoPPtr<Node<V>>, Tracked<DekoPointsTo<Node<V>>>))
+        requires
+            old(self).wf(),
+            0 <= i < old(self).inner@.ptrs.len(),
+            !old(self).is_empty(),
+        ensures
+            ret.0 == old(self).inner@.ptrs.index(i as int),
+            ret.1@.value().value == old(self)@.index(i as int),
+            self@ =~= old(self)@.remove(i as int),
+            self.inner@.ptrs == old(self).inner@.ptrs.remove(i as int),
+            self.wf(),
+    {
+        // If we are removing the first element, we can use the pop_front_no_alloc method.
+        if i == 0 {
+            return self.pop_front_no_alloc();
+        }
+        let mut idx = 0;
+        let mut ptr = self.head;
+
+        while idx < i - 1
+            invariant
+                idx < i < self.inner@.ptrs.len(),
+                forall|j: nat| 0 <= j < self.inner@.ptrs.len() ==> #[trigger] self.node_wf_at(j),
+                ptr matches Some(p) && p == self.inner@.ptrs[idx as int],
+            decreases i - idx,
+        {
+            proof {
+                assert(self.node_wf_at(idx as nat));
+            }
+            // Get the current node.
+            let tracked perm = self.inner.borrow().perms.tracked_borrow(idx as nat);
+            let p = ptr.unwrap().borrow(Tracked(perm));
+
+            ptr = p.next;
+            idx += 1;
+        }
+
+        proof {
+            // Now we have ptr == self@[idx] as prev and ptr->next == self@[idx + 1] as this.
+            assert(self.wf());
+            assert(self.node_wf_at(idx as nat));
+            assert(self.node_wf_at((idx + 1) as nat));
+        }
+        let tracked prev_perm = self.inner.borrow().perms.tracked_borrow(idx as nat);
+        let tracked this_perm = self.inner.borrow().perms.tracked_borrow((idx + 1) as nat);
+
+        let prev_node = ptr.unwrap();
+        let prev_node_v = prev_node.borrow(Tracked(prev_perm));
+        let this_node = prev_node_v.next.unwrap();
+        let this_node_v = this_node.borrow(Tracked(this_perm));
+
+        match this_node_v.next {
+            // If we have next then we have to update the prev pointer.
+            Some(next_node) => {
+                proof {
+                    assert(self.wf());
+                    assert(self.node_wf_at((idx + 2) as nat));
+                }
+
+                let tracked mut prev_perm = self.inner.borrow_mut().perms.tracked_remove(
+                    idx as nat,
+                );
+                let tracked mut this_perm = self.inner.borrow_mut().perms.tracked_remove(
+                    (idx + 1) as nat,
+                );
+                let tracked mut next_perm = self.inner.borrow_mut().perms.tracked_remove(
+                    (idx + 2) as nat,
+                );
+
+                let mut prev_node_v = prev_node.take(Tracked(&mut prev_perm));
+                let mut next_node_v = next_node.take(Tracked(&mut next_perm));
+                prev_node_v.next = Some(next_node);
+                next_node_v.prev = Some(prev_node);
+
+                prev_node.write(Tracked(&mut prev_perm), prev_node_v);
+                next_node.write(Tracked(&mut next_perm), next_node_v);
+                self.len = self.len - 1;
+
+                // node -> prev    -> this     -> next -> node
+                //         ^idx        ^idx + 1   ^ idx + 2
+                // node -> prev    -> next     -> node
+                //        ^idx        ^idx + 2
+                proof {
+                    assert(idx + 1 == i);
+                    // Update the ghost states.
+                    self.inner.borrow_mut().perms.tracked_insert(idx as nat, prev_perm);
+                    self.inner.borrow_mut().perms.tracked_insert((idx + 2) as nat, next_perm);
+                    self.inner.borrow_mut().ptrs.tracked_remove((idx + 1) as int);
+
+                    assert forall|i: nat|
+                        (0 <= i <= idx) || (idx + 2 <= i < old(
+                            self,
+                        )@.len()) implies self.inner@.perms.dom().contains(i) by {
+                        assert(old(self).node_wf_at(i));
+                    };
+
+                    // Now we need to shift the key map
+                    // [    ] | [    ]
+                    //  keep   shift by 1
+                    let ghost mut keys_left = Map::new(
+                        |i: nat| 0 <= i <= idx as nat,
+                        |i: nat| i as nat,
+                    );
+                    let ghost keys_right = Map::new(
+                        |i: nat| idx + 1 <= i < old(self)@.len() - 1,
+                        |i: nat| (i + 1) as nat,
+                    );
+
+                    let ghost keys = keys_left.union_prefer_right(keys_right);
+                    self.inner.borrow_mut().perms.tracked_map_keys_in_place(keys);
+
+                    assert forall|i: nat|
+                        (0 <= i <= idx) implies self.node_wf_at(i) by {
+                        assert(old(self).node_wf_at(i));
+                    };
+                    assert forall|i: nat|
+                        (idx + 1 <= i < self@.len()) implies self.node_wf_at(i) by {
+                        assert(old(self).node_wf_at(i + 1));
+                    };
+                }
+
+                (this_node, Tracked(this_perm))
+            },
+            None => {
+                self.tail = Some(prev_node);
+                let tracked mut prev_perm = self.inner.borrow_mut().perms.tracked_remove(
+                    idx as nat,
+                );
+                let tracked mut this_perm = self.inner.borrow_mut().perms.tracked_remove(
+                    (idx + 1) as nat,
+                );
+
+                let mut prev_node_v = prev_node.take(Tracked(&mut prev_perm));
+                prev_node_v.next = None;
+                prev_node.write(Tracked(&mut prev_perm), prev_node_v);
+                self.len = self.len - 1;
+
+                proof {
+                    assert(prev_node == old(self).inner@.ptrs.index(idx as int));
+                    assert(idx + 1 == old(self)@.len() - 1);
+                    // Update the ghost states.
+                    self.inner.borrow_mut().perms.tracked_insert(idx as nat, prev_perm);
+                    self.inner.borrow_mut().ptrs.tracked_remove((idx + 1) as int);
+
+                    assert forall|i: nat|
+                        0 <= i < self.inner@.ptrs.len() implies #[trigger] self.node_wf_at(i) by {
+                        assert(old(self).node_wf_at(i as nat));
+                    }
+                }
+
+                (this_node, Tracked(this_perm))
+            },
+        }
+    }
+
+    /// Finds a block by its address in the linked list and returns its index if it exists.
+    pub fn find_by_addr(&self, addr: u64) -> (res: Option<usize>)
+        requires
+            self.wf(),
+        ensures
+            res matches Some(idx) ==> 0 <= idx < self.inner@.ptrs.len()
+                && self.inner@.ptrs[idx as int].addr() == addr as usize,
+    {
+        let mut ptr = self.head.as_ref();
+        let mut idx = 0;
+
+        loop
+            invariant
+                self.wf(),
+                idx < self.inner@.ptrs.len() ==> {
+                    &&& ptr matches Some(ptr)
+                    &&& ptr == self.inner@.ptrs[idx as int]
+                },
+            decreases self.inner@.ptrs.len() as usize - idx,
+        {
+            if ptr.is_none() || idx >= self.len {
+                return None;
+            }
+            let p = ptr.unwrap();
+            if p.addr() == addr as usize {
+                return Some(idx);
+            }
+            proof {
+                assert(self.node_wf_at(idx as nat));
+            }
+
+            let tracked perm = self.inner.borrow().perms.tracked_borrow(idx as nat);
+            let p = p.borrow(Tracked(perm));
+
+            idx += 1;
+            ptr = p.next.as_ref();
+        }
+    }
+
     /// Pushes to the front of the linked list without allocating any memory.
     pub fn push_front_no_alloc(
         &mut self,
@@ -253,6 +465,7 @@ impl<V: WellFormed> LinkedList<V> {
         requires
             old(self).wf(),
             perm@.wf(),
+            old(self).len < usize::MAX,
             perm@.value().value.wf(),
             v@ == perm@.pptr(),
             perm@.is_init(),
@@ -274,6 +487,7 @@ impl<V: WellFormed> LinkedList<V> {
                     assert(self.inner@.ptrs.len() > 0);
                     assert(self.node_wf_at(0));
                 }
+                self.len = self.len + 1;
 
                 // Now we update the node pointers.
                 v.write(
@@ -319,11 +533,11 @@ impl<V: WellFormed> LinkedList<V> {
                     assert(self.node_wf_at(0));
                     // Some additional proofs on wellformed.
                     assert(forall|i: nat|
-                        1 <= i && i <= old(self).inner@.ptrs.len() && old(self).node_wf_at(
+                        1 <= i <= old(self).inner@.ptrs.len() && old(self).node_wf_at(
                             (i - 1) as nat,
                         ) ==> #[trigger] self.node_wf_at(i));
                     assert forall|i: int|
-                        1 <= i && i <= self.inner@.ptrs.len() as int - 1 implies #[trigger] old(
+                        1 <= i <= self.inner@.ptrs.len() as int - 1 implies #[trigger] old(
                         self,
                     ).inner@.ptrs.index(i - 1) == self.inner@.ptrs.index(i) by {
                         assert(old(self).node_wf_at((i - 1) as nat));
@@ -341,6 +555,7 @@ impl<V: WellFormed> WellFormed for LinkedList<V> {
     /// If this is missing the trigger cannot be automatically matches by Verus
     open spec fn wf(&self) -> bool {
         &&& self.node_wf()
+        &&& self.len == self.inner@.ptrs.len()
         &&& if self.inner@.ptrs.len() == 0 {
             &&& self.head.is_none()
             &&& self.tail.is_none()
