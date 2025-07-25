@@ -63,13 +63,15 @@ impl<T: WellFormed, const N: usize> Array<T, N> {
     #[verifier::external_body]
     pub fn update_in_place<U>(&mut self, i: usize, f: impl FnOnce(T) -> (U, T)) -> (t: U)
         requires
-            0 <= i < old(self).spec_len() as usize,
+            0 <= i < old(self)@.len(),
             old(self).wf(),
+            old(self)@.index(i as int).wf(),
             f.requires((old(self)@.index(i as int),)),
         ensures
             self.wf(),
             f.ensures((old(self)@.index(i as int),), (t, self@.index(i as int))),
             self@.len() == old(self)@.len(),
+            self@.index(i as int).wf(),
             // others remain unchanged.
             forall|j: int|
                 0 <= j < old(self)@.len() as int && j != i as int ==> self@.index(j) == old(

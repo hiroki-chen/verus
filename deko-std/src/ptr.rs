@@ -12,6 +12,8 @@ use crate::prelude::*;
 
 verus! {
 
+pub type DekoPointsToRaw = PointsToRaw;
+
 /// DekoPPtr (which stands for “permissioned pointer”) is a wrapper around a `PPtr` pointer to a heap-allocated V.
 ///
 /// In order to access (read or write) the value behind the pointer, the user needs a special ghost permission token

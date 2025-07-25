@@ -70,7 +70,9 @@ impl<V: WellFormed + Heap> Predicate<V> for DekoHeapPredicate<V> {
     }
 }
 
-/// A heap that uses buddy system with configurable order.
+/// A heap that uses buddy system with configurable order. Note that this struct
+/// is completely ignorant of the type of the pointer and just manipulate the
+/// raw memory. The retuning value will be used for the `DekoPPtr` type.
 ///
 /// Before using this heap make sure that the system's memory is
 /// properly initialized, paging is enabled, etc.
@@ -748,6 +750,7 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         // `block` is the biggest merged block we have so far.
         let mut order = initial_order;
         let len = self.free_list.len() as _;
+        let mut ptr = ptr as u64;
         while order < len
             invariant
                 len == self.free_list@.len(),
@@ -759,23 +762,73 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
             decreases len - order,
         {
             let buddy = self.buddy(order, ptr);
+            let ghost prev = *self;
 
             // We have found a valid buddy block to be merged with.
             if buddy != 0 {
                 // Check if the buddy block is indeed free.
                 if let Some(idx) = self.free_list.index(order as usize).find_by_addr(ptr) {
                     // We have a buddy that is free.
-                    // let (buddy_ptr, Tracked(buddy_points_to)) = self.free_list.update_in_place(
-                    //     order as usize,
-                    //     |list|
-                    //         {
-                    //             let mut list = list;
-                    //             let res = list.remove(idx);
-                    //             (res, list)
-                    //         },
-                    // );
+                    let f = |list: LinkedList<()>| -> (res: (
+                        (DekoPPtr<Node<()>>, Tracked<DekoHeapBlockPerm>),
+                        LinkedList<()>,
+                    ))
+                        requires
+                            list.wf(),
+                            self.free_list@.index(order as int) == list,
+                        ensures
+                            res.0.0 == list.inner@.ptrs.index(idx as int),
+                            res.1@ == list@.remove(idx as int),
+                            res.1.inner@.ptrs == list.inner@.ptrs.remove(idx as int),
+                            res.0.1@.value().value == list@.index(idx as int),
+                            res.1.wf(),
+                        {
+                            assert(0 <= idx < list.inner@.ptrs.len());
+                            let mut list = list;
+                            let res = list.remove(idx);
+                            (res, list)
+                        };
+
+                    let (buddy_ptr, Tracked(buddy_points_to)) = self.free_list.update_in_place(
+                        order as usize,
+                        f,
+                    );
+
+                    ptr = ptr.min(buddy_ptr.addr() as u64);
                 } else {
-                    // We just insert the block into the free list.
+                    // If we reach here, we haven't found a buddy block of this size so
+                    // we just insert the block into the free list and mark it as free.
+                    let (ptr, Tracked(points_to)) = unsafe {
+                        // Because we are manipulating the raw memory, we need to
+                        // use `from_raw_uninit` to create a pointer from the raw address.
+                        // This is safe because we are guaranteed that the address is valid
+                        // and the memory is uninitialized by formal verification.
+                        //
+                        // No allocation is required because we are just casting raw address
+                        // into a "node".
+                        DekoPPtr::<Node<()>>::from_raw_uninit(ptr)
+                    };
+
+                    proof {
+                        assume(points_to.is_init());
+                        assume(points_to.value().value.wf());
+                    }
+
+                    let f = |list: LinkedList<()>| -> (res: ((), LinkedList<()>))
+                        requires
+                            list.wf(),
+                            self.free_list@.index(order as int) == list,
+                        ensures
+                            res.1.wf(),
+                        {
+                            let mut list = list;
+                            list.push_front_no_alloc(ptr, Tracked(points_to));
+                            ((), list)
+                        };
+
+
+                    self.free_list.update_in_place(order as usize, f);
+                    return;
                 }
             }
             order += 1;

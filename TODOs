@@ -9,3 +9,4 @@
   This can be an unverified logger as we don't need it in production environment. So it is safe to keep one.
 
 [ ] Verus has some issue supporting cross-reference for statics. The current workaround is to define and use statics in the same module.
+[ ] Verus doesn't (seem to) support `#[cfg(test)]`. Can we find a better way to do this?

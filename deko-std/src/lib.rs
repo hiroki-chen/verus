@@ -3,7 +3,7 @@
 //! provides the following modules:
 //!
 //! - `sync`: Provides synchronization primitives such as `Mutex`, `RwLock`, and `OnceCell`.
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 #![allow(non_snake_case)]
 #![allow(unused_imports)]
 #![allow(unexpected_cfgs)]

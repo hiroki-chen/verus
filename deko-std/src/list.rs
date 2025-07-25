@@ -373,12 +373,12 @@ impl<V: WellFormed> LinkedList<V> {
                     let ghost keys = keys_left.union_prefer_right(keys_right);
                     self.inner.borrow_mut().perms.tracked_map_keys_in_place(keys);
 
-                    assert forall|i: nat|
-                        (0 <= i <= idx) implies self.node_wf_at(i) by {
+                    assert forall|i: nat| (0 <= i <= idx) implies self.node_wf_at(i) by {
                         assert(old(self).node_wf_at(i));
                     };
-                    assert forall|i: nat|
-                        (idx + 1 <= i < self@.len()) implies self.node_wf_at(i) by {
+                    assert forall|i: nat| (idx + 1 <= i < self@.len()) implies self.node_wf_at(
+                        i,
+                    ) by {
                         assert(old(self).node_wf_at(i + 1));
                     };
                 }
@@ -602,6 +602,27 @@ pub fn pop_front_closure<V: WellFormed>(ll: LinkedList<V>) -> (res: (
 {
     let mut ll = ll;
     let hd = ll.pop_front_no_alloc();
+
+    (hd, ll)
+}
+
+pub fn remove_closure<V: WellFormed>(ll: LinkedList<V>, i: usize) -> (res: (
+    (DekoPPtr<Node<V>>, Tracked<DekoPointsTo<Node<V>>>),
+    LinkedList<V>,
+))
+    requires
+        ll.wf(),
+        0 <= i < ll.inner@.ptrs.len(),
+        !ll.is_empty(),
+    ensures
+        res.0.0 == ll.inner@.ptrs.index(i as int),
+        res.0.1@.value().value == ll@.index(i as int),
+        ll@.remove(i as int) == res.1@,
+        res.1.wf(),
+        res.1.inner@.ptrs == ll.inner@.ptrs.remove(i as int),
+{
+    let mut ll = ll;
+    let hd = ll.remove(i);
 
     (hd, ll)
 }
