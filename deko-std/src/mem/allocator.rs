@@ -127,42 +127,39 @@ pub const HEAP_SIZE: usize = 32;
 /// is a large contigunous memory already mapped by the monitor. Basically this is just a wrapper
 /// around the `DekoHeap` type.
 #[verifier::reject_recursive_types(V)]
-pub struct DekoHeapAllocator<V, F> where V: WellFormed + Heap, F: Predicate<V> {
+pub struct DekoHeapAllocator<V: WellFormed + Heap> {
     /// The allocator that manages the heap.
     ///
-    /// This is a mutex to allow concurrent access to the heap.
+    /// This is a RwLock to allow concurrent access to the heap.
     /// Note that this is not a global allocator, so we do not use
     /// the `GlobalAlloc` trait.
-    allocator: Mutex<V, F>,
+    allocator: RwLock<V, DekoHeapPredicate>,
 }
 
 /// A global allocator that is used to allocate memory for the monitor.
-pub exec static DEKO_ALLOCATOR: DekoHeapAllocator<
-    DekoHeap<HEAP_SIZE>,
-    DekoHeapPredicate<DekoHeap<HEAP_SIZE>>,
->
+pub exec static DEKO_ALLOCATOR: DekoHeapAllocator<DekoHeap<HEAP_SIZE>>
     ensures
         DEKO_ALLOCATOR.wf(),
 {
-    let ghost f = DekoHeapPredicate::<DekoHeap<HEAP_SIZE>>(core::marker::PhantomData);
+    let ghost f = DekoHeapPredicate;
     let heap = DekoHeap::<HEAP_SIZE>::new(Ghost(f));
 
     DekoHeapAllocator::new(heap, Ghost(f))
 }
 
-impl<V, F> DekoHeapAllocator<V, F> where V: WellFormed + Heap, F: Predicate<V> {
+impl<V: WellFormed + Heap> DekoHeapAllocator<V> {
     /// Creates a new `DekoHeapAllocator` with the given heap.
     ///
     /// The caller must ensure that the heap is properly initialized and
     /// the memory is mapped.
-    pub const fn new(v: V, Ghost(pred): Ghost<F>) -> (s: Self)
+    pub const fn new(v: V, Ghost(pred): Ghost<DekoHeapPredicate>) -> (s: Self)
         requires
             v.wf(),
             pred.inv(v),
         ensures
             s.wf(),
     {
-        Self { allocator: Mutex::new(v, Ghost(pred)) }
+        Self { allocator: RwLock::new(v, Ghost(pred)) }
     }
 
     /// This API is *hidden* because we do not want the caller to manipulate any
@@ -175,6 +172,7 @@ impl<V, F> DekoHeapAllocator<V, F> where V: WellFormed + Heap, F: Predicate<V> {
         Tracked<Dealloc>,
     ))
         requires
+            self.wf(),
             valid_layout(size, align),
             size != 0,
         ensures
@@ -189,7 +187,7 @@ impl<V, F> DekoHeapAllocator<V, F> where V: WellFormed + Heap, F: Predicate<V> {
             pt.0@.provenance == pt.1@.provenance(),
         opens_invariants none
     {
-        let p = self.alloc_impl(size, align);
+        let p = self.alloc_impl(size, align) as *mut u8;
         (p, Tracked::assume_new(), Tracked::assume_new())
     }
 
@@ -204,6 +202,7 @@ impl<V, F> DekoHeapAllocator<V, F> where V: WellFormed + Heap, F: Predicate<V> {
         Tracked(dealloc): Tracked<Dealloc>,
     )
         requires
+            self.wf(),
             size != 0,
             dealloc.addr() == ptr.addr(),
             dealloc.size() == size as nat,
@@ -215,24 +214,31 @@ impl<V, F> DekoHeapAllocator<V, F> where V: WellFormed + Heap, F: Predicate<V> {
         self.dealloc_impl(ptr, size, align);
     }
 
-    fn alloc_impl(&self, size: usize, align: usize) -> *mut u8 {
-        core::ptr::null_mut()  // TODO: Implement the actual allocation logic.
+    fn alloc_impl(&self, size: usize, align: usize) -> u64
+        requires
+            self.wf(),
+            // todo: add allocation size and alignment constraints
+    {
+        let (mut allocator, write_handle) = self.allocator.acquire_write();
 
+        assume(allocator.valid_size_and_align(size as _, align as _));
+
+        let res = allocator.allocate(size as u64, align as u64);
+        write_handle.release_write(allocator);
+
+        res
     }
 
     fn dealloc_impl(&self, ptr: *mut u8, size: usize, align: usize) {
     }
 }
 
-impl<V, F> WellFormed for DekoHeapAllocator<V, F> where V: WellFormed + Heap, F: Predicate<V> {
+impl<V: WellFormed + Heap> WellFormed for DekoHeapAllocator<V> {
     closed spec fn wf(&self) -> bool {
-        self.allocator.wf()
+        true
     }
 }
 
-pub type DefaultDekoHeapAllocator = DekoHeapAllocator<
-    DekoHeap<HEAP_SIZE>,
-    DekoHeapPredicate<DekoHeap<HEAP_SIZE>>,
->;
+pub type DefaultDekoHeapAllocator = DekoHeapAllocator<DekoHeap<HEAP_SIZE>>;
 
 } // verus!

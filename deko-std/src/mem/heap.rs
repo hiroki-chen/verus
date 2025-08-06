@@ -53,19 +53,44 @@ pub open spec fn overlaps_with(left: nat, right: nat, block_size: nat) -> bool {
     !(left >= right_end || right >= left_end)
 }
 
-pub trait Heap {
+/// A trait that defines the interface for a heap.
+///
+/// WellFormed -> Heap -> WellFormed this creates a loop.
+pub trait Heap: WellFormed + Sized {
+    spec fn in_heap_range(&self, addr: nat, size: nat) -> bool;
+
+    spec fn valid_size_and_align(&self, size: u64, align: u64) -> bool;
+
     spec fn free_list_valid(&self) -> bool;
 
-    // The total size of the heap this instance manages.
-    spec fn heap_size(&self) -> nat;
+    fn allocate(&mut self, size: u64, align: u64) -> (pt: u64)
+        requires
+            old(self).wf(),
+            old(self).free_list_valid(),
+            old(self).valid_size_and_align(size, align),
+        ensures
+            self.wf(),
+            self.free_list_valid(),
+            pt != 0 ==> self.in_heap_range(pt as nat, size as nat),
+    ;
+
+    fn deallocate(&mut self, ptr: u64, size: u64, align: u64)
+        requires
+            old(self).valid_size_and_align(size, align),
+            old(self).wf(),
+            old(self).free_list_valid(),
+            old(self).in_heap_range(ptr as nat, size as nat),
+        ensures
+            self.wf(),
+            self.free_list_valid(),
+    ;
 }
 
-pub ghost struct DekoHeapPredicate<V: WellFormed + Heap>(pub core::marker::PhantomData<V>);
+pub ghost struct DekoHeapPredicate;
 
-pub ghost struct DekoHeapListPredicate<V: WellFormed + Heap>(pub core::marker::PhantomData<V>);
-
-impl<V: WellFormed + Heap> Predicate<V> for DekoHeapPredicate<V> {
-    closed spec fn inv(self, v: V) -> bool {
+impl<V: WellFormed + Heap> RwLockPredicate<V> for DekoHeapPredicate {
+    open spec fn inv(self, v: V) -> bool {
+        &&& v.wf()
         &&& v.free_list_valid()
     }
 }
@@ -116,6 +141,21 @@ pub struct DekoHeap<const ORDER: usize> {
 }
 
 impl<const ORDER: usize> Heap for DekoHeap<ORDER> {
+    closed spec fn valid_size_and_align(&self, size: u64, align: u64) -> bool {
+        let new_size = self.allocation_size_spec(size, align);
+
+        &&& align
+            <= HEAP_ALIGNMENT  // align must be a power of two and at most the page size.
+        &&& is_power_of_two(align)
+        &&& new_size <= self.heap_size
+        &&& size > 0
+    }
+
+    closed spec fn in_heap_range(&self, addr: nat, size: nat) -> bool {
+        &&& self.heap_base as nat <= addr
+        &&& addr + size <= (self.heap_base + self.heap_size) as nat
+    }
+
     closed spec fn free_list_valid(&self) -> bool {
         &&& self.block_no_overlapping()
         &&& self.free_list.wf()
@@ -123,13 +163,184 @@ impl<const ORDER: usize> Heap for DekoHeap<ORDER> {
             0 <= i < self.free_list@.len() ==> #[trigger] self.free_list@.index(i).wf()
     }
 
-    #[verifier::inline]
-    open spec fn heap_size(&self) -> nat {
-        block_size(ORDER as nat)
+    /// Allocates a block of memory from the heap.
+    fn allocate(&mut self, size: u64, align: u64) -> (pt: u64)
+        ensures
+            self.wf(),
+            self.free_list_valid(),
+            pt != 0 ==> self.in_heap_range(pt as nat, size as nat),
+            self.params_eq(&old(self)),
+    {
+        // Get the order we will need.
+        let order_needed = self.allocation_order(size, align) as usize;
+
+        let mut order = order_needed;
+        let len = self.free_list.len();
+        // Start with the smallest acceptable block size, and search
+        // upwards until we reach blocks the size of the entire heap.
+        while order < len
+            invariant
+                self.wf(),
+                self.free_list_valid(),
+                order_needed <= order <= len,
+                len == self.free_list@.len(),
+                self.params_eq(&old(self)),
+                self.order_size(order_needed as nat) >= size,
+            decreases len - order,
+        {
+            let ghost prev = *self;
+
+            // Do we have a block of this size? Check head.
+            if !self.free_list.index(order).head.is_none() {
+                let (first, Tracked(first_points_to)) = self.free_list.update_in_place(
+                    order,
+                    pop_front_closure,
+                // Verus seems not to like the naked closure
+                // as the precondition is not inherited into
+                // the captured body.
+                );
+
+                proof {
+                    assert(prev.free_list@.index(order as int).wf());
+                    self.lemma_order_size_increases(order_needed as nat, order as nat);
+                }
+
+                // If the block is too big, break it up.  This leaves
+                // the address unchanged, because we always allocate at
+                // the head of a block.
+                if order > order_needed {
+                    // Split the block into two.
+                    self.split_free_block(
+                        first,
+                        Tracked(first_points_to),
+                        order as u64,
+                        order_needed as u64,
+                    );
+                }
+                return first.addr() as u64;
+            }
+            order += 1;
+        }
+
+        // If we reach here, we have not found a block of the requested size.
+        // Memory exhaustion is very hard to detect in static analysis so we
+        // just return 0 to indicate that we cannot allocate anything.
+        0
+    }
+
+    /// Deallocate a block allocated using `allocate`.
+    fn deallocate(&mut self, ptr: u64, size: u64, align: u64)
+        ensures
+            self.wf(),
+            self.free_list_valid(),
+            self.params_eq(&old(self)),
+    {
+        let initial_order = self.allocation_order(size, align);
+
+        // The fun part: When deallocating a block, we also want to check
+        // to see if its "buddy" is on the free list.  If the buddy block
+        // is also free, we merge them and continue walking up.
+        //
+        // `block` is the biggest merged block we have so far.
+        let mut order = initial_order;
+        let len = self.free_list.len() as _;
+        let mut ptr = ptr as u64;
+        while order < len
+            invariant
+                len == self.free_list@.len(),
+                self.wf(),
+                self.free_list_valid(),
+                order >= initial_order,
+                self.params_eq(&old(self)),
+                self.in_heap_range(ptr as nat, size as nat),
+                self.order_size(initial_order as nat) >= size,
+            decreases len - order,
+        {
+            let buddy = self.buddy(order, ptr);
+            let ghost prev = *self;
+
+            // We have found a valid buddy block to be merged with.
+            if buddy != 0 {
+                // Check if the buddy block is indeed free.
+                if let Some(idx) = self.free_list.index(order as usize).find_by_addr(ptr) {
+                    // We have a buddy that is free.
+                    let f = |list: LinkedList<()>| -> (res: (
+                        (DekoPPtr<Node<()>>, Tracked<DekoHeapBlockPerm>),
+                        LinkedList<()>,
+                    ))
+                        requires
+                            list.wf(),
+                            self.free_list@.index(order as int) == list,
+                        ensures
+                            res.0.0 == list.inner@.ptrs.index(idx as int),
+                            res.1@ == list@.remove(idx as int),
+                            res.1.inner@.ptrs == list.inner@.ptrs.remove(idx as int),
+                            res.0.1@.value().value == list@.index(idx as int),
+                            res.1.wf(),
+                        {
+                            assert(0 <= idx < list.inner@.ptrs.len());
+                            let mut list = list;
+                            let res = list.remove(idx);
+                            (res, list)
+                        };
+
+                    let (buddy_ptr, Tracked(buddy_points_to)) = self.free_list.update_in_place(
+                        order as usize,
+                        f,
+                    );
+
+                    ptr = ptr.min(buddy_ptr.addr() as u64);
+                } else {
+                    // If we reach here, we haven't found a buddy block of this size so
+                    // we just insert the block into the free list and mark it as free.
+                    let (ptr, Tracked(points_to)) = unsafe {
+                        // Because we are manipulating the raw memory, we need to
+                        // use `from_raw_uninit` to create a pointer from the raw address.
+                        // This is safe because we are guaranteed that the address is valid
+                        // and the memory is uninitialized by formal verification.
+                        //
+                        // No allocation is required because we are just casting raw address
+                        // into a "node".
+                        DekoPPtr::<Node<()>>::from_raw_uninit(ptr)
+                    };
+
+                    proof {
+                        assume(points_to.is_init());
+                        assume(points_to.value().value.wf());
+                    }
+
+                    let f = |list: LinkedList<()>| -> (res: ((), LinkedList<()>))
+                        requires
+                            list.wf(),
+                            self.free_list@.index(order as int) == list,
+                        ensures
+                            res.1.wf(),
+                        {
+                            let mut list = list;
+                            list.push_front_no_alloc(ptr, Tracked(points_to));
+                            ((), list)
+                        };
+
+                    self.free_list.update_in_place(order as usize, f);
+                    return ;
+                }
+            }
+            order += 1;
+        }
     }
 }
 
 impl<const ORDER: usize> DekoHeap<ORDER> {
+    #[verifier::inline]
+    pub open spec fn heap_size(&self) -> nat {
+        block_size(ORDER as nat)
+    }
+
+    pub closed spec fn is_init(&self) -> bool {
+        &&& self.heap_base != 0
+        &&& self.heap_size != 0
+    }
+
     /// The size of the blocks we allocate for a given order.
     ///
     /// Note that we add the minimum block size to the order to ensure that
@@ -170,11 +381,6 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
     //             a.order_size(order),
     //         ),
     // ;
-    pub closed spec fn in_heap_range(&self, addr: nat, size: nat) -> bool {
-        &&& self.heap_base as nat <= addr
-        &&& addr + size <= (self.heap_base + self.heap_size) as nat
-    }
-
     pub closed spec fn blocks_are_aligned(&self, list: &LinkedList<()>, block_size: nat) -> bool {
         forall|i: int|
             0 <= i < list.inner@.ptrs.len() ==> #[trigger] list.inner@.ptrs.index(i).addr() % (
@@ -313,11 +519,6 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         lemma_log_pow(2, 64);
     }
 
-    pub closed spec fn is_init(&self) -> bool {
-        &&& self.heap_base != 0
-        &&& self.heap_size != 0
-    }
-
     pub closed spec fn init_ok(&self) -> bool {
         &&& self.is_init()
         &&& forall|i: int|
@@ -351,10 +552,12 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         requires
             !old(self).is_init(),
             old(self).wf(),
+            old(self).free_list_valid(),
             valid_heap_param(heap_start, heap_size, ORDER as u64),
         ensures
             self.wf(),
             self.init_ok(),
+            self.free_list_valid(),
     {
         self.heap_base = heap_start;
 
@@ -410,7 +613,7 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
     /// Because Array owns the opauqe [T; N] and we use const array-fill expression,
     /// verus cannot reason anything about it so we just mark this function as trusted.
     #[verifier::external_body]
-    pub const fn new(Ghost(f): Ghost<DekoHeapPredicate::<DekoHeap<ORDER>>>) -> (s: Self)
+    pub const fn new(Ghost(f): Ghost<DekoHeapPredicate>) -> (s: Self)
         requires
     // We need ORDER > 0 to have at least one block size.
 
@@ -439,16 +642,6 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         let new_size = vstd::math::max(new_size as int, self.min_block_size as int) as u64;
 
         next_power_of_two_spec(new_size as nat) as u64
-    }
-
-    pub closed spec fn valid_size_and_align(&self, size: u64, align: u64) -> bool {
-        let new_size = self.allocation_size_spec(size, align);
-
-        &&& align
-            <= HEAP_ALIGNMENT  // align must be a power of two and at most the page size.
-        &&& is_power_of_two(align)
-        &&& new_size <= self.heap_size
-        &&& size > 0
     }
 
     fn allocation_size(&self, mut size: u64, align: u64) -> (s: u64)
@@ -548,9 +741,11 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
             order_needed < order < ORDER,
             old(self).in_heap_range(block.addr() as nat, old(self).order_size(order as nat)),
             old(self).wf(),
+            old(self).free_list_valid(),
             old(self).is_init(),
         ensures
             self.wf(),
+            self.free_list_valid(),
             self.params_eq(&old(self)),
     {
         let addr = block.addr();  // get the address to the block.
@@ -662,185 +857,12 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
             self.heap_base + buddy_offset
         }
     }
-
-    /// Allocates a block of memory from the heap.
-    pub fn allocate(&mut self, size: u64, align: u64) -> (pt: u64)
-        requires
-            old(self).wf(),
-            old(self).is_init(),
-            old(self).valid_size_and_align(size, align),
-        ensures
-            self.wf(),
-            pt != 0 ==> self.in_heap_range(pt as nat, size as nat),
-            self.params_eq(&old(self)),
-    {
-        // Get the order we will need.
-        let order_needed = self.allocation_order(size, align) as usize;
-
-        let mut order = order_needed;
-        let len = self.free_list.len();
-        // Start with the smallest acceptable block size, and search
-        // upwards until we reach blocks the size of the entire heap.
-        while order < len
-            invariant
-                self.wf(),
-                order_needed <= order <= len,
-                len == self.free_list@.len(),
-                self.params_eq(&old(self)),
-                self.order_size(order_needed as nat) >= size,
-            decreases len - order,
-        {
-            let ghost prev = *self;
-
-            // Do we have a block of this size? Check head.
-            if !self.free_list.index(order).head.is_none() {
-                let (first, Tracked(first_points_to)) = self.free_list.update_in_place(
-                    order,
-                    pop_front_closure,
-                // Verus seems not to like the naked closure
-                // as the precondition is not inherited into
-                // the captured body.
-                );
-
-                proof {
-                    assert(prev.free_list@.index(order as int).wf());
-                    self.lemma_order_size_increases(order_needed as nat, order as nat);
-                }
-
-                // If the block is too big, break it up.  This leaves
-                // the address unchanged, because we always allocate at
-                // the head of a block.
-                if order > order_needed {
-                    // Split the block into two.
-                    self.split_free_block(
-                        first,
-                        Tracked(first_points_to),
-                        order as u64,
-                        order_needed as u64,
-                    );
-                }
-                return first.addr() as u64;
-            }
-            order += 1;
-        }
-
-        // If we reach here, we have not found a block of the requested size.
-        // Memory exhaustion is very hard to detect in static analysis so we
-        // just return 0 to indicate that we cannot allocate anything.
-        0
-    }
-
-    /// Deallocate a block allocated using `allocate`.
-    pub fn deallocate(&mut self, ptr: u64, size: u64, align: u64)
-        requires
-            old(self).valid_size_and_align(size, align),
-            old(self).wf(),
-            old(self).is_init(),
-            old(self).in_heap_range(ptr as nat, size as nat),
-        ensures
-            self.wf(),
-            self.params_eq(&old(self)),
-    {
-        let initial_order = self.allocation_order(size, align);
-
-        // The fun part: When deallocating a block, we also want to check
-        // to see if its "buddy" is on the free list.  If the buddy block
-        // is also free, we merge them and continue walking up.
-        //
-        // `block` is the biggest merged block we have so far.
-        let mut order = initial_order;
-        let len = self.free_list.len() as _;
-        let mut ptr = ptr as u64;
-        while order < len
-            invariant
-                len == self.free_list@.len(),
-                self.wf(),
-                order >= initial_order,
-                self.params_eq(&old(self)),
-                self.in_heap_range(ptr as nat, size as nat),
-                self.order_size(initial_order as nat) >= size,
-            decreases len - order,
-        {
-            let buddy = self.buddy(order, ptr);
-            let ghost prev = *self;
-
-            // We have found a valid buddy block to be merged with.
-            if buddy != 0 {
-                // Check if the buddy block is indeed free.
-                if let Some(idx) = self.free_list.index(order as usize).find_by_addr(ptr) {
-                    // We have a buddy that is free.
-                    let f = |list: LinkedList<()>| -> (res: (
-                        (DekoPPtr<Node<()>>, Tracked<DekoHeapBlockPerm>),
-                        LinkedList<()>,
-                    ))
-                        requires
-                            list.wf(),
-                            self.free_list@.index(order as int) == list,
-                        ensures
-                            res.0.0 == list.inner@.ptrs.index(idx as int),
-                            res.1@ == list@.remove(idx as int),
-                            res.1.inner@.ptrs == list.inner@.ptrs.remove(idx as int),
-                            res.0.1@.value().value == list@.index(idx as int),
-                            res.1.wf(),
-                        {
-                            assert(0 <= idx < list.inner@.ptrs.len());
-                            let mut list = list;
-                            let res = list.remove(idx);
-                            (res, list)
-                        };
-
-                    let (buddy_ptr, Tracked(buddy_points_to)) = self.free_list.update_in_place(
-                        order as usize,
-                        f,
-                    );
-
-                    ptr = ptr.min(buddy_ptr.addr() as u64);
-                } else {
-                    // If we reach here, we haven't found a buddy block of this size so
-                    // we just insert the block into the free list and mark it as free.
-                    let (ptr, Tracked(points_to)) = unsafe {
-                        // Because we are manipulating the raw memory, we need to
-                        // use `from_raw_uninit` to create a pointer from the raw address.
-                        // This is safe because we are guaranteed that the address is valid
-                        // and the memory is uninitialized by formal verification.
-                        //
-                        // No allocation is required because we are just casting raw address
-                        // into a "node".
-                        DekoPPtr::<Node<()>>::from_raw_uninit(ptr)
-                    };
-
-                    proof {
-                        assume(points_to.is_init());
-                        assume(points_to.value().value.wf());
-                    }
-
-                    let f = |list: LinkedList<()>| -> (res: ((), LinkedList<()>))
-                        requires
-                            list.wf(),
-                            self.free_list@.index(order as int) == list,
-                        ensures
-                            res.1.wf(),
-                        {
-                            let mut list = list;
-                            list.push_front_no_alloc(ptr, Tracked(points_to));
-                            ((), list)
-                        };
-
-
-                    self.free_list.update_in_place(order as usize, f);
-                    return;
-                }
-            }
-            order += 1;
-        }
-    }
 }
 
 impl<const ORDER: usize> WellFormed for DekoHeap<ORDER> {
     closed spec fn wf(&self) -> bool {
         &&& self.is_init()
         &&& self.heap_size_valid()
-        &&& self.free_list_valid()
         &&& self.free_list@.len() == ORDER as int
         &&& ORDER - 1 >= 0
     }

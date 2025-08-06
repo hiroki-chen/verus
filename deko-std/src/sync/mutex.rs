@@ -1,3 +1,10 @@
+//! Mutex implementation in Verus.
+//!
+//! TODO: This is incomplete as we do not yet have anything to reason about the
+//!       "wf" predicate on the cell.
+//!
+//! I'm not sure whether we stick to using `Mutex` or switch to `RwLock` as Verus
+//! standard library already has a working `RwLock` implementation.
 use vstd::atomic::{AtomicCellId, PAtomicBool, PermissionBool};
 use vstd::cell::{CellId, PCell, PointsTo};
 use vstd::invariant::{AtomicInvariant, InvariantPredicate};
@@ -41,6 +48,7 @@ impl<V, F: Predicate<V>> InvariantPredicate<
 #[verifier::reject_recursive_types(V)]
 pub struct Mutex<V, F: Predicate<V>> {
     pub atomic: PAtomicBool,
+    // todo: replace it with 'invcell`?
     pub cell: PCell<V>,
     pub inv: Tracked<
         AtomicInvariant<
@@ -79,7 +87,9 @@ impl<V, F: Predicate<V>> Mutex<V, F> {
         requires
             self.wf(),
         ensures
-            points_to@.id() == self.cell.id() && points_to@.is_init(),
+            points_to@.id() == self.cell.id(),
+            points_to@.mem_contents() matches MemContents::Init(value)
+                && self.inv@.constant().2@.inv(value),
     {
         loop
             invariant
@@ -110,7 +120,6 @@ impl<V, F: Predicate<V>> Mutex<V, F> {
         requires
             self.wf(),
             points_to.id() == self.cell.id(),
-            points_to.is_init(),
             points_to.mem_contents() matches MemContents::Init(value)
                 && self.inv@.constant().2@.inv(value),
     {
