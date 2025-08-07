@@ -217,16 +217,19 @@ impl<V: WellFormed + Heap> DekoHeapAllocator<V> {
     fn alloc_impl(&self, size: usize, align: usize) -> u64
         requires
             self.wf(),
-            // todo: add allocation size and alignment constraints
     {
         let (mut allocator, write_handle) = self.allocator.acquire_write();
 
-        assume(allocator.valid_size_and_align(size as _, align as _));
+        if allocator.check_allocation_size(size as u64, align as u64) {
+            let res = allocator.allocate(size as u64, align as u64);
+            write_handle.release_write(allocator);
+            res
+        } else {
+            write_handle.release_write(allocator);
 
-        let res = allocator.allocate(size as u64, align as u64);
-        write_handle.release_write(allocator);
-
-        res
+            // Error.
+            0
+        }
     }
 
     fn dealloc_impl(&self, ptr: *mut u8, size: usize, align: usize) {

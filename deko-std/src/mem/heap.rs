@@ -63,6 +63,11 @@ pub trait Heap: WellFormed + Sized {
 
     spec fn free_list_valid(&self) -> bool;
 
+    fn check_allocation_size(&self, size: u64, align: u64) -> (r: bool)
+        ensures
+            r <==> self.valid_size_and_align(size, align),
+;
+
     fn allocate(&mut self, size: u64, align: u64) -> (pt: u64)
         requires
             old(self).wf(),
@@ -161,6 +166,28 @@ impl<const ORDER: usize> Heap for DekoHeap<ORDER> {
         &&& self.free_list.wf()
         &&& forall|i: int|
             0 <= i < self.free_list@.len() ==> #[trigger] self.free_list@.index(i).wf()
+    }
+
+    fn check_allocation_size(&self, mut size: u64, align: u64) -> (r: bool)
+        ensures
+            r <==> self.valid_size_and_align(size, align),
+    {
+        if size == 0 {
+            return false;
+        }
+        if align > size {
+            size = align;
+        }
+        let size = if size <= self.min_block_size {
+            self.min_block_size
+        } else {
+            size
+        };
+
+        let new_size = size.next_power_of_two();
+        let power_of_two = align > 0 && (align & (align - 1)) == 0;
+
+        align <= HEAP_ALIGNMENT && power_of_two && new_size <= self.heap_size
     }
 
     /// Allocates a block of memory from the heap.
@@ -644,14 +671,16 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         next_power_of_two_spec(new_size as nat) as u64
     }
 
-    fn allocation_size(&self, mut size: u64, align: u64) -> (s: u64)
-        requires
-            self.valid_size_and_align(size, align),
+    fn choose_size(&self, mut size: u64, align: u64) -> (s: u64)
         ensures
-            s == self.allocation_size_spec(size, align),
-            is_power_of_two_spec(s as nat),
-            self.min_block_size <= s <= self.heap_size,
-            s >= size,
+            s == vstd::math::max(
+                if align > size {
+                    align
+                } else {
+                    size
+                } as _,
+                self.min_block_size as _,
+            ),
     {
         if align > size {
             size = align;
@@ -662,7 +691,20 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
             size
         };
 
-        size.next_power_of_two()
+        size
+    }
+
+    #[inline(always)]
+    fn allocation_size(&self, size: u64, align: u64) -> (s: u64)
+        requires
+            self.valid_size_and_align(size, align),
+        ensures
+            s == self.allocation_size_spec(size, align),
+            is_power_of_two_spec(s as nat),
+            self.min_block_size <= s <= self.heap_size,
+            s >= size,
+    {
+        self.choose_size(size, align).next_power_of_two()
     }
 
     /// The "order" of an allocation is how many times we need to double
