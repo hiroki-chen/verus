@@ -3,6 +3,7 @@ use vstd::prelude::*;
 verus! {
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
+#[repr(C)]
 pub struct VirtAddr(pub u64);
 
 impl From<u64> for VirtAddr {

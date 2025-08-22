@@ -91,16 +91,15 @@ pub fn deko_main(
     ensures
         false,
 {
-    crate::logging::init_logger();
+    // crate::logging::init_logger();
 
     let platform_type = header.borrow(Tracked(&header_content));
     let platform_type = PlatformType::from(platform_type.platform_type);
-    hal::init_platform(platform_type);
-
-    crate::cpu::gdt::init_gdt();
 
     let mut early_idt = Idt { entries: create_early_idt() };
     crate::cpu::idt::init_early_idt(&mut early_idt);
+
+    hal::init_platform(platform_type);
 
     // Initialize the CPUID table to detect CPU cores.
 

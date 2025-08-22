@@ -15,8 +15,10 @@ verus! {
 pub exec static GLOBAL_GDT: GlobalDescriptorTable = GlobalDescriptorTable::new();
 
 #[derive(Clone, Copy)]
+#[repr(C)]
 pub struct GDTEntry(u64);
 
+#[repr(C)]
 pub struct GDTDesc {
     limit: u16,
     base: VirtAddr,
@@ -86,7 +88,7 @@ impl GlobalDescriptorTable {
         unsafe {
             core::arch::asm!(r#" /* Load GDT */
 
-                 /* Reload data segments */
+            /* Reload data segments */
                  movw   %cx, %ds
                  movw   %cx, %es
                  movw   %cx, %fs
@@ -116,7 +118,7 @@ impl GlobalDescriptorTable {
         unsafe {
             core::arch::asm!(
                 "lgdt ({0})", // load the address of our GDT
-                in(reg) &self.entries,
+                in(reg) &desc,
                 options(att_syntax),
             );
         }

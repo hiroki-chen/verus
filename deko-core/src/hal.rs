@@ -63,6 +63,7 @@ fn init_early_idt() {
 /// Sets up the environment for the platform which will setup the GDT, kernel mapping, paging,
 /// kernel loading, heaps, etc.
 fn setup_env() {
+    crate::cpu::gdt::init_gdt();
 }
 
 #[verifier::external_body]
@@ -70,9 +71,6 @@ pub fn init_platform(platform_type: PlatformType) {
     // This is buggy as verus has problem dealing with statics.
     // We will remove `external_body` once the bug is fixed.
     PLATFORM.init(platform_type);
-
-    // Set up early IDTs.
-    init_early_idt();
 
     setup_env();
 
