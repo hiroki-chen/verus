@@ -43,11 +43,18 @@ SECTIONS
 	. = ALIGN(16);
 	.rodata : { *(.rodata) }
 
-    /DISCARD/ :
-    {
-        *(.eh_frame)
-        *(.eh_frame_hdr)
-    }
+	.ro_after_init : {
+		ro_after_init_start = .;
+		*(.ro_after_init) *(.ro_after_init.*)
+		. = ALIGN(4096);
+		ro_after_init_end = .;
+	}
+
+	/DISCARD/ :
+	{
+			*(.eh_frame)
+			*(.eh_frame_hdr)
+	}
 }
 
 ENTRY(entry)

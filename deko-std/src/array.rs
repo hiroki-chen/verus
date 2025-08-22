@@ -90,7 +90,7 @@ impl<T: WellFormed, const N: usize> Array<T, N> {
     #[inline(always)]
     pub fn update(&mut self, i: usize, value: T) -> (t: T)
         requires
-            0 <= i < old(self)@.len() as usize,
+            0 <= (i as int) < old(self)@.len(),
             old(self).wf(),
             value.wf(),
         ensures

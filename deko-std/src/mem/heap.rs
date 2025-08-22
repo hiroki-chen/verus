@@ -66,7 +66,7 @@ pub trait Heap: WellFormed + Sized {
     fn check_allocation_size(&self, size: u64, align: u64) -> (r: bool)
         ensures
             r <==> self.valid_size_and_align(size, align),
-;
+    ;
 
     fn allocate(&mut self, size: u64, align: u64) -> (pt: u64)
         requires

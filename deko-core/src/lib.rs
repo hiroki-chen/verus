@@ -30,6 +30,7 @@ compile_error!("Cannot be compiled against non x86_64 architecture!");
 #[cfg(all(feature = "tdx", feature = "snp"))]
 compile_error!("Cannot enable both TDX and SEV features at the same time!");
 
+pub mod address;
 pub mod allocator;
 pub mod boot;
 pub mod cpu;
@@ -48,6 +49,7 @@ use deko_std::prelude::*;
 use deko_std::ptr::{DekoPPtr, DekoPointsTo};
 use vstd::prelude::*;
 
+use crate::cpu::idt::{create_early_idt, stage2_generic_idt_handler_no_ghcb, Idt, IdtEntry};
 use crate::hal::PlatformType;
 
 verus! {
@@ -70,6 +72,10 @@ verus! {
 ///
 /// - `header`: A permissioned pointer to the header of the monitor, which contains metadata about the monitor.
 /// - `header_permission`: A tracked struct for determining the access permission of our header (read-only).
+///
+/// # References
+///
+/// https://github.com/coconut-svsm/svsm/blob/main/kernel/src/stage2.rs
 #[verifier::exec_allows_no_decreases_clause]
 pub fn deko_main(
     header: DekoPPtr<HeaderRaw>,
@@ -91,15 +97,13 @@ pub fn deko_main(
     let platform_type = PlatformType::from(platform_type.platform_type);
     hal::init_platform(platform_type);
 
-    // let aaa = PLATFORM.get();
+    crate::cpu::gdt::init_gdt();
 
-    // Log the initialization message.
-    // crate::logging::log(log::Level::Info, format_args!("Deko Monitor initialized!"));
+    let mut early_idt = Idt { entries: create_early_idt() };
+    crate::cpu::idt::init_early_idt(&mut early_idt);
 
-    // Initialize the global allocator.
-    // This is crucial as we now are still under UEFI mm which means
-    // vaddr == paddr.
-    // cpu_idle();
+    // Initialize the CPUID table to detect CPU cores.
+
     loop {
     }
 }
