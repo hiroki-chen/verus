@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 vstd = { workspace = true }
-builtin = { workspace = true }
+verus_builtin = { workspace = true }
 
 deko-std = { workspace = true }
 

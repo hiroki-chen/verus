@@ -91,7 +91,9 @@ pub fn deko_main(
     ensures
         false,
 {
-    // crate::logging::init_logger();
+    // For SNP, the logging is enabled via GHCB.
+    #[cfg(feature = "tdx")]
+    crate::logging::init_logger();
 
     let platform_type = header.borrow(Tracked(&header_content));
     let platform_type = PlatformType::from(platform_type.platform_type);

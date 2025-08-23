@@ -18,7 +18,7 @@ pub exec static GLOBAL_GDT: GlobalDescriptorTable = GlobalDescriptorTable::new()
 #[repr(C)]
 pub struct GDTEntry(u64);
 
-#[repr(C)]
+#[repr(C, packed(2))]
 pub struct GDTDesc {
     limit: u16,
     base: VirtAddr,
@@ -86,9 +86,10 @@ impl GlobalDescriptorTable {
         self.load();
 
         unsafe {
-            core::arch::asm!(r#" /* Load GDT */
+            core::arch::asm!(r#"
+                /* Load GDT */
 
-            /* Reload data segments */
+                /* Reload data segments */
                  movw   %cx, %ds
                  movw   %cx, %es
                  movw   %cx, %fs

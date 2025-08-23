@@ -1,4 +1,4 @@
-use state_machines_macros::*;
+use verus_state_machines_macros::*;
 use vstd::atomic::{PAtomicU64, PermissionU64};
 use vstd::invariant::AtomicInvariant;
 use vstd::multiset::Multiset;
