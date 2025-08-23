@@ -209,8 +209,7 @@ impl Idt {
             size <= old(self).entries@.len(),
             old(self).entries.wf(),
         ensures
-            forall |i: int| 
-                0 <= i < size as int ==> #[trigger] self.entries@[i as int].wf(),
+            forall|i: int| 0 <= i < size as int ==> #[trigger] self.entries@[i as int].wf(),
     {
         let mut i = 0;
         let addr = addr as usize;
@@ -232,6 +231,19 @@ impl Idt {
             i += 1;
         }
     }
+
+    #[inline(always)]
+    pub fn from_idt_entries(entries: Array<IdtEntry, 256>) -> (r: Self)
+        requires
+            entries.wf(),
+            forall|i: int|
+                0 <= i && i < 256 ==> #[trigger] entries@[i as int].high != 0
+                    || entries@[i as int].low != 0,
+        ensures
+            r.wf(),
+    {
+        Idt { entries }
+    }
 }
 
 /// Initialize the early IDT used in stage2. This will remain in scope as long as
@@ -247,6 +259,8 @@ pub fn init_early_idt(early_idt: &mut Idt)
             core::mem::size_of::<IdtEntry>(),
         );
     }
+
+    early_idt.load();
 }
 
 #[verusfmt::skip]

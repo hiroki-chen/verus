@@ -84,7 +84,7 @@ unsafe impl<V, F: Predicate<V>> Sync for OnceCell<V, F> {
 }
 
 impl<V, F: Predicate<V>> OnceCell<V, F> {
-    pub closed spec fn inv(&self, v: V) -> bool {
+    pub open spec fn inv(&self, v: V) -> bool {
         self.cell.0@.inv(v)
     }
 

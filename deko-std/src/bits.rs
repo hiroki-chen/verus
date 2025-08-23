@@ -30,6 +30,17 @@ pub proof fn lemma_xor_is_or_minus_and()
 {
 }
 
+
+#[verifier::bit_vector]
+pub proof fn lemma_u32_subset(a: u32, b: u32, c: u32)
+    requires
+        a & b == a,
+        c & a != 0,
+    ensures
+        c & b != 0,
+{
+}
+
 pub proof fn lemma_lt_is_power_of_two_bitor(p: u64, x: u64, y: u64, n: u64)
     requires
         0 <= n < 64,

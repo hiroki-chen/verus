@@ -1,6 +1,8 @@
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
+use crate::cpu::idt::Idt;
+
 verus! {
 
 #[repr(u64)]
@@ -36,7 +38,16 @@ pub exec static PLATFORM: OnceLock<PlatformType, PlatformPredicate>
 }
 
 impl From<u64> for PlatformType {
-    fn from(value: u64) -> Self {
+    fn from(value: u64) -> (r: Self)
+        ensures
+            if value == 0x0001 {
+                r matches PlatformType::Tdx
+            } else if value == 0x0002 {
+                r matches PlatformType::Snp
+            } else {
+                r matches PlatformType::None
+            },
+    {
         match value {
             0x0001 => PlatformType::Tdx,
             0x0002 => PlatformType::Snp,
@@ -63,13 +74,15 @@ fn init_early_idt() {
 /// Sets up the environment for the platform which will setup the GDT, kernel mapping, paging,
 /// kernel loading, heaps, etc.
 fn setup_env() {
+    // Set up the GDT.
     crate::cpu::gdt::init_gdt();
 }
 
-#[verifier::external_body]
-pub fn init_platform(platform_type: PlatformType) {
-    // This is buggy as verus has problem dealing with statics.
-    // We will remove `external_body` once the bug is fixed.
+pub fn init_platform(platform_type: PlatformType, idt: &mut Idt)
+    requires
+        (platform_type matches PlatformType::Tdx) || (platform_type matches PlatformType::Snp),
+        old(idt).entries.wf(),
+{
     PLATFORM.init(platform_type);
 
     setup_env();
