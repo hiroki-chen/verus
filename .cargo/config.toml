@@ -8,9 +8,8 @@ xtask = "run --package xtask --release --"
 qemu-tdx = "xtask --target-arch tdx qemu --config-path .config/qemu.tdx.config.toml"
 qemu-snp = "xtask --target-arch snp qemu --config-path .config/qemu.snp.config.toml"
 
-create-bootable-tdx = "xtask  --target-arch tdx create-bootable --deko-monitor-path target/x86_64-tdx-deko/release/deko-monitor"
-create-bootable-snp = "xtask  --target-arch snp create-bootable --deko-monitor-path target/x86_64-snp-deko/release/deko-monitor.bin"
-create-bootable-snp-test = "xtask  --target-arch snp create-bootable --deko-monitor-path /data/cc/svsm/bin/stage2"
+create-bootable-tdx = "xtask  --target-arch tdx create-bootable --stage2-path target/x86_64-tdx-deko/release/deko-monitor"
+create-bootable-snp = "xtask  --target-arch snp create-bootable --stage2-path target/x86_64-snp-deko/release/deko-stage2.bin"
 
 build-deko-tdx-release = "xtask --target-arch tdx build --target deko --release"
 build-deko-snp-release = "xtask --target-arch snp build --target deko --release"
@@ -21,3 +20,11 @@ pretty = "xtask pretty"
 
 # TODO: Fork another version. This will download unncessary git submodules recursively.
 install-igvmbuilder = "install --git https://github.com/coconut-svsm/svsm.git igvmbuilder"
+
+[target.x86_64-snp-deko]
+rustflags = [
+	"-C", "force-frame-pointers",
+	"-C", "linker-flavor=ld", # using rust-lld causes some problems with relocation and gcc linker script.
+	"--cfg", "aes_force_soft",
+	"--cfg", "polyval_force_soft",
+]

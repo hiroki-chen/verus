@@ -1,7 +1,0 @@
-[unstable]
-build-std-features = ["compiler-builtins-mem"]
-build-std = ["core","alloc", "compiler_builtins"]
-unstable-options = true
-
-[profile.release]
-debug = 1

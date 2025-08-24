@@ -1,7 +1,9 @@
+use deko_meta::HeaderRaw;
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
 use crate::cpu::idt::Idt;
+use crate::snp::Snp;
 
 verus! {
 
@@ -65,7 +67,7 @@ pub trait PlatformApi: Sync + Send {
 
     /// Initializes the platform. This function should be called once at the
     /// beginning of the program to set up the platform-specific environment.
-    fn init_platform(&self);
+    fn init_platform(&self, header: &HeaderRaw);
 }
 
 fn init_early_idt() {
@@ -73,19 +75,28 @@ fn init_early_idt() {
 
 /// Sets up the environment for the platform which will setup the GDT, kernel mapping, paging,
 /// kernel loading, heaps, etc.
-fn setup_env() {
+fn setup_env(platform_type: PlatformType, header: &HeaderRaw) {
     // Set up the GDT.
     crate::cpu::gdt::init_gdt();
+
+    match platform_type {
+        PlatformType::Tdx => {},
+        PlatformType::Snp => {
+            let snp = Snp;
+            snp.init_platform(header);
+        },
+        _ => {},
+    }
 }
 
-pub fn init_platform(platform_type: PlatformType, idt: &mut Idt)
+pub fn init_platform(platform_type: PlatformType, idt: &mut Idt, header: &HeaderRaw)
     requires
         (platform_type matches PlatformType::Tdx) || (platform_type matches PlatformType::Snp),
         old(idt).entries.wf(),
 {
     PLATFORM.init(platform_type);
 
-    setup_env();
+    setup_env(platform_type, header);
 
     match platform_type {
         PlatformType::Tdx => {

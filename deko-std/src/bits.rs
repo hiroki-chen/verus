@@ -30,7 +30,6 @@ pub proof fn lemma_xor_is_or_minus_and()
 {
 }
 
-
 #[verifier::bit_vector]
 pub proof fn lemma_u32_subset(a: u32, b: u32, c: u32)
     requires

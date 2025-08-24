@@ -1,5 +1,6 @@
 use core::sync::atomic::AtomicU32;
 
+use deko_meta::HeaderRaw;
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
@@ -16,9 +17,16 @@ extern "C" {
     static mut ap_flag: AtomicU32;
 }
 
-pub struct SEVStatusFlags;
-
 verus! {
+
+pub exec static SNP_VTOM: OnceCellNoPred<usize>
+    ensures
+        SNP_VTOM.wf(),
+{
+    OnceCellNoPred::new(Ghost(()))
+}
+
+pub struct SEVStatusFlags;
 
 pub const SEV_STATUS_MSR: u32 = 0xC0010131;
 
@@ -121,7 +129,7 @@ impl SnpStatusFlags {
     #[verifier::external_body]
     #[inline(always)]
     pub fn get_status() -> (r: Self)
-        ensures 
+        ensures
             r.wf(),
     {
         let bits = read_msr(SEV_STATUS_MSR) as u32;
@@ -200,8 +208,14 @@ impl PlatformApi for Snp {
         PlatformType::Snp
     }
 
-    fn init_platform(&self) {
+    fn init_platform(&self, header: &HeaderRaw) {
         // Initialize the SNP platform.
+        let snp_status = SnpStatusFlags::get_status();
+        if !snp_status.contains(VTOM) {
+            vstd::vpanic!("SNP VTOM is not enabled!");
+        }
+        // Set the top of the virtual memory.
+
     }
 }
 

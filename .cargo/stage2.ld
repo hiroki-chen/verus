@@ -18,6 +18,10 @@ SECTIONS
 		*(.text)
 		*(.text.*)
 		. = ALIGN(16);
+		entry_code_start = .;
+		*(.entry.text)
+		entry_code_end = .;
+		. = ALIGN(16);
 		early_exception_table_start = .;
 		KEEP(*(__early_exception_table))
 		early_exception_table_end = .;
@@ -42,19 +46,6 @@ SECTIONS
 	 * to reserve for BSS. */
 	. = ALIGN(16);
 	.rodata : { *(.rodata) }
-
-	.ro_after_init : {
-		ro_after_init_start = .;
-		*(.ro_after_init) *(.ro_after_init.*)
-		. = ALIGN(4096);
-		ro_after_init_end = .;
-	}
-
-	/DISCARD/ :
-	{
-			*(.eh_frame)
-			*(.eh_frame_hdr)
-	}
 }
 
-ENTRY(entry)
+ENTRY(startup_32)

@@ -9,12 +9,8 @@
     "executables": true,
     "linker-flavor": "ld.lld",
     "linker": "rust-lld",
-    "pre-link-args": {
-        "ld.lld": ["--script=.cargo/monitor.ld"]
-    },
     "disable-redzone": true,
     "features": "-mmx,-sse,+soft-float",
-    "relocation-model": "pic",
     "dynamic-linking": false,
     "position-independent-executables": true,
     "rustc-abi": "x86-softfloat"

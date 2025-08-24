@@ -2,11 +2,19 @@
 name = "deko-core"
 edition = "2021"
 
+[[bin]]
+path = "src/stage2.rs"
+name = "stage2"
+
+[[bin]]
+path = "src/monitor.rs"
+name = "deko"
+
 [package.metadata.verus]
 verify = true
 
 [dependencies]
-vstd = { workspace = true }
+vstd = { workspace = true, features = ["allow_panic"] }
 verus_builtin = { workspace = true }
 verus_builtin_macros = { workspace = true }
 

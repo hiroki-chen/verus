@@ -16,7 +16,7 @@ impl PlatformApi for Tdx {
         PlatformType::Tdx
     }
 
-    fn init_platform(&self) {
+    fn init_platform(&self, _header: &HeaderRaw) {
         // Initialize the TDX platform.
     }
 }

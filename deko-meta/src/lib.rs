@@ -7,6 +7,56 @@ verus! {
 
 pub const BOOT_VERSION: u8 = 0x1;
 
+// The first 640 KB of RAM (low memory)
+pub const LOWMEM_END: u32 = 0xA0000;
+
+pub const STAGE2_HEAP_START: u32 = 0x10000;
+
+// 64 KB
+pub const STAGE2_HEAP_END: u32 = LOWMEM_END;
+
+// 640 KB
+pub const STAGE2_BASE: u32 = 0x800000;
+
+// Start of stage2 area excluding heap
+pub const STAGE2_STACK_END: u32 = STAGE2_BASE;
+
+pub const STAGE2_STACK_PAGE: u32 = 0x805000;
+
+pub const STAGE2_INFO_SZ: u32 = 0x30;
+
+// hardcode this.
+pub const STAGE2_STACK: u32 = STAGE2_STACK_PAGE + 0x1000 - STAGE2_INFO_SZ;
+
+pub const SECRETS_PAGE: u32 = 0x806000;
+
+pub const CPUID_PAGE: u32 = 0x807000;
+
+// Stage2 is loaded at 8 MB + 32 KB
+pub const STAGE2_START: u32 = 0x808000;
+
+pub const STAGE2_MAXLEN: u32 = 0x8D0000 - STAGE2_START;
+
+#[repr(C, packed)]
+pub struct Stage2LaunchInfo {
+    // VTOM must be the first field.
+    #[cfg(feature = "snp")]
+    pub vtom: u64,
+    // platform_type must be the second field.
+    pub platform_type: u32,
+    // cpuid_page must be the third field.
+    pub cpuid_page: u32,
+    // secrets_page must be the fourth field.
+    pub secrets_page: u32,
+    pub stage2_end: u32,
+    pub kernel_elf_start: u32,
+    pub kernel_elf_end: u32,
+    pub kernel_fs_start: u32,
+    pub kernel_fs_end: u32,
+    pub igvm_params: u32,
+    pub _reserved: u32,
+}
+
 #[repr(C)]
 #[derive(Debug, Default)]
 pub tracked struct HeaderRaw {
@@ -63,6 +113,7 @@ impl IsConstant for HeaderRaw {
         &&& self.mmap.is_constant()
         &&& self.mmap_len.is_constant()
         &&& self.kernel_entry.is_constant()
+        &&& self.platform_type.is_constant()
     }
 }
 

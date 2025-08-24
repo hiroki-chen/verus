@@ -11,7 +11,7 @@ const DEFAULT_STAGE1_PATH: &str =
 const DEFAULT_OVMF_PATH: &str = "~/.local/share/ovmf/OVMF.fd";
 /// This is for SEV stage 2 boot.
 const DEFAULT_DEKO_MONITOR_PATH: &str =
-    "/home/haobchen/cage-sev/target/x86_64-snp-deko/release/deko-monitor.bin";
+    "/home/haobchen/cage-sev/target/x86_64-snp-deko/release/deko";
 const DEFAULT_VERUS_REPO: &str = "https://github.com/hiroki-chen/verus.git";
 
 #[derive(Debug)]
@@ -73,7 +73,7 @@ enum Commands {
         #[arg(short, long)]
         ovmf_path: Option<String>,
         #[arg(short, long)]
-        deko_monitor_path: Option<String>,
+        stage2_path: Option<String>,
         #[arg(short, long)]
         stage1_path: Option<String>,
     },
@@ -130,43 +130,116 @@ impl Builder {
     pub fn build(&self, target: BuildTarget, release: bool) -> Result<()> {
         match target {
             BuildTarget::Deko => {
-                // Change the working directory to the deko-monitor package
-                let deko_monitor = project_root().join("deko-monitor");
-                std::env::set_current_dir(&deko_monitor)
-                    .context("Failed to change directory to deko-monitor")?;
+                println!("--- Building stage2 bootloader ---");
+
+                let deko_stage2 = project_root().join("deko-core");
+                std::env::set_current_dir(&deko_stage2)
+                    .context("Failed to change directory to deko-core")?;
                 let mut cmd = std::process::Command::new("cargo");
                 cmd.arg("verus")
                     .arg("build")
                     .arg("--target")
                     .arg(format!("../.cargo/x86_64-{}-deko.json", self.target_arch))
                     .arg("--features")
-                    .arg(format!("{},logging", self.target_arch))
-                    .arg("--no-default-features");
-
+                    .arg(self.target_arch.as_str())
+                    .arg("--bin")
+                    .arg("stage2");
                 if release {
                     cmd.arg("--release");
                 } else {
                     cmd.arg("--debug");
                 }
 
-                println!("Building Deko with command: {:?}", cmd);
                 if !cmd.status()?.success() {
-                    bail!("Cannot build deko");
+                    bail!("Cannot build deko-stage2");
                 }
 
                 if self.target_arch.contains("snp") {
-                    // Creating flat image
                     cmd = std::process::Command::new("objcopy");
                     cmd.arg("-O")
                         .arg("binary")
-                        .arg("../target/x86_64-snp-deko/release/deko-monitor")
-                        .arg("../target/x86_64-snp-deko/release/deko-monitor.bin");
+                        .arg("../target/x86_64-snp-deko/release/stage2")
+                        .arg("../target/x86_64-snp-deko/release/deko-stage2.bin");
 
                     println!("Creating flat image with command: {:?}", cmd);
                     if !cmd.status()?.success() {
                         bail!("Cannot create flat image for deko-monitor");
                     }
                 }
+
+                println!("--- Building Deko Monitor ---");
+                let deko_core = project_root().join("deko-core");
+                std::env::set_current_dir(&deko_core)
+                    .context("Failed to change directory to deko-core")?;
+                cmd = std::process::Command::new("cargo");
+                cmd.arg("verus")
+                    .arg("build")
+                    .arg("--target")
+                    .arg(format!("../.cargo/x86_64-{}-deko.json", self.target_arch))
+                    .arg("--features")
+                    .arg(self.target_arch.as_str())
+                    .arg("--bin")
+                    .arg("deko");
+                if release {
+                    cmd.arg("--release");
+                } else {
+                    cmd.arg("--debug");
+                }
+                if !cmd.status()?.success() {
+                    bail!("Cannot build deko-monitor");
+                }
+
+                if self.target_arch.contains("snp") {
+                    cmd = std::process::Command::new("objcopy");
+                    cmd.arg("-O")
+                        .arg("elf64-x86-64")
+                        .arg("--strip-unneeded")
+                        .arg("../target/x86_64-snp-deko/release/deko")
+                        .arg("../target/x86_64-snp-deko/release/deko.elf");
+
+                    println!("Creating ELF image with command: {:?}", cmd);
+                    if !cmd.status()?.success() {
+                        bail!("Cannot create flat image for deko-monitor");
+                    }
+                }
+
+                // println!("--- Building stage1 bootloader ---");
+                // let deko_monitor = project_root().join("deko-monitor");
+                // std::env::set_current_dir(&deko_monitor)
+                //     .context("Failed to change directory to deko-monitor")?;
+                // let mut cmd = std::process::Command::new("cargo");
+                // cmd.arg("verus")
+                //     .arg("build")
+                //     .arg("--target")
+                //     .arg(format!("../.cargo/x86_64-{}-deko.json", self.target_arch))
+                //     .arg("--features")
+                //     .arg(format!("{},logging", self.target_arch))
+                //     .arg("--no-default-features");
+
+                // if release {
+                //     cmd.arg("--release");
+                // } else {
+                //     cmd.arg("--debug");
+                // }
+
+                // println!("Building Deko with command: {:?}", cmd);
+                // if !cmd.status()?.success() {
+                //     bail!("Cannot build deko");
+                // }
+
+                // if self.target_arch.contains("snp") {
+                //     // Creating flat image
+                //     cmd = std::process::Command::new("objcopy");
+                //     cmd.arg("-O")
+                //         .arg("binary")
+                //         .arg("../target/x86_64-snp-deko/release/deko-monitor")
+                //         .arg("../target/x86_64-snp-deko/release/deko-monitor.bin");
+
+                //     println!("Creating flat image with command: {:?}", cmd);
+                //     if !cmd.status()?.success() {
+                //         bail!("Cannot create flat image for deko-monitor");
+                //     }
+                // }
 
                 Ok(())
             }
@@ -240,8 +313,8 @@ impl Builder {
 
         if config.debug {
             // Additional debugging options
-            cmd.args(["-s", "-S"]); // -s for gdb server, -S for pause on startup
-            println!("Debugging mode enabled: QEMU will start with GDB server and paused state.");
+            cmd.args(["-s"]); // -s for gdb server
+            println!("Debugging mode enabled: QEMU will start with GDB server.");
         }
 
         println!("Executing command: {:?}", cmd);
@@ -257,16 +330,16 @@ impl Builder {
     pub fn create_bootable(
         &self,
         ovmf_path: &str,
-        deko_monitor_path: &str,
+        stage2_path: &str,
         stage1_path: &str,
     ) -> Result<()> {
         match &self.target_arch {
             target if target.contains("snp") => self
-                .create_bootable_sev(ovmf_path, deko_monitor_path)
+                .create_bootable_sev(ovmf_path, stage2_path)
                 .context("Failed to create bootable SEV image"),
             target if target.contains("tdx") => {
                 // Placeholder for TDX logic
-                self.create_bootable_tdx(deko_monitor_path, stage1_path)
+                self.create_bootable_tdx(stage2_path, stage1_path)
                     .context("Failed to create bootable TDX image")
             }
             _ => bail!("Unsupported target architecture: {}", self.target_arch),
@@ -320,29 +393,26 @@ impl Builder {
         Ok(())
     }
 
-    fn create_bootable_sev(&self, ovmf_path: &str, deko_monitor_path: &str) -> Result<()> {
+    fn create_bootable_sev(&self, ovmf_path: &str, stage2_path: &str) -> Result<()> {
         // First ensure that our package is fresh.
         self.build(BuildTarget::Deko, true)?;
 
         // Logic to create a bootable image using the provided paths
-        let deko_monitor_path = project_root().join(deko_monitor_path);
+        let stage2_path = project_root().join(stage2_path);
         let boot_img_path = project_root().join("target/x86_64-snp-deko/release/igvm.igvm");
         // Get full path to OVMF
         let ovmf_path = shellexpand::tilde(ovmf_path);
 
         println!("Creating IGVM image with:");
-        println!("Deko Monitor Path: {:?}", deko_monitor_path);
+        println!("Deko Monitor Path: {:?}", stage2_path);
         println!("IGVM Image Path: {:?}", boot_img_path);
 
         let mut cmd = std::process::Command::new("igvmbuilder");
-        cmd.args(["--sort", "--policy", "0x30000", "--snp"]);
+        cmd.args(["--sort", "--policy", "0x30000", "--snp"]); // todo: the policy should be configurable.
         cmd.args(["--firmware", ovmf_path.to_string().as_str()]);
         // Stage 2 has some problems.
-        cmd.args(["--stage2", deko_monitor_path.to_str().unwrap()]);
-        cmd.args([
-            "--kernel",
-            "/home/haobchen/cage-sev/target/x86_64-snp-deko/release/deko-monitor",
-        ]);
+        cmd.args(["--stage2", stage2_path.to_str().unwrap()]);
+        cmd.args(["--kernel", DEFAULT_DEKO_MONITOR_PATH]);
         cmd.args(["--output", boot_img_path.to_str().unwrap()]);
         cmd.arg("qemu");
 
@@ -388,22 +458,22 @@ fn main() -> Result<()> {
 
     let builder = Builder::new(target_arch.to_string());
     match cli.command {
-        Commands::CreateBootable { ovmf_path, deko_monitor_path, stage1_path } => {
+        Commands::CreateBootable { ovmf_path, stage2_path, stage1_path } => {
             if let Some(loader) = &ovmf_path {
                 println!("Using OVMF path: {}", loader);
             } else {
                 println!("No loader path provided, using default.");
             }
 
-            if let Some(deko_monitor) = &deko_monitor_path {
-                println!("Using deko monitor path: {}", deko_monitor);
+            if let Some(stage2_path) = &stage2_path {
+                println!("Using deko monitor path: {}", stage2_path);
             } else {
                 println!("No deko monitor path provided, using default.");
             }
 
             builder.create_bootable(
                 ovmf_path.as_deref().unwrap_or(DEFAULT_OVMF_PATH),
-                deko_monitor_path.as_deref().unwrap_or(DEFAULT_DEKO_MONITOR_PATH),
+                stage2_path.as_deref().unwrap_or(DEFAULT_DEKO_MONITOR_PATH),
                 stage1_path.as_deref().unwrap_or(DEFAULT_STAGE1_PATH),
             )
         }
@@ -466,8 +536,7 @@ fn bootstrap(prefix: &str, commit: Option<&str>) -> Result<()> {
     // 2. Build verus
     std::env::set_current_dir(PathBuf::from(prefix).join("verus/source"))?;
     cmd = std::process::Command::new("../tools/vargo/target/release/vargo");
-    cmd.arg("build")
-        .arg("--release");
+    cmd.arg("build").arg("--release");
 
     if !cmd.status().context("Failed to run vargo build")?.success() {
         bail!("Failed to build verus");

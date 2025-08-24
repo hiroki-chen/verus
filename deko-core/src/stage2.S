@@ -3,9 +3,9 @@
 .code32
 
 .org 0
-.globl entry
+.globl startup_32
 
-entry:
+startup_32:
   movl %esp, %ebp
 
   movl $gdt64_desc, %eax
@@ -211,11 +211,11 @@ startup_64:
     *
     * - Pass &Stage2LaunchInfo as the first argument (%rdi)
     * - Make sure (%rsp + 8) is 16b-aligned when control is transferred
-    *   to _start
+    *   to deko_main
     */
   movl %ebp, %edi
   andq $~0xf, %rsp
-  call _start
+  call deko_main
 
 idt32:
   .rept 32
@@ -255,3 +255,8 @@ gdt64_desc:
 pgtable:
 .fill 0x7000, 1, 0
 pgtable_end:
+
+.globl bsp_stack
+bsp_stack:
+.globl bsp_stack_end
+bsp_stack_end:

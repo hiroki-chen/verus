@@ -53,6 +53,14 @@ pub trait Predicate<V>: Sized {
     spec fn inv(self, v: V) -> bool;
 }
 
+// Dummy implementation if we don't care about the predicate.
+impl<V> Predicate<V> for () {
+    #[verifier::inline]
+    open spec fn inv(self, __discard: V) -> bool {
+        true
+    }
+}
+
 /// A helper predicate that always returns true for any value of type `V`.
 /// This is used when there is no predicate on the value should be used.
 pub struct TrivialPredicate<V: WellFormed>(core::marker::PhantomData<V>);

@@ -11,3 +11,9 @@ deko-std = { workspace = true }
 
 [package.metadata.verus]
 verify = true
+
+
+[features]
+default = ["snp"]
+tdx = []
+snp = []
