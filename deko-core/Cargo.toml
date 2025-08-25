@@ -10,6 +10,9 @@ name = "stage2"
 path = "src/monitor.rs"
 name = "deko"
 
+[lib]
+path = "src/stage2.rs"
+
 [package.metadata.verus]
 verify = true
 
@@ -23,6 +26,7 @@ deko-macros = { workspace = true }
 deko-std = { workspace = true, features = ["alloc"] }
 deko-logging = { workspace = true, optional = true }
 log = { version = "0.4.27", optional = true }
+paste = "1.0.15"
 
 [features]
 default = ["snp", "logging"]

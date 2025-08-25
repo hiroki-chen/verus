@@ -1,18 +1,28 @@
-use deko_meta::HeaderRaw;
+use deko_meta::{HeaderRaw, Stage2LaunchInfo};
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
-use crate::cpu::idt::Idt;
+use crate::cpu::idt::{stage2_generic_idt_handler_no_ghcb, Idt};
+use crate::cpu::register_cpuid_table;
 use crate::snp::Snp;
 
 verus! {
 
-#[repr(u64)]
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub enum PlatformType {
-    Tdx = 0x0001,
-    Snp = 0x0002,
+    Snp,
+    Tdx,
     None,  // not supported yet.
+}
+
+impl From<u32> for PlatformType {
+    fn from(value: u32) -> Self {
+        match value {
+            0x0001 => PlatformType::Snp,
+            0x0002 => PlatformType::Tdx,
+            _ => PlatformType::None,
+        }
+    }
 }
 
 pub struct PlatformPredicate;
@@ -39,74 +49,75 @@ pub exec static PLATFORM: OnceLock<PlatformType, PlatformPredicate>
     OnceLock::new(Ghost(PlatformPredicate {  }))
 }
 
-impl From<u64> for PlatformType {
-    fn from(value: u64) -> (r: Self)
-        ensures
-            if value == 0x0001 {
-                r matches PlatformType::Tdx
-            } else if value == 0x0002 {
-                r matches PlatformType::Snp
-            } else {
-                r matches PlatformType::None
-            },
-    {
-        match value {
-            0x0001 => PlatformType::Tdx,
-            0x0002 => PlatformType::Snp,
-            _ => PlatformType::None,
-        }
-    }
-}
-
 /// This defines a platform abstraction to permit the Deko to run on different
 /// backend CVMs. This also gives verus to reason about the high-level verifi-
 /// cation logics without resorting to low-level details of the platform.
-pub trait PlatformApi: Sync + Send {
+pub trait PlatformApi: Sync + Send + WellFormed {
     /// Returns the platform type of the current platform.
     fn platform_type(&self) -> PlatformType;
 
     /// Initializes the platform. This function should be called once at the
     /// beginning of the program to set up the platform-specific environment.
-    fn init_platform(&self, header: &HeaderRaw);
+    fn init_platform(&self, header: &Stage2LaunchInfo)
+        requires
+            header.wf(),
+            self.wf(),
+    ;
 }
 
-fn init_early_idt() {
+/// Injects dummy handlers into the IDT so that we can do early-stage
+/// exception handling (although this does nothing for now).
+#[inline(always)]
+#[verifier::external_body]
+fn init_early_idt(idt: &mut Idt)
+    requires
+        old(idt).entries.wf(),
+    ensures
+        idt.wf(),
+{
+    unsafe {
+        idt.init(&stage2_generic_idt_handler_no_ghcb as *const _ as _, 32);
+    }
 }
 
 /// Sets up the environment for the platform which will setup the GDT, kernel mapping, paging,
 /// kernel loading, heaps, etc.
-fn setup_env(platform_type: PlatformType, header: &HeaderRaw) {
+pub fn setup_env(header: &Stage2LaunchInfo, idt: &mut Idt)
+    requires
+        header.wf(),
+        old(idt).entries.wf(),
+    ensures
+        idt.wf(),
+{
     // Set up the GDT.
     crate::cpu::gdt::init_gdt();
 
+    let platform_type = PlatformType::from(header.platform_type);
+
+    // Initialize the IDT.
+    init_early_idt(idt);
+    idt.load();
+
+    // Do some platform-specific stuff.
     match platform_type {
-        PlatformType::Tdx => {},
         PlatformType::Snp => {
             let snp = Snp;
             snp.init_platform(header);
         },
-        _ => {},
-    }
-}
-
-pub fn init_platform(platform_type: PlatformType, idt: &mut Idt, header: &HeaderRaw)
-    requires
-        (platform_type matches PlatformType::Tdx) || (platform_type matches PlatformType::Snp),
-        old(idt).entries.wf(),
-{
-    PLATFORM.init(platform_type);
-
-    setup_env(platform_type, header);
-
-    match platform_type {
-        PlatformType::Tdx => {
-            // Initialize TDX platform.
+        _ => {
+            vstd::vpanic!("todo: ");
         },
-        PlatformType::Snp => {
-            // Initialize SNP platform.
-        },
-        _ => {},
     }
+
+    // Now we prepare for the mapping.
+
+    // Read the CPUID table.
+    unsafe {
+        register_cpuid_table(header.cpuid_page);
+    }
+
+    // Enable paging now.
+
 }
 
 } // verus!

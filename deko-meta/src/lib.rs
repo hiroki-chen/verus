@@ -37,10 +37,14 @@ pub const STAGE2_START: u32 = 0x808000;
 
 pub const STAGE2_MAXLEN: u32 = 0x8D0000 - STAGE2_START;
 
+/// This piece of information is provided by IGVM to stage2 so we do not
+/// explicitly construct it.
+///
+/// The parameter's structure is defined in svsm/igvmbuilder; we can also
+/// construct one on our own if needed but not necessary for the time being.
 #[repr(C, packed)]
 pub struct Stage2LaunchInfo {
     // VTOM must be the first field.
-    #[cfg(feature = "snp")]
     pub vtom: u64,
     // platform_type must be the second field.
     pub platform_type: u32,
@@ -78,6 +82,24 @@ pub tracked struct HeaderRaw {
     pub kernel_entry: u64,
     /// The type of this platform:
     pub platform_type: u64,
+}
+
+impl WellFormed for Stage2LaunchInfo {
+    open spec fn wf(&self) -> bool {
+        // The Stage2LaunchInfo is well-formed if the addresses are aligned.
+        &&& self.vtom % 0x1000 == 0
+        &&& self.cpuid_page % 0x1000 == 0
+        &&& self.cpuid_page != 0
+        &&& self.secrets_page % 0x1000 == 0
+        &&& self.secrets_page != 0
+        &&& self.stage2_end % 0x1000 == 0
+        &&& self.kernel_elf_start % 0x1000 == 0
+        &&& self.kernel_elf_end % 0x1000 == 0
+        &&& self.kernel_fs_start % 0x1000 == 0
+        &&& self.kernel_fs_end % 0x1000 == 0
+        &&& self.platform_type == 0x0001 || self.platform_type == 0x0002
+        &&& self.platform_type matches 0x0001 ==> self.vtom != 0
+    }
 }
 
 impl HeaderRaw {

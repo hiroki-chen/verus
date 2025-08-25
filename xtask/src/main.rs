@@ -203,44 +203,6 @@ impl Builder {
                     }
                 }
 
-                // println!("--- Building stage1 bootloader ---");
-                // let deko_monitor = project_root().join("deko-monitor");
-                // std::env::set_current_dir(&deko_monitor)
-                //     .context("Failed to change directory to deko-monitor")?;
-                // let mut cmd = std::process::Command::new("cargo");
-                // cmd.arg("verus")
-                //     .arg("build")
-                //     .arg("--target")
-                //     .arg(format!("../.cargo/x86_64-{}-deko.json", self.target_arch))
-                //     .arg("--features")
-                //     .arg(format!("{},logging", self.target_arch))
-                //     .arg("--no-default-features");
-
-                // if release {
-                //     cmd.arg("--release");
-                // } else {
-                //     cmd.arg("--debug");
-                // }
-
-                // println!("Building Deko with command: {:?}", cmd);
-                // if !cmd.status()?.success() {
-                //     bail!("Cannot build deko");
-                // }
-
-                // if self.target_arch.contains("snp") {
-                //     // Creating flat image
-                //     cmd = std::process::Command::new("objcopy");
-                //     cmd.arg("-O")
-                //         .arg("binary")
-                //         .arg("../target/x86_64-snp-deko/release/deko-monitor")
-                //         .arg("../target/x86_64-snp-deko/release/deko-monitor.bin");
-
-                //     println!("Creating flat image with command: {:?}", cmd);
-                //     if !cmd.status()?.success() {
-                //         bail!("Cannot create flat image for deko-monitor");
-                //     }
-                // }
-
                 Ok(())
             }
             BuildTarget::Stage1 => {
