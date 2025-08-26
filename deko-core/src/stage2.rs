@@ -61,8 +61,6 @@ pub fn deko_main(
         s2_info_perm.is_init(),
         s2_info_perm.value().wf(),
         s2_info_perm.mem_wf(),
-    ensures
-        false,
 {
     let s2_info = s2_info.borrow(Tracked(s2_info_perm));
     let mut early_idt = Idt { entries: create_early_idt() };

@@ -1,6 +1,5 @@
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
