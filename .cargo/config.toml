@@ -21,6 +21,9 @@ pretty = "xtask pretty"
 # TODO: Fork another version. This will download unncessary git submodules recursively.
 install-igvmbuilder = "install --git https://github.com/coconut-svsm/svsm.git igvmbuilder"
 
+bootstrap-verus = "xtask bootstrap-verus"
+boostrap-qemu = "xtask bootstrap-qemu"
+
 [target.x86_64-snp-deko]
 rustflags = [
 	"-C", "force-frame-pointers",

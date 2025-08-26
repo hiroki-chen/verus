@@ -1,18 +1,84 @@
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use git2::Repository;
 use serde::Deserialize;
 
-const DEFAULT_STAGE1_PATH: &str =
-    "/home/haobchen/cage-sev/target/x86_64-unknown-uefi/release/deko-stage1.efi";
-const DEFAULT_OVMF_PATH: &str = "~/.local/share/ovmf/OVMF.fd";
-/// This is for SEV stage 2 boot.
-const DEFAULT_DEKO_MONITOR_PATH: &str =
-    "/home/haobchen/cage-sev/target/x86_64-snp-deko/release/deko";
+// Configuration constants - no user-specific paths
 const DEFAULT_VERUS_REPO: &str = "https://github.com/hiroki-chen/verus.git";
+const DEFAULT_MEMORY: &str = "4G";
+const DEFAULT_SMP_CORES: u32 = 4;
+
+/// Configuration struct to hold all paths and settings
+#[derive(Debug)]
+struct ProjectConfig {
+    root: PathBuf,
+    target_arch: String,
+    target_triple: String,
+}
+
+impl ProjectConfig {
+    fn new(target_arch: String) -> Self {
+        let root = project_root();
+        let target_triple = format!("x86_64-{}-deko", target_arch);
+
+        ProjectConfig { root, target_arch, target_triple }
+    }
+
+    // Helper methods to generate paths dynamically
+    fn target_dir(&self, release: bool) -> PathBuf {
+        let profile = if release { "release" } else { "debug" };
+        self.root.join("target").join(&self.target_triple).join(profile)
+    }
+
+    fn stage1_path(&self, release: bool) -> PathBuf {
+        let profile = if release { "release" } else { "debug" };
+        self.root.join("target").join("x86_64-unknown-uefi").join(profile).join("deko-stage1.efi")
+    }
+
+    fn deko_monitor_path(&self, release: bool) -> PathBuf { self.target_dir(release).join("deko") }
+
+    fn stage2_binary_path(&self, release: bool) -> PathBuf {
+        self.target_dir(release).join("deko-stage2.bin")
+    }
+
+    fn stage2_path(&self, release: bool) -> PathBuf { self.target_dir(release).join("stage2") }
+
+    fn deko_elf_path(&self, release: bool) -> PathBuf { self.target_dir(release).join("deko.elf") }
+
+    fn boot_image_path(&self) -> PathBuf { self.target_dir(true).join("boot.img") }
+
+    fn igvm_path(&self) -> PathBuf { self.target_dir(true).join("igvm.igvm") }
+
+    fn custom_target_json(&self) -> PathBuf {
+        self.root.join(".cargo").join(format!("{}.json", self.target_triple))
+    }
+
+    fn default_ovmf_path() -> PathBuf {
+        // Try multiple common locations
+        let possible_paths = vec![
+            PathBuf::from("/usr/local/share/ovmf/OVMF.fd"),
+            dirs::data_local_dir().map(|d| d.join("share/ovmf/OVMF.fd")).unwrap_or_default(),
+            PathBuf::from("/usr/share/ovmf/OVMF_CODE.fd"),
+        ];
+
+        for path in possible_paths {
+            if path.exists() {
+                return path;
+            }
+        }
+
+        // Fallback to user's home directory
+        dirs::home_dir()
+            .map(|d| d.join(".local/share/ovmf/OVMF.fd"))
+            .unwrap_or_else(|| PathBuf::from("~/.local/share/ovmf/OVMF.fd"))
+    }
+
+    fn qemu_config_path(&self) -> PathBuf { self.root.join(".config/qemu.config.toml") }
+}
 
 #[derive(Debug)]
 struct FinalQemuConfig {
@@ -50,6 +116,7 @@ struct PartialQemuConfig {
 enum BuildTarget {
     Deko,
     Stage1,
+    All,
 }
 
 #[derive(ValueEnum, Debug, Clone)]
@@ -57,13 +124,12 @@ enum TargetArch {
     Tdx,
     Snp,
 }
-
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
-    #[arg(short, long, value_enum)]
+    #[arg(short, long, value_enum, global = true)]
     target_arch: Option<TargetArch>,
 }
 
@@ -71,16 +137,16 @@ struct Cli {
 enum Commands {
     CreateBootable {
         #[arg(short, long)]
-        ovmf_path: Option<String>,
+        ovmf_path: Option<PathBuf>,
         #[arg(short, long)]
-        stage2_path: Option<String>,
+        stage2_path: Option<PathBuf>,
         #[arg(short, long)]
-        stage1_path: Option<String>,
+        stage1_path: Option<PathBuf>,
     },
 
     Qemu {
         #[arg(short, long)]
-        config_path: Option<String>,
+        config_path: Option<PathBuf>,
     },
 
     Build {
@@ -90,152 +156,174 @@ enum Commands {
         release: bool,
     },
 
-    Pretty,
+    Pretty {
+        #[arg(short, long)]
+        paths: Vec<PathBuf>,
+    },
 
-    Bootstrap {
+    BootstrapVerus {
         #[arg(short, long)]
-        // The path where the toolchain needs to be installed.
-        prefix: String,
+        prefix: PathBuf,
         #[arg(short, long)]
-        // The commit to checkout after cloning the repository.
         commit: Option<String>,
+    },
+
+    BootstrapQemu {
+        #[arg(short, long)]
+        /// The directory where QEMU will be built and installed
+        prefix: PathBuf,
     },
 }
 
 impl Default for FinalQemuConfig {
     fn default() -> Self {
+        let config = ProjectConfig::new("snp".to_string()); // Default to SNP
+
         FinalQemuConfig {
-            memory: "4G".to_string(),
-            smp_cores: 4,
+            memory: DEFAULT_MEMORY.to_string(),
+            smp_cores: DEFAULT_SMP_CORES,
             enable_cvm: true,
-            enable_graphics: false, // Default to nographic
+            enable_graphics: false,
             drive: vec![],
-            igvm_path: project_root()
-                .join("target/x86_64-snp-deko/release/igvm.igvm")
-                .display()
-                .to_string(),
+            igvm_path: config.igvm_path().display().to_string(),
             debug: false,
-            bios_path: "/usr/local/share/ovmf/OVMF.fd".to_string(),
+            bios_path: ProjectConfig::default_ovmf_path().display().to_string(),
         }
     }
 }
 
 struct Builder {
-    target_arch: String,
+    config: ProjectConfig,
 }
-
 impl Builder {
-    pub fn new(target_arch: String) -> Self { Builder { target_arch } }
+    pub fn new(target_arch: String) -> Self { Builder { config: ProjectConfig::new(target_arch) } }
 
     pub fn build(&self, target: BuildTarget, release: bool) -> Result<()> {
         match target {
-            BuildTarget::Deko => {
-                println!("--- Building stage2 bootloader ---");
-
-                let deko_stage2 = project_root().join("deko-core");
-                std::env::set_current_dir(&deko_stage2)
-                    .context("Failed to change directory to deko-core")?;
-                let mut cmd = std::process::Command::new("cargo");
-                cmd.arg("verus")
-                    .arg("build")
-                    .arg("--target")
-                    .arg(format!("../.cargo/x86_64-{}-deko.json", self.target_arch))
-                    .arg("--features")
-                    .arg(self.target_arch.as_str())
-                    .arg("--bin")
-                    .arg("stage2");
-                if release {
-                    cmd.arg("--release");
-                } else {
-                    cmd.arg("--debug");
-                }
-
-                if !cmd.status()?.success() {
-                    bail!("Cannot build deko-stage2");
-                }
-
-                if self.target_arch.contains("snp") {
-                    cmd = std::process::Command::new("objcopy");
-                    cmd.arg("-O")
-                        .arg("binary")
-                        .arg("../target/x86_64-snp-deko/release/stage2")
-                        .arg("../target/x86_64-snp-deko/release/deko-stage2.bin");
-
-                    println!("Creating flat image with command: {:?}", cmd);
-                    if !cmd.status()?.success() {
-                        bail!("Cannot create flat image for deko-monitor");
-                    }
-                }
-
-                println!("--- Building Deko Monitor ---");
-                let deko_core = project_root().join("deko-core");
-                std::env::set_current_dir(&deko_core)
-                    .context("Failed to change directory to deko-core")?;
-                cmd = std::process::Command::new("cargo");
-                cmd.arg("verus")
-                    .arg("build")
-                    .arg("--target")
-                    .arg(format!("../.cargo/x86_64-{}-deko.json", self.target_arch))
-                    .arg("--features")
-                    .arg(self.target_arch.as_str())
-                    .arg("--bin")
-                    .arg("deko");
-                if release {
-                    cmd.arg("--release");
-                } else {
-                    cmd.arg("--debug");
-                }
-                if !cmd.status()?.success() {
-                    bail!("Cannot build deko-monitor");
-                }
-
-                if self.target_arch.contains("snp") {
-                    cmd = std::process::Command::new("objcopy");
-                    cmd.arg("-O")
-                        .arg("elf64-x86-64")
-                        .arg("--strip-unneeded")
-                        .arg("../target/x86_64-snp-deko/release/deko")
-                        .arg("../target/x86_64-snp-deko/release/deko.elf");
-
-                    println!("Creating ELF image with command: {:?}", cmd);
-                    if !cmd.status()?.success() {
-                        bail!("Cannot create flat image for deko-monitor");
-                    }
-                }
-
+            BuildTarget::All => {
+                self.build(BuildTarget::Stage1, release)?;
+                self.build(BuildTarget::Deko, release)?;
                 Ok(())
             }
-            BuildTarget::Stage1 => {
-                let mut cmd = std::process::Command::new("cargo");
-                cmd.arg("build")
-                    .arg("--package")
-                    .arg("deko-stage1")
-                    .arg("--target")
-                    .arg("x86_64-unknown-uefi")
-                    .arg("--features")
-                    .arg(self.target_arch.as_str());
-
-                if release {
-                    cmd.arg("--release");
-                }
-
-                println!("Building Stage1 with command: {:?}", cmd);
-                if !cmd.status()?.success() {
-                    bail!("Failed to build stage1");
-                }
-
-                Ok(())
-            }
+            BuildTarget::Deko => self.build_deko(release),
+            BuildTarget::Stage1 => self.build_stage1(release),
         }
     }
 
-    pub fn qemu(&self, config_path: &str) -> Result<()> {
-        let config = match load_qemu_config(config_path) {
+    fn build_deko(&self, release: bool) -> Result<()> {
+        println!("--- Building stage2 bootloader ---");
+
+        let deko_stage2 = self.config.root.join("deko-core");
+        std::env::set_current_dir(&deko_stage2)
+            .context("Failed to change directory to deko-core")?;
+
+        // Build stage2
+        let mut cmd = std::process::Command::new("cargo");
+        cmd.arg("verus")
+            .arg("build")
+            .arg("--target")
+            .arg(self.config.custom_target_json())
+            .arg("--features")
+            .arg(&self.config.target_arch)
+            .arg("--bin")
+            .arg("stage2");
+
+        if release {
+            cmd.arg("--release");
+        }
+
+        println!("Building with command: {:?}", cmd);
+        if !cmd.status()?.success() {
+            bail!("Cannot build deko-stage2");
+        }
+
+        // Create flat image for SNP
+        if self.config.target_arch == "snp" {
+            let mut cmd = std::process::Command::new("objcopy");
+            cmd.arg("-O")
+                .arg("binary")
+                .arg(self.config.stage2_path(release))
+                .arg(self.config.stage2_binary_path(release));
+
+            println!("Creating flat image with command: {:?}", cmd);
+            if !cmd.status()?.success() {
+                bail!("Cannot create flat image for deko-monitor");
+            }
+        }
+
+        println!("--- Building Deko Monitor ---");
+
+        // Build monitor
+        let mut cmd = std::process::Command::new("cargo");
+        cmd.arg("verus")
+            .arg("build")
+            .arg("--target")
+            .arg(self.config.custom_target_json())
+            .arg("--features")
+            .arg(&self.config.target_arch)
+            .arg("--bin")
+            .arg("deko");
+
+        if release {
+            cmd.arg("--release");
+        }
+
+        if !cmd.status()?.success() {
+            bail!("Cannot build deko-monitor");
+        }
+
+        // Create ELF for SNP
+        if self.config.target_arch == "snp" {
+            let mut cmd = std::process::Command::new("objcopy");
+            cmd.arg("-O")
+                .arg("elf64-x86-64")
+                .arg("--strip-unneeded")
+                .arg(self.config.deko_monitor_path(release))
+                .arg(self.config.deko_elf_path(release));
+
+            println!("Creating ELF image with command: {:?}", cmd);
+            if !cmd.status()?.success() {
+                bail!("Cannot create ELF image for deko-monitor");
+            }
+        }
+
+        Ok(())
+    }
+
+    fn build_stage1(&self, release: bool) -> Result<()> {
+        let mut cmd = std::process::Command::new("cargo");
+        cmd.arg("build")
+            .arg("--package")
+            .arg("deko-stage1")
+            .arg("--target")
+            .arg("x86_64-unknown-uefi")
+            .arg("--features")
+            .arg(&self.config.target_arch);
+
+        if release {
+            cmd.arg("--release");
+        }
+
+        println!("Building Stage1 with command: {:?}", cmd);
+        if !cmd.status()?.success() {
+            bail!("Failed to build stage1");
+        }
+
+        Ok(())
+    }
+
+    pub fn qemu(&self, config_path: Option<PathBuf>) -> Result<()> {
+        let config_path = config_path.unwrap_or_else(|| self.config.qemu_config_path());
+
+        let config = match load_qemu_config(&config_path) {
             Ok(cfg) => cfg,
-            Err(_) => Default::default(),
+            Err(e) => {
+                println!("Warning: Failed to load config ({}), using defaults", e);
+                Default::default()
+            }
         };
 
-        println!("--- Launching QEMU ---");
+        println!("✓ Launching QEMU");
         println!("Configuration: {:#?}", config);
 
         let mut cmd = std::process::Command::new("qemu-system-x86_64");
@@ -246,7 +334,7 @@ impl Builder {
         for (i, drive) in config.drive.iter().enumerate() {
             cmd.arg("-drive").arg(format!(
                 "file={},if={},format={},id=disk{}",
-                drive.file.to_str().unwrap(),
+                drive.file.display(),
                 drive.interface,
                 drive.format,
                 i
@@ -254,9 +342,7 @@ impl Builder {
         }
 
         // Graphics configuration
-        if config.enable_graphics {
-            // Keeps default graphics
-        } else {
+        if !config.enable_graphics {
             cmd.args(["-nographic", "-vga", "none"]);
         }
 
@@ -264,151 +350,150 @@ impl Builder {
         cmd.args(["-serial", "stdio", "-nodefaults", "-no-reboot"]);
 
         if config.enable_cvm {
-            if self.target_arch.contains("snp") {
-                qemu_sev(&config, &mut cmd);
-            } else if self.target_arch.contains("tdx") {
-                qemu_tdx(&config, &mut cmd);
-            } else {
-                bail!("Unsupported target architecture: {}", self.target_arch);
+            match self.config.target_arch.as_str() {
+                "snp" => qemu_sev(&config, &mut cmd),
+                "tdx" => qemu_tdx(&config, &mut cmd),
+                _ => bail!("Unsupported target architecture: {}", self.config.target_arch),
             }
         }
 
         if config.debug {
-            // Additional debugging options
-            cmd.args(["-s"]); // -s for gdb server
-            println!("Debugging mode enabled: QEMU will start with GDB server.");
+            cmd.arg("-s");
+            println!("✓ Debugging mode enabled: QEMU will start with GDB server on port 1234");
         }
 
-        println!("Executing command: {:?}", cmd);
+        println!("✓ Executing command: {:?}", cmd);
 
         let mut child = cmd.spawn().context("Failed to spawn QEMU")?;
         child.wait().context("QEMU process failed")?;
-
-        println!("Running QEMU with the following configuration:");
 
         Ok(())
     }
 
     pub fn create_bootable(
         &self,
-        ovmf_path: &str,
-        stage2_path: &str,
-        stage1_path: &str,
+        ovmf_path: Option<PathBuf>,
+        stage2_path: Option<PathBuf>,
+        stage1_path: Option<PathBuf>,
     ) -> Result<()> {
-        match &self.target_arch {
-            target if target.contains("snp") => self
-                .create_bootable_sev(ovmf_path, stage2_path)
-                .context("Failed to create bootable SEV image"),
-            target if target.contains("tdx") => {
-                // Placeholder for TDX logic
-                self.create_bootable_tdx(stage2_path, stage1_path)
-                    .context("Failed to create bootable TDX image")
-            }
-            _ => bail!("Unsupported target architecture: {}", self.target_arch),
+        match self.config.target_arch.as_str() {
+            "snp" => self.create_bootable_snp(ovmf_path, stage2_path),
+            "tdx" => self.create_bootable_tdx(stage2_path, stage1_path),
+            _ => bail!("Unsupported target architecture: {}", self.config.target_arch),
         }
     }
 
-    fn create_bootable_tdx(&self, deko_monitor_path: &str, stage1_path: &str) -> Result<()> {
-        self.build(BuildTarget::Stage1, true)?;
-        self.build(BuildTarget::Deko, true)?;
+    fn create_bootable_tdx(
+        &self,
+        deko_monitor_path: Option<PathBuf>,
+        stage1_path: Option<PathBuf>,
+    ) -> Result<()> {
+        // Build everything first
+        self.build(BuildTarget::All, true)?;
 
-        // Logic to create a bootable image using the provided paths
-        let loader_path = project_root().join(stage1_path);
-        let deko_monitor_path = project_root().join(deko_monitor_path);
-        let boot_img_path = project_root().join("target/x86_64-tdx-deko/release/boot.img");
+        let loader_path = stage1_path.unwrap_or_else(|| self.config.stage1_path(true));
+        let deko_monitor_path =
+            deko_monitor_path.unwrap_or_else(|| self.config.deko_monitor_path(true));
+        let boot_img_path = self.config.boot_image_path();
 
-        println!("Creating bootable image with:");
-        println!("Loader Path: {:?}", loader_path);
-        println!("Deko Monitor Path: {:?}", deko_monitor_path);
-        println!("Boot Image Path: {:?}", boot_img_path);
+        println!("✓ Creating bootable image with:");
+        println!("  Loader Path: {:?}", loader_path);
+        println!("  Deko Monitor Path: {:?}", deko_monitor_path);
+        println!("  Boot Image Path: {:?}", boot_img_path);
 
+        // Create boot image
         let img_file = OpenOptions::new()
-            .read(true) // We need to read from it after formatting.
-            .write(true) // We need to write to it to format and copy files.
-            .create(true) // Create it if it doesn't exist.
-            .truncate(true) // Truncate it to zero if it already exists.
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
             .open(&boot_img_path)
             .context("Failed to create or open boot image file")?;
-        // Zeros out the file to ensure it's empty
+
         let img_len = 1024 * 1024 * 64; // 64 MB
-        img_file.set_len(img_len as u64).context("Failed to set boot image file size")?;
+        img_file.set_len(img_len)?;
 
         let format_options = fatfs::FormatVolumeOptions::new();
-        fatfs::format_volume(&img_file, format_options).context("Failed to format boot image")?;
+        fatfs::format_volume(&img_file, format_options)?;
 
-        let fs = fatfs::FileSystem::new(&img_file, fatfs::FsOptions::new())
-            .context("Failed to initialize filesystem")?;
+        let fs = fatfs::FileSystem::new(&img_file, fatfs::FsOptions::new())?;
         let root_dir = fs.root_dir();
-        let efi_dir = root_dir.create_dir("EFI").context("Failed to create EFI directory")?;
-        let boot_dir = efi_dir.create_dir("BOOT").context("Failed to create BOOT directory")?;
+        let efi_dir = root_dir.create_dir("EFI")?;
+        let boot_dir = efi_dir.create_dir("BOOT")?;
 
-        let mut dest_file =
-            boot_dir.create_file("BOOTX64.EFI").context("Failed to create BOOTX64.EFI file")?;
+        let mut dest_file = boot_dir.create_file("BOOTX64.EFI")?;
         dest_file.truncate()?;
-        std::io::copy(&mut fs::File::open(loader_path)?, &mut dest_file)?;
+        std::io::copy(&mut fs::File::open(&loader_path)?, &mut dest_file)?;
 
         let mut dest_file = root_dir.create_file("deko.bin")?;
         dest_file.truncate()?;
-        std::io::copy(&mut fs::File::open(deko_monitor_path)?, &mut dest_file)?;
+        std::io::copy(&mut fs::File::open(&deko_monitor_path)?, &mut dest_file)?;
 
-        println!("--- Boot Image created at {:?} ---", boot_img_path);
+        println!("✓ Boot Image created at {:?}", boot_img_path);
         Ok(())
     }
 
-    fn create_bootable_sev(&self, ovmf_path: &str, stage2_path: &str) -> Result<()> {
-        // First ensure that our package is fresh.
+    fn create_bootable_snp(
+        &self,
+        ovmf_path: Option<PathBuf>,
+        stage2_path: Option<PathBuf>,
+    ) -> Result<()> {
+        // Build everything first
         self.build(BuildTarget::Deko, true)?;
 
-        // Logic to create a bootable image using the provided paths
-        let stage2_path = project_root().join(stage2_path);
-        let boot_img_path = project_root().join("target/x86_64-snp-deko/release/igvm.igvm");
-        // Get full path to OVMF
-        let ovmf_path = shellexpand::tilde(ovmf_path);
+        let stage2_path = stage2_path.unwrap_or_else(|| self.config.stage2_binary_path(true));
+        let boot_img_path = self.config.igvm_path();
+        let ovmf_path = ovmf_path.unwrap_or_else(ProjectConfig::default_ovmf_path);
+        let kernel_path = self.config.deko_monitor_path(true);
 
-        println!("Creating IGVM image with:");
-        println!("Deko Monitor Path: {:?}", stage2_path);
-        println!("IGVM Image Path: {:?}", boot_img_path);
+        println!("✓ Creating IGVM image with:");
+        println!("  Stage2 Path: {:?}", stage2_path);
+        println!("  Kernel Path: {:?}", kernel_path);
+        println!("  OVMF Path: {:?}", ovmf_path);
+        println!("  Output: {:?}", boot_img_path);
 
         let mut cmd = std::process::Command::new("igvmbuilder");
-        cmd.args(["--sort", "--policy", "0x30000", "--snp"]); // todo: the policy should be configurable.
-        cmd.args(["--firmware", ovmf_path.to_string().as_str()]);
-        // Stage 2 has some problems.
-        cmd.args(["--stage2", stage2_path.to_str().unwrap()]);
-        cmd.args(["--kernel", DEFAULT_DEKO_MONITOR_PATH]);
-        cmd.args(["--output", boot_img_path.to_str().unwrap()]);
+        cmd.args(["--sort", "--policy", "0x30000", "--snp"]);
+        cmd.args(["--firmware", &ovmf_path.display().to_string()]);
+        cmd.args(["--stage2", &stage2_path.display().to_string()]);
+        cmd.args(["--kernel", &kernel_path.display().to_string()]);
+        cmd.args(["--output", &boot_img_path.display().to_string()]);
         cmd.arg("qemu");
 
-        println!("Executing command: {:?}", cmd);
+        // Change directory back to project root
+        std::env::set_current_dir(&self.config.root)
+            .context("Failed to change directory to project root")?;
 
-        let mut child = cmd.spawn().context("Failed to spawn igvmbuilder")?;
-        child.wait().context("igvmbuilder process failed")?;
+        println!("✓ Executing command: {:?}", cmd);
 
-        println!("--- IGVM Image created at {:?} ---", boot_img_path);
+        if !cmd.status()?.success() {
+            bail!("igvmbuilder failed");
+        }
+
+        println!("✓ IGVM Image created at {:?}", boot_img_path);
         Ok(())
     }
 }
 
 fn qemu_sev(config: &FinalQemuConfig, cmd: &mut std::process::Command) {
-    // SEV specific configuration
-    cmd.arg("-machine").arg(format!(
+    cmd.arg("-machine").arg(
         "type=q35,confidential-guest-support=sev,kernel_irqchip=split,igvm-cfg=igvm,memory-backend=ram"
-    ));
+    );
     cmd.args(["-object", "sev-snp-guest,id=sev,reduced-phys-bits=1,cbitpos=51"]);
     cmd.arg("-object").arg(format!("memory-backend-memfd,id=ram,size={}", config.memory));
     cmd.arg("-object").arg(format!("igvm-cfg,id=igvm,file={}", config.igvm_path));
 }
 
 fn qemu_tdx(config: &FinalQemuConfig, cmd: &mut std::process::Command) {
-    cmd.arg("-machine").arg(format!(
-        "type=q35,confidential-guest-support=tdx,kernel_irqchip=split,memory-backend=ram0"
-    ));
+    cmd.arg("-machine")
+        .arg("type=q35,confidential-guest-support=tdx,kernel_irqchip=split,memory-backend=ram0");
 
     let tdx_arg = if config.debug { "tdx-guest,id=tdx,debug=on" } else { "tdx-guest,id=tdx" };
 
     cmd.args(["-object", tdx_arg]);
     cmd.args(["-object", "iommufd,id=iommufd0"]);
     cmd.arg("-object").arg(format!("memory-backend-ram,id=ram0,size={}", config.memory));
-    cmd.args(["-bios", config.bios_path.as_str()]);
+    cmd.args(["-bios", &config.bios_path]);
 }
 
 fn main() -> Result<()> {
@@ -419,144 +504,308 @@ fn main() -> Result<()> {
     };
 
     let builder = Builder::new(target_arch.to_string());
+
     match cli.command {
         Commands::CreateBootable { ovmf_path, stage2_path, stage1_path } => {
-            if let Some(loader) = &ovmf_path {
-                println!("Using OVMF path: {}", loader);
-            } else {
-                println!("No loader path provided, using default.");
-            }
-
-            if let Some(stage2_path) = &stage2_path {
-                println!("Using deko monitor path: {}", stage2_path);
-            } else {
-                println!("No deko monitor path provided, using default.");
-            }
-
-            builder.create_bootable(
-                ovmf_path.as_deref().unwrap_or(DEFAULT_OVMF_PATH),
-                stage2_path.as_deref().unwrap_or(DEFAULT_DEKO_MONITOR_PATH),
-                stage1_path.as_deref().unwrap_or(DEFAULT_STAGE1_PATH),
-            )
+            builder.create_bootable(ovmf_path, stage2_path, stage1_path)
         }
-        Commands::Qemu { config_path } => {
-            if let Some(path) = &config_path {
-                println!("Using QEMU config path: {}", path);
-            } else {
-                println!("No QEMU config path provided, using default.");
-            }
-            // Here you would implement the logic to run QEMU with the provided config
-            // For now, we just print a message
-            println!("Running QEMU with the specified configuration...");
 
-            let config_path = config_path.unwrap_or_else(|| {
-                project_root().join(".config/qemu.config.toml").display().to_string()
-            });
+        Commands::Qemu { config_path } => builder.qemu(config_path),
 
-            builder.qemu(&config_path).context("Failed to run QEMU")
-        }
         Commands::Build { target, release } => builder.build(target, release),
-        Commands::Pretty => pretty().context("Failed to run pretty command"),
-        Commands::Bootstrap { prefix, commit } => {
-            bootstrap(&prefix, commit.as_ref().map(|x| x.as_str())).context("Failed to bootstrap")
-        }
+
+        Commands::Pretty { paths } => pretty(paths),
+
+        Commands::BootstrapVerus { prefix, commit } => bootstrap_verus(&prefix, commit.as_deref()),
+
+        Commands::BootstrapQemu { prefix } => bootstrap_qemu(&prefix),
     }
 }
 
-fn bootstrap(prefix: &str, commit: Option<&str>) -> Result<()> {
-    println!("Bootstrapping with prefix: {}", prefix);
-    {
-        let verus_dir = PathBuf::from(prefix).join("verus");
-        let repo = Repository::clone(DEFAULT_VERUS_REPO, verus_dir)?;
+fn bootstrap_qemu(prefix: &Path) -> Result<()> {
+    println!("Bootstrapping QEMU with IGVM support...");
+    println!("Installation prefix: {}", prefix.display());
+
+    // Ensure prefix directory exists
+    std::fs::create_dir_all(prefix).context("Failed to create prefix directory")?;
+
+    // Step 2: Clone and build QEMU with IGVM support
+    println!("\n--- Building QEMU with IGVM support ---");
+    let qemu_dir = prefix.join("qemu");
+
+    if !qemu_dir.exists() {
+        println!("Cloning QEMU repository...");
+        let repo = Repository::clone("https://github.com/coconut-svsm/qemu", &qemu_dir)
+            .context("Failed to clone QEMU repository")?;
+
+        // Checkout the svsm-igvm branch
+        println!("Checking out svsm-igvm branch...");
+
+        let branch_name = "svsm-igvm";
+        let (object, reference) = repo
+            .revparse_ext(branch_name)
+            .with_context(|| format!("Failed to find branch {}", branch_name))?;
+        repo.checkout_tree(&object, None)?;
+        repo.set_head(reference.unwrap().name().unwrap())?;
+
+        println!("✓ Checked out branch: {}", branch_name);
+    } else {
+        println!("QEMU repository already exists at {:?}", qemu_dir);
+
+        // Ensure we're on the right branch
+        let repo = Repository::open(&qemu_dir)?;
+        let head = repo.head()?;
+        let current_branch = head.shorthand().unwrap_or("unknown");
+
+        if current_branch != "svsm-igvm" {
+            println!("Switching to svsm-igvm branch...");
+            repo.set_head("refs/heads/svsm-igvm")?;
+            repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
+        }
+    }
+
+    // Configure QEMU
+    std::env::set_current_dir(&qemu_dir).context("Failed to change directory to QEMU repo")?;
+
+    let qemu_install_dir = prefix.join("qemu-svsm");
+    println!("Configuring QEMU...");
+    println!("  Install directory: {:?}", qemu_install_dir);
+
+    let mut cmd = std::process::Command::new("./configure");
+    cmd.arg(format!("--prefix={}", qemu_install_dir.display()))
+        .arg("--target-list=x86_64-softmmu")
+        .arg("--enable-igvm");
+
+    println!("Running: {:?}", cmd);
+    let output = cmd.output().context("Failed to configure QEMU")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        // Check for common issues
+        if stderr.contains("igvm") || stdout.contains("igvm") {
+            eprintln!(
+                "IGVM library might not be properly installed. Make sure ldconfig has been run."
+            );
+            eprintln!("You may need to run: sudo ldconfig");
+        }
+
+        bail!("Failed to configure QEMU:\nSTDOUT:\n{}\nSTDERR:\n{}", stdout, stderr);
+    }
+    println!("✓ QEMU configured successfully");
+
+    // Build QEMU with ninja
+    println!("Building QEMU with ninja...");
+    let mut cmd = std::process::Command::new("ninja");
+    cmd.arg("-C").arg("build/");
+
+    println!("This may take several minutes...");
+    let output = cmd.output().context("Failed to build QEMU with ninja")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Failed to build QEMU:\n{}", stderr);
+    }
+    println!("✓ QEMU built successfully");
+
+    // Install QEMU
+    println!("Installing QEMU...");
+    let mut cmd = std::process::Command::new("make");
+    cmd.arg("install");
+
+    let output = cmd.output().context("Failed to install QEMU")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Failed to install QEMU:\n{}", stderr);
+    }
+
+    println!("✓ QEMU installed successfully");
+
+    // Print final instructions
+    println!("\n=== QEMU with IGVM support installed successfully! ===");
+    println!("QEMU binary location: {:?}", qemu_install_dir.join("bin/qemu-system-x86_64"));
+    println!("\nTo use this QEMU, add it to your PATH:");
+    println!("  export PATH={}:$PATH", qemu_install_dir.join("bin").display());
+    println!("\nOr use the full path when running QEMU:");
+    println!("  {}/qemu-system-x86_64 [options]", qemu_install_dir.join("bin").display());
+
+    Ok(())
+}
+
+fn bootstrap_verus(prefix: &Path, commit: Option<&str>) -> Result<()> {
+    println!("Bootstrapping with prefix: {}", prefix.display());
+
+    // Ensure prefix directory exists
+    std::fs::create_dir_all(prefix).context("Failed to create prefix directory")?;
+
+    let verus_dir = prefix.join("verus");
+
+    // Clone or update repository
+    if verus_dir.exists() {
+        println!("Verus repository already exists at {}, using existing repo", verus_dir.display());
+
+        let repo = Repository::open(&verus_dir).context("Failed to open existing repository")?;
+
         if let Some(commit) = commit {
             repo.set_head_detached(repo.revparse_single(commit)?.id())?;
             println!("Checked out commit: {}", commit);
-        } else {
-            println!("No specific commit provided, using the latest.");
+        }
+    } else {
+        println!("Cloning Verus repository to {}", verus_dir.display());
+        let repo = Repository::clone(DEFAULT_VERUS_REPO, &verus_dir)?;
+
+        if let Some(commit) = commit {
+            repo.set_head_detached(repo.revparse_single(commit)?.id())?;
+            println!("Checked out commit: {}", commit);
         }
     }
 
-    // Get z3.
-    std::env::set_current_dir(PathBuf::from(prefix).join("verus/source/tools"))
-        .context("Failed to change directory to tools")?;
-    let mut cmd = std::process::Command::new("bash");
-    cmd.arg("get_z3.sh");
-    if !cmd.status().context("Failed to run get_z3.sh")?.success() {
-        bail!("Failed to get z3");
+    // Step 3: Build Verus (following the official instructions)
+    let source_dir = verus_dir.join("source");
+    let activate_script = verus_dir.join("tools/activate");
+
+    // Check if activation script exists
+    if !activate_script.exists() {
+        bail!("Activation script not found at {:?}", activate_script);
     }
 
-    // 1. Build vargo.
-    std::env::set_current_dir(PathBuf::from(prefix).join("verus/tools/vargo"))
-        .context("Failed to change directory to verus")?;
-    let mut cmd = std::process::Command::new("cargo");
-    cmd.arg("build").arg("--release");
+    println!("Building Verus with development environment...");
 
-    if !cmd.status().context("Failed to run cargo build")?.success() {
-        bail!("Failed to build vargo");
+    // Change to source directory
+    std::env::set_current_dir(&source_dir)
+        .with_context(|| format!("Failed to change directory to {:?}", source_dir))?;
+
+    // Detect the shell
+    let shell = detect_shell();
+    println!("Detected shell: {}", shell);
+
+    // Build command that sources activate script and runs vargo build
+    let build_command = match shell.as_str() {
+        "fish" => {
+            format!("source ../tools/activate.fish && vargo build --release",)
+        }
+        _ => {
+            // bash/zsh/sh
+            format!("source ../tools/activate && vargo build --release",)
+        }
+    };
+
+    // Install z3.
+    println!("Installing z3...");
+    let mut z3_cmd = std::process::Command::new("bash");
+    z3_cmd.arg("-c").arg("./tools/get-z3.sh");
+    if !z3_cmd.status()?.success() {
+        bail!("Failed to install z3");
+    }
+    println!("✓ z3 installed successfully");
+
+    println!("Running build in development environment...");
+    println!("Command: {}", build_command);
+
+    let mut cmd = std::process::Command::new(&shell);
+    cmd.arg("-c").arg(&build_command).current_dir(&source_dir).env("RUST_BACKTRACE", "1");
+
+    // Run the build
+    let output = cmd.output().context("Failed to execute vargo build")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        bail!("Failed to build verus:\nSTDOUT:\n{}\nSTDERR:\n{}", stdout, stderr);
     }
 
-    // 2. Build verus
-    std::env::set_current_dir(PathBuf::from(prefix).join("verus/source"))?;
-    cmd = std::process::Command::new("../tools/vargo/target/release/vargo");
-    cmd.arg("build").arg("--release");
-
-    if !cmd.status().context("Failed to run vargo build")?.success() {
-        bail!("Failed to build verus");
+    // Check for success indicators in output
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.contains("Verified") || stdout.contains("vstd") {
+        println!("✓ Verus built and vstd verified successfully");
+    } else {
+        println!("✓ Verus build completed");
     }
+
+    println!("✓ Bootstrap completed successfully!");
+
+    // Print final instructions
+    println!("\nVerus installation complete!");
+    println!("Verus binary should be at: {:?}", source_dir.join("target-verus/release/verus"));
+    println!("\nTo use Verus, source the activation script:");
+    match shell.as_str() {
+        "fish" => println!("  source {:?}", verus_dir.join("tools/activate.fish")),
+        _ => println!("  source {:?}", verus_dir.join("tools/activate")),
+    }
+    println!("Then run: vargo build --release");
 
     Ok(())
 }
 
-fn pretty() -> Result<()> {
+// Helper function to detect the current shell
+fn detect_shell() -> String {
+    // Try to get shell from environment
+    if let Ok(shell) = std::env::var("SHELL") {
+        if shell.contains("fish") {
+            return "fish".to_string();
+        } else if shell.contains("zsh") {
+            return "zsh".to_string();
+        } else if shell.contains("bash") {
+            return "bash".to_string();
+        }
+    }
+
+    // Default to bash
+    "bash".to_string()
+}
+
+fn pretty(paths: Vec<PathBuf>) -> Result<()> {
     let root = project_root();
 
-    // Find all *.rs files recursively.
-    let mut rs_files = vec![];
-    for entry in walkdir::WalkDir::new(&root) {
-        let entry = entry.context("Failed to read directory")?;
+    // If specific paths provided, use those; otherwise find all
+    let rs_files = if !paths.is_empty() {
+        paths
+    } else {
+        let mut files = vec![];
+        for entry in walkdir::WalkDir::new(&root) {
+            let entry = entry?;
+            let path = entry.path();
 
-        if entry.file_type().is_file()
-            && entry.path().extension().and_then(|s| s.to_str()) == Some("rs")
-            && entry.path().to_str().unwrap().contains("deko")
-            && !entry.path().to_str().unwrap().contains("target")
-            && !entry.path().to_str().unwrap().contains("deko-macros")
-        {
-            rs_files.push(entry.into_path());
+            if entry.file_type().is_file()
+                && path.extension().and_then(|s| s.to_str()) == Some("rs")
+                && path.to_str().map_or(false, |s| {
+                    s.contains("deko") && !s.contains("target") && !s.contains("deko-macros")
+                })
+            {
+                files.push(path.to_path_buf());
+            }
         }
-    }
+        files
+    };
 
-    // Run formatter on each file.
-    for file in rs_files {
+    for file in &rs_files {
+        println!("Formatting: {:?}", file);
         let mut cmd = std::process::Command::new("verusfmt");
-        cmd.arg(file.to_str().unwrap());
-        cmd.arg(file.to_str().unwrap()); // same output
-        if !cmd.status().context("Failed to run rustfmt")?.success() {
-            bail!("Failed to format file: {:?}", file);
+        cmd.arg(&file).arg(&file);
+        if !cmd.status()?.success() {
+            eprintln!("Warning: Failed to format file: {:?}", file);
         }
     }
 
+    println!("✓ Formatted {} files", rs_files.len());
     Ok(())
 }
 
-fn load_qemu_config(path: &str) -> Result<FinalQemuConfig> {
-    // Logic to load QEMU configuration from the specified path
-    let config_path = PathBuf::from(path);
+fn load_qemu_config(path: &Path) -> Result<FinalQemuConfig> {
     let mut config = FinalQemuConfig::default();
 
-    if config_path.try_exists()? {
-        println!("Loading QEMU configuration from: {:?}", config_path);
-        // Here you would parse the config file and populate the `config` variable
-        // For now, we just print a message
-    } else {
-        println!("Config file not found at: {:?}", config_path);
-        return Err(anyhow::anyhow!("QEMU configuration file not found"));
+    if !path.exists() {
+        return Err(anyhow::anyhow!("Config file not found: {:?}", path));
     }
 
-    let partial = toml::from_str::<PartialQemuConfig>(
-        &fs::read_to_string(&config_path).context("Failed to read QEMU config file")?,
-    )
-    .context("Failed to parse QEMU config file")?;
+    println!("✓ Loading QEMU configuration from: {:?}", path);
 
+    let content = fs::read_to_string(path)?;
+    let partial = toml::from_str::<PartialQemuConfig>(&content)?;
+
+    // Apply partial config over defaults
     if let Some(mem) = partial.memory {
         config.memory = mem;
     }
@@ -575,11 +824,9 @@ fn load_qemu_config(path: &str) -> Result<FinalQemuConfig> {
     if let Some(igvm_path) = partial.igvm_path {
         config.igvm_path = igvm_path;
     }
-    // For drive, the user's config completely replaces the default.
     if let Some(drive) = partial.drive {
         config.drive = drive;
     }
-
     if let Some(debug) = partial.debug {
         config.debug = debug;
     }
