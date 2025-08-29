@@ -4,6 +4,12 @@ use crate::prelude::*;
 
 verus! {
 
+impl<V: WellFormed> WellFormed for vstd::cell::PointsTo<V> {
+    closed spec fn wf(&self) -> bool {
+        true
+    }
+}
+
 pub trait IsConstant {
     spec fn is_constant(&self) -> bool;
 }

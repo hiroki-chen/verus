@@ -27,20 +27,48 @@ macro_rules! deko_bitflags {
                 )*
             }
 
+            impl deko_std::prelude::WellFormed for $name {
+                open spec fn wf(&self) -> bool {
+                    true
+                }
+            }
+
             impl $name {
                 pub open spec fn bit(&self) -> $T {
                     match self {
                         $(
-                            $name::$Flag => $value,
+                            $name::$Flag => (1 as $T) << $value,
                         )*
                     }
                 }
             }
 
         } // verus!
-
         paste::paste! {
-            verus! {
+        verus! {
+            #[allow(non_upper_case_globals)]
+            $vis const [<$name _ALL_BITS>]: $T = $( (1 as $T) << $value )|*;
+
+            #[verifier::bit_vector]
+            $vis proof fn [<lemma_ $name _subset_implies_bits>](flag: $T, self_bits: $T)
+                requires
+                    flag & ($((1 as $T) << $value)|*) == flag,
+                    $(
+                        (flag & ((1 as $T) << $value) != 0) ==> (((1 as $T) << $value) & self_bits != 0)
+                    ),*
+                ensures
+                    flag & self_bits == flag
+            {}
+
+            #[verifier::bit_vector]
+            $vis proof fn [<lemma_ $name _bit_valid>](v: $T)
+                requires
+                    $(
+                        v == (1 as $T) << $value
+                    )||*
+                ensures
+                    v & ($((1 as $T) << $value)|*) == v
+            {}
 
             $vis struct [<$name Flags>] {
                 /// Store the bitflags as a value of type T.
@@ -79,9 +107,11 @@ macro_rules! deko_bitflags {
                     self.bits
                 }
 
+                #[verifier::spinoff_prover]
                 pub fn contains(&self, flag: $T) -> (r: bool)
                     requires
                         self.wf(),
+                        flag & [<$name _ALL_BITS>] == flag,  // flag only has valid bits set
                     ensures
                         r == from_bits(flag).subset_of(self@),
                 {
@@ -90,6 +120,10 @@ macro_rules! deko_bitflags {
                         let ghost other = from_bits(flag);
                         assert(other =~= vstd::set::Set::new(|s: $name| s.bit() & flag != 0));
                         assert(self@ =~= from_bits(self.bits()));
+                        assert(forall |flag: $name| {
+                            #[trigger]
+                            $(flag.bit() == (1 as $T) << $value)||*
+                        });
 
                         assert(forall|s: $name| #[trigger]
                             self@.contains(s) <==> (s.bit() & self.bits() != 0));
@@ -105,10 +139,45 @@ macro_rules! deko_bitflags {
                                 [<lemma_ $T _subset>](flag, self.bits, s.bit());
                             }
                         }
+
+                        // The key is to decompose flag into its individual bits and
+                        // use the subset relationship.
                         if other.subset_of(self@) {
-                            assert(forall|s: $name| #[trigger]
-                                other.contains(s) ==> s.bit() & flag != 0 && s.bit() & self.bits != 0);
-                            assume(flag & self.bits() == flag);
+                            assert(forall |status: $name|
+                                #[trigger] status.bit() & self.bits != 0 <==> self@.contains(status)
+                            );
+                            // from subset_of.
+                            assert(forall |status: $name|
+                                #[trigger] other.contains(status) ==> self@.contains(status)
+                            );
+                            // From definition of `other`.
+                            assert(other =~= vstd::set::Set::new(|status: $name| status.bit() & flag != 0));
+
+                            $(
+                                if flag & ((1 as $T) << $value) != 0 {
+                                    assert(other.contains($name::$Flag)) by {
+                                        // Apply commutativity of `&` to isolate the bit.
+                                        deko_std::bits::bit64_and_auto();
+                                        deko_std::bits::bit32_and_auto();
+                                    }
+                                    assert(self@.contains($name::$Flag));
+                                    assert(self.bits & ((1 as $T) << $value) != 0) by {
+                                        deko_std::bits::bit64_and_auto();
+                                        deko_std::bits::bit32_and_auto();
+                                    }
+                                }
+                            )*
+
+                            // Now combine all the facts
+                            let bits = self.bits;
+                            assert(flag & bits == flag) by (bit_vector)
+                                requires
+                                    flag &
+                                    ($( (1 as $T) << $value )|*) == flag,
+                                    $(
+                                        (flag & ((1 as $T) << $value) != 0) ==> (((1 as $T) << $value) & bits != 0)
+                                    ),*
+                            ;
                         }
                     }
 
@@ -130,10 +199,42 @@ macro_rules! deko_bitflags {
 
                     [<$name Flags>] { bits: 0, flags: Ghost(vstd::set::Set::empty()) }
                 }
+
+                #[verifier::spinoff_prover]
+                pub fn all_bits() -> (r: Self)
+                    ensures
+                        r.inv(),
+                        r.bits() == $( (1 as $T) << $value )|*,
+                {
+                    let ghost set = vstd::set::Set::full();
+                    let all_bits: $T = [<$name _ALL_BITS>];
+
+                    proof {
+                        assert(
+                            $(
+                                ((all_bits) & ((1 as $T) << $value) != 0)
+                            )&&*
+                        ) by (bit_vector)
+                            requires
+                                all_bits == ($( ((1 as $T) << $value) )|*);
+
+                        assert(forall |flag: $name| {
+                            #[trigger]
+                            $(flag.bit() == (1 as $T) << $value)||*
+                        });
+
+                        assert forall|flag: $name| (#[trigger] flag.bit() & all_bits) != 0 by {
+                            deko_std::prelude::bit32_and_auto();
+                            deko_std::prelude::bit64_and_auto();
+                        }
+                    }
+
+                    [<$name Flags>] { bits: all_bits, flags: Ghost(set) }
+                }
             }
 
             } // verus!
-        }
+        } // paste
     };
 }
 
@@ -151,6 +252,33 @@ pub const proof fn bit64_and_auto()
         forall|a: u32, b: u32| #[trigger] (a & b) <= b,
         forall|a: u16, b: u16| #[trigger] (a & b) <= b,
         forall|a: u8, b: u8| #[trigger] (a & b) <= b,
+{
+}
+
+#[verifier::bit_vector]
+pub const proof fn bit32_and_auto()
+    ensures
+        forall|a: u32, b: u32| #[trigger] (a & b) == b & a,
+        forall|a: u32, b: u32, c: u32| #[trigger] ((a & b) & c) == a & (b & c),
+        forall|a: u32| #[trigger] (a & a) == a,
+        forall|a: u32| #[trigger] (a & 0) == 0,
+        forall|a: u32| #[trigger] (a & 0xffffffffu32) == a,
+        forall|a: u32, b: u32| #[trigger] (a & b) <= b && (a & b) <= a,
+{
+}
+
+#[verifier::bit_vector]
+pub const proof fn bit64_or_auto()
+    ensures
+        forall|a: u64, b: u64| #[trigger] (a | b) == b | a,
+        forall|a: u64, b: u64, c: u64| #[trigger] ((a | b) | c) == a | (b | c),
+        forall|a: u64| #[trigger] (a | a) == a,
+        forall|a: u64| #[trigger] (a | 0) == a,
+        forall|a: u64| #[trigger] (a | 0xffffffffffffffffu64) == 0xffffffffffffffffu64,
+        forall|a: u64, b: u64| #[trigger] (a | b) >= b && (a | b) >= a,
+        forall|a: u32, b: u32| #[trigger] (a | b) >= b,
+        forall|a: u16, b: u16| #[trigger] (a | b) >= b,
+        forall|a: u8, b: u8| #[trigger] (a | b) >= b,
 {
 }
 
@@ -174,7 +302,6 @@ pub proof fn lemma_u32_subset(a: u32, b: u32, c: u32)
 {
 }
 
-
 #[verifier::bit_vector]
 pub proof fn lemma_u64_subset(a: u64, b: u64, c: u64)
     requires
@@ -184,7 +311,6 @@ pub proof fn lemma_u64_subset(a: u64, b: u64, c: u64)
         c & b != 0,
 {
 }
-
 
 pub proof fn lemma_lt_is_power_of_two_bitor(p: u64, x: u64, y: u64, n: u64)
     requires

@@ -8,19 +8,45 @@ use crate::snp::Snp;
 
 verus! {
 
-#[derive(PartialEq, Eq, Clone, Copy)]
+#[derive(PartialEq, Eq)]
 pub enum PlatformType {
     Snp,
     Tdx,
     None,  // not supported yet.
 }
 
+impl WellFormed for PlatformType {
+    open spec fn wf(&self) -> bool {
+        true
+    }
+}
+
 impl From<u32> for PlatformType {
-    fn from(value: u32) -> Self {
+    fn from(value: u32) -> (r: Self)
+        ensures
+            match value {
+                0x0001 => r == PlatformType::Snp,
+                0x0002 => r == PlatformType::Tdx,
+                _ => r == PlatformType::None,
+            },
+    {
         match value {
             0x0001 => PlatformType::Snp,
             0x0002 => PlatformType::Tdx,
             _ => PlatformType::None,
+        }
+    }
+}
+
+impl Clone for PlatformType {
+    fn clone(&self) -> (r: Self)
+        ensures
+            (r == *self),
+    {
+        match self {
+            Self::Snp => Self::Snp,
+            Self::Tdx => Self::Tdx,
+            Self::None => Self::None,
         }
     }
 }
@@ -36,12 +62,110 @@ impl Predicate<PlatformType> for PlatformPredicate {
     }
 }
 
-/// A global platform type that is initialized at the beginning of the program.
+/// A global platform type that is initialized once at system startup.
 ///
-/// # Note
+/// This static variable holds the detected platform type (SNP or TDX) and is designed
+/// to be initialized by the BSP (Bootstrap Processor) during early boot, then accessed
+/// by all cores throughout the system's lifetime.
 ///
-/// This is due to a bug in verus as it panics on cross-module static variable
-/// references so we have to pin every static variable to the current module.
+/// # Verification Limitations
+///
+/// Verus currently has limited support for reasoning about static variables:
+///
+/// 1. **No spec method access**: We cannot invoke any of the static's `spec` methods
+///    in specifications, preventing us from writing preconditions like
+///    `requires PLATFORM.is_init()`.
+///
+/// 2. **No ghost state visibility**: The ghost state tracking initialization status
+///    is tied to the atomic value and cannot be observed in pure spec code.
+///
+/// 3. **No cross-core reasoning**: Verus cannot verify that the BSP initializes this
+///    variable before APs (Application Processors) access it, even though our boot
+///    protocol guarantees this ordering.
+///
+/// # Safety Invariants (Runtime-Guaranteed, Not Verus-Verified)
+///
+/// The following invariants are maintained by our boot protocol and hardware behavior,
+/// but cannot be formally verified in Verus:
+///
+/// 1. **Initialization Ordering**: The BSP executes initialization code before any AP
+///    begins execution. This is guaranteed by hardware (APs start in wait-for-SIPI state)
+///    and our bootloader (which sends SIPI only after BSP initialization).
+///
+/// 2. **Single Initialization**: The platform type is set exactly once by the BSP.
+///    The `OnceLock` ensures atomicity, preventing race conditions if multiple cores
+///    somehow attempt initialization.
+///
+/// 3. **Availability Guarantee**: When any AP code runs, `PLATFORM.get().is_some()`
+///    is guaranteed to be true.
+///
+/// # Why a Static Variable?
+///
+/// Alternative designs were considered but rejected:
+///
+/// - **Passing platform type as parameter**: Would require threading this value through
+///   every function call in the system, cluttering APIs and complicating the codebase.
+///
+/// - **Per-core storage**: Would require complex synchronization to ensure consistency
+///   and waste memory storing identical values.
+///
+/// - **Const generic parameter**: Would require compile-time knowledge of platform type,
+///   but this is only determined at runtime through CPUID detection.
+///
+/// # Verification Workarounds
+///
+/// Since we cannot directly verify properties of this static, we employ several strategies:
+///
+/// ## 1. Trusted Wrapper Functions
+/// ```ignore
+/// #[verifier::external_body]
+/// pub fn get_platform() -> PlatformType {
+///     PLATFORM.get().expect("Platform not initialized")
+/// }
+/// ```
+///
+/// ## 2. Ghost Tokens (Considered but not implemented)
+/// We considered maintaining a parallel `tracked` variable that shadows the static:
+/// ```ignore
+/// tracked static PLATFORM_INIT_TOKEN: Option<InitToken>;
+/// ```
+/// However, this approach has its own limitations as we still cannot connect the ghost
+/// token to the actual initialization state in specifications.
+///
+/// ## 3. Defensive Runtime Checks
+/// In debug builds, we validate our assumptions:
+/// ```ignore
+/// debug_assert!(PLATFORM.get().is_some(), "Platform accessed before initialization");
+/// ```
+///
+/// # Usage Example
+///
+/// ```ignore
+/// // In BSP initialization code (runs first)
+/// pub fn bsp_init() {
+///     let platform_type = detect_platform_type();  // SNP or TDX
+///     PLATFORM.init_or_panic(platform_type, "Failed to initialize platform type");
+///     // ... start APs ...
+/// }
+///
+/// // In AP entry point (called from assembly after BSP initialization)
+/// #[verifier::external_body]  // Cannot verify assembly-to-Rust transition
+/// pub fn ap_main() {
+///     // Safe to unwrap: BSP guaranteed to have initialized
+///     let platform = PLATFORM.get().unwrap();
+///     // ... use platform ...
+/// }
+/// ```
+///
+/// # Trust Boundary
+///
+/// This static variable represents a trust boundary in our verification:
+/// - **Below this layer**: Hardware, firmware, and assembly code ensure proper ordering
+/// - **At this layer**: We trust that initialization has occurred when accessed
+/// - **Above this layer**: Verified Rust code can safely use the platform type
+///
+/// This is a fundamental limitation when verifying systems code: some guarantees come
+/// from outside the verified language's model and must be explicitly trusted.
 pub exec static PLATFORM: OnceLock<PlatformType, PlatformPredicate>
     ensures
         PLATFORM.wf(),
@@ -93,8 +217,13 @@ pub fn setup_env(header: &Stage2LaunchInfo, idt: &mut Idt)
     crate::cpu::gdt::init_gdt();
 
     let platform_type = PlatformType::from(header.platform_type);
+    PLATFORM.init(platform_type.clone());
 
+    if PLATFORM.get().is_none() {
+        vstd::vpanic!("Failed to initialize platform type; this is fatal.");
+    }
     // Initialize the IDT.
+
     init_early_idt(idt);
     idt.load();
 

@@ -1,5 +1,7 @@
+use verus_state_machines_macros::tokenized_state_machine;
+use vstd::atomic::PAtomicBool;
 use vstd::atomic_with_ghost;
-use vstd::cell::{PCell, PointsTo};
+use vstd::cell::{CellId, PCell, PointsTo};
 use vstd::modes::*;
 use vstd::prelude::*;
 use vstd::simple_pptr::MemContents;
@@ -42,7 +44,7 @@ struct_with_invariants! {
 /// assert(value.is_some());   // unsatisfied precondition, as MY_ONCE is uninitialized.
 /// ```
 #[verifier::reject_recursive_types(V)]
-pub struct OnceCell<V: 'static, F: Predicate<V>> {
+pub struct OnceCell<V: 'static + WellFormed, F: Predicate<V>> {
     pub cell: (Ghost<F>, PCell<Option<V>>),
     pub state: vstd::atomic_ghost::AtomicU64<_, OnceCellState<V>, _>,
 }
@@ -76,16 +78,16 @@ pub type OnceLock<V, F> = OnceCell<V, F>;
 /// multi-threaded contexts; it is safe to declare these traits so long as
 /// `self.wf()` holds.
 #[verifier::external]
-unsafe impl<V, F: Predicate<V>> Send for OnceCell<V, F> {
+unsafe impl<V: WellFormed, F: Predicate<V>> Send for OnceCell<V, F> {
 
 }
 
 #[verifier::external]
-unsafe impl<V, F: Predicate<V>> Sync for OnceCell<V, F> {
+unsafe impl<V: WellFormed, F: Predicate<V>> Sync for OnceCell<V, F> {
 
 }
 
-impl<V, F: Predicate<V>> OnceCell<V, F> {
+impl<V: WellFormed, F: Predicate<V>> OnceCell<V, F> {
     pub open spec fn inv(&self, v: V) -> bool {
         self.cell.0@.inv(v)
     }
@@ -145,11 +147,13 @@ impl<V, F: Predicate<V>> OnceCell<V, F> {
                 // often shared among threads and we want to ensure that
                 // the value is accessible globally.
                 let tracked static_points_to = tracked_static_ref(points_to);
+                // let tracked _ = self.inst.borrow().do_deposit(points_to, points_to, &mut token);
                 atomic_with_ghost! {
                     &self.state => store(INITED); ghost g => {
                         g = OnceCellState::Init(static_points_to);
                     }
                 }
+                return ;
             } else {
                 // wait or abort.
                 return ;

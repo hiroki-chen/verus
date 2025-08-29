@@ -2,7 +2,7 @@ use deko_std::prelude::*;
 use vstd::prelude::*;
 
 deko_bitflags! {
-    pub struct PteFlags: u64 {
+    pub struct Pte: u64 {
         const PRESENT       = 0;
         const WRITABLE      = 1;
         const USER          = 2;
@@ -15,3 +15,4 @@ deko_bitflags! {
         const NX            = 63;
     }
 }
+
