@@ -92,7 +92,7 @@ macro_rules! deko_bitflags {
 
             impl WellFormed for [<$name Flags>] {
                 open spec fn wf(&self) -> bool {
-                    self.inv()
+                    &&& self.inv()
                 }
             }
 
@@ -108,6 +108,7 @@ macro_rules! deko_bitflags {
                 }
 
                 #[verifier::spinoff_prover]
+                #[inline(always)]
                 pub fn contains(&self, flag: $T) -> (r: bool)
                     requires
                         self.wf(),
@@ -184,6 +185,7 @@ macro_rules! deko_bitflags {
                     res
                 }
 
+                #[inline(always)]
                 pub fn empty() -> (r: Self)
                     ensures
                         r.inv(),
@@ -200,6 +202,7 @@ macro_rules! deko_bitflags {
                     [<$name Flags>] { bits: 0, flags: Ghost(vstd::set::Set::empty()) }
                 }
 
+                #[inline(always)]
                 #[verifier::spinoff_prover]
                 pub fn all_bits() -> (r: Self)
                     ensures
@@ -210,6 +213,7 @@ macro_rules! deko_bitflags {
                     let all_bits: $T = [<$name _ALL_BITS>];
 
                     proof {
+                        // proving r.inv() is non-trivial.
                         assert(
                             $(
                                 ((all_bits) & ((1 as $T) << $value) != 0)
@@ -230,6 +234,45 @@ macro_rules! deko_bitflags {
                     }
 
                     [<$name Flags>] { bits: all_bits, flags: Ghost(set) }
+                }
+
+
+                #[inline(always)]
+                pub fn remove(&mut self, flag: $T)
+                    requires
+                        old(self).wf(),
+                        flag & [<$name _ALL_BITS>] == flag,
+                    ensures
+                        self.wf(),
+                        self@ =~= old(self)@.difference(from_bits(flag)),
+                {
+                    // After self.bits & !flag, a bit is set iff it was set before AND *not in flag*
+                    self.bits = self.bits & !flag;
+                    self.flags = Ghost(old(self).flags.borrow().difference(from_bits(flag)));
+
+                    // Now we need to prove inv() again.
+                    proof {
+                        assert(self@ =~= from_bits(self.bits)) by {
+                            assert forall|s: $name| #[trigger]
+                                self@.contains(s) <==> from_bits(self.bits).contains(s) by {
+                                let sbit = s.bit();
+                                let old_sbit = old(self).bits;
+
+                                // Bit-level reasoning: this is equivalent to s.bit() & (old(self).bits & !flag) != 0
+                                assert((sbit & old_sbit != 0 && sbit & flag == 0) <==> (sbit & (old_sbit
+                                    & !flag) != 0)) by (bit_vector)
+                                    requires
+                                        $(sbit == ((1 as $T) << $value))||*
+                                ;
+                            }
+                        }
+
+                        // Proving `self@.contains(flag) <=> ...` is trivial as
+                        // verus can automatically figure it out difference must
+                        // produce a valid subset of that set; so we can always
+                        // deduce from a stronger precondition.
+
+                    }
                 }
             }
 
