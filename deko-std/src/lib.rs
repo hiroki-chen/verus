@@ -7,6 +7,8 @@
 #![allow(non_snake_case)]
 #![allow(unused_imports)]
 #![allow(unexpected_cfgs)]
+#![allow(unused_macros)]
+#![allow(non_shorthand_field_patterns)]
 #![cfg_attr(feature = "alloc", feature(allocator_api))]
 
 use vstd::prelude::*;

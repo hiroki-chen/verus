@@ -36,11 +36,26 @@ core::arch::global_asm!(include_str!("stage2.S"), options(att_syntax));
 
 verus! {
 
+#[verifier::external_body]
+fn early_die() {
+    unsafe {
+        core::arch::asm!("ud2", options(att_syntax));
+    }
+}
+
+#[verifier::external_body]
+fn early_dbg() {
+    unsafe {
+        core::arch::asm!("hlt", options(att_syntax));
+    }
+}
+
 #[verifier::external]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    loop {
-    }
+    crate::early_die();
+
+    loop {}
 }
 
 /// The entry point of the stage2 in IGVM. Thanks to IGVM we do not need to
@@ -62,6 +77,7 @@ pub fn deko_main(
         s2_info_perm.value().wf(),
         s2_info_perm.mem_wf(),
 {
+
     let s2_info = s2_info.borrow(Tracked(s2_info_perm));
     let mut early_idt = Idt { entries: create_early_idt() };
 

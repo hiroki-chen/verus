@@ -15,4 +15,3 @@ deko_bitflags! {
         const NX            = 63;
     }
 }
-

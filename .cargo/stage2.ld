@@ -30,6 +30,12 @@ SECTIONS
 		KEEP(*(__exception_table))
 		exception_table_end = .;
 	}
+
+	. = ALIGN(64);  /* Cache line alignment */
+	.ap_section : {
+		*(.ap_section)
+	}
+
 	. = ALIGN(16);
 	.data : { *(.data) }
 	edata = .;

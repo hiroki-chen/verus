@@ -1,12 +1,49 @@
-use deko_meta::{HeaderRaw, Stage2LaunchInfo};
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use deko_meta::{HeaderRaw, Stage2LaunchInfo, LOWMEM_END, STAGE2_START};
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
+use crate::address::{FixedAddressMappingRange, PhysAddr, VirtAddr};
 use crate::cpu::idt::{stage2_generic_idt_handler_no_ghcb, Idt};
 use crate::cpu::register_cpuid_table;
 use crate::snp::Snp;
 
+#[macro_export]
+macro_rules! dispatch_to_platform {
+    ($func:ident, $($args:expr),*) => {
+        {
+            let platform_type = match PLATFORM.get() {
+                Some(pt) => pt,
+                None => vstd::vpanic!("Platform not initialized"), // should not happen but could be.
+            };
+
+            match platform_type {
+                PlatformType::Snp => {
+                    let platform = Snp;
+                    platform.$func($($args),*)
+                },
+                _ => vstd::vpanic!("Unsupported platform type"),
+            }
+        }
+    };
+}
+
 verus! {
+
+/// A global flag to indicate whether the AP has been started.
+///
+/// Allow APs to proceed as the environment is now ready. This
+/// is set by the BSP after all initialization is done.
+#[no_mangle]
+#[link_section = ".ap_section"]
+pub exec static AP_FLAG: AtomicBool = AtomicBool::new(false);
+
+#[verifier::external_body]
+#[inline(always)]
+fn allow_ap_to_proceed() {
+    AP_FLAG.store(true, Ordering::Release);
+}
 
 #[derive(PartialEq, Eq)]
 pub enum PlatformType {
@@ -187,6 +224,23 @@ pub trait PlatformApi: Sync + Send + WellFormed {
             header.wf(),
             self.wf(),
     ;
+
+    fn validate_memory(
+        &self,
+        heap_start: &VirtAddr,
+        heap_end: &VirtAddr,
+    ) -> bool
+        requires
+            self.wf(),
+            heap_start.wf(),
+            heap_end.wf(),
+            heap_end@ > heap_start@,
+            heap_start@ % 0x1000 == 0,
+            heap_end@ % 0x1000 == 0,
+            heap_end@ <= LOWMEM_END as u64,
+    {
+        true
+    }
 }
 
 /// Injects dummy handlers into the IDT so that we can do early-stage
@@ -223,30 +277,35 @@ pub fn setup_env(header: &Stage2LaunchInfo, idt: &mut Idt)
         vstd::vpanic!("Failed to initialize platform type; this is fatal.");
     }
     // Initialize the IDT.
-
     init_early_idt(idt);
     idt.load();
 
     // Do some platform-specific stuff.
-    match platform_type {
-        PlatformType::Snp => {
-            let snp = Snp;
-            snp.init_platform(header);
-        },
-        _ => {
-            vstd::vpanic!("todo: ");
-        },
-    }
-
-    // Now we prepare for the mapping.
+    dispatch_to_platform!(init_platform, header);
 
     // Read the CPUID table.
     unsafe {
         register_cpuid_table(header.cpuid_page);
     }
 
-    // Enable paging now.
+    // Set up the kernel mapping.
+    let virt_start = VirtAddr::from(u64::from(STAGE2_START));
+    let virt_end = VirtAddr::from(u64::from(header.stage2_end));
+    let phys_start = PhysAddr::from(u64::from(STAGE2_START));
+    let kernel_mapping = FixedAddressMappingRange::new(virt_start, virt_end, phys_start);
 
+    // SVSM ref: Create a simple heap mapping using the lower memory region.
+    let zero = VirtAddr::from(0u64);
+    let lowmem = VirtAddr::from(LOWMEM_END as u64);
+    let heap_mapping = FixedAddressMappingRange::new(zero, lowmem, PhysAddr::from(0u64));
+
+    dispatch_to_platform!(validate_memory, &zero, &lowmem);
+
+    // TODO: Make these addresses globally visible; seems we have to implement
+    // an automatic invariant for OnceCell.
+
+    // BSP done; allow APs to proceed.
+    allow_ap_to_proceed();
 }
 
 } // verus!

@@ -1,9 +1,10 @@
 use core::sync::atomic::AtomicU32;
 
-use deko_meta::{HeaderRaw, Stage2LaunchInfo};
+use deko_meta::{HeaderRaw, Stage2LaunchInfo, LOWMEM_END};
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
+use crate::address::{FixedAddressMappingRange, VirtAddr};
 use crate::cpu::msr::read_msr;
 use crate::hal::{PlatformApi, PlatformType};
 use crate::mm::paging::PteFlags;
@@ -23,6 +24,31 @@ extern "C" {
 }
 
 verus! {
+
+/// The permission to the physical address in case there are some higher
+/// properties on it; e.g., if this is validated?
+pub tracked struct PSnpVirtAddr {
+    addr: u64,
+    validated: bool,
+}
+
+impl PSnpVirtAddr {
+    pub closed spec fn addr(&self) -> u64 {
+        self.addr
+    }
+
+    pub closed spec fn is_validated(&self) -> bool {
+        self.validated
+    }
+
+    pub proof fn validate(&mut self) {
+        self.validated = true;
+    }
+
+    pub proof fn invalidate(&mut self) {
+        self.validated = false;
+    }
+}
 
 pub exec static SNP_VTOM: OnceCellNoPred<usize>
     ensures
@@ -69,8 +95,8 @@ impl PlatformApi for Snp {
         if !snp_status.contains(VTOM) {
             vstd::vpanic!("SNP VTOM is not enabled!");
         }
-        // Set the top of the virtual memory.
 
+        // Set the top of the virtual memory.
         let vtom = header.vtom as usize;
         SNP_VTOM.init(vtom);
 
@@ -111,6 +137,47 @@ impl PlatformApi for Snp {
         // feature_mask.remove(PteFlags::GLOBAL);
 
         FEATURE_MASK.init(feature_mask);
+    }
+
+    // TODO: Add permission or tracked token here.
+    fn validate_memory(
+        &self,
+        heap_start: &VirtAddr,
+        heap_end: &VirtAddr,
+    ) -> bool
+        /*
+        requires
+            self.wf(),
+            heap_start.wf(),
+            heap_end.wf(),
+            heap_end@ > heap_start@,
+            heap_start@ % 0x1000 == 0,
+            heap_end@ % 0x1000 == 0,
+        */
+    {
+        let mut start = *heap_start;
+        let end = *heap_end;
+
+        while start.0 < end.0
+            invariant
+                start@ <= end@,
+                self.wf(),
+                heap_start.wf(),
+                heap_end.wf(),
+                start@ % 0x1000 == 0,
+                heap_start@ % 0x1000 == 0,
+                heap_end@ % 0x1000 == 0,
+                heap_end@ <= LOWMEM_END as u64,
+                end@ == heap_end@,
+            decreases
+                end@ - start@,
+        {
+            let (ret, cf) = Self::pvalidate(start.0, 0x1000, true, Tracked(()));
+
+            start = VirtAddr(start.0 + 0x1000);
+        }
+
+        true
     }
 }
 

@@ -100,6 +100,7 @@ impl_spec_constant_for_basic! {u64, u32, u16, usize, u8, bool, char, i8, i16, i3
 /// the closure needs to capture the environment, Verus cannot automatically "inherit" some
 /// properties from it so we need to manually lift the function to a closure and add proxy
 /// pre-conditions and post-conditions.
+#[allow(unused_macros)]
 macro_rules! lift_to_closure {
     ($func:ident, $type:ty, $returning:ty, $requires:tt, $ensures: tt) => {
         paste::paste! {

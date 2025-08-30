@@ -3,6 +3,43 @@ use vstd::prelude::*;
 
 verus! {
 
+#[derive(Clone, Copy)]
+pub struct FixedAddressMappingRange {
+    virt_start: VirtAddr,
+    virt_end: VirtAddr,
+    phys_start: PhysAddr,
+}
+
+impl WellFormed for FixedAddressMappingRange {
+    closed spec fn wf(&self) -> bool {
+        Self::valid_mapping_range(self.virt_start, self.virt_end, self.phys_start)
+    }
+}
+
+impl FixedAddressMappingRange {
+    pub open spec fn valid_mapping_range(
+        virt_start: VirtAddr,
+        virt_end: VirtAddr,
+        phys_start: PhysAddr,
+    ) -> bool {
+        &&& virt_start.wf()
+        &&& virt_end.wf()
+        &&& phys_start.wf()
+        &&& virt_start@ % 0x1000 == phys_start@ % 0x1000
+        &&& virt_end@ > virt_start@
+        &&& virt_end@ - virt_start@ + phys_start@ < u64::MAX + 1
+    }
+
+    pub fn new(virt_start: VirtAddr, virt_end: VirtAddr, phys_start: PhysAddr) -> (r: Self)
+        requires
+            Self::valid_mapping_range(virt_start, virt_end, phys_start),
+        ensures
+            r.wf(),
+    {
+        Self { virt_start, virt_end, phys_start }
+    }
+}
+
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
 #[repr(transparent)]
 pub struct VirtAddr(pub u64);
@@ -18,7 +55,7 @@ impl View for VirtAddr {
 impl WellFormed for VirtAddr {
     #[verifier::inline]
     open spec fn wf(&self) -> bool {
-        self.0 < 0x0000_8000_0000_0000
+        true
     }
 }
 
@@ -37,18 +74,24 @@ impl View for PhysAddr {
 impl WellFormed for PhysAddr {
     #[verifier::inline]
     open spec fn wf(&self) -> bool {
-        self.0 < 0x0000_8000_0000_0000
+        true
     }
 }
 
 impl From<u64> for VirtAddr {
-    fn from(value: u64) -> Self {
+    fn from(value: u64) -> (r: Self)
+        ensures
+            r@ === value,
+    {
         VirtAddr(value)
     }
 }
 
 impl From<u64> for PhysAddr {
-    fn from(value: u64) -> Self {
+    fn from(value: u64) -> (r: Self)
+        ensures
+            r@ === value,
+    {
         PhysAddr(value)
     }
 }

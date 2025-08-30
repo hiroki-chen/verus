@@ -85,6 +85,7 @@ pub tracked struct HeaderRaw {
 }
 
 impl WellFormed for Stage2LaunchInfo {
+    // FIXME: There are some self-contradictory definitions here.
     open spec fn wf(&self) -> bool {
         // The Stage2LaunchInfo is well-formed if the addresses are aligned.
         &&& self.vtom % 0x1000 == 0
@@ -95,10 +96,11 @@ impl WellFormed for Stage2LaunchInfo {
         &&& self.stage2_end % 0x1000 == 0
         &&& self.kernel_elf_start % 0x1000 == 0
         &&& self.kernel_elf_end % 0x1000 == 0
-        &&& self.kernel_fs_start % 0x1000 == 0
-        &&& self.kernel_fs_end % 0x1000 == 0
         &&& self.platform_type == 0x0001 || self.platform_type == 0x0002
         &&& self.platform_type matches 0x0001 ==> self.vtom != 0
+        &&& self.stage2_end > STAGE2_START
+        &&& self.stage2_end <= u32::MAX  // ensures no overflow.
+
     }
 }
 

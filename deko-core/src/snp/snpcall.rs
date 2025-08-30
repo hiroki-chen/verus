@@ -22,6 +22,47 @@ pub const RMP_NO_WRITE: u8 = RMP_READ | RMP_USER_EXE | RMP_KERN_EXE;
 pub const RMP_RWX: u8 = RMP_NO_WRITE | RMP_WRITE;
 
 impl Snp {
+    /// PVALIDATE takes a page size as an input parameter indicating that either a
+    /// 4KB or 2MB page should be validated.
+    ///
+    /// If the guest attempts to validate a page that is not mapped to the specified size,
+    /// e.g., a 4KB page is specified but the address is mapped to a 2MB page, a `VMEXIT`
+    /// will occur to indicate an NPF. The reverse will generate a `FAIL_SIZE_MISMATCH`.
+    ///
+    /// Returns the return value and the changed bit of CF.
+    #[verifier::external_body]
+    pub fn pvalidate(vaddr: u64, psize: u64, validate: bool, Tracked(perm): Tracked<()>) -> (r: (
+        u64,
+        bool,
+    ))
+        requires
+            psize == 0x1000,
+            vaddr % 0x1000 == 0,
+    // todo: add more requirements here since we can track permission of the memory.
+
+    {
+        let rax = vaddr;
+        let ret: u64;
+        let rcx = 0u64;  // as we do not support huge pages we just assume 0.
+        let cf: u64;
+        let rdx = validate as u64;
+
+        unsafe {
+            core::arch::asm!(
+                "xorq %r8, %r8",
+                "pvalidate",
+                "adcq %r8, %r8",
+                in("rax")  rax,
+             in("rcx")  rcx,
+             in("rdx")  rdx,
+             lateout("rax") ret,
+             lateout("r8") cf,
+             options(att_syntax));
+        }
+
+        (ret, cf != 0)
+    }
+
     #[verifier::external_body]
     pub fn rmpadjust(
         vaddr: u64,
