@@ -25,6 +25,15 @@ extern "C" {
 
 verus! {
 
+fn has_vtom() -> bool {
+    let snp_status = SnpStatusFlags::get_status();
+    proof {
+        lemma_SnpStatus_bit_valid(VTOM as _);
+    }
+
+    snp_status.contains(VTOM)
+}
+
 /// The permission to the physical address in case there are some higher
 /// properties on it; e.g., if this is validated?
 pub tracked struct PSnpVirtAddr {
@@ -65,17 +74,15 @@ impl Snp {
     #[inline(always)]
     #[verifier::external_body]
     fn get_page_encryption_masks(&self) -> PageEncryptionMasks {
-        let vtom = SNP_VTOM.get();
-        if vtom.is_none() {
-            vstd::vpanic!("SNP VTOM is not initialized!");
-        }
-        let vtom = vtom.unwrap();
-
-        PageEncryptionMasks {
-            private_pte_mask: 0,
-            shared_pte_mask: *vtom,
-            addr_mask_width: vtom.leading_zeros(),
-            phys_addr_sizes: 4096,  // togo: get this from cpuid.
+        if has_vtom() {
+            vstd::vpanic!("We do not support VTOM yet");
+        } else {
+            PageEncryptionMasks {
+                private_pte_mask: 1 << 51,
+                shared_pte_mask: 0,
+                addr_mask_width: 51,
+                phys_addr_sizes: 48, // todo: do not hardcode this.
+            }
         }
     }
 }
@@ -87,15 +94,6 @@ impl PlatformApi for Snp {
     }
 
     fn init_platform(&self, header: &Stage2LaunchInfo) {
-        // Initialize the SNP platform.
-        let snp_status = SnpStatusFlags::get_status();
-        proof {
-            lemma_SnpStatus_bit_valid(VTOM as _);
-        }
-        if !snp_status.contains(VTOM) {
-            vstd::vpanic!("SNP VTOM is not enabled!");
-        }
-
         // Set the top of the virtual memory.
         let vtom = header.vtom as usize;
         SNP_VTOM.init(vtom);
@@ -144,8 +142,7 @@ impl PlatformApi for Snp {
         &self,
         heap_start: &VirtAddr,
         heap_end: &VirtAddr,
-    ) -> bool
-        /*
+    ) -> bool/*
         requires
             self.wf(),
             heap_start.wf(),
@@ -154,7 +151,7 @@ impl PlatformApi for Snp {
             heap_start@ % 0x1000 == 0,
             heap_end@ % 0x1000 == 0,
         */
-    {
+     {
         let mut start = *heap_start;
         let end = *heap_end;
 
@@ -169,8 +166,7 @@ impl PlatformApi for Snp {
                 heap_end@ % 0x1000 == 0,
                 heap_end@ <= LOWMEM_END as u64,
                 end@ == heap_end@,
-            decreases
-                end@ - start@,
+            decreases end@ - start@,
         {
             let (ret, cf) = Self::pvalidate(start.0, 0x1000, true, Tracked(()));
 

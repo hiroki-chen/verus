@@ -225,11 +225,7 @@ pub trait PlatformApi: Sync + Send + WellFormed {
             self.wf(),
     ;
 
-    fn validate_memory(
-        &self,
-        heap_start: &VirtAddr,
-        heap_end: &VirtAddr,
-    ) -> bool
+    fn validate_memory(&self, heap_start: &VirtAddr, heap_end: &VirtAddr) -> bool
         requires
             self.wf(),
             heap_start.wf(),
@@ -277,6 +273,7 @@ pub fn setup_env(header: &Stage2LaunchInfo, idt: &mut Idt)
         vstd::vpanic!("Failed to initialize platform type; this is fatal.");
     }
     // Initialize the IDT.
+
     init_early_idt(idt);
     idt.load();
 

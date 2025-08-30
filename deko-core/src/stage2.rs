@@ -55,7 +55,8 @@ fn early_dbg() {
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     crate::early_die();
 
-    loop {}
+    loop {
+    }
 }
 
 /// The entry point of the stage2 in IGVM. Thanks to IGVM we do not need to
@@ -77,7 +78,6 @@ pub fn deko_main(
         s2_info_perm.value().wf(),
         s2_info_perm.mem_wf(),
 {
-
     let s2_info = s2_info.borrow(Tracked(s2_info_perm));
     let mut early_idt = Idt { entries: create_early_idt() };
 

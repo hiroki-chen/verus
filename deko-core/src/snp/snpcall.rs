@@ -37,7 +37,8 @@ impl Snp {
     ))
         requires
             psize == 0x1000,
-            vaddr % 0x1000 == 0,
+            vaddr % 0x1000
+                == 0,
     // todo: add more requirements here since we can track permission of the memory.
 
     {
