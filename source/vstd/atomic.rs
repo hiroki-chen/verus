@@ -95,6 +95,7 @@ macro_rules! atomic_types {
         verus! {
 
         #[verifier::external_body] /* vattr */
+        #[repr(C)]
         pub struct $at_ident {
             ato: $rust_ty,
         }
