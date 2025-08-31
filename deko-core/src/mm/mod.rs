@@ -4,18 +4,18 @@ use deko_std::prelude::*;
 use vstd::prelude::*;
 
 use crate::address::{PhysAddr, VirtAddr};
-use crate::mm::paging::PteFlags;
+use crate::mm::paging::{PageTable, PteFlags};
 
 verus! {
 
-pub exec static PTE_MASK_PRIVATE: OnceCellNoPred<usize>
+pub exec static PTE_MASK_PRIVATE: OnceCellNoPred<u64>
     ensures
         PTE_MASK_PRIVATE.wf(),
 {
     OnceCellNoPred::new(Ghost(()))
 }
 
-pub exec static PTE_MASK_SHARED: OnceCellNoPred<usize>
+pub exec static PTE_MASK_SHARED: OnceCellNoPred<u64>
     ensures
         PTE_MASK_SHARED.wf(),
 {
@@ -29,7 +29,7 @@ pub exec static PHYS_ADDR_SIZE: OnceCellNoPred<u32>
     OnceCellNoPred::new(Ghost(()))
 }
 
-pub exec static MAX_PHYS_ADDR: OnceCellNoPred<usize>
+pub exec static MAX_PHYS_ADDR: OnceCellNoPred<u64>
     ensures
         MAX_PHYS_ADDR.wf(),
 {
@@ -44,8 +44,8 @@ pub exec static FEATURE_MASK: OnceCellNoPred<PteFlags>
 }
 
 pub struct PageEncryptionMasks {
-    pub private_pte_mask: usize,
-    pub shared_pte_mask: usize,
+    pub private_pte_mask: u64,
+    pub shared_pte_mask: u64,
     pub addr_mask_width: u32,
     pub phys_addr_sizes: u32,
 }
@@ -62,6 +62,17 @@ pub fn init_heap_allocator(heap_start: &VirtAddr, heap_end: &VirtAddr)
     let phys_start = PhysAddr(heap_start.0);
 
     DEKO_ALLOCATOR.init(phys_start.0, heap_end.0 - heap_start.0);
+}
+
+// TODO: Add CPU core permission.
+#[inline(always)]
+pub fn virt_to_phys(vaddr: VirtAddr) -> (paddr: PhysAddr)
+    requires
+        vaddr.wf(),
+    ensures
+        paddr.wf(),
+{
+    PageTable::virt_to_frame(vaddr).0
 }
 
 } // verus!

@@ -3,6 +3,8 @@ use deko_std::prelude::*;
 use vstd::prelude::*;
 
 use super::Snp;
+use crate::cpu::{CpuData, PerCpuAreas, PerCpuShared, CPUID_MAX_COUNT, PERCPU_AREAS};
+use crate::mm::paging::get_initial_pgtable;
 
 verus! {
 
@@ -23,12 +25,34 @@ pub const RMP_NO_WRITE: u8 = RMP_READ | RMP_USER_EXE | RMP_KERN_EXE;
 pub const RMP_RWX: u8 = RMP_NO_WRITE | RMP_WRITE;
 
 impl Snp {
-    fn init_platform_end(igvm_params: &IgvmParamBlock)
+    pub fn init_platform_end(&self, igvm_params: &IgvmParamBlock)
         requires
+            self.wf(),
             igvm_params.wf(),
     {
         let debug_console_port = igvm_params.debug_serial_port as u16;
         Self::init_ghcb_logging(debug_console_port);
+    }
+
+    pub fn init_each_cpu(&self)
+        requires
+            self.wf(),
+    {
+        let shared_area_ptr = {
+            let read_handle = PERCPU_AREAS.acquire_read();
+            // The permission is discarded; you can only obtain this permission
+            // if you own this.
+            let (ptr, _) = read_handle.borrow().0.index_as_ptr(0);
+
+            read_handle.release_read();
+
+            ptr
+        };
+
+        // Need inter-CPU communication block.
+        // seems we should install the permission into the bsp cpu state.
+        let (bsp_pgtable, Tracked(bsp_pgtable_perm)) = get_initial_pgtable();
+        let bsp_percpu = CpuData::new(bsp_pgtable, Tracked(bsp_pgtable_perm), shared_area_ptr);
     }
 
     /// PVALIDATE takes a page size as an input parameter indicating that either a

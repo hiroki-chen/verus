@@ -58,6 +58,15 @@ pub trait Heap: WellFormed + Sized {
 
     spec fn free_list_valid(&self) -> bool;
 
+    spec fn init_ok(&self) -> bool;
+
+    spec fn is_init(&self) -> bool;
+
+    fn is_init_impl(&self) -> (r: bool)
+        ensures
+            r <==> self.is_init(),
+    ;
+
     fn check_allocation_size(&self, size: u64, align: u64) -> (r: bool)
         ensures
             r <==> self.valid_size_and_align(size, align),
@@ -82,6 +91,18 @@ pub trait Heap: WellFormed + Sized {
             old(self).in_heap_range(ptr as nat, size as nat),
         ensures
             self.wf(),
+            self.free_list_valid(),
+    ;
+
+    fn init(&mut self, heap_start: u64, heap_size: u64, order: u64)
+        requires
+            !old(self).is_init(),
+            old(self).wf(),
+            old(self).free_list_valid(),
+            valid_heap_param(heap_start, heap_size, order),
+        ensures
+            self.wf(),
+            self.init_ok(),
             self.free_list_valid(),
     ;
 }
@@ -161,6 +182,31 @@ impl<const ORDER: usize> Heap for DekoHeap<ORDER> {
         &&& self.free_list.wf()
         &&& forall|i: int|
             0 <= i < self.free_list@.len() ==> #[trigger] self.free_list@.index(i).wf()
+    }
+
+    closed spec fn is_init(&self) -> bool {
+        &&& self.heap_base != 0
+        &&& self.heap_size != 0
+    }
+
+    closed spec fn init_ok(&self) -> bool {
+        &&& self.is_init()
+        &&& forall|i: int|
+            #![trigger self.free_list@.index(i)]
+            if i == ORDER - 1 as int {
+                // This is because we will insert the entire initial block into the last
+                // free list.
+                self.free_list@.index(i)@.len() == 1
+            } else {
+                self.free_list@.index(i)@.len() == 0
+            }
+    }
+
+    fn is_init_impl(&self) -> (r: bool)
+        ensures
+            r <==> self.is_init(),
+    {
+        self.heap_base != 0 && self.heap_size != 0
     }
 
     fn check_allocation_size(&self, mut size: u64, align: u64) -> (r: bool)
@@ -350,17 +396,39 @@ impl<const ORDER: usize> Heap for DekoHeap<ORDER> {
             order += 1;
         }
     }
+
+    /// Initializes the heap with a given memory region, making it ready for allocations.
+    ///
+    /// This is the bootstrapping function. It takes a raw permission for a large memory
+    /// region, finds the largest power-of-2 block that fits, and adds that single
+    /// block to the appropriate free list.
+    ///
+    /// # Safety
+    /// The caller must guarantee that the provided permission `perm` corresponds to a
+    /// valid, unused memory region starting at `heap_start` of `heap_size`.
+    fn init(&mut self, heap_start: u64, heap_size: u64, order: u64)
+        ensures
+            self.wf(),
+            self.init_ok(),
+            self.free_list_valid(),
+    {
+        self.heap_base = heap_start;
+
+        proof {
+            assert(old(self).free_list === self.free_list);
+            assert(self.free_list_valid());
+        }
+
+        unsafe {
+            self.init_unchecked(heap_start, heap_size, order);
+        }
+    }
 }
 
 impl<const ORDER: usize> DekoHeap<ORDER> {
     #[verifier::inline]
     pub open spec fn heap_size(&self) -> nat {
         block_size(ORDER as nat)
-    }
-
-    pub closed spec fn is_init(&self) -> bool {
-        &&& self.heap_base != 0
-        &&& self.heap_size != 0
     }
 
     /// The size of the blocks we allocate for a given order.
@@ -541,19 +609,6 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         lemma_log_pow(2, 64);
     }
 
-    pub closed spec fn init_ok(&self) -> bool {
-        &&& self.is_init()
-        &&& forall|i: int|
-            #![trigger self.free_list@.index(i)]
-            if i == ORDER - 1 as int {
-                // This is because we will insert the entire initial block into the last
-                // free list.
-                self.free_list@.index(i)@.len() == 1
-            } else {
-                self.free_list@.index(i)@.len() == 0
-            }
-    }
-
     pub closed spec fn empty_free_list(&self) -> bool {
         forall|i: int|
             0 <= i < self.free_list@.len() as int ==> #[trigger] self.free_list@.index(
@@ -561,43 +616,12 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
             ).inner@.ptrs.len() == 0
     }
 
-    /// Initializes the heap with a given memory region, making it ready for allocations.
-    ///
-    /// This is the bootstrapping function. It takes a raw permission for a large memory
-    /// region, finds the largest power-of-2 block that fits, and adds that single
-    /// block to the appropriate free list.
-    ///
-    /// # Safety
-    /// The caller must guarantee that the provided permission `perm` corresponds to a
-    /// valid, unused memory region starting at `heap_start` of `heap_size`.
-    pub fn init(&mut self, heap_start: u64, heap_size: u64)
+    unsafe fn init_unchecked(&mut self, heap_start: u64, heap_size: u64, order: u64)
         requires
             !old(self).is_init(),
             old(self).wf(),
-            old(self).free_list_valid(),
-            valid_heap_param(heap_start, heap_size, ORDER as u64),
-        ensures
-            self.wf(),
-            self.init_ok(),
-            self.free_list_valid(),
-    {
-        self.heap_base = heap_start;
-
-        proof {
-            assert(old(self).free_list === self.free_list);
-            assert(self.free_list_valid());
-        }
-
-        unsafe {
-            self.init_unchecked(heap_start, heap_size);
-        }
-    }
-
-    unsafe fn init_unchecked(&mut self, heap_start: u64, heap_size: u64)
-        requires
-            !old(self).is_init(),
-            old(self).wf(),
-            valid_heap_param(heap_start, heap_size, ORDER as u64),
+            valid_heap_param(heap_start, heap_size, order),
+            order == ORDER as u64,
         ensures
             self.wf(),
             self.init_ok(),
@@ -605,7 +629,7 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         // Since we do not have a method to modify the value in place, we need to
         // manually replace the target list in the free_list with an empty one,
         // update the node, and then "give back" to the free list.
-        let top_order = ORDER - 1;
+        let top_order = (order - 1) as usize;
         proof {
             assert(old(self).free_list@.index(top_order as int).wf());
         }
@@ -898,7 +922,8 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
 
 impl<const ORDER: usize> WellFormed for DekoHeap<ORDER> {
     closed spec fn wf(&self) -> bool {
-        &&& self.is_init()
+        &&& self.heap_base != 0
+        &&& self.heap_size != 0
         &&& self.heap_size_valid()
         &&& self.free_list@.len() == ORDER as int
         &&& ORDER - 1 >= 0

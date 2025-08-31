@@ -10,7 +10,7 @@ use crate::address::{FixedAddressMappingRange, PhysAddr, VirtAddr};
 use crate::cpu::idt::{stage2_generic_idt_handler, stage2_generic_idt_handler_no_ghcb, Idt};
 use crate::cpu::register_cpuid_table;
 use crate::mm::init_heap_allocator;
-use crate::snp::Snp;
+use crate::snp::{get_igvm_params, Snp};
 
 #[macro_export]
 macro_rules! dispatch_to_platform {
@@ -301,11 +301,22 @@ pub fn setup_env(header: &Stage2LaunchInfo, idt: &mut Idt)
     let virt_start = VirtAddr::from(u64::from(STAGE2_START));
     let virt_end = VirtAddr::from(u64::from(header.stage2_end));
     let phys_start = PhysAddr::from(u64::from(STAGE2_START));
+
+    proof {
+        assume(virt_start.wf());
+        assume(virt_end.wf());
+    }
+
     let kernel_mapping = FixedAddressMappingRange::new(virt_start, virt_end, phys_start);
 
     // SVSM ref: Create a simple heap mapping using the lower memory region.
     let zero = VirtAddr::from(0u64);
     let lowmem = VirtAddr::from(LOWMEM_END as u64);
+        proof {
+        assume(zero.wf());
+        assume(lowmem.wf());
+    }
+
     let heap_mapping = FixedAddressMappingRange::new(zero, lowmem, PhysAddr::from(0u64));
 
     dispatch_to_platform!(validate_memory, &zero, &lowmem);
@@ -314,6 +325,8 @@ pub fn setup_env(header: &Stage2LaunchInfo, idt: &mut Idt)
     allow_ap_to_proceed();
 
     // Initialize the heap.
+    let heap_start = VirtAddr::from(STAGE2_HEAP_START as u64);
+    let heap_end = VirtAddr::from(STAGE2_HEAP_END as u64);
     proof {
         // TODO: prove here that the heap parameters are valid.
         assume(valid_heap_param(
@@ -321,13 +334,18 @@ pub fn setup_env(header: &Stage2LaunchInfo, idt: &mut Idt)
             (STAGE2_HEAP_END - STAGE2_HEAP_START) as u64,
             HEAP_SIZE as u64,
         ));
+        assume(heap_start.wf());
+        assume(heap_end.wf());
     }
-    init_heap_allocator(&STAGE2_HEAP_START.into(), &STAGE2_HEAP_END.into());
+    
+    init_heap_allocator(&heap_start, &heap_end);
 
     // Initialize per-cpu-specific structures.
+    dispatch_to_platform!(init_each_cpu, );
 
     init_early_idt_late(idt);
 
+    dispatch_to_platform!(init_platform_end, get_igvm_params(header));
 }
 
 } // verus!

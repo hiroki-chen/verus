@@ -93,7 +93,23 @@ macro_rules! impl_spec_constant_for_basic {
 )*
     }
 }
+
+#[macro_export]
+macro_rules! impl_wf_for_atomics {
+    ($($name:ident),*) => {
+        $(verus!{
+            impl WellFormed for vstd::atomic::$name {
+                open spec fn wf(&self) -> bool {
+                    true
+                }
+            }
+        }
+)*
+    };
+}
+
 impl_spec_constant_for_basic! {u64, u32, u16, usize, u8, bool, char, i8, i16, i32, i64}
+impl_wf_for_atomics!(PAtomicU8, PAtomicU16, PAtomicU32, PAtomicU64, PAtomicBool);
 
 /// A macro to lift a function to a closure that can be used in some special contexts. For
 /// example, we need a closure to be used in `.map` or `filter` methods. In such cases, if

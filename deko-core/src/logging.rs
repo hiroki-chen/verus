@@ -3,7 +3,13 @@
 //! This crate currently DOES NOT use the `vstd` crate to verify its implementation as it is designed solely for debugging.
 //!
 //! TODO: Overhaul this module to fit both snp and tdx.
+use core::fmt::Write;
+
+use deko_std::prelude::*;
 use vstd::prelude::*;
+
+use crate::hal::{PlatformType, PLATFORM};
+use crate::snp::logging::GHCB_IO_PORT;
 
 #[cfg(feature = "logging")]
 mod warning {
@@ -31,7 +37,147 @@ const DEBUG_COLOR: &'static str = "\x1B[34m";
 // Blue
 const TRACE_COLOR: &'static str = "\x1B[36m";
 
-// Cyan
+/// Using a dynamic trait object is not supported by verus, so this
+/// is just
+pub struct Console;
+
+pub exec static CONSOLE: RwLockNoPred<Console>
+    ensures
+        CONSOLE.wf(),
+{
+    let lock = RwLockNoPred::new(Console {  }, Ghost(TrivialPredicate::new()));
+    proof {
+        use_type_invariant(&lock);
+    }
+
+    lock
+}
+
+impl WellFormed for Console {
+    open spec fn wf(&self) -> bool {
+        true
+    }
+}
+
+impl Console {
+    #[verifier::external_body]
+    fn write_bytes(&self, buffer: &[u8]) {
+        let platform_type = match PLATFORM.get() {
+            Some(p) => p,
+            None => return ,
+        };
+
+        for b in buffer.iter() {
+            // dispatch to platform-specific implementation
+            match platform_type {
+                PlatformType::Snp => {
+                    let ghcb_port = match GHCB_IO_PORT.get() {
+                        Some(p) => p,
+                        None => return ,
+                    };
+                },
+                _ => {
+                    // Unsupported platform; do nothing
+                },
+            }
+        }
+    }
+}
+
+#[verifier::external]
+impl core::fmt::Write for Console {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        self.write_bytes(s.as_bytes());
+        Ok(())
+    }
+}
+
+#[verifier::external]
+impl log::Log for Console {
+    fn enabled(&self, _metadata: &log::Metadata) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            return ;
+        }
+        match record.metadata().level() {
+            log::Level::Error => __print(
+                format_args!(
+                    "{}[Deko-Monitor] {}: {}{}\n",
+                    ERROR_COLOR,
+                    record.metadata().level().as_str(),
+                    record.args(),
+                    RESET_COLOR
+                ),
+            ),
+            log::Level::Warn => __print(
+                format_args!(
+                    "{}[Deko-Monitor] {}: {}{}\n",
+                    WARN_COLOR,
+                    record.metadata().level().as_str(),
+                    record.args(),
+                    RESET_COLOR
+                ),
+            ),
+            log::Level::Info => __print(
+                format_args!(
+                    "{}[Deko-Monitor] {}: {}{}\n",
+                    INFO_COLOR,
+                    record.metadata().level().as_str(),
+                    record.args(),
+                    RESET_COLOR
+                ),
+            ),
+            log::Level::Debug => __print(
+                format_args!(
+                    "{}[Deko-Monitor] {}: {}{}\n",
+                    DEBUG_COLOR,
+                    record.metadata().level().as_str(),
+                    record.args(),
+                    RESET_COLOR
+                ),
+            ),
+            log::Level::Trace => __print(
+                format_args!(
+                    "{}[Deko-Monitor] {}: {}{}\n",
+                    TRACE_COLOR,
+                    record.metadata().level().as_str(),
+                    record.args(),
+                    RESET_COLOR
+                ),
+            ),
+        }
+    }
+
+    fn flush(&self) {
+    }
+}
+
+#[verifier::external]
+pub fn __print(arg: core::fmt::Arguments) {
+    let (mut console, write_handle) = CONSOLE.acquire_write();
+    console.write_fmt(arg).unwrap();
+    write_handle.release_write(console);
+}
+
+} // verus!
+#[macro_export]
+macro_rules! println {
+    ($($args:tt)*) => {
+        log::info!($($args)*);
+    };
+    () => {
+        log::info!("");
+    };
+}
+
+#[cfg(feature = "use_deprecated_logging")]
+mod __private {
+
+    vstd::prelude::verus! {
+
 #[verifier::external_body]
 #[cfg(feature = "logging")]
 pub fn init_logger() {
@@ -55,49 +201,46 @@ pub fn log(level: log::Level, args: core::fmt::Arguments) {
 
 } // verus!
 #[cfg(feature = "logging")]
-#[macro_export]
-macro_rules! info {
+    #[macro_export]
+    macro_rules! info {
     ($($arg:tt)*) => {
         $crate::logging::log(log::Level::Info, format_args!($($arg)*));
     }
 }
 
-#[cfg(not(feature = "logging"))]
-#[macro_export]
-macro_rules! info {
+    #[cfg(not(feature = "logging"))]
+    #[macro_export]
+    macro_rules! info {
     ($($arg:tt)*) => {
         let _ = format_args!($($arg)*);
     };
 }
 
-#[cfg(feature = "logging")]
-#[macro_export]
-macro_rules! warn {
+    #[cfg(feature = "logging")]
+    macro_rules! warn {
     ($($arg:tt)*) => {
         log(log::Level::Warn, format_args!($($arg)*));
     }
 }
 
-#[cfg(not(feature = "logging"))]
-#[macro_export]
-macro_rules! warn {
+    #[cfg(not(feature = "logging"))]
+    macro_rules! warn {
     ($($arg:tt)*) => {
         let _ = format_args!($($arg)*);
     }
 }
 
-#[cfg(feature = "logging")]
-#[macro_export]
-macro_rules! error {
+    #[cfg(feature = "logging")]
+    macro_rules! error {
     ($($arg:tt)*) => {
         log(log::Level::Error, format_args!($($arg)*));
     }
 }
 
-#[cfg(not(feature = "logging"))]
-#[macro_export]
-macro_rules! error {
+    #[cfg(not(feature = "logging"))]
+    macro_rules! error {
     ($($arg:tt)*) => {
         let _ = format_args!($($arg)*);
     }
+}
 }

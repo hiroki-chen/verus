@@ -169,6 +169,16 @@ impl<V: WellFormed + Heap> DekoHeapAllocator<V> {
             self.wf(),
             crate::heap::valid_heap_param(heap_start, heap_size, HEAP_SIZE as u64),
     {
+        let (mut allocator, write_handle) = self.allocator.acquire_write();
+
+        // If already initialized, we do nothing.
+        if allocator.is_init_impl() {
+            write_handle.release_write(allocator);
+            return ;
+        }
+        allocator.init(heap_start, heap_size, HEAP_SIZE as u64);
+
+        write_handle.release_write(allocator);
     }
 
     /// This API is *hidden* because we do not want the caller to manipulate any

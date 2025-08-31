@@ -1,6 +1,9 @@
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
+use crate::address::{PhysAddr, VirtAddr};
+use crate::mm::{PTE_MASK_PRIVATE, PTE_MASK_SHARED};
+
 deko_bitflags! {
     pub struct Pte: u64 {
         const PRESENT       = 0;
@@ -15,3 +18,283 @@ deko_bitflags! {
         const NX            = 63;
     }
 }
+
+extern "C" {
+    /// This is the top-level, very initial page table that we can directly
+    /// use to enable paging.
+    #[link_name = "pgtable"]
+    pub static mut pgtable: PageTable;
+}
+
+verus! {
+
+// Note on the constants: Verus is having trouble verifying
+// non-overflow/underflow of some arithmetic operations that
+// involve constants and bit operations.
+//
+// We resort to hardcoding some of the results.
+
+/// Size helpers
+pub const SIZE_1K: u64 = 1024;
+pub const SIZE_1M: u64 = SIZE_1K * 1024;
+pub const SIZE_1G: u64 = SIZE_1M * 1024;
+
+/// Pagesize definitions
+pub const PAGE_SIZE: u64 = SIZE_1K * 4;
+pub const PAGE_SIZE_2M: u64 = SIZE_1M * 2;
+
+/// More size helpers
+// pub const SIZE_LEVEL3: u64 = 1u64 << ((9 * 3) + 12);
+// pub const SIZE_LEVEL2: u64 = 1u64 << ((9 * 2) + 12);
+// pub const SIZE_LEVEL1: u64 = 1u64 << ((9 * 1) + 12);
+// pub const SIZE_LEVEL0: u64 = 1u64 << ((9 * 0) + 12);
+pub const SIZE_LEVEL3: u64 = 0x8000000000;
+pub const SIZE_LEVEL2: u64 = 0x40000000;
+pub const SIZE_LEVEL1: u64 = 0x200000;
+pub const SIZE_LEVEL0: u64 = 0x1000;
+
+// Stack definitions
+pub const STACK_PAGES: u64 = 8;
+pub const STACK_SIZE: u64 = PAGE_SIZE * STACK_PAGES;
+pub const STACK_GUARD_SIZE: u64 = STACK_SIZE;
+pub const STACK_TOTAL_SIZE: u64 = STACK_SIZE + STACK_GUARD_SIZE;
+
+/// Level3 page-table index shared between all CPUs
+pub const PGTABLE_LVL3_IDX_SHARED: u64 = 511;
+
+/// Base Address of shared memory region
+// pub const GLOBAL_BASE: VirtAddr = VirtAddr(PGTABLE_LVL3_IDX_SHARED << ((3 * 9) + 12)); 
+// FIXME: Hardcoded due to verus verification issues
+pub const GLOBAL_BASE: VirtAddr = VirtAddr(0xFF8000000000);
+
+pub const GLOBAL_MAPPING_SIZE: u64 = 256 * SIZE_1G;
+
+/// Shared mappings region start
+pub const GLOBAL_MAPPING_BASE: VirtAddr = VirtAddr(GLOBAL_BASE.0 + GLOBAL_MAPPING_SIZE);
+
+/// Shared mappings region end
+pub const GLOBAL_MAPPING_END: VirtAddr = VirtAddr(GLOBAL_MAPPING_BASE.0 + (SIZE_1G));
+
+/// Mapping address for Hyper-V hypercall page.
+pub const HYPERCALL_CODE_PAGE: VirtAddr = VirtAddr(GLOBAL_MAPPING_BASE.0 - PAGE_SIZE);
+
+/// PerCPU mappings level 3 index
+pub const PGTABLE_LVL3_IDX_PERCPU: u64 = 510;
+
+/// Base Address of shared memory region
+// pub const PERCPU_BASE: VirtAddr = VirtAddr(PGTABLE_LVL3_IDX_PERCPU << ((3 * 9) + 12));
+// FIXME: Hardcoded due to verus verification issues
+pub const PERCPU_BASE: VirtAddr = VirtAddr(0xFF0000000000);
+
+/// End Address of per-cpu memory region
+pub const PERCPU_END: VirtAddr = VirtAddr(PERCPU_BASE.0 + (SIZE_LEVEL3));
+
+/// PerCPU CAA mappings
+pub const PERCPU_CAA_BASE: VirtAddr = VirtAddr(PERCPU_BASE.0 + (2 * SIZE_LEVEL0));
+
+/// PerCPU VMSA mappings
+pub const PERCPU_VMSA_BASE: VirtAddr = VirtAddr(PERCPU_BASE.0 + (4 * SIZE_LEVEL0));
+
+/// Region for PerCPU Stacks
+pub const PERCPU_STACKS_BASE: VirtAddr = VirtAddr(PERCPU_BASE.0 + (SIZE_LEVEL1));
+
+/// Shadow stack address of the per-cpu init task
+pub const SHADOW_STACKS_INIT_TASK: VirtAddr = PERCPU_STACKS_BASE;
+
+/// Stack address to use during context switches
+pub const CONTEXT_SWITCH_STACK: VirtAddr =
+    VirtAddr(SHADOW_STACKS_INIT_TASK.0 + (STACK_TOTAL_SIZE));
+
+/// Shadow stack address to use during context switches
+pub const CONTEXT_SWITCH_SHADOW_STACK: VirtAddr =
+    VirtAddr(CONTEXT_SWITCH_STACK.0 + (STACK_TOTAL_SIZE));
+
+///  IST Stacks base address
+pub const STACKS_IST_BASE: VirtAddr =
+    VirtAddr(CONTEXT_SWITCH_SHADOW_STACK.0 + (STACK_TOTAL_SIZE));
+
+/// DoubleFault IST stack base address
+pub const STACK_IST_DF_BASE: VirtAddr = STACKS_IST_BASE;
+/// DoubleFault ISST shadow stack base address
+pub const SHADOW_STACK_ISST_DF_BASE: VirtAddr =
+    VirtAddr(STACKS_IST_BASE.0 + (STACK_TOTAL_SIZE));
+
+/// PerCPU XSave Context area base address
+pub const XSAVE_AREA_BASE: VirtAddr =
+    VirtAddr(SHADOW_STACK_ISST_DF_BASE.0 + (STACK_TOTAL_SIZE));
+
+/// Base Address for temporary mappings - used by page-table guards
+pub const PERCPU_TEMP_BASE: VirtAddr = VirtAddr(PERCPU_BASE.0 + (SIZE_LEVEL2));
+
+// Below is space for 512 temporary 4k mappings and 511 temporary 2M mappings
+
+/// Start and End for PAGE_SIZEed temporary mappings
+pub const PERCPU_TEMP_BASE_4K: VirtAddr = PERCPU_TEMP_BASE;
+pub const PERCPU_TEMP_END_4K: VirtAddr = VirtAddr(PERCPU_TEMP_BASE_4K.0 + (SIZE_LEVEL1));
+
+/// Start and End for PAGE_SIZEed temporary mappings
+pub const PERCPU_TEMP_BASE_2M: VirtAddr = VirtAddr(PERCPU_TEMP_BASE.0 + (SIZE_LEVEL1));
+pub const PERCPU_TEMP_END_2M: VirtAddr = VirtAddr(PERCPU_TEMP_BASE.0 + (SIZE_LEVEL2));
+
+/// Task mappings level 3 index
+pub const PGTABLE_LVL3_IDX_PERTASK: u64 = 508;
+
+/// Base address of task memory region
+// pub const PERTASK_BASE: VirtAddr = VirtAddr(PGTABLE_LVL3_IDX_PERTASK << ((3 * 9) + 12));
+// FIXME: Hardcoded due to verus verification issues
+pub const PERTASK_BASE: VirtAddr = VirtAddr(0xFE0000000000);
+
+/// End address of task memory region
+pub const PERTASK_END: VirtAddr = VirtAddr(PERTASK_BASE.0 + (SIZE_LEVEL3));
+
+/// Page table self-map level 3 index
+pub const PGTABLE_LVL3_IDX_PTE_SELFMAP: u64 = 493;
+
+// pub const PTE_BASE: VirtAddr = VirtAddr(PGTABLE_LVL3_IDX_PTE_SELFMAP << ((3 * 9) + 12));
+// FIXME: Hardcoded due to verus verification issues
+pub const PTE_BASE: VirtAddr = VirtAddr(0xF68000000000);
+
+//
+// User-space mapping constants
+//
+
+/// Start of user memory address range
+pub const USER_MEM_START: VirtAddr = VirtAddr(0);
+
+/// End of user memory address range
+pub const USER_MEM_END: VirtAddr = VirtAddr(USER_MEM_START.0 + (256 * SIZE_LEVEL3));
+
+#[inline(always)]
+#[verifier::external_body]
+fn strip_confidentiality_bits(paddr: u64) -> u64 {
+    paddr &! (PTE_MASK_PRIVATE.get().unwrap_or(&51))
+}
+
+#[verifier::external_body]
+#[inline(always)]
+fn strip_shared_address_bits(paddr: u64) -> u64 {
+    paddr &! (PTE_MASK_SHARED.get().unwrap())
+}
+
+pub struct PageFrameNumber(pub PhysAddr);
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct PageTableEntry(pub PhysAddr);
+
+#[repr(C)]
+pub struct Page(pub Array<PageTableEntry, 512>);
+
+#[repr(C)]
+pub struct PageTable(pub Page);
+
+impl PageTableEntry {
+    // todo: add some stronger conditions.
+    #[verifier::external_body]
+    pub fn read_pte(vaddr: VirtAddr) -> (r: PageTableEntry)
+        requires
+            vaddr.wf(),
+        ensures
+            r.wf(),
+    {
+        unsafe { *(vaddr.0 as *const PageTableEntry) }
+    }
+}
+
+impl WellFormed for PageFrameNumber {
+    closed spec fn wf(&self) -> bool {
+        self.0.wf()
+    }
+}
+
+impl WellFormed for PageTableEntry {
+    #[verifier::inline]
+    open spec fn wf(&self) -> bool {
+        self.0.wf()
+    }
+}
+
+impl WellFormed for Page {
+    open spec fn wf(&self) -> bool {
+        self.0.wf()
+    }
+}
+
+impl WellFormed for PageTable {
+    closed spec fn wf(&self) -> bool {
+        self.0.wf()
+    }
+}
+
+impl PageTableEntry {
+
+}
+
+impl Page {
+
+}
+
+impl PageTable {
+    /// Calculate the virtual address of a PTE in the self-map, which maps a
+    /// specified virtual address.
+    ///
+    /// # Parameters
+    /// - `vaddr': The virtual address whose PTE should be located.
+    ///
+    /// # Returns
+    /// The virtual address of the PTE.
+    fn get_pte_address(vaddr: VirtAddr) -> (r: VirtAddr)
+        requires
+            vaddr.wf(),
+        ensures
+            r.wf(),
+            r@ == PTE_BASE@ + ((vaddr@ & 0x0000_FFFF_FFFF_F000u64) >> 9),
+    {
+        let r = VirtAddr(PTE_BASE.0 + ((vaddr.0 & 0x0000_FFFF_FFFF_F000u64) >> 9));
+
+        proof {
+            assume(r.wf());
+        }
+
+        r
+    }
+
+    pub fn virt_to_frame(vaddr: VirtAddr) -> (r: PageFrameNumber)
+        requires
+            vaddr.wf(),
+        ensures
+            r.wf(),
+    {
+        // Calculate the virtual addresses of each level of the paging
+        // hierarchy in the self-map.
+        let pte_addr = Self::get_pte_address(vaddr);
+        let pde_addr = Self::get_pte_address(pte_addr);
+        let pdpe_addr = Self::get_pte_address(pde_addr);
+        let pml4e_addr = Self::get_pte_address(pdpe_addr);
+
+        // todo: we need to have a way for reasoning about
+        // if these entries are `present`; we only allow
+        // present entries to be looked up.
+        let pml4e =  PageTableEntry::read_pte(pml4e_addr);
+        let pdpe =  PageTableEntry::read_pte(pdpe_addr);
+        let pde =  PageTableEntry::read_pte(pde_addr);
+        let pte =  PageTableEntry::read_pte(pte_addr);
+
+        // Check that all entries are present (pending).
+        let paddr = PhysAddr(pte.0.0 & 0x000f_ffff_ffff_f000);
+        PageFrameNumber(PhysAddr(strip_confidentiality_bits(paddr.0)))
+    }
+}
+
+#[verusfmt::skip]
+#[verifier::external_body]
+#[inline(always)]
+pub fn get_initial_pgtable() -> (r: (DekoPPtr<PageTable>, Tracked<DekoPointsTo<PageTable>>))
+    ensures
+        r.0@ === r.1@.pptr(),
+{
+    unsafe { DekoPPtr::from_raw_uninit(&raw mut pgtable as *mut PageTable as u64) }
+}
+
+
+} // verus!

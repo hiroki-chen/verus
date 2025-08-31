@@ -67,8 +67,20 @@ impl<V> Predicate<V> for () {
 /// This is used when there is no predicate on the value should be used.
 pub struct TrivialPredicate<V: WellFormed>(core::marker::PhantomData<V>);
 
+impl<V: WellFormed> TrivialPredicate<V> {
+    pub closed spec fn new() -> Self {
+        TrivialPredicate(core::marker::PhantomData)
+    }
+}
+
 impl<V: WellFormed> Predicate<V> for TrivialPredicate<V> {
     #[verifier::inline]
+    open spec fn inv(self, __discard: V) -> bool {
+        true
+    }
+}
+
+impl<V: WellFormed> RwLockPredicate<V> for TrivialPredicate<V> {
     open spec fn inv(self, __discard: V) -> bool {
         true
     }

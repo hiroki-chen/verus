@@ -60,6 +60,26 @@ impl<T: WellFormed, const N: usize> Array<T, N> {
         &self.0[i]
     }
 
+    /// In case we need to index the element as pointers. As Verus does not support
+    /// direct case from `&T` to `DekoPPtr<T>`, we need to go through raw pointer first.
+    /// We also does return the permission as borrowed to ensure no one else can modify
+    /// the data while we have the pointer.
+    #[verifier::external_body]
+    #[inline(always)]
+    pub fn index_as_ptr(&self, i: usize) -> (t: (DekoPPtr<T>, Tracked<&DekoPointsTo<T>>))
+        requires
+            0 <= i < self.spec_len() as usize,
+            self.wf(),
+        ensures
+            t.1@.is_init() && t.1@.value() == self@.index(i as int),
+            t.0@ === t.1@.pptr(),
+    {
+        let (ptr, Tracked(perm)) = unsafe { DekoPPtr::from_raw_uninit(&self.0[i] as *const T as u64)
+        };
+
+        (ptr, Tracked(&perm))
+    }
+
     #[verifier::external_body]
     pub fn update_in_place<U>(&mut self, i: usize, f: impl FnOnce(T) -> (U, T)) -> (t: U)
         requires
@@ -109,6 +129,7 @@ impl<T: WellFormed + Copy, const N: usize> Array<T, N> {
     pub const fn fill(elem: T) -> (s: Self)
         ensures
             s@ =~= Seq::new(N as nat, |i| elem),
+            s.wf(),
     {
         Self([elem;N])
     }

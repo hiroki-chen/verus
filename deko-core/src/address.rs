@@ -1,6 +1,8 @@
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
+use crate::mm::paging::PTE_BASE;
+
 verus! {
 
 #[derive(Clone, Copy)]
@@ -55,7 +57,7 @@ impl View for VirtAddr {
 impl WellFormed for VirtAddr {
     #[verifier::inline]
     open spec fn wf(&self) -> bool {
-        true
+        &&& PTE_BASE@ + ((self@ & 0x0000_FFFF_FFFF_F000u64) >> 9) <= 0x0000_FFFF_FFFF_FFFFu64
     }
 }
 

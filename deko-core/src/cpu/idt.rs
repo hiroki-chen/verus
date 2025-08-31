@@ -81,19 +81,19 @@ const IDT_TYPE_INT: u8 = 0x0e;
 
 const IDT_TYPE_TRAP: u8 = 0x0f;
 
-#[verifier::external_body]
 pub fn create_early_idt() -> (arr: Array<IdtEntry, 256>)
     ensures
         arr.wf(),
         forall|i: int|
             0 <= i && i < 256 ==> #[trigger] arr@[i as int].high == 0 && arr@[i as int].low == 0,
 {
-    Array::new([const { IdtEntry::no_handler() };256])
+    Array::fill(IdtEntry::no_handler())
 }
 
 /// The base addresses of the IDT should be aligned on an 8-byte boundary
 /// to maximize performance of cache line fills.
 #[repr(C, packed(8))]
+#[derive(Copy, Clone)]
 pub struct IdtEntry {
     pub low: u64,
     pub high: u64,
@@ -106,7 +106,12 @@ impl WellFormed for IdtEntry {
 }
 
 impl IdtEntry {
-    pub const fn no_handler() -> Self {
+    pub const fn no_handler() -> (r: Self)
+        ensures
+            r.wf(),
+            r.low == 0,
+            r.high == 0,
+    {
         Self { low: 0, high: 0 }
     }
 

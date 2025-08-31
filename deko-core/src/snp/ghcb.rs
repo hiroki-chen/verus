@@ -17,7 +17,7 @@ verus! {
 #[repr(C)]
 pub struct GuestHostCommucationBlock {
     _reserved: Array<u8, 0xcb>,
-    pub cpl: PAtomicU8, // tweak: this is now `repr[(C)]`
+    pub cpl: PAtomicU8,  // tweak: this is now `repr[(C)]`
     _reserved2: Array<u8, 0x74>,
     pub xss: u64,
     _reserved3: Array<u8, 0x18>,
@@ -67,7 +67,7 @@ impl WellFormed for GuestHostCommucationBlock {
 /// Fetch the current GHCB structure for this specific CPU core.
 #[verifier::external_body]
 fn current_ghcb() -> &'static GuestHostCommucationBlock {
-  vstd::vpanic!("todo")
+    vstd::vpanic!("todo")
 }
 
 } // verus!
