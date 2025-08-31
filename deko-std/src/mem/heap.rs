@@ -20,7 +20,7 @@ pub const HEAP_ALIGNMENT: u64 = 0x1000;
 pub open spec fn valid_heap_param(heap_base: u64, heap_size: u64, order: u64) -> bool {
     let min_block_size = heap_size >> ((order - 1) as u64);
 
-    &&& heap_base > 0
+    &&& heap_base >= 0
     &&& heap_size > 0
     &&& heap_size >= min_block_size
     &&& min_block_size >= core::mem::size_of::<Node<()>>() as u64
@@ -39,11 +39,6 @@ pub open spec fn block_size(order: nat) -> nat {
 #[verifier::inline]
 pub open spec fn addr_is_valid_for_order(addr: nat, order: nat) -> bool {
     addr % block_size(order) == 0
-}
-
-#[verifier::inline]
-pub open spec fn is_power_of_two(n: u64) -> bool {
-    n > 0 && (n & (n - 1) as u64) == 0
 }
 
 /// Checks if two blocks of memory overlap.

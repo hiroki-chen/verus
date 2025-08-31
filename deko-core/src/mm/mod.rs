@@ -1,8 +1,9 @@
 pub mod paging;
 
-use deko_std::sync::OnceCellNoPred;
+use deko_std::prelude::*;
 use vstd::prelude::*;
 
+use crate::address::{PhysAddr, VirtAddr};
 use crate::mm::paging::PteFlags;
 
 verus! {
@@ -47,6 +48,20 @@ pub struct PageEncryptionMasks {
     pub shared_pte_mask: usize,
     pub addr_mask_width: u32,
     pub phys_addr_sizes: u32,
+}
+
+pub fn init_heap_allocator(heap_start: &VirtAddr, heap_end: &VirtAddr)
+    requires
+        heap_start.wf(),
+        heap_end.wf(),
+        heap_start@ % 0x1000 == 0,
+        heap_end@ % 0x1000 == 0,
+        heap_end@ > heap_start@,
+        valid_heap_param(heap_start.0, (heap_end.0 - heap_start.0) as u64, HEAP_SIZE as u64),
+{
+    let phys_start = PhysAddr(heap_start.0);
+
+    DEKO_ALLOCATOR.init(phys_start.0, heap_end.0 - heap_start.0);
 }
 
 } // verus!

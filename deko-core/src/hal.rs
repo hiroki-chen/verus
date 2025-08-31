@@ -1,12 +1,15 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use deko_meta::{HeaderRaw, Stage2LaunchInfo, LOWMEM_END, STAGE2_START};
+use deko_meta::{
+    HeaderRaw, Stage2LaunchInfo, LOWMEM_END, STAGE2_HEAP_END, STAGE2_HEAP_START, STAGE2_START,
+};
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
 use crate::address::{FixedAddressMappingRange, PhysAddr, VirtAddr};
-use crate::cpu::idt::{stage2_generic_idt_handler_no_ghcb, Idt};
+use crate::cpu::idt::{stage2_generic_idt_handler, stage2_generic_idt_handler_no_ghcb, Idt};
 use crate::cpu::register_cpuid_table;
+use crate::mm::init_heap_allocator;
 use crate::snp::Snp;
 
 #[macro_export]
@@ -242,16 +245,23 @@ pub trait PlatformApi: Sync + Send + WellFormed {
 /// Injects dummy handlers into the IDT so that we can do early-stage
 /// exception handling (although this does nothing for now).
 #[inline(always)]
-#[verifier::external_body]
 fn init_early_idt(idt: &mut Idt)
     requires
         old(idt).entries.wf(),
     ensures
         idt.wf(),
 {
-    unsafe {
-        idt.init(&stage2_generic_idt_handler_no_ghcb as *const _ as _, 32);
-    }
+    crate::cpu::idt::init_early_idt(idt);
+}
+
+#[inline(always)]
+fn init_early_idt_late(idt: &mut Idt)
+    requires
+        old(idt).wf(),
+    ensures
+        idt.wf(),
+{
+    crate::cpu::idt::init_generic_idt(idt);
 }
 
 /// Sets up the environment for the platform which will setup the GDT, kernel mapping, paging,
@@ -286,6 +296,8 @@ pub fn setup_env(header: &Stage2LaunchInfo, idt: &mut Idt)
     }
 
     // Set up the kernel mapping.
+    // TODO: Make these addresses globally visible; seems we have to implement
+    // an automatic invariant for OnceCell.
     let virt_start = VirtAddr::from(u64::from(STAGE2_START));
     let virt_end = VirtAddr::from(u64::from(header.stage2_end));
     let phys_start = PhysAddr::from(u64::from(STAGE2_START));
@@ -298,11 +310,24 @@ pub fn setup_env(header: &Stage2LaunchInfo, idt: &mut Idt)
 
     dispatch_to_platform!(validate_memory, &zero, &lowmem);
 
-    // TODO: Make these addresses globally visible; seems we have to implement
-    // an automatic invariant for OnceCell.
-
     // BSP done; allow APs to proceed.
     allow_ap_to_proceed();
+
+    // Initialize the heap.
+    proof {
+        // TODO: prove here that the heap parameters are valid.
+        assume(valid_heap_param(
+            STAGE2_HEAP_START as u64,
+            (STAGE2_HEAP_END - STAGE2_HEAP_START) as u64,
+            HEAP_SIZE as u64,
+        ));
+    }
+    init_heap_allocator(&STAGE2_HEAP_START.into(), &STAGE2_HEAP_END.into());
+
+    // Initialize per-cpu-specific structures.
+
+    init_early_idt_late(idt);
+
 }
 
 } // verus!

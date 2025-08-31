@@ -87,12 +87,30 @@ impl From<u64> for VirtAddr {
     }
 }
 
+impl From<u32> for VirtAddr {
+    fn from(value: u32) -> (r: Self)
+        ensures
+            r@ === value as u64,
+    {
+        VirtAddr(value as u64)
+    }
+}
+
 impl From<u64> for PhysAddr {
     fn from(value: u64) -> (r: Self)
         ensures
             r@ === value,
     {
         PhysAddr(value)
+    }
+}
+
+impl From<u32> for PhysAddr {
+    fn from(value: u32) -> (r: Self)
+        ensures
+            r@ === value as u64,
+    {
+        PhysAddr(value as u64)
     }
 }
 

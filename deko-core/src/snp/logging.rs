@@ -7,34 +7,71 @@
 //! to use logging. Also notice that logging is extremely dangerous as this could
 //! interfere with information flow control. So it should only be enabled on debug.
 use vstd::prelude::*;
+
+use crate::snp::Snp;
+
+#[cfg(feature = "logging")]
 verus! {
 
-/// A struct that implements the GHCB protocol for logging.
-#[verifier::external]
-#[cfg(feature = "logging")]
-pub struct GHCBIo;
+use deko_std::prelude::*;
 
-#[cfg(feature = "logging")]
-pub fn init_logger() {
+pub exec static GHCB_IO_PORT: OnceCellNoPred<GHCBIoPort>
+    ensures
+        GHCB_IO_PORT.wf(),
+{
+    OnceCellNoPred::new(Ghost(()))
 }
 
-#[verifier::external]
-#[allow(unused)]
-#[cfg(feature = "logging")]
-impl GHCBIo {
-    pub fn outb(&self, port: u16, value: u8) {
-        // This function should send the byte to the GHCB protocol.
-        // The actual implementation is not provided here as it depends on the
-        // specific GHCB protocol implementation.
-        // For example, it could use a specific instruction to write to the port.
-    }
+/// A struct to represent the GHCB I/O port.
+///
+/// # Note
+///
+/// This struct does not lock the I/O port and it is not intended
+/// to be use directly. We must wrap it through a struct, e.g.,
+/// `Terminal` or `Console` that finally re-routes all the request
+/// to this struct.
+///
+/// Furthermore, since Verus does not yet support trait objects,
+/// we can only use the concrete types directly via a dispatcher.
+#[derive(Clone, Copy)]
+pub struct GHCBIoPort(u16);
 
-    pub fn outw(&self, port: u16, value: u16) {
-        // This function should send the word to the GHCB protocol.
-        // The actual implementation is not provided here as it depends on the
-        // specific GHCB protocol implementation.
-        // For example, it could use a specific instruction to write to the port.
+impl WellFormed for GHCBIoPort {
+    open spec fn wf(&self) -> bool {
+        true
     }
 }
+
+impl GHCBIoPort {
+    pub fn new(port: u16) -> (r: Self)
+        ensures
+            r.wf(),
+    {
+        GHCBIoPort(port)
+    }
+
+    #[inline(always)]
+    pub fn outb(&self, value: u8)
+        requires
+            self.wf(),
+    {
+    }
+
+    pub fn inb(&self) {
+        vstd::vpanic!("Not implemented");
+    }
+}
+
+impl Snp {
+    /// Initialize the GHCB logging mechanism.
+    pub(crate) fn init_ghcb_logging(serial_port: u16) {
+        GHCB_IO_PORT.init(GHCBIoPort::new(serial_port));
+    }
+}
+
+} // verus!
+#[cfg(not(feature = "logging"))]
+verus! {
+
 
 } // verus!

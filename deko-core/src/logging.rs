@@ -1,6 +1,8 @@
 //! Debug logging feature for the monitor; enable only for debugging purposes only. You should disable this for safety reasons.
 //!
 //! This crate currently DOES NOT use the `vstd` crate to verify its implementation as it is designed solely for debugging.
+//!
+//! TODO: Overhaul this module to fit both snp and tdx.
 use vstd::prelude::*;
 
 #[cfg(feature = "logging")]
@@ -13,6 +15,23 @@ mod warning {
 
 verus! {
 
+const RESET_COLOR: &'static str = "\x1B[0m";
+
+const ERROR_COLOR: &'static str = "\x1B[31m";
+
+// Red
+const WARN_COLOR: &'static str = "\x1B[33m";
+
+// Yellow
+const INFO_COLOR: &'static str = "\x1B[32m";
+
+// Green
+const DEBUG_COLOR: &'static str = "\x1B[34m";
+
+// Blue
+const TRACE_COLOR: &'static str = "\x1B[36m";
+
+// Cyan
 #[verifier::external_body]
 #[cfg(feature = "logging")]
 pub fn init_logger() {

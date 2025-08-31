@@ -11,6 +11,11 @@ pub open spec fn is_power_of_two_spec(n: nat) -> bool {
     exists|exp: nat| n == #[trigger] pow(2, exp)
 }
 
+#[verifier::inline]
+pub open spec fn is_power_of_two(n: u64) -> bool {
+    n > 0 && (n & (n - 1) as u64) == 0
+}
+
 pub open spec fn next_power_of_two_spec(n: nat) -> nat {
     if n == 0 || n == 1 {
         1

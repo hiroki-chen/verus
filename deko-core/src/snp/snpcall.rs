@@ -1,4 +1,5 @@
-use deko_std::cpu::CpuCore;
+use deko_meta::IgvmParamBlock;
+use deko_std::prelude::*;
 use vstd::prelude::*;
 
 use super::Snp;
@@ -22,6 +23,14 @@ pub const RMP_NO_WRITE: u8 = RMP_READ | RMP_USER_EXE | RMP_KERN_EXE;
 pub const RMP_RWX: u8 = RMP_NO_WRITE | RMP_WRITE;
 
 impl Snp {
+    fn init_platform_end(igvm_params: &IgvmParamBlock)
+        requires
+            igvm_params.wf(),
+    {
+        let debug_console_port = igvm_params.debug_serial_port as u16;
+        Self::init_ghcb_logging(debug_console_port);
+    }
+
     /// PVALIDATE takes a page size as an input parameter indicating that either a
     /// 4KB or 2MB page should be validated.
     ///

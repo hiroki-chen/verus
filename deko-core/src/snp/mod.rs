@@ -1,6 +1,6 @@
 use core::sync::atomic::AtomicU32;
 
-use deko_meta::{HeaderRaw, Stage2LaunchInfo, LOWMEM_END};
+use deko_meta::{HeaderRaw, IgvmParamBlock, Stage2LaunchInfo, LOWMEM_END};
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
@@ -13,9 +13,9 @@ use crate::mm::{
     PTE_MASK_SHARED,
 };
 
+pub mod ghcb;
 pub mod snpcall;
 
-#[cfg(feature = "logging")]
 pub(crate) mod logging;
 
 extern "C" {
@@ -24,6 +24,21 @@ extern "C" {
 }
 
 verus! {
+
+#[verifier::external_body]
+#[inline(always)]
+pub fn get_igvm_params<'a>(header: &'a Stage2LaunchInfo) -> (r: &'a IgvmParamBlock)
+    requires
+        header.wf(),
+    ensures
+        r.wf(),
+{
+    // Note that this case does NOT include all the fields contained in the
+    // `header.igvm_params` structure; we just extract the leading `IgvmParamBlock`
+    // here since it is the first part of the structure; this should be safe as long
+    // as we do not access any fields beyond the `IgvmParamBlock` fields.
+    unsafe { &*(header.igvm_params as *const IgvmParamBlock) }
+}
 
 fn has_vtom() -> bool {
     let snp_status = SnpStatusFlags::get_status();
@@ -66,7 +81,12 @@ pub exec static SNP_VTOM: OnceCellNoPred<usize>
     OnceCellNoPred::new(Ghost(()))
 }
 
-pub const SEV_STATUS_MSR: u32 = 0xC0010131;
+pub const MSR_SEV_STATUS: u32 = 0xC001_0131;
+
+/// The MSR used to support the GHCB MSR Protocol. For more
+/// details, please refer to SEV-ES GHCB standardization doc
+/// published by AMD.
+pub const MSR_AMD64_SEV_ES_GHCB: u32 = 0xC001_0130;
 
 pub struct Snp;
 
@@ -81,7 +101,7 @@ impl Snp {
                 private_pte_mask: 1 << 51,
                 shared_pte_mask: 0,
                 addr_mask_width: 51,
-                phys_addr_sizes: 48, // todo: do not hardcode this.
+                phys_addr_sizes: 48,  // todo: do not hardcode this.
             }
         }
     }
@@ -215,7 +235,7 @@ impl SnpStatusFlags {
         ensures
             r.wf(),
     {
-        let bits = read_msr(SEV_STATUS_MSR) as u32;
+        let bits = read_msr(MSR_SEV_STATUS) as u32;
 
         SnpStatusFlags { bits, flags: Ghost(from_bits(bits)) }
     }

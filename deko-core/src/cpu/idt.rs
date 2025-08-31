@@ -250,6 +250,8 @@ impl Idt {
 /// stage2 is in memory.
 #[verifier::external_body]
 pub fn init_early_idt(early_idt: &mut Idt)
+    requires
+        old(early_idt).entries.wf(),
     ensures
         early_idt.wf(),
 {
@@ -263,9 +265,25 @@ pub fn init_early_idt(early_idt: &mut Idt)
     early_idt.load();
 }
 
+#[verifier::external_body]
+pub fn init_generic_idt(early_idt: &mut Idt)
+    requires
+        old(early_idt).wf(),  // since we must have called init_early_idt
+
+    ensures
+        early_idt.wf(),
+{
+    unsafe {
+        early_idt.init(&stage2_generic_idt_handler as *const u8, core::mem::size_of::<IdtEntry>());
+    }
+
+    early_idt.load();
+}
+
 #[verusfmt::skip]
 extern "C" {
     pub static stage2_generic_idt_handler_no_ghcb: u8;
+    pub static stage2_generic_idt_handler: u8;
 }
 
 } // verus!

@@ -137,6 +137,8 @@ pub struct DekoHeapAllocator<V: WellFormed + Heap> {
 }
 
 /// A global allocator that is used to allocate memory for the monitor.
+///
+/// TODO: add an API for configuring the heap.
 pub exec static DEKO_ALLOCATOR: DekoHeapAllocator<DekoHeap<HEAP_SIZE>>
     ensures
         DEKO_ALLOCATOR.wf(),
@@ -160,6 +162,13 @@ impl<V: WellFormed + Heap> DekoHeapAllocator<V> {
             s.wf(),
     {
         Self { allocator: RwLock::new(v, Ghost(pred)) }
+    }
+
+    pub fn init(&self, heap_start: u64, heap_size: u64)
+        requires
+            self.wf(),
+            crate::heap::valid_heap_param(heap_start, heap_size, HEAP_SIZE as u64),
+    {
     }
 
     /// This API is *hidden* because we do not want the caller to manipulate any
