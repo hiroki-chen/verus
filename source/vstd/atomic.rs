@@ -143,6 +143,7 @@ macro_rules! atomic_types_generic {
 
         #[verifier::accept_recursive_types(T)]
         #[verifier::external_body] /* vattr */
+        #[repr(C)]
         pub struct $at_ident <T> {
             ato: $rust_ty,
         }
