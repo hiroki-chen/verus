@@ -312,7 +312,7 @@ pub fn setup_env(header: &Stage2LaunchInfo, idt: &mut Idt)
     // SVSM ref: Create a simple heap mapping using the lower memory region.
     let zero = VirtAddr::from(0u64);
     let lowmem = VirtAddr::from(LOWMEM_END as u64);
-        proof {
+    proof {
         assume(zero.wf());
         assume(lowmem.wf());
     }
@@ -328,16 +328,16 @@ pub fn setup_env(header: &Stage2LaunchInfo, idt: &mut Idt)
     let heap_start = VirtAddr::from(STAGE2_HEAP_START as u64);
     let heap_end = VirtAddr::from(STAGE2_HEAP_END as u64);
     proof {
-        // TODO: prove here that the heap parameters are valid.
-        assume(valid_heap_param(
-            STAGE2_HEAP_START as u64,
-            (STAGE2_HEAP_END - STAGE2_HEAP_START) as u64,
-            HEAP_SIZE as u64,
-        ));
-        assume(heap_start.wf());
-        assume(heap_end.wf());
+        crate::theories::stage2_heap_valid_params();
+
+        let heap_start_val = heap_start@;
+
+        assert((heap_start_val & 0x0000_FFFF_FFFF_F000u64) >> 9 == 0x80u64) by (bit_vector)
+            requires
+                (heap_start_val == 0x10000),
+        ;
     }
-    
+
     init_heap_allocator(&heap_start, &heap_end);
 
     // Initialize per-cpu-specific structures.

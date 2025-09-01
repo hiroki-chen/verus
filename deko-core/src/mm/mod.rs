@@ -75,4 +75,145 @@ pub fn virt_to_phys(vaddr: VirtAddr) -> (paddr: PhysAddr)
     PageTable::virt_to_frame(vaddr).0
 }
 
+pub tracked struct DekoMemoryRegionPermission;
+
+impl DekoMemoryRegionPermission {
+    /// Check if the permission is well-formed.
+    pub open spec fn wf(&self) -> bool {
+        true
+        // TODO: Implement me!
+
+    }
+}
+
+exec static ROOT_MEM: RwLockNoPred<DekoMemoryRegion>
+    ensures
+        ROOT_MEM.wf(),
+{
+    let root = RwLockNoPred::new(DekoMemoryRegion::new(), Ghost(TrivialPredicate::new()));
+
+    proof {
+        use_type_invariant(&root);
+    }
+
+    root
+}
+
+/// A continuous memory region.
+pub struct DekoMemoryRegion {
+    /// The physical start address of the memory region.
+    pub phys_start: PhysAddr,
+    /// The virtual start address of the memory region.
+    pub virt_start: VirtAddr,
+    /// The number of pages in the memory region.
+    pub npages: u64,
+    /// The permission of the memory region.
+    pub perm: Tracked<DekoMemoryRegionPermission>,
+}
+
+impl WellFormed for DekoMemoryRegion {
+    #[verifier::inline]
+    open spec fn wf(&self) -> bool {
+        &&& self.phys_start.wf()
+        &&& self.virt_start.wf()
+        &&& self.npages > 0
+        &&& self.npages <= (u64::MAX / 0x1000)
+        &&& self.phys_start@ % 0x1000 == 0
+        &&& self.virt_start@ % 0x1000 == 0
+        &&& self.perm@.wf()
+        &&& self.virt_start@ + self.npages * 0x1000 <= u64::MAX
+    }
+}
+
+impl DekoMemoryRegion {
+    #[verifier::inline]
+    pub open spec fn contains_addr_spec(&self, addr: VirtAddr) -> bool {
+        &&& addr@ >= self.virt_start@
+        &&& addr@ < self.virt_start@ + self.npages * 0x1000
+    }
+
+    #[verifier::inline]
+    pub open spec fn subset_of_spec(&self, other: &DekoMemoryRegion) -> bool {
+        &&& self.virt_start@ >= other.virt_start@
+        &&& self.virt_start@ + self.npages * 0x1000 <= other.virt_start@ + other.npages * 0x1000
+    }
+
+    #[verifier::inline]
+    pub open spec fn overlap_with_spec(&self, other: &DekoMemoryRegion) -> bool {
+        &&& self.virt_start@ < other.virt_start@ + other.npages * 0x1000
+        &&& self.virt_start@ + self.npages * 0x1000 > other.virt_start@
+    }
+
+    #[verifier::inline]
+    pub open spec fn empty_spec(&self) -> bool {
+        &&& self.npages == 0
+    }
+
+    #[verifier::when_used_as_spec(contains_addr_spec)]
+    #[inline]
+    pub fn contains_addr(&self, addr: VirtAddr) -> (r: bool)
+        requires
+            self.wf(),
+            addr.wf(),
+        ensures
+            self.contains_addr_spec(addr) == r,
+    {
+        addr.0 >= self.virt_start.0 && addr.0 < self.virt_start.0 + self.npages * 0x1000
+    }
+
+    #[verifier::when_used_as_spec(subset_of_spec)]
+    #[inline]
+    pub fn subset_of(&self, other: &DekoMemoryRegion) -> (r: bool)
+        requires
+            self.wf(),
+            other.wf(),
+        ensures
+            self.subset_of_spec(other) == r,
+    {
+        self.virt_start.0 >= other.virt_start.0 && self.virt_start.0 + self.npages * 0x1000
+            <= other.virt_start.0 + other.npages * 0x1000
+    }
+
+    #[verifier::when_used_as_spec(overlap_with_spec)]
+    #[inline]
+    pub fn overlap_with(&self, other: &DekoMemoryRegion) -> (r: bool)
+        requires
+            self.wf(),
+            other.wf(),
+        ensures
+            self.overlap_with_spec(other) == r,
+    {
+        self.virt_start.0 < other.virt_start.0 + other.npages * 0x1000
+            && self.virt_start.0 + self.npages * 0x1000 > other.virt_start.0
+    }
+
+    #[verifier::when_used_as_spec(empty_spec)]
+    #[inline]
+    pub fn empty(&self) -> (r: bool)
+        requires
+            self.wf(),
+        ensures
+            self.empty_spec() == r,
+    {
+        self.npages == 0
+    }
+
+    #[verifier::external_body]
+    pub const fn new() -> (r: Self)
+        ensures
+            r.wf(),
+            r.empty_spec(),
+    {
+        DekoMemoryRegion {
+            phys_start: PhysAddr(0),
+            virt_start: VirtAddr(0),
+            npages: 0,
+            perm: Tracked::assume_new(),
+        }
+    }
+
+    pub fn init_mem_region(&mut self, phys_start: PhysAddr, virt_start: VirtAddr, npages: u64)
+    {}
+}
+
 } // verus!

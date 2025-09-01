@@ -5,10 +5,12 @@ pub mod types;
 
 use deko_std::prelude::*;
 use vstd::atomic::{PAtomicBool, PAtomicU32, PermissionBool, PermissionU32};
+use vstd::cell::{PCell, PointsTo};
 use vstd::prelude::*;
 
 use crate::address::{PhysAddr, VirtAddr};
-use crate::mm::paging::PageTable;
+use crate::mm::paging::{DekoCpuPTOwner, PageTable, PteFlags, PERCPU_BASE, PTE_BASE};
+use crate::mm::virt_to_phys;
 use crate::snp::ghcb::GuestHostCommucationBlock;
 
 verus! {
@@ -170,12 +172,13 @@ pub exec static PERCPU_AREAS: RwLock<PerCpuAreas, PerCpuAreasInv>
 
 /// The structure that holds each core's own data.
 pub struct CpuData {
+    cpu_id: u64,
     /// The GHCB block for this CPU.
-    ghcb: OnceCellNoPred<GuestHostCommucationBlock>,
+    ghcb: PCell<GuestHostCommucationBlock>,
     tss: X86Tss,
     pgtable: DekoPPtr<PageTable>,
-    pgtable_perm: Tracked<DekoPointsTo<PageTable>>,
     shared_area: DekoPPtr<PerCpuShared>,
+    pgowner: Ghost<DekoCpuPTOwner>,
 }
 
 #[repr(C, packed)]
@@ -292,10 +295,11 @@ impl WellFormed for X86Tss {
 
 impl WellFormed for CpuData {
     closed spec fn wf(&self) -> bool {
-        &&& self.ghcb.wf()
         &&& self.tss.wf()
-        &&& self.pgtable_perm.wf()
-        &&& self.pgtable@ === self.pgtable_perm@.pptr()
+        &&& self.pgowner.wf()
+        &&& self.cpu_id < CPUID_MAX_COUNT as u64
+        &&& self.pgowner@.cpu_id() == self.cpu_id
+        &&& self.pgowner@.pgtable() === self.pgtable@.addr() as u64
     }
 }
 
@@ -306,20 +310,43 @@ impl X86Tss {
 impl CpuData {
     uninterp spec fn addr(&self) -> u64;
 
+    pub fn install_ghcb(
+        &self,
+        Tracked(ghcb_perm): Tracked<&mut PointsTo<GuestHostCommucationBlock>>,
+    )
+        requires
+            self.wf(),
+            self.ghcb().id() == old(ghcb_perm).id(),
+            old(ghcb_perm).is_uninit(),
+        ensures
+            self.ghcb().id() == ghcb_perm.id(),
+            // ghcb_perm.is_init(),
+    {
+        // let ghcb = balabla
+        // self.ghcb.put(ghcb, ghcb_perm);
+    }
+
     /// Create a new CPU data structure.
     pub fn new(
         pgtable: DekoPPtr<PageTable>,
-        pgtable_perm: Tracked<DekoPointsTo<PageTable>>,
         shared_area: DekoPPtr<PerCpuShared>,
+        pgowner: Ghost<DekoCpuPTOwner>,
+        cpu_id: u64,
+        ghcb: PCell<GuestHostCommucationBlock>,
     ) -> (r: Self)
         requires
-            pgtable_perm.wf(),
-            pgtable@ === pgtable_perm@.pptr(),
+            pgowner@.wf(),
+            cpu_id < CPUID_MAX_COUNT as u64,
+            pgowner@.cpu_id() == cpu_id,
+            pgowner@.pgtable() === pgtable@.addr() as u64,
         ensures
             r.wf(),
+            r.pgtable() == pgtable,
+            r.pgowner() == pgowner,
+            r.cpu_id() == cpu_id,
     {
         CpuData {
-            ghcb: OnceCellNoPred::new(Ghost(())),
+            ghcb,
             tss: X86Tss {
                 reserved0: 0,
                 stacks: Array::fill(0),
@@ -330,8 +357,9 @@ impl CpuData {
                 io_bmp_base: 0,
             },
             pgtable,
-            pgtable_perm,
             shared_area,
+            pgowner,
+            cpu_id,
         }
     }
 
@@ -341,15 +369,65 @@ impl CpuData {
             self.wf(),
         ensures
             r == self.addr(),
+            PTE_BASE@ + ((r & 0x0000_FFFF_FFFF_F000u64) >> 9)
+                <= 0x0000_FFFF_FFFF_FFFFu64
+            // todo: add something to ensure the address is valid.
+            ,
     {
         self as *const CpuData as u64
     }
 
-    pub fn map_self_stage2(&self)
+    pub closed spec fn cpu_id(&self) -> u64 {
+        self.cpu_id
+    }
+
+    pub closed spec fn pgtable(&self) -> DekoPPtr<PageTable> {
+        self.pgtable
+    }
+
+    pub closed spec fn pgowner(&self) -> Ghost<DekoCpuPTOwner> {
+        self.pgowner
+    }
+
+    pub closed spec fn ghcb(&self) -> &PCell<GuestHostCommucationBlock> {
+        &self.ghcb
+    }
+
+    pub open spec fn is_valid_pgtable_request(&self, pgperm: &DekoPointsTo<PageTable>) -> bool {
+        &&& pgperm.wf()
+        &&& pgperm.pptr()
+            == self.pgtable()@  // the permission is for its own page table
+
+    }
+
+    /// Map the cpu data structure into the stage-2 page table.
+    pub fn map_self_stage2(&self, Tracked(pgperm): Tracked<&mut DekoPointsTo<PageTable>>)
         requires
             self.wf(),
+            self.is_valid_pgtable_request(old(pgperm)),
+        ensures
+            pgperm.wf(),
     {
         let vaddr = VirtAddr::from(self.as_ptr());
+        let paddr = virt_to_phys(vaddr);
+        let base = PERCPU_BASE;
+
+        proof {
+            let base_addr = base@;
+            assert(0xF68000000000 + ((base_addr & 0x0000_FFFF_FFFF_F000u64) >> 9)
+                <= 0x0000_FFFF_FFFF_FFFFu64) by (bit_vector)
+                requires
+                    base_addr == 0xFF0000000000,
+            ;
+        }
+
+        PageTable::map_page(
+            self.pgtable.clone(),
+            Tracked(pgperm),
+            PERCPU_BASE,
+            paddr,
+            PteFlags::data(),
+        );
     }
 }
 

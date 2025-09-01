@@ -1,10 +1,11 @@
 use deko_meta::IgvmParamBlock;
 use deko_std::prelude::*;
+use vstd::cell::PCell;
 use vstd::prelude::*;
 
 use super::Snp;
 use crate::cpu::{CpuData, PerCpuAreas, PerCpuShared, CPUID_MAX_COUNT, PERCPU_AREAS};
-use crate::mm::paging::get_initial_pgtable;
+use crate::mm::paging::{get_initial_pgtable, DekoCpuPTOwner};
 
 verus! {
 
@@ -25,6 +26,14 @@ pub const RMP_NO_WRITE: u8 = RMP_READ | RMP_USER_EXE | RMP_KERN_EXE;
 pub const RMP_RWX: u8 = RMP_NO_WRITE | RMP_WRITE;
 
 impl Snp {
+    #[inline]
+    fn init_guest_host(&self, cpu: &CpuData)
+        requires
+            self.wf(),
+            cpu.wf(),
+    {
+    }
+
     pub fn init_platform_end(&self, igvm_params: &IgvmParamBlock)
         requires
             self.wf(),
@@ -51,8 +60,20 @@ impl Snp {
 
         // Need inter-CPU communication block.
         // seems we should install the permission into the bsp cpu state.
-        let (bsp_pgtable, Tracked(bsp_pgtable_perm)) = get_initial_pgtable();
-        let bsp_percpu = CpuData::new(bsp_pgtable, Tracked(bsp_pgtable_perm), shared_area_ptr);
+        let (bsp_pgtable, Tracked(mut bsp_pgtable_perm)) = get_initial_pgtable();
+        let pgowner = Ghost(DekoCpuPTOwner::new(0, bsp_pgtable@.addr() as u64));
+        let (ghcb, Tracked(mut ghcb_perm)) = PCell::empty();
+
+        let mut bsp_percpu = CpuData::new(bsp_pgtable, shared_area_ptr, pgowner, 0, ghcb);
+
+        proof {
+            assert(bsp_pgtable_perm.wf());
+            assert(bsp_pgtable_perm.pptr() == bsp_pgtable@);
+            assert(bsp_percpu.pgtable() == bsp_pgtable);
+        }
+
+        bsp_percpu.map_self_stage2(Tracked(&mut bsp_pgtable_perm));
+        self.init_guest_host(&bsp_percpu);
     }
 
     /// PVALIDATE takes a page size as an input parameter indicating that either a

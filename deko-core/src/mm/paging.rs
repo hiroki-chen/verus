@@ -33,14 +33,16 @@ verus! {
 // involve constants and bit operations.
 //
 // We resort to hardcoding some of the results.
-
 /// Size helpers
 pub const SIZE_1K: u64 = 1024;
+
 pub const SIZE_1M: u64 = SIZE_1K * 1024;
+
 pub const SIZE_1G: u64 = SIZE_1M * 1024;
 
 /// Pagesize definitions
 pub const PAGE_SIZE: u64 = SIZE_1K * 4;
+
 pub const PAGE_SIZE_2M: u64 = SIZE_1M * 2;
 
 /// More size helpers
@@ -49,21 +51,27 @@ pub const PAGE_SIZE_2M: u64 = SIZE_1M * 2;
 // pub const SIZE_LEVEL1: u64 = 1u64 << ((9 * 1) + 12);
 // pub const SIZE_LEVEL0: u64 = 1u64 << ((9 * 0) + 12);
 pub const SIZE_LEVEL3: u64 = 0x8000000000;
+
 pub const SIZE_LEVEL2: u64 = 0x40000000;
+
 pub const SIZE_LEVEL1: u64 = 0x200000;
+
 pub const SIZE_LEVEL0: u64 = 0x1000;
 
 // Stack definitions
 pub const STACK_PAGES: u64 = 8;
+
 pub const STACK_SIZE: u64 = PAGE_SIZE * STACK_PAGES;
+
 pub const STACK_GUARD_SIZE: u64 = STACK_SIZE;
+
 pub const STACK_TOTAL_SIZE: u64 = STACK_SIZE + STACK_GUARD_SIZE;
 
 /// Level3 page-table index shared between all CPUs
 pub const PGTABLE_LVL3_IDX_SHARED: u64 = 511;
 
 /// Base Address of shared memory region
-// pub const GLOBAL_BASE: VirtAddr = VirtAddr(PGTABLE_LVL3_IDX_SHARED << ((3 * 9) + 12)); 
+// pub const GLOBAL_BASE: VirtAddr = VirtAddr(PGTABLE_LVL3_IDX_SHARED << ((3 * 9) + 12));
 // FIXME: Hardcoded due to verus verification issues
 pub const GLOBAL_BASE: VirtAddr = VirtAddr(0xFF8000000000);
 
@@ -102,38 +110,37 @@ pub const PERCPU_STACKS_BASE: VirtAddr = VirtAddr(PERCPU_BASE.0 + (SIZE_LEVEL1))
 pub const SHADOW_STACKS_INIT_TASK: VirtAddr = PERCPU_STACKS_BASE;
 
 /// Stack address to use during context switches
-pub const CONTEXT_SWITCH_STACK: VirtAddr =
-    VirtAddr(SHADOW_STACKS_INIT_TASK.0 + (STACK_TOTAL_SIZE));
+pub const CONTEXT_SWITCH_STACK: VirtAddr = VirtAddr(SHADOW_STACKS_INIT_TASK.0 + (STACK_TOTAL_SIZE));
 
 /// Shadow stack address to use during context switches
-pub const CONTEXT_SWITCH_SHADOW_STACK: VirtAddr =
-    VirtAddr(CONTEXT_SWITCH_STACK.0 + (STACK_TOTAL_SIZE));
+pub const CONTEXT_SWITCH_SHADOW_STACK: VirtAddr = VirtAddr(
+    CONTEXT_SWITCH_STACK.0 + (STACK_TOTAL_SIZE),
+);
 
 ///  IST Stacks base address
-pub const STACKS_IST_BASE: VirtAddr =
-    VirtAddr(CONTEXT_SWITCH_SHADOW_STACK.0 + (STACK_TOTAL_SIZE));
+pub const STACKS_IST_BASE: VirtAddr = VirtAddr(CONTEXT_SWITCH_SHADOW_STACK.0 + (STACK_TOTAL_SIZE));
 
 /// DoubleFault IST stack base address
 pub const STACK_IST_DF_BASE: VirtAddr = STACKS_IST_BASE;
+
 /// DoubleFault ISST shadow stack base address
-pub const SHADOW_STACK_ISST_DF_BASE: VirtAddr =
-    VirtAddr(STACKS_IST_BASE.0 + (STACK_TOTAL_SIZE));
+pub const SHADOW_STACK_ISST_DF_BASE: VirtAddr = VirtAddr(STACKS_IST_BASE.0 + (STACK_TOTAL_SIZE));
 
 /// PerCPU XSave Context area base address
-pub const XSAVE_AREA_BASE: VirtAddr =
-    VirtAddr(SHADOW_STACK_ISST_DF_BASE.0 + (STACK_TOTAL_SIZE));
+pub const XSAVE_AREA_BASE: VirtAddr = VirtAddr(SHADOW_STACK_ISST_DF_BASE.0 + (STACK_TOTAL_SIZE));
 
 /// Base Address for temporary mappings - used by page-table guards
 pub const PERCPU_TEMP_BASE: VirtAddr = VirtAddr(PERCPU_BASE.0 + (SIZE_LEVEL2));
 
 // Below is space for 512 temporary 4k mappings and 511 temporary 2M mappings
-
 /// Start and End for PAGE_SIZEed temporary mappings
 pub const PERCPU_TEMP_BASE_4K: VirtAddr = PERCPU_TEMP_BASE;
+
 pub const PERCPU_TEMP_END_4K: VirtAddr = VirtAddr(PERCPU_TEMP_BASE_4K.0 + (SIZE_LEVEL1));
 
 /// Start and End for PAGE_SIZEed temporary mappings
 pub const PERCPU_TEMP_BASE_2M: VirtAddr = VirtAddr(PERCPU_TEMP_BASE.0 + (SIZE_LEVEL1));
+
 pub const PERCPU_TEMP_END_2M: VirtAddr = VirtAddr(PERCPU_TEMP_BASE.0 + (SIZE_LEVEL2));
 
 /// Task mappings level 3 index
@@ -157,23 +164,127 @@ pub const PTE_BASE: VirtAddr = VirtAddr(0xF68000000000);
 //
 // User-space mapping constants
 //
-
 /// Start of user memory address range
 pub const USER_MEM_START: VirtAddr = VirtAddr(0);
 
 /// End of user memory address range
 pub const USER_MEM_END: VirtAddr = VirtAddr(USER_MEM_START.0 + (256 * SIZE_LEVEL3));
 
+// marked as external_body because verus does not support complement.
 #[inline(always)]
 #[verifier::external_body]
-fn strip_confidentiality_bits(paddr: u64) -> u64 {
-    paddr &! (PTE_MASK_PRIVATE.get().unwrap_or(&51))
+fn strip_confidentiality_bits(paddr: u64) -> (r: u64)
+{
+    paddr & !(PTE_MASK_PRIVATE.get().unwrap_or(&51))
 }
 
+// marked as external_body because verus does not support complement.
 #[verifier::external_body]
 #[inline(always)]
 fn strip_shared_address_bits(paddr: u64) -> u64 {
-    paddr &! (PTE_MASK_SHARED.get().unwrap())
+    paddr & !(PTE_MASK_SHARED.get().unwrap())
+}
+
+/// Set address as private via mask.
+#[verifier::external_body]
+#[inline(always)]
+fn make_private_address(paddr: u64) -> u64 {
+    (strip_shared_address_bits(paddr) | PTE_MASK_PRIVATE.get().unwrap_or(&51))
+}
+
+pub ghost struct DekoCpuPTOwner {
+    pub cpu_id: u64,
+    pub pgtable: u64,
+}
+
+impl WellFormed for DekoCpuPTOwner {
+    open spec fn wf(&self) -> bool {
+        true
+    }
+}
+
+
+impl DekoCpuPTOwner {
+    pub open spec fn new(cpu_id: u64, pt: u64) -> Self {
+        DekoCpuPTOwner { cpu_id, pgtable: pt }
+    }
+
+    pub open spec fn cpu_id(&self) -> u64 {
+        self.cpu_id
+    }
+
+    pub open spec fn pgtable(&self) -> u64 {
+        self.pgtable
+    }
+}
+
+pub enum Mapping {
+    Level3(DekoPPtr<PageTableEntry>),
+    Level2(DekoPPtr<PageTableEntry>),
+    Level1(DekoPPtr<PageTableEntry>),
+    Level0(DekoPPtr<PageTableEntry>),
+}
+
+impl WellFormed for Mapping {
+    open spec fn wf(&self) -> bool {
+        true
+    }
+}
+
+impl Mapping {
+    pub open spec fn pptr(&self) -> &DekoPPtr<PageTableEntry> {
+        match self {
+            Mapping::Level3(p) => p,
+            Mapping::Level2(p) => p,
+            Mapping::Level1(p) => p,
+            Mapping::Level0(p) => p,
+        }
+    }
+
+    pub fn raw(&self) -> (r: u64)
+        requires
+            self.wf(),
+        ensures
+            r == self.pptr().addr(),
+    {
+        let r = match self {
+            Mapping::Level3(p) => p.addr(),
+            Mapping::Level2(p) => p.addr(),
+            Mapping::Level1(p) => p.addr(),
+            Mapping::Level0(p) => p.addr(),
+        };
+
+        r as _
+    }
+
+    #[verifier::external_body]
+    pub fn write_pte(&self, paddr: PhysAddr, Tracked(perm): Tracked<&mut DekoPointsTo<PageTableEntry>>) 
+        requires
+            self.wf(),
+            paddr.wf(),
+            old(perm).wf(),
+            old(perm).pptr() === self.pptr()@,
+        ensures
+            perm.wf(),
+            perm.pptr() === self.pptr()@,
+    {
+        let addr = self.raw();
+
+        unsafe {
+            // This is safe because we know that
+            // PageTableEntry is repr(C) and contains only a PhysAddr,
+            // which is a u64 (repr(transparent)).
+            *(addr as *mut u64) = paddr.0;
+        }
+    }
+}
+
+impl View for Mapping {
+    type V = DekoPPtr<PageTableEntry>;
+
+    open spec fn view(&self) -> DekoPPtr<PageTableEntry> {
+        *self.pptr()
+    }
 }
 
 pub struct PageFrameNumber(pub PhysAddr);
@@ -275,14 +386,133 @@ impl PageTable {
         // todo: we need to have a way for reasoning about
         // if these entries are `present`; we only allow
         // present entries to be looked up.
-        let pml4e =  PageTableEntry::read_pte(pml4e_addr);
-        let pdpe =  PageTableEntry::read_pte(pdpe_addr);
-        let pde =  PageTableEntry::read_pte(pde_addr);
-        let pte =  PageTableEntry::read_pte(pte_addr);
+        let pml4e = PageTableEntry::read_pte(pml4e_addr);
+        let pdpe = PageTableEntry::read_pte(pdpe_addr);
+        let pde = PageTableEntry::read_pte(pde_addr);
+        let pte = PageTableEntry::read_pte(pte_addr);
 
         // Check that all entries are present (pending).
         let paddr = PhysAddr(pte.0.0 & 0x000f_ffff_ffff_f000);
         PageFrameNumber(PhysAddr(strip_confidentiality_bits(paddr.0)))
+    }
+
+    fn walk(
+        pt: DekoPPtr<Self>,
+        vaddr: VirtAddr,
+        Tracked(perm): Tracked<&DekoPointsTo<Self>>,
+    ) -> (r: Mapping)
+        requires
+            vaddr.wf(),
+            perm.wf(),
+            perm.pptr() === pt@,
+        ensures
+            r.wf(),
+            // r.pptr() === PageTable::get_pte_address(vaddr)@,
+    {
+        proof {
+            admit();
+        }
+        vstd::vpanic!("abcd");
+    }
+
+    #[verifier::external_body]
+    fn from_mapping(m: &Mapping) -> (r: Tracked<DekoPointsTo<PageTableEntry>>)
+        requires
+            m.wf(),
+        ensures
+            r.wf(),
+            r@.wf(),
+            r@.pptr() === m.pptr()@,
+    {
+        let addr = m.raw();
+        let (_, perm) = unsafe { DekoPPtr::from_raw_uninit(addr) };
+
+        perm
+    }
+
+    fn allocate_pte(
+        pt: DekoPPtr<Self>,
+        Tracked(pt_perm): Tracked<&mut DekoPointsTo<Self>>,
+        vaddr: VirtAddr,
+    ) -> (r: (Mapping, Tracked<DekoPointsTo<PageTableEntry>>))
+        requires
+            vaddr.wf(),
+            old(pt_perm).wf(),
+            old(pt_perm).pptr() === pt@,
+        ensures
+            pt_perm.wf(),
+            pt_perm.pptr() === pt@,
+            r.0.wf(),
+            r.1.wf(),
+            r.1@.wf(),
+            r.1@.pptr() === r.0@@,
+    {
+        let m = Self::walk(pt, vaddr, Tracked(pt_perm));
+
+        match m {
+            Mapping::Level0(_) => {
+                let perm = Self::from_mapping(&m);
+                (m, perm)
+            }
+            _ => {
+                // ? recoverable?? or anything to enforce that this won't happen?
+                vstd::vpanic!("unexpected mapping type");
+            }
+        }
+    }
+
+    pub fn map_page(
+        pt: DekoPPtr<Self>,
+        Tracked(pt_perm): Tracked<&mut DekoPointsTo<Self>>,
+        vaddr: VirtAddr,
+        paddr: PhysAddr,
+        flags: PteFlags,
+    )
+        requires
+            vaddr.wf(),
+            paddr.wf(),
+            old(pt_perm).wf(),
+            old(pt_perm).pptr() === pt@,
+        ensures
+            pt_perm.wf(),
+            pt_perm.pptr() === pt@,
+    {
+        let (pte, Tracked(mut pte_perm)) = Self::allocate_pte(pt, Tracked(pt_perm), vaddr);
+
+        match pte {
+            Mapping::Level0(_) => {
+                let new_paddr = PhysAddr(strip_shared_address_bits(paddr.0) | flags.bits);
+                pte.write_pte(new_paddr, Tracked(&mut pte_perm));
+            }
+            _ => {
+                // ? recoverable?? or anything to enforce that this won't happen?
+                vstd::vpanic!("unexpected mapping type");
+            }
+        }
+    }
+}
+
+impl PteFlags {
+    #[inline(always)]
+    pub fn data() -> (r: Self)
+        ensures
+            r.wf(),
+    {
+        let flags = Ghost(
+            vstd::set::Set::new(
+                |pte: Pte|
+                    pte == Pte::PRESENT || pte == Pte::WRITABLE || pte == Pte::ACCESSED || pte
+                        == Pte::DIRTY || pte == Pte::NX,
+            ),
+        );
+        let bits = (1 << Pte::PRESENT as u64) | (1 << Pte::WRITABLE as u64) | (1
+            << Pte::ACCESSED as u64) | (1 << Pte::DIRTY as u64) | (1 << Pte::NX as u64);
+
+        let r = Self { bits, flags };
+
+        assume(r.wf());
+
+        r
     }
 }
 
@@ -292,9 +522,10 @@ impl PageTable {
 pub fn get_initial_pgtable() -> (r: (DekoPPtr<PageTable>, Tracked<DekoPointsTo<PageTable>>))
     ensures
         r.0@ === r.1@.pptr(),
+        r.1.wf(),
+        r.1@.wf(),
 {
     unsafe { DekoPPtr::from_raw_uninit(&raw mut pgtable as *mut PageTable as u64) }
 }
-
 
 } // verus!
