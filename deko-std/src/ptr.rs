@@ -36,6 +36,14 @@ impl<V> WellFormed for DekoPointsTo<V> {
     }
 }
 
+impl<V: WellFormed> DekoPointsTo<V> {
+    #[verifier::inline]
+    pub open spec fn wf_with_val(&self) -> bool {
+        &&& self.wf()
+        &&& self.value().wf()
+    }
+}
+
 impl<V> Clone for DekoPPtr<V> {
     fn clone(&self) -> (res: Self)
         ensures
@@ -187,6 +195,29 @@ impl<V> DekoPPtr<V> {
             perm.leak_contents();
         }
         self.put(Tracked(perm), v);
+    }
+}
+
+impl<V: WellFormed> DekoPPtr<V> {
+    /// Try to borrow this pointer.
+    #[inline(always)]
+    pub fn borrow_wf<'a>(self, Tracked(perm): Tracked<&'a DekoPointsTo<V>>) -> (v: &'a V)
+        requires
+            perm.pptr() == self@,
+            perm.is_init(),
+            perm.mem_wf(),
+            perm.wf_with_val(),
+        ensures
+            *v == perm.value(),
+            v.wf(),
+        opens_invariants none
+        no_unwind
+    {
+        proof {
+            use_type_invariant(&*perm);
+        }
+
+        self.borrow(Tracked(perm))
     }
 }
 

@@ -45,7 +45,7 @@ macro_rules! deko_bitflags {
 
         } // verus!
         paste::paste! {
-                                                                                        verus! {
+                                        verus! {
             #[allow(non_upper_case_globals)]
             $vis const [<$name _ALL_BITS>]: $T = $( (1 as $T) << $value )|*;
 
@@ -97,6 +97,27 @@ macro_rules! deko_bitflags {
             }
 
             impl [<$name Flags>] {
+                /// Gives the proof that for each $Flag, it is a valid bit.
+                pub proof fn lemma_each_bits_is_valid()
+                    ensures
+                        $(([<$name _ALL_BITS>]) & ($Flag) == $Flag,)*
+                        $($Flag & ([<$name _ALL_BITS>]) == $Flag,)*
+                {
+                    let all_bits = $((1 as $T) << $value)|*;
+
+                    assert(
+                        $(
+                            all_bits & ((1 as $T) << $value) == ((1 as $T) << $value)
+                        )&&*
+                    ) by (bit_vector)
+                        requires
+                            all_bits == ($( ((1 as $T) << $value) )|*);
+
+                    // Apply commutativity.
+                    bit64_and_auto();
+                    bit32_and_auto();
+                }
+
                 pub open spec fn inv(&self) -> bool {
                     &&& forall|flag: $name| #[trigger]
                         self@.contains(flag) <==> (flag.bit() & self.bits() != 0)
@@ -105,6 +126,20 @@ macro_rules! deko_bitflags {
 
                 pub closed spec fn bits(&self) -> $T {
                     self.bits
+                }
+
+                pub fn from_bits_truncate(bits: $T) -> (r: [<$name Flags>])
+                    ensures
+                        r.inv(),
+                        r@ == from_bits(bits & [<$name _ALL_BITS>]),
+                {
+                    let bits = bits & [<$name _ALL_BITS>]; // strip off invalid bits
+                    let ghost set = vstd::set::Set::new(|flag: $name| flag.bit() & bits != 0);
+                    [<$name Flags>] { bits, flags: Ghost(set) }
+                }
+
+                pub open spec fn max() -> int {
+                    $T::MAX as int
                 }
 
                 #[verifier::spinoff_prover]
@@ -277,7 +312,46 @@ macro_rules! deko_bitflags {
             }
 
             } // verus!
-                                                                                    } // paste
+                                    } // paste
+    };
+}
+
+/// Defines quick definition of bit composition.
+/// 
+/// # Example
+/// 
+/// ```rust
+/// deko_bitflags! {
+///     pub struct MyFlags: u32 {
+///        const FLAG_A = 0;
+///        const FLAG_B = 1;
+///    }
+/// }
+/// 
+/// deko_bitflags_quick! {
+///    MyFlags,
+///    ok : FLAG_A | FLAG_B,
+///    err: FLAG_A &FLAG_B,
+/// }
+/// ```
+#[macro_export]
+macro_rules! deko_bitflags_quick {
+    ($name:ident, $($bit_name:ident : { $($bits:expr),* })*, $(,)?) => {
+        paste::paste! {
+            verus! {
+                impl [<$name Flags>] {
+                    $(
+                        #[inline(always)]
+                        pub fn $bit_name() -> (r: Self)
+                            ensures
+                                r.inv(),
+                        {
+                            Self::from_bits_truncate($($bits)|*)
+                        }
+                    )*
+                } 
+            }
+        }
     };
 }
 

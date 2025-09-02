@@ -319,7 +319,8 @@ impl CpuData {
             old(ghcb_perm).is_uninit(),
         ensures
             self.ghcb().id() == ghcb_perm.id(),
-            // ghcb_perm.is_init(),
+    // ghcb_perm.is_init(),
+
     {
         // let ghcb = balabla
         // self.ghcb.put(ghcb, ghcb_perm);
@@ -393,7 +394,8 @@ impl CpuData {
     }
 
     pub open spec fn is_valid_pgtable_request(&self, pgperm: &DekoPointsTo<PageTable>) -> bool {
-        &&& pgperm.wf()
+        &&& pgperm.is_init()
+        &&& pgperm.wf_with_val()
         &&& pgperm.pptr()
             == self.pgtable()@  // the permission is for its own page table
 

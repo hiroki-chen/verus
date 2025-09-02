@@ -108,6 +108,31 @@ macro_rules! impl_wf_for_atomics {
     };
 }
 
+#[macro_export]
+macro_rules! with_permission {
+    ($name:ident, $($field:ident : $T:ty )? $(,)?) => {
+        paste::paste! {
+                                            verus! {
+                pub struct [<$name Permission>] {
+                    $($field: $T,)*
+                }
+
+                impl [<$name Permission>] {
+                    /// The id of this permission.
+                    pub uninterp spec fn id(&self) -> int;
+
+                    // Auto getter.
+                    $(
+                        pub closed spec fn [< $field _spec >](&self) -> $T {
+                            self.$field
+                        }
+                    )*
+                }
+            }
+                                        }
+    };
+}
+
 impl_spec_constant_for_basic! {u64, u32, u16, usize, u8, bool, char, i8, i16, i32, i64}
 impl_wf_for_atomics!(PAtomicU8, PAtomicU16, PAtomicU32, PAtomicU64, PAtomicBool);
 
