@@ -4,6 +4,7 @@ use vstd::prelude::*;
 
 verus! {
 
+#[verifier::nonlinear]
 pub proof fn stage2_heap_valid_params()
     ensures
         valid_heap_param(

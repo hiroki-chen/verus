@@ -1,7 +1,6 @@
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
-use crate::address::{PhysAddr, VirtAddr};
 use crate::mm::{PTE_MASK_PRIVATE, PTE_MASK_SHARED};
 
 deko_bitflags! {

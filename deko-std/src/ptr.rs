@@ -7,7 +7,7 @@ use vstd::raw_ptr::{
 use vstd::simple_pptr::{PPtr, PointsTo};
 use vstd::view::View;
 
-use crate::mem::{DefaultDekoHeapAllocator, DekoHeapAllocator, PermissionDekoMem};
+use crate::mem::{DefaultDekoHeapAllocator, DekoBuddyAllocator, PermissionDekoMem};
 use crate::prelude::*;
 
 verus! {

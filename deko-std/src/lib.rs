@@ -16,6 +16,7 @@ use vstd::prelude::*;
 #[cfg(feature = "alloc")]
 pub mod boxed;
 
+pub mod address;
 pub mod array;
 pub mod bits;
 pub mod boot;
@@ -31,6 +32,7 @@ pub mod wf;
 
 // Export everything.
 pub mod prelude {
+    pub use crate::address::*;
     pub use crate::array::*;
     pub use crate::bits::*;
     pub use crate::boot::*;

@@ -1,12 +1,29 @@
+//! This module implements the memory subsystem for the Deko monitor.
+//!
+//! The layout of the memory is as follows:
+//!
+//! - Buddy allocator that manages the raw, untyped physical memory.
+//! - Kernel page frame allocator that allocates physical pages.
+//! - Some high level allocators that allocates pages from the page frame allocators.
+//! - A memory manager that manages the page tables and memory regions.
+
+pub mod frame_allocator;
 pub mod paging;
 
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
-use crate::address::{PhysAddr, VirtAddr};
+use crate::mm::frame_allocator::DekoPageFrameAllocator;
 use crate::mm::paging::{PageTable, PteFlags};
 
 verus! {
+
+pub exec static DEKO_FRAME_ALLOCATOR: DekoPageFrameAllocator
+    ensures
+        DEKO_FRAME_ALLOCATOR.wf(),
+{
+    DekoPageFrameAllocator::new()
+}
 
 pub exec static PTE_MASK_PRIVATE: OnceCellNoPred<u64>
     ensures
@@ -50,7 +67,9 @@ pub struct PageEncryptionMasks {
     pub phys_addr_sizes: u32,
 }
 
-pub fn init_heap_allocator(heap_start: &VirtAddr, heap_end: &VirtAddr)
+/// This function initializes the global `DEKO_FRAME_ALLOCATOR` with the given
+/// physical memory region for physical memory allocation.
+pub fn init_frame_allocator(heap_start: &VirtAddr, heap_end: &VirtAddr)
     requires
         heap_start.wf(),
         heap_end.wf(),
@@ -61,7 +80,7 @@ pub fn init_heap_allocator(heap_start: &VirtAddr, heap_end: &VirtAddr)
 {
     let phys_start = PhysAddr(heap_start.0);
 
-    DEKO_ALLOCATOR.init(phys_start.0, heap_end.0 - heap_start.0);
+    DEKO_FRAME_ALLOCATOR.init(phys_start.0, heap_end.0 - heap_start.0);
 }
 
 // TODO: Add CPU core permission.
@@ -84,19 +103,6 @@ impl DekoMemoryRegionPermission {
         // TODO: Implement me!
 
     }
-}
-
-exec static ROOT_MEM: RwLockNoPred<DekoMemoryRegion>
-    ensures
-        ROOT_MEM.wf(),
-{
-    let root = RwLockNoPred::new(DekoMemoryRegion::new(), Ghost(TrivialPredicate::new()));
-
-    proof {
-        use_type_invariant(&root);
-    }
-
-    root
 }
 
 /// A continuous memory region.

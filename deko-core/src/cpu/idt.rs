@@ -1,8 +1,6 @@
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
-use crate::address::VirtAddr;
-
 core::arch::global_asm!(include_str!("idt.S"), options(att_syntax));
 
 verus! {

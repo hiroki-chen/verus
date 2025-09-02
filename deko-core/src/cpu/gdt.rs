@@ -7,8 +7,6 @@
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
-use crate::address::VirtAddr;
-
 verus! {
 
 #[link_section = ".ro_after_init"]

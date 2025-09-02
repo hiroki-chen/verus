@@ -66,11 +66,11 @@ struct Allocator;
 
 #[verifier::external]
 unsafe impl core::alloc::GlobalAlloc for Allocator {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+    unsafe fn alloc(&self, _layout: core::alloc::Layout) -> *mut u8 {
         panic!("DekoHeapAllocator is not used as the global allocator by default. Use DekoHeapAllocator::alloc instead.");
     }
 
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {
         panic!("DekoHeapAllocator is not used as the global allocator by default. Use DekoHeapAllocator::dealloc instead.");
     }
 }

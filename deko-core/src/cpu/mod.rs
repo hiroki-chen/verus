@@ -8,7 +8,6 @@ use vstd::atomic::{PAtomicBool, PAtomicU32, PermissionBool, PermissionU32};
 use vstd::cell::{PCell, PointsTo};
 use vstd::prelude::*;
 
-use crate::address::{PhysAddr, VirtAddr};
 use crate::mm::paging::{DekoCpuPTOwner, PageTable, PteFlags, PERCPU_BASE, PTE_BASE};
 use crate::mm::virt_to_phys;
 use crate::snp::ghcb::GuestHostCommucationBlock;

@@ -14,6 +14,25 @@ pub const PAGE_SIZE: u64 = 0x1000;
 // 4096 bytes
 pub const PAGE_MASK: u64 = !(PAGE_SIZE - 1);
 
+/// The implementer of this trait must guarantee that the `allocate_frame`
+/// method returns only unique unused frames. Otherwise, undefined behavior
+/// may result from two callers modifying or deallocating the same frame.
+pub trait FrameAllocator: WellFormed {
+    /// Allocates single physical frame and returns its physical address.
+    fn allocate_frame(&self) -> (r: PhysAddr)
+        requires
+            self.wf(),
+        ensures
+            r.wf(),
+    ;
+
+    fn deallocate_frame(&self, frame: PhysAddr)
+        requires
+            self.wf(),
+            frame.wf(),
+    ;
+}
+
 // 0xFFFFF000
 /// A trait to describe the memory manager.
 pub trait MemoryManager: WellFormed {
@@ -127,7 +146,7 @@ pub const HEAP_SIZE: usize = 32;
 /// is a large contigunous memory already mapped by the monitor. Basically this is just a wrapper
 /// around the `DekoHeap` type.
 #[verifier::reject_recursive_types(V)]
-pub struct DekoHeapAllocator<V: WellFormed + Heap> {
+pub struct DekoBuddyAllocator<V: WellFormed + Heap> {
     /// The allocator that manages the heap.
     ///
     /// This is a RwLock to allow concurrent access to the heap.
@@ -136,20 +155,7 @@ pub struct DekoHeapAllocator<V: WellFormed + Heap> {
     allocator: RwLock<V, DekoHeapPredicate>,
 }
 
-/// A global allocator that is used to allocate memory for the monitor.
-///
-/// TODO: add an API for configuring the heap.
-pub exec static DEKO_ALLOCATOR: DekoHeapAllocator<DekoHeap<HEAP_SIZE>>
-    ensures
-        DEKO_ALLOCATOR.wf(),
-{
-    let ghost f = DekoHeapPredicate;
-    let heap = DekoHeap::<HEAP_SIZE>::new(Ghost(f));
-
-    DekoHeapAllocator::new(heap, Ghost(f))
-}
-
-impl<V: WellFormed + Heap> DekoHeapAllocator<V> {
+impl<V: WellFormed + Heap> DekoBuddyAllocator<V> {
     /// Creates a new `DekoHeapAllocator` with the given heap.
     ///
     /// The caller must ensure that the heap is properly initialized and
@@ -185,7 +191,7 @@ impl<V: WellFormed + Heap> DekoHeapAllocator<V> {
     /// raw pointers and deallocations directly.
     #[verifier::external_body]
     #[inline(always)]
-    pub(crate) fn alloc(&self, size: usize, align: usize) -> (pt: (
+    pub fn alloc(&self, size: usize, align: usize) -> (pt: (
         *mut u8,
         Tracked<PointsToRaw>,
         Tracked<Dealloc>,
@@ -212,7 +218,7 @@ impl<V: WellFormed + Heap> DekoHeapAllocator<V> {
 
     #[verifier::external_body]
     #[inline(always)]
-    pub(crate) fn dealloc(
+    pub fn dealloc(
         &self,
         ptr: *mut u8,
         size: usize,
@@ -255,12 +261,12 @@ impl<V: WellFormed + Heap> DekoHeapAllocator<V> {
     }
 }
 
-impl<V: WellFormed + Heap> WellFormed for DekoHeapAllocator<V> {
+impl<V: WellFormed + Heap> WellFormed for DekoBuddyAllocator<V> {
     closed spec fn wf(&self) -> bool {
         true
     }
 }
 
-pub type DefaultDekoHeapAllocator = DekoHeapAllocator<DekoHeap<HEAP_SIZE>>;
+pub type DefaultDekoHeapAllocator = DekoBuddyAllocator<DekoHeap<HEAP_SIZE>>;
 
 } // verus!

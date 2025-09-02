@@ -4,7 +4,6 @@ use deko_meta::{HeaderRaw, IgvmParamBlock, Stage2LaunchInfo, LOWMEM_END};
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
-use crate::address::{FixedAddressMappingRange, VirtAddr};
 use crate::cpu::msr::read_msr;
 use crate::hal::{PlatformApi, PlatformType};
 use crate::mm::paging::PteFlags;

@@ -6,10 +6,9 @@ use deko_meta::{
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
-use crate::address::{FixedAddressMappingRange, PhysAddr, VirtAddr};
 use crate::cpu::idt::{stage2_generic_idt_handler, stage2_generic_idt_handler_no_ghcb, Idt};
 use crate::cpu::register_cpuid_table;
-use crate::mm::init_heap_allocator;
+use crate::mm::init_frame_allocator;
 use crate::snp::{get_igvm_params, Snp};
 
 #[macro_export]
@@ -324,7 +323,7 @@ pub fn setup_env(header: &Stage2LaunchInfo, idt: &mut Idt)
     // BSP done; allow APs to proceed.
     allow_ap_to_proceed();
 
-    // Initialize the heap.
+    // Initialize the heap (physical memory region).
     let heap_start = VirtAddr::from(STAGE2_HEAP_START as u64);
     let heap_end = VirtAddr::from(STAGE2_HEAP_END as u64);
     proof {
@@ -338,7 +337,7 @@ pub fn setup_env(header: &Stage2LaunchInfo, idt: &mut Idt)
         ;
     }
 
-    init_heap_allocator(&heap_start, &heap_end);
+    init_frame_allocator(&heap_start, &heap_end);
 
     // Initialize per-cpu-specific structures.
     dispatch_to_platform!(init_each_cpu, );

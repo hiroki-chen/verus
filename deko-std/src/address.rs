@@ -1,9 +1,9 @@
-use deko_std::prelude::*;
+use crate::prelude::*;
 use vstd::prelude::*;
 
-use crate::mm::paging::PTE_BASE;
-
 verus! {
+
+pub const PTE_BASE: VirtAddr = VirtAddr(0xF68000000000);
 
 #[derive(Clone, Copy)]
 pub struct FixedAddressMappingRange {
