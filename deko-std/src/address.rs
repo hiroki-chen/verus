@@ -7,6 +7,20 @@ verus! {
 pub const PTE_BASE: VirtAddr = VirtAddr(0xF68000000000);
 
 #[derive(Clone, Copy)]
+pub struct MappingSpace {
+    pub kernel: FixedAddressMappingRange,
+    pub physmap: FixedAddressMappingRange,
+}
+
+pub struct MappingSpacePred;
+
+impl Predicate<MappingSpace> for MappingSpacePred {
+    open spec fn inv(self, v: MappingSpace) -> bool {
+        v.wf()
+    }
+}
+
+#[derive(Clone, Copy)]
 pub struct FixedAddressMappingRange {
     virt_start: VirtAddr,
     virt_end: VirtAddr,
@@ -16,6 +30,14 @@ pub struct FixedAddressMappingRange {
 impl WellFormed for FixedAddressMappingRange {
     closed spec fn wf(&self) -> bool {
         Self::valid_mapping_range(self.virt_start, self.virt_end, self.phys_start)
+    }
+}
+
+impl WellFormed for MappingSpace {
+    #[verifier::inline]
+    open spec fn wf(&self) -> bool {
+        &&& self.kernel.wf()
+        &&& self.physmap.wf()
     }
 }
 
@@ -40,6 +62,52 @@ impl FixedAddressMappingRange {
             r.wf(),
     {
         Self { virt_start, virt_end, phys_start }
+    }
+
+    pub fn phys_to_virt(&self, paddr: PhysAddr) -> (vaddr: Option<VirtAddr>)
+        requires
+            self.wf(),
+            paddr.wf(),
+        ensures
+            vaddr matches Some(vaddr) ==> vaddr.wf(),
+    {
+        // This is invalid.
+        if paddr.0 < self.phys_start.0 {
+            return None;
+        }
+        let size = self.virt_end.0 - self.virt_start.0;
+        if paddr.0 - self.phys_start.0 >= size {
+            return None;
+        }
+        let vaddr = self.virt_start.0 + (paddr.0 - self.phys_start.0);
+        proof {
+            let vaddr = vaddr@;
+            let virt_end = self.virt_end@;
+            let ptr_base = PTE_BASE@;
+            let val1 = (virt_end & 0x0000_FFFF_FFFF_F000u64) >> 9;
+            let val2 = (vaddr & 0x0000_FFFF_FFFF_F000u64) >> 9;
+
+            assert(vaddr <= virt_end);
+            assume(val2 <= val1);
+        }
+
+        // Add the offset to the virt base.
+        Some(VirtAddr(vaddr))
+    }
+}
+
+impl MappingSpace {
+    pub fn phys_to_virt(&self, paddr: PhysAddr) -> (vaddr: Option<VirtAddr>)
+        requires
+            self.wf(),
+            paddr.wf(),
+        ensures
+            vaddr matches Some(vaddr) ==> vaddr.wf(),
+    {
+        match self.kernel.phys_to_virt(paddr) {
+            Some(vaddr) => Some(vaddr),
+            None => self.physmap.phys_to_virt(paddr),
+        }
     }
 }
 

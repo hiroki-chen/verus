@@ -17,6 +17,13 @@ use crate::mm::paging::{PageTable, PteFlags};
 
 verus! {
 
+pub exec static DEKO_MAPPING_SPACE: OnceCell<MappingSpace, MappingSpacePred>
+    ensures
+        DEKO_MAPPING_SPACE.wf(),
+{
+    OnceCell::new(Ghost(MappingSpacePred {  }))
+}
+
 pub exec static DEKO_FRAME_ALLOCATOR: DekoPageFrameAllocator
     ensures
         DEKO_FRAME_ALLOCATOR.wf(),
@@ -91,6 +98,21 @@ pub fn virt_to_phys(vaddr: VirtAddr) -> (paddr: PhysAddr)
         paddr.wf(),
 {
     PageTable::virt_to_frame(vaddr).to_phys()
+}
+
+#[inline(always)]
+pub fn phys_to_virt(paddr: PhysAddr) -> (vaddr: VirtAddr)
+    requires
+        paddr.wf(),
+    ensures
+        vaddr.wf(),
+{
+    if let Some(ms) = DEKO_MAPPING_SPACE.get() {
+        if let Some(vaddr) = ms.phys_to_virt(paddr) {
+            return vaddr;
+        }
+    }
+    vstd::vpanic!("fatal runtime error!");
 }
 
 pub tracked struct DekoMemoryRegionPermission;

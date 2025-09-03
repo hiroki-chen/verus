@@ -219,6 +219,26 @@ impl<V: WellFormed> DekoPPtr<V> {
 
         self.borrow(Tracked(perm))
     }
+
+    #[inline(always)]
+    #[verifier::external_body]
+    // TODO: Add some constraints for casting pointers.
+    pub unsafe fn into<U: WellFormed>(self, Tracked(perm): Tracked<DekoPointsTo<V>>) -> (r: (
+        DekoPPtr<U>,
+        Tracked<DekoPointsTo<U>>,
+    ))
+        requires
+            perm.pptr() == self@,
+            perm.wf(),
+            perm.wf_with_val(),
+        ensures
+            r.1@.pptr() == r.0@,
+            r.1@.wf(),
+            r.1@.is_init() == perm.is_init(),
+            r.1@.wf_with_val(),
+    {
+        DekoPPtr::from_raw_uninit(self.addr() as u64)
+    }
 }
 
 impl<V> DekoPointsTo<V> {

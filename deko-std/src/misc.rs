@@ -112,7 +112,7 @@ macro_rules! impl_wf_for_atomics {
 macro_rules! with_permission {
     ($name:ident, $($field:ident : $T:ty )? $(,)?) => {
         paste::paste! {
-                                            verus! {
+                                                                                            verus! {
                 pub struct [<$name Permission>] {
                     $($field: $T,)*
                 }
@@ -129,7 +129,7 @@ macro_rules! with_permission {
                     )*
                 }
             }
-                                        }
+                                                                                        }
     };
 }
 

@@ -402,10 +402,10 @@ impl CpuData {
     }
 
     /// Map the cpu data structure into the stage-2 page table.
-    pub fn map_self_stage2(&self, Tracked(pgperm): Tracked<&mut DekoPointsTo<PageTable>>)
+    pub fn map_self_stage2(&self, Tracked(pgperm): Tracked<DekoPointsTo<PageTable>>)
         requires
             self.wf(),
-            self.is_valid_pgtable_request(old(pgperm)),
+            self.is_valid_pgtable_request(&pgperm),
         ensures
             pgperm.wf(),
     {

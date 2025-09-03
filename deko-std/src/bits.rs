@@ -4,6 +4,7 @@ use vstd::bits::*;
 use vstd::prelude::*;
 
 #[macro_export]
+#[verusfmt::skip]
 macro_rules! deko_bitflags {
     (
         $(#[$outer:meta])*
@@ -45,7 +46,7 @@ macro_rules! deko_bitflags {
 
         } // verus!
         paste::paste! {
-                                        verus! {
+                        verus! {
             #[allow(non_upper_case_globals)]
             $vis const [<$name _ALL_BITS>]: $T = $( (1 as $T) << $value )|*;
 
@@ -97,6 +98,13 @@ macro_rules! deko_bitflags {
             }
 
             impl [<$name Flags>] {
+                pub proof fn lemma_from_bits_single(flag: $name)
+                    ensures
+                        from_bits(flag.bit()) =~= set![flag],
+                {
+                    admit();
+                }
+
                 /// Gives the proof that for each $Flag, it is a valid bit.
                 pub proof fn lemma_each_bits_is_valid()
                     ensures
@@ -141,8 +149,13 @@ macro_rules! deko_bitflags {
                     $T::MAX as int
                 }
 
+                pub open spec fn contains_spec(&self, flag: $T) -> bool {
+                    from_bits(flag).subset_of(self@)
+                }
+
                 #[verifier::spinoff_prover]
                 #[inline(always)]
+                #[verifier::when_used_as_spec(contains_spec)]
                 pub fn contains(&self, flag: $T) -> (r: bool)
                     requires
                         self.wf(),
@@ -308,14 +321,14 @@ macro_rules! deko_bitflags {
             }
 
             } // verus!
-                                    } // paste
+                    } // paste
     };
 }
 
 /// Defines quick definition of bit composition.
-/// 
+///
 /// # Example
-/// 
+///
 /// ```rust
 /// deko_bitflags! {
 ///     pub struct MyFlags: u32 {
@@ -323,7 +336,7 @@ macro_rules! deko_bitflags {
 ///        const FLAG_B = 1;
 ///    }
 /// }
-/// 
+///
 /// deko_bitflags_quick! {
 ///    MyFlags,
 ///    ok : FLAG_A | FLAG_B,
@@ -334,7 +347,7 @@ macro_rules! deko_bitflags {
 macro_rules! deko_bitflags_quick {
     ($name:ident, $($bit_name:ident : { $($bits:expr),* })*, $(,)?) => {
         paste::paste! {
-            verus! {
+                            verus! {
                 impl [<$name Flags>] {
                     $(
                         #[inline(always)]
@@ -345,9 +358,9 @@ macro_rules! deko_bitflags_quick {
                             Self::from_bits_truncate($($bits)|*)
                         }
                     )*
-                } 
+                }
             }
-        }
+                        }
     };
 }
 

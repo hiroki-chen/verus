@@ -43,6 +43,10 @@ impl<T: WellFormed, const N: usize> Array<T, N> {
 
     pub uninterp spec fn idx(&self, i: int) -> T;
 
+    pub uninterp spec fn idx_ptr(&self, i: int) -> DekoPPtr<T>;
+
+    pub uninterp spec fn idx_perms(&self, i: int) -> DekoPointsTo<T>;
+
     #[verifier::inline]
     pub open spec fn to_seq(&self) -> Seq<T> {
         self@
@@ -73,6 +77,8 @@ impl<T: WellFormed, const N: usize> Array<T, N> {
         ensures
             t.1@.is_init() && t.1@.value() == self@.index(i as int),
             t.0@ === t.1@.pptr(),
+            self.idx_ptr(i as int)@ == t.0@,
+            self.idx_perms(i as int) == t.1@,
     {
         let (ptr, Tracked(perm)) = unsafe { DekoPPtr::from_raw_uninit(&self.0[i] as *const T as u64)
         };

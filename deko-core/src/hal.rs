@@ -8,7 +8,7 @@ use vstd::prelude::*;
 
 use crate::cpu::idt::{stage2_generic_idt_handler, stage2_generic_idt_handler_no_ghcb, Idt};
 use crate::cpu::register_cpuid_table;
-use crate::mm::init_frame_allocator;
+use crate::mm::{init_frame_allocator, DEKO_MAPPING_SPACE};
 use crate::snp::{get_igvm_params, Snp};
 
 #[macro_export]
@@ -319,6 +319,9 @@ pub fn setup_env(header: &Stage2LaunchInfo, idt: &mut Idt)
     let heap_mapping = FixedAddressMappingRange::new(zero, lowmem, PhysAddr::from(0u64));
 
     dispatch_to_platform!(validate_memory, &zero, &lowmem);
+
+    let mapping_space = MappingSpace { kernel: kernel_mapping, physmap: heap_mapping };
+    DEKO_MAPPING_SPACE.init(mapping_space);
 
     // BSP done; allow APs to proceed.
     allow_ap_to_proceed();

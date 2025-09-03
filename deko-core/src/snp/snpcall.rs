@@ -60,7 +60,7 @@ impl Snp {
 
         // Need inter-CPU communication block.
         // seems we should install the permission into the bsp cpu state.
-        let (bsp_pgtable, Tracked(mut bsp_pgtable_perm)) = get_initial_pgtable();
+        let (bsp_pgtable, Tracked(bsp_pgtable_perm)) = get_initial_pgtable();
         let pgowner = Ghost(DekoCpuPTOwner::new(0, bsp_pgtable@.addr() as u64));
         let (ghcb, Tracked(mut ghcb_perm)) = PCell::empty();
 
@@ -72,7 +72,7 @@ impl Snp {
             assert(bsp_percpu.pgtable() == bsp_pgtable);
         }
 
-        bsp_percpu.map_self_stage2(Tracked(&mut bsp_pgtable_perm));
+        bsp_percpu.map_self_stage2(Tracked(bsp_pgtable_perm));
         self.init_guest_host(&bsp_percpu);
     }
 
