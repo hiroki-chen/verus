@@ -114,8 +114,7 @@ macro_rules! deko_bitflags {
                             all_bits == ($( ((1 as $T) << $value) )|*);
 
                     // Apply commutativity.
-                    bit64_and_auto();
-                    bit32_and_auto();
+                    deko_std::bits::[<bit_ $T _and_auto>]();
                 }
 
                 pub open spec fn inv(&self) -> bool {
@@ -193,13 +192,11 @@ macro_rules! deko_bitflags {
                                 if flag & ((1 as $T) << $value) != 0 {
                                     assert(other.contains($name::$Flag)) by {
                                         // Apply commutativity of `&` to isolate the bit.
-                                        deko_std::bits::bit64_and_auto();
-                                        deko_std::bits::bit32_and_auto();
+                                        deko_std::bits::[<bit_ $T _and_auto>]();
                                     }
                                     assert(self@.contains($name::$Flag));
                                     assert(self.bits & ((1 as $T) << $value) != 0) by {
-                                        deko_std::bits::bit64_and_auto();
-                                        deko_std::bits::bit32_and_auto();
+                                        deko_std::bits::[<bit_ $T _and_auto>]();
                                     }
                                 }
                             )*
@@ -228,7 +225,7 @@ macro_rules! deko_bitflags {
                 {
                     proof {
                         assert forall|flag: $name| (#[trigger] flag.bit() & 0) == 0 by {
-                            deko_std::prelude::bit64_and_auto();
+                            deko_std::bits::[<bit_ $T _and_auto>]();
                         }
                         // Necessary
                         assert(vstd::set::Set::empty() =~= from_bits(0));
@@ -263,8 +260,7 @@ macro_rules! deko_bitflags {
                         });
 
                         assert forall|flag: $name| (#[trigger] flag.bit() & all_bits) != 0 by {
-                            deko_std::prelude::bit32_and_auto();
-                            deko_std::prelude::bit64_and_auto();
+                            deko_std::bits::[<bit_ $T _and_auto>]();
                         }
                     }
 
@@ -358,7 +354,7 @@ macro_rules! deko_bitflags_quick {
 verus! {
 
 #[verifier::bit_vector]
-pub const proof fn bit64_and_auto()
+pub const proof fn bit_u64_and_auto()
     ensures
         forall|a: u64, b: u64| #[trigger] (a & b) == b & a,
         forall|a: u64, b: u64, c: u64| #[trigger] ((a & b) & c) == a & (b & c),
@@ -373,7 +369,7 @@ pub const proof fn bit64_and_auto()
 }
 
 #[verifier::bit_vector]
-pub const proof fn bit32_and_auto()
+pub const proof fn bit_u32_and_auto()
     ensures
         forall|a: u32, b: u32| #[trigger] (a & b) == b & a,
         forall|a: u32, b: u32, c: u32| #[trigger] ((a & b) & c) == a & (b & c),
@@ -385,7 +381,7 @@ pub const proof fn bit32_and_auto()
 }
 
 #[verifier::bit_vector]
-pub const proof fn bit64_or_auto()
+pub const proof fn bit_u64_or_auto()
     ensures
         forall|a: u64, b: u64| #[trigger] (a | b) == b | a,
         forall|a: u64, b: u64, c: u64| #[trigger] ((a | b) | c) == a | (b | c),

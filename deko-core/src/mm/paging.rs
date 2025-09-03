@@ -738,31 +738,6 @@ impl PageTable {
     }
 }
 
-// impl PteFlags {
-//     #[inline(always)]
-//     pub fn data() -> (r: Self)
-//         ensures
-//             r.wf(),
-//     {
-//         let flags = Ghost(
-//             vstd::set::Set::new(
-//                 |pte: Pte|
-//                     pte == Pte::PRESENT || pte == Pte::WRITABLE || pte == Pte::ACCESSED || pte
-//                         == Pte::DIRTY || pte == Pte::NX,
-//             ),
-//         );
-//         let bits = (1 << Pte::PRESENT as u64) | (1 << Pte::WRITABLE as u64) | (1
-//             << Pte::ACCESSED as u64) | (1 << Pte::DIRTY as u64) | (1 << Pte::NX as u64);
-
-//         let r = Self { bits, flags };
-
-//         assume(r.wf());
-
-//         r
-//     }
-// }
-
-
 #[verusfmt::skip]
 #[verifier::external_body]
 #[inline(always)]
