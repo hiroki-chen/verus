@@ -6,11 +6,10 @@ verus! {
 
 /// A simple page frame allocator that allocates physical pages. This just holds a
 /// buddy allocator inside where we implement this in `deko_std`.
-pub struct DekoPageFrameAllocator(DekoBuddyAllocator<DekoHeap<HEAP_SIZE>>);
+pub struct DekoPageFrameAllocator(pub DekoBuddyAllocator<DekoHeap<HEAP_SIZE>>);
 
 impl DekoPageFrameAllocator {
-    #[verifier::type_invariant]
-    pub closed spec fn inv(&self) -> bool {
+    pub open spec fn inv(&self) -> bool {
         self.0.wf()
     }
 
@@ -35,7 +34,7 @@ impl DekoPageFrameAllocator {
 }
 
 impl WellFormed for DekoPageFrameAllocator {
-    closed spec fn wf(&self) -> bool {
+    open spec fn wf(&self) -> bool {
         self.inv()
     }
 }

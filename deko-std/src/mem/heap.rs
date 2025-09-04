@@ -522,6 +522,7 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
 
     pub closed spec fn heap_size_valid(&self) -> bool {
         // The heap size must be a multiple of the minimum block size.
+        &&& self.min_block_size > 0
         &&& self.heap_size % self.min_block_size
             == 0
         // The heap size must be a power of two.

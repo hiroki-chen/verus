@@ -35,20 +35,6 @@ core::arch::global_asm!(include_str!("stage2.S"), options(att_syntax));
 
 verus! {
 
-#[verifier::external_body]
-fn early_die() {
-    unsafe {
-        core::arch::asm!("ud2", options(att_syntax));
-    }
-}
-
-#[verifier::external_body]
-fn early_dbg() {
-    unsafe {
-        core::arch::asm!("hlt", options(att_syntax));
-    }
-}
-
 #[verifier::external]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {

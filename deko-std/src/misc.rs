@@ -4,6 +4,24 @@ use crate::prelude::*;
 
 verus! {
 
+#[verifier::external_body]
+pub fn early_die()
+    opens_invariants none
+{
+    unsafe {
+        core::arch::asm!("ud2", options(att_syntax));
+    }
+}
+
+#[verifier::external_body]
+pub fn early_dbg()
+    opens_invariants none
+{
+    unsafe {
+        core::arch::asm!("hlt", options(att_syntax));
+    }
+}
+
 impl<V: WellFormed> WellFormed for vstd::cell::PointsTo<V> {
     closed spec fn wf(&self) -> bool {
         true

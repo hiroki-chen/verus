@@ -120,9 +120,9 @@ pub tracked struct PermissionDekoMemoryRegion {}
 /// The default of the heap that can we manage.
 ///
 /// 2 ^ 33 - 1 = 17179869183 bytes (~4 GiB).
-pub const HEAP_SIZE: usize = 32;
+pub const HEAP_SIZE: usize = 10;
 
-/// The _true_ global allocator for Deko that manages the heap.
+/// The _true_ global allocator for Deko that manages the physical pages.
 ///
 /// For safety reasons we explicitly disallow _any_ attempt to use the default
 /// global allocator in Rust because:
@@ -267,6 +267,12 @@ impl<V: WellFormed + Heap> WellFormed for DekoBuddyAllocator<V> {
     }
 }
 
+/// Please be aware that this is NOT:
+/// - the global allocator for Rust.
+/// - the virtual heap allocator, and
+/// 
+/// this IS
+/// - the physical memory allocator that allocates physical pages.
 pub type DefaultDekoHeapAllocator = DekoBuddyAllocator<DekoHeap<HEAP_SIZE>>;
 
 } // verus!

@@ -6,6 +6,7 @@ use vstd::prelude::*;
 use super::Snp;
 use crate::cpu::{CpuData, PerCpuAreas, PerCpuShared, CPUID_MAX_COUNT, PERCPU_AREAS};
 use crate::mm::paging::{get_initial_pgtable, DekoCpuPTOwner};
+use crate::mm::DEKO_FRAME_ALLOCATOR;
 
 verus! {
 
@@ -26,6 +27,7 @@ pub const RMP_NO_WRITE: u8 = RMP_READ | RMP_USER_EXE | RMP_KERN_EXE;
 pub const RMP_RWX: u8 = RMP_NO_WRITE | RMP_WRITE;
 
 impl Snp {
+    /// Set up the GHCB pages and other necessary state for SNP operation.
     #[inline]
     fn init_guest_host(&self, cpu: &CpuData)
         requires
@@ -57,15 +59,22 @@ impl Snp {
 
             ptr
         };
-
         // Need inter-CPU communication block.
         // seems we should install the permission into the bsp cpu state.
         let (bsp_pgtable, Tracked(bsp_pgtable_perm)) = get_initial_pgtable();
         let pgowner = Ghost(DekoCpuPTOwner::new(0, bsp_pgtable@.addr() as u64));
         let (ghcb, Tracked(mut ghcb_perm)) = PCell::empty();
 
-        let mut bsp_percpu = CpuData::new(bsp_pgtable, shared_area_ptr, pgowner, 0, ghcb);
+        // FIXME: This creates a variable on the stack so this is problematic;
+        // we cannot remap it later.
+        let bsp_percpu = CpuData::new(bsp_pgtable, shared_area_ptr, pgowner, 0, ghcb);
+        let (bsp_percpu, Tracked(bsp_percpu_perm)) = Box::new(
+            bsp_percpu,
+            &DEKO_FRAME_ALLOCATOR.0,
+            Ghost(())
+        );
 
+        let bsp_percpu = bsp_percpu.borrow(Tracked(&bsp_percpu_perm));
         proof {
             assert(bsp_pgtable_perm.wf());
             assert(bsp_pgtable_perm.pptr() == bsp_pgtable@);
@@ -73,7 +82,7 @@ impl Snp {
         }
 
         bsp_percpu.map_self_stage2(Tracked(bsp_pgtable_perm));
-        self.init_guest_host(&bsp_percpu);
+        self.init_guest_host(bsp_percpu);
     }
 
     /// PVALIDATE takes a page size as an input parameter indicating that either a

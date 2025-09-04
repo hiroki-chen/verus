@@ -89,6 +89,7 @@ struct FinalQemuConfig {
     debug: bool,
     igvm_path: String,
     bios_path: String,
+    extra_config: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -109,6 +110,7 @@ struct PartialQemuConfig {
     debug: Option<bool>,
     igvm_path: Option<String>,
     bios_path: Option<String>,
+    extra_config: Option<Vec<String>>,
 }
 
 #[derive(ValueEnum, Debug, Clone)]
@@ -187,6 +189,7 @@ impl Default for FinalQemuConfig {
             igvm_path: config.igvm_path().display().to_string(),
             debug: false,
             bios_path: ProjectConfig::default_ovmf_path().display().to_string(),
+            extra_config: vec![],
         }
     }
 }
@@ -359,6 +362,14 @@ impl Builder {
         if config.debug {
             cmd.arg("-s");
             println!("✓ Debugging mode enabled: QEMU will start with GDB server on port 1234");
+        }
+
+        if !config.extra_config.is_empty() {
+            println!("✓ Adding extra QEMU configurations: {:?}", config.extra_config);
+            for extra in &config.extra_config {
+                let parts: Vec<&str> = extra.split_whitespace().collect();
+                cmd.args(&parts);
+            }
         }
 
         println!("✓ Executing command: {:?}", cmd);
@@ -828,6 +839,9 @@ fn load_qemu_config(path: &Path) -> Result<FinalQemuConfig> {
     }
     if let Some(debug) = partial.debug {
         config.debug = debug;
+    }
+    if let Some(extra) = partial.extra_config {
+        config.extra_config = extra;
     }
 
     Ok(config)

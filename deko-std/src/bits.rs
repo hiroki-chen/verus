@@ -46,7 +46,7 @@ macro_rules! deko_bitflags {
 
         } // verus!
         paste::paste! {
-                        verus! {
+                                        verus! {
             #[allow(non_upper_case_globals)]
             $vis const [<$name _ALL_BITS>]: $T = $( (1 as $T) << $value )|*;
 
@@ -321,7 +321,7 @@ macro_rules! deko_bitflags {
             }
 
             } // verus!
-                    } // paste
+                                    } // paste
     };
 }
 
@@ -344,10 +344,11 @@ macro_rules! deko_bitflags {
 /// }
 /// ```
 #[macro_export]
+#[verusfmt::skip]
 macro_rules! deko_bitflags_quick {
-    ($name:ident, $($bit_name:ident : { $($bits:expr),* })*, $(,)?) => {
+    ($name:ident, $($bit_name:ident : { $($bits:expr),* }),* $(,)?) => {
         paste::paste! {
-                            verus! {
+            verus! {
                 impl [<$name Flags>] {
                     $(
                         #[inline(always)]
@@ -360,7 +361,7 @@ macro_rules! deko_bitflags_quick {
                     )*
                 }
             }
-                        }
+        }
     };
 }
 

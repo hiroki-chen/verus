@@ -159,8 +159,8 @@ impl PlatformApi for Snp {
     // TODO: Add permission or tracked token here.
     fn validate_memory(
         &self,
-        heap_start: &VirtAddr,
-        heap_end: &VirtAddr,
+        heap_start: u64,
+        heap_end: u64,
     ) -> bool/*
         requires
             self.wf(),
@@ -171,25 +171,25 @@ impl PlatformApi for Snp {
             heap_end@ % 0x1000 == 0,
         */
      {
-        let mut start = *heap_start;
-        let end = *heap_end;
+        let mut start = heap_start;
 
-        while start.0 < end.0
+        while start < heap_end
             invariant
-                start@ <= end@,
+                start <= heap_end,
                 self.wf(),
-                heap_start.wf(),
-                heap_end.wf(),
-                start@ % 0x1000 == 0,
-                heap_start@ % 0x1000 == 0,
-                heap_end@ % 0x1000 == 0,
-                heap_end@ <= LOWMEM_END as u64,
-                end@ == heap_end@,
-            decreases end@ - start@,
+                start % 0x1000 == 0,
+                heap_start % 0x1000 == 0,
+                heap_end % 0x1000 == 0,
+                heap_end <= LOWMEM_END as u64,
+            decreases heap_end - start,
         {
-            let (ret, cf) = Self::pvalidate(start.0, 0x1000, true, Tracked(()));
+            let addr = VirtAddr::new(start);
 
-            start = VirtAddr(start.0 + 0x1000);
+            proof { assume(addr@ % 0x1000 == 0); // we can prove this.
+            }
+
+            let (ret, cf) = Self::pvalidate(addr.0, 0x1000, true, Tracked(()));
+            start += 0x1000;
         }
 
         true

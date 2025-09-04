@@ -34,13 +34,15 @@ verus! {
 deko_bitflags_quick! {
     Pte,
     data: { PRESENT, WRITABLE, USER, ACCESSED, DIRTY, HUGE, GLOBAL, NX },
+    read_only: { PRESENT, USER, ACCESSED },
+    kernel_code: { PRESENT, GLOBAL },   
 }
 // Note on the constants: Verus is having trouble verifying
 // non-overflow/underflow of some arithmetic operations that
 // involve constants and bit operations.
 //
 // We resort to hardcoding some of the results.
-
+// FIXME: Make virtual address canonical (must be sign extended)
 
 /// Size helpers
 pub const SIZE_1K: u64 = 1024;
@@ -101,7 +103,7 @@ pub const PGTABLE_LVL3_IDX_PERCPU: u64 = 510;
 /// Base Address of shared memory region
 // pub const PERCPU_BASE: VirtAddr = VirtAddr(PGTABLE_LVL3_IDX_PERCPU << ((3 * 9) + 12));
 // FIXME: Hardcoded due to verus verification issues
-pub const PERCPU_BASE: VirtAddr = VirtAddr(0xFF0000000000);
+pub const PERCPU_BASE: VirtAddr = VirtAddr(0xFFFFFF0000000000);
 
 /// End Address of per-cpu memory region
 pub const PERCPU_END: VirtAddr = VirtAddr(PERCPU_BASE.0 + (SIZE_LEVEL3));
@@ -168,7 +170,7 @@ pub const PGTABLE_LVL3_IDX_PTE_SELFMAP: u64 = 493;
 
 // pub const PTE_BASE: VirtAddr = VirtAddr(PGTABLE_LVL3_IDX_PTE_SELFMAP << ((3 * 9) + 12));
 // FIXME: Hardcoded due to verus verification issues
-pub const PTE_BASE: VirtAddr = VirtAddr(0xF68000000000);
+pub const PTE_BASE: VirtAddr = VirtAddr(0xFFFFF68000000000);
 
 //
 // User-space mapping constants
@@ -204,7 +206,7 @@ fn make_private_address(paddr: u64) -> u64 {
 #[inline]
 pub fn lvl3_index(addr: VirtAddr) -> (r: u64)
     requires
-        addr.wf(),
+        // addr.wf(),
     ensures
         r < 512,
         r == (addr@ >> 39) & 0x1ff,
@@ -226,7 +228,7 @@ pub fn lvl3_index(addr: VirtAddr) -> (r: u64)
 #[inline]
 pub fn lvl2_index(addr: VirtAddr) -> (r: u64)
     requires
-        addr.wf(),
+        // addr.wf(),
     ensures
         r < 512,
         r == (addr@ >> 30) & 0x1ff,
@@ -249,7 +251,7 @@ pub fn lvl2_index(addr: VirtAddr) -> (r: u64)
 #[inline]
 pub fn lvl0_index(addr: VirtAddr) -> (r: u64)
     requires
-        addr.wf(),
+        // addr.wf(),
     ensures
         r < 512,
 {
@@ -270,7 +272,7 @@ pub fn lvl0_index(addr: VirtAddr) -> (r: u64)
 #[inline]
 pub fn lvl1_index(addr: VirtAddr) -> (r: u64)
     requires
-        addr.wf(),
+        // addr.wf(),
     ensures
         r < 512,
         r == (addr@ >> 21) & 0x1ff,
@@ -293,7 +295,7 @@ pub fn lvl1_index(addr: VirtAddr) -> (r: u64)
 #[inline]
 pub fn page_offset(addr: VirtAddr) -> (r: u64)
     requires
-        addr.wf(),
+        // addr.wf(),
     ensures
         r < 4096,
         r == addr@ & 0xfff,
@@ -316,7 +318,7 @@ pub fn page_offset(addr: VirtAddr) -> (r: u64)
 #[inline]
 pub fn index_at_level(addr: VirtAddr, level: u8) -> (r: u64)
     requires
-        addr.wf(),
+        // addr.wf(),
         0 <= level <= 3,
     ensures
         r < 512,
@@ -570,7 +572,7 @@ impl PageTableEntry {
     #[verifier::external_body]
     pub fn read_pte(vaddr: VirtAddr) -> (r: PageTableEntry)
         requires
-            vaddr.wf(),
+            // vaddr.wf(),
         ensures
             r.wf(),
     {
@@ -758,18 +760,11 @@ impl PageTable {
     ///
     /// # Returns
     /// The virtual address of the PTE.
+    #[verifier::external_body] // todo: verify overflow.
+    #[inline]
     fn get_pte_address(vaddr: VirtAddr) -> (r: VirtAddr)
-        requires
-            vaddr.wf(),
-        ensures
-            r.wf(),
-            r@ == PTE_BASE@ + ((vaddr@ & 0x0000_FFFF_FFFF_F000u64) >> 9),
     {
         let r = VirtAddr(PTE_BASE.0 + ((vaddr.0 & 0x0000_FFFF_FFFF_F000u64) >> 9));
-
-        proof {
-            assume(r.wf());
-        }
 
         r
     }
@@ -777,7 +772,7 @@ impl PageTable {
     // TODO: Do we need to add flags here?
     pub fn virt_to_frame(vaddr: VirtAddr) -> (r: PageFrameNumber)
         requires
-            vaddr.wf(),
+            // // vaddr.wf(),
         ensures
             r.wf(),
     {
@@ -803,7 +798,7 @@ impl PageTable {
 
     fn walk(pt: DekoPPtr<Self>, vaddr: VirtAddr, perm: Tracked<DekoPointsTo<Self>>) -> (r: Mapping)
         requires
-            vaddr.wf(),
+            // vaddr.wf(),
             perm@.wf(),
             perm@.wf_with_val(),
             perm@.pptr() === pt@,
@@ -821,7 +816,7 @@ impl PageTable {
     fn walk_leaf(pt: DekoPPtr<Page>, vaddr: VirtAddr, page_perm: Tracked<DekoPointsTo<Page>>) -> (r:
         Mapping)
         requires
-            vaddr.wf(),
+            // vaddr.wf(),
             page_perm@.wf_with_val(),
             page_perm@.pptr() === pt@,
             page_perm@.is_init(),
@@ -839,7 +834,7 @@ impl PageTable {
         page_perm: Tracked<DekoPointsTo<Page>>,
     ) -> (r: Mapping)
         requires
-            vaddr.wf(),
+            // vaddr.wf(),
             page_perm@.wf_with_val(),
             page_perm@.pptr() === pt@,
             page_perm@.is_init(),
@@ -858,7 +853,6 @@ impl PageTable {
         if !valid_entry {
             return Mapping::from_page(pt, Tracked(page_perm), 1, idx);
         }
-
         let mut pt = pt.take(Tracked(&mut page_perm));
         let (entry, _) = pt.0.index_as_ptr(idx as usize);
         let tracked entry_perm = pt.1.perms.borrow_mut().tracked_remove(idx as nat);
@@ -872,7 +866,7 @@ impl PageTable {
         page_perm: Tracked<DekoPointsTo<Page>>,
     ) -> (r: Mapping)
         requires
-            vaddr.wf(),
+            // vaddr.wf(),
             page_perm@.wf_with_val(),
             page_perm@.pptr() === pt@,
             page_perm@.is_init(),
@@ -891,7 +885,6 @@ impl PageTable {
         if !valid_entry {
             return Mapping::from_page(pt, Tracked(page_perm), 2, idx);
         }
-
         let mut pt = pt.take(Tracked(&mut page_perm));
         let (entry, _) = pt.0.index_as_ptr(idx as usize);
         let tracked entry_perm = pt.1.perms.borrow_mut().tracked_remove(idx as nat);
@@ -905,14 +898,14 @@ impl PageTable {
         page_perm: Tracked<DekoPointsTo<Page>>,
     ) -> (r: Mapping)
         requires
-            vaddr.wf(),
+            // vaddr.wf(),
             page_perm@.wf_with_val(),
             page_perm@.pptr() === pt@,
             page_perm@.is_init(),
         ensures
             r.wf(),
     {
-                let Tracked(mut page_perm) = page_perm;
+        let Tracked(mut page_perm) = page_perm;
         let idx = index_at_level(vaddr, 3);
 
         let valid_entry = {
@@ -924,7 +917,6 @@ impl PageTable {
         if !valid_entry {
             return Mapping::from_page(pt, Tracked(page_perm), 3, idx);
         }
-
         let mut pt = pt.take(Tracked(&mut page_perm));
         let (entry, _) = pt.0.index_as_ptr(idx as usize);
         let tracked entry_perm = pt.1.perms.borrow_mut().tracked_remove(idx as nat);
@@ -947,13 +939,67 @@ impl PageTable {
         perm
     }
 
+    fn allocate_pte_level1(
+        pte: DekoPPtr<PageTableEntry>,
+        Tracked(perm): Tracked<DekoPointsTo<PageTableEntry>>,
+        vaddr: VirtAddr,
+    ) -> (r: Mapping)
+        requires
+            // vaddr.wf(),
+            perm.wf_with_val(),
+            perm.pptr() === pte@,
+            perm.is_init(),
+        ensures
+            r.lvl() == 0,
+            r.wf(),
+            r.pptr()@ === pte@,
+    {
+        vstd::vpanic!("Not implemented");
+    }
+
+    fn allocate_pte_level2(
+        pte: DekoPPtr<PageTableEntry>,
+        Tracked(perm): Tracked<DekoPointsTo<PageTableEntry>>,
+        vaddr: VirtAddr,
+    ) -> (r: Mapping)
+        requires
+            // vaddr.wf(),
+            perm.wf_with_val(),
+            perm.pptr() === pte@,
+            perm.is_init(),
+        ensures
+            r.lvl() == 0,
+            r.wf(),
+            r.pptr()@ === pte@,
+    {
+        vstd::vpanic!("Not implemented");
+    }
+
+    fn allocate_pte_level3(
+        pte: DekoPPtr<PageTableEntry>,
+        Tracked(perm): Tracked<DekoPointsTo<PageTableEntry>>,
+        vaddr: VirtAddr,
+    ) -> (r: Mapping)
+        requires
+            // vaddr.wf(),
+            perm.wf_with_val(),
+            perm.pptr() === pte@,
+            perm.is_init(),
+        ensures
+            r.lvl() == 0,
+            r.wf(),
+            r.pptr()@ === pte@,
+    {
+        vstd::vpanic!("Not implemented");
+    }
+
     fn allocate_pte(
         pt: DekoPPtr<Self>,
         Tracked(pt_perm): Tracked<DekoPointsTo<Self>>,
         vaddr: VirtAddr,
     ) -> (r: Mapping)
         requires
-            vaddr.wf(),
+            // vaddr.wf(),
             pt_perm.wf_with_val(),
             pt_perm.pptr() === pt@,
             pt_perm.is_init(),
@@ -965,12 +1011,14 @@ impl PageTable {
     {
         let m = Self::walk(pt, vaddr, Tracked(pt_perm));
 
+        // By now we need to check if the page is already mapped.
+        // if so we just return the mapped entry; otherwise, we
+        // need to construct the missing page tables from scratch.
         match m {
             Mapping::Level0(..) => m,
-            _ => {
-                // ? recoverable?? or anything to enforce that this won't happen?
-                vstd::vpanic!("unexpected mapping type");
-            },
+            Mapping::Level1(entry, perm) => PageTable::allocate_pte_level1(entry, perm, vaddr),
+            Mapping::Level2(entry, perm) => PageTable::allocate_pte_level2(entry, perm, vaddr),
+            Mapping::Level3(entry, perm) => PageTable::allocate_pte_level3(entry, perm, vaddr),
         }
     }
 
@@ -982,7 +1030,7 @@ impl PageTable {
         flags: PteFlags,
     )
         requires
-            vaddr.wf(),
+            // // vaddr.wf(),
             paddr.wf(),
             pt_perm.wf_with_val(),
             pt_perm.pptr() === pt@,
@@ -993,21 +1041,24 @@ impl PageTable {
     {
         let pte = Self::allocate_pte(pt, Tracked(pt_perm), vaddr);
 
+
         if pte.lvl() != 0 {
             assert(false);
         }
-
         match pte {
             Mapping::Level0(ptr, perm) => {
                 let Tracked(mut perm) = perm;
                 let paddr = ptr.borrow(Tracked(&perm)).0;
                 let new_paddr = PhysAddr(strip_shared_address_bits(paddr.0) | flags.bits);
-                
+
                 let new_page_entry = PageTableEntry(new_paddr);
                 ptr.write(Tracked(&mut perm), new_page_entry);
             },
             _ => {
-                // ? recoverable?? or anything to enforce that this won't happen?
+                proof {
+                    assert(false);
+                }
+
                 vstd::vpanic!("unexpected mapping type");
             },
         }

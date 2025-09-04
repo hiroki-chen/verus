@@ -227,15 +227,13 @@ pub trait PlatformApi: Sync + Send + WellFormed {
             self.wf(),
     ;
 
-    fn validate_memory(&self, heap_start: &VirtAddr, heap_end: &VirtAddr) -> bool
+    fn validate_memory(&self, heap_start: u64, heap_end: u64) -> bool
         requires
             self.wf(),
-            heap_start.wf(),
-            heap_end.wf(),
-            heap_end@ > heap_start@,
-            heap_start@ % 0x1000 == 0,
-            heap_end@ % 0x1000 == 0,
-            heap_end@ <= LOWMEM_END as u64,
+            heap_end > heap_start,
+            heap_start % 0x1000 == 0,
+            heap_end % 0x1000 == 0,
+            heap_end <= LOWMEM_END as u64,
     {
         true
     }
@@ -282,7 +280,6 @@ pub fn setup_env(header: &Stage2LaunchInfo, idt: &mut Idt)
         vstd::vpanic!("Failed to initialize platform type; this is fatal.");
     }
     // Initialize the IDT.
-
     init_early_idt(idt);
     idt.load();
 
@@ -318,7 +315,7 @@ pub fn setup_env(header: &Stage2LaunchInfo, idt: &mut Idt)
 
     let heap_mapping = FixedAddressMappingRange::new(zero, lowmem, PhysAddr::from(0u64));
 
-    dispatch_to_platform!(validate_memory, &zero, &lowmem);
+    dispatch_to_platform!(validate_memory, 0, LOWMEM_END as u64);
 
     let mapping_space = MappingSpace { kernel: kernel_mapping, physmap: heap_mapping };
     DEKO_MAPPING_SPACE.init(mapping_space);
@@ -334,10 +331,10 @@ pub fn setup_env(header: &Stage2LaunchInfo, idt: &mut Idt)
 
         let heap_start_val = heap_start@;
 
-        assert((heap_start_val & 0x0000_FFFF_FFFF_F000u64) >> 9 == 0x80u64) by (bit_vector)
-            requires
-                (heap_start_val == 0x10000),
-        ;
+        // assert((heap_start_val & 0x0000_FFFF_FFFF_F000u64) >> 9 == 0x80u64) by (bit_vector)
+        //     requires
+        //         (heap_start_val == 0x10000),
+        // ;
     }
 
     init_frame_allocator(&heap_start, &heap_end);

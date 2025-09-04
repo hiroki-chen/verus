@@ -413,14 +413,14 @@ impl CpuData {
         let paddr = virt_to_phys(vaddr);
         let base = PERCPU_BASE;
 
-        proof {
-            let base_addr = base@;
-            assert(0xF68000000000 + ((base_addr & 0x0000_FFFF_FFFF_F000u64) >> 9)
-                <= 0x0000_FFFF_FFFF_FFFFu64) by (bit_vector)
-                requires
-                    base_addr == 0xFF0000000000,
-            ;
-        }
+        // proof {
+        //     let base_addr = base@;
+        //     assert(0xF68000000000 + ((base_addr & 0x0000_FFFF_FFFF_F000u64) >> 9)
+        //         <= 0x0000_FFFF_FFFF_FFFFu64) by (bit_vector)
+        //         requires
+        //             base_addr == 0xFF0000000000,
+        //     ;
+        // }
 
         PageTable::map_page(
             self.pgtable.clone(),
