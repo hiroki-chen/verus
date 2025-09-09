@@ -13,7 +13,9 @@ use deko_std::prelude::*;
 use vstd::prelude::*;
 
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
-use crate::mm::paging::{PageTable, PteFlags};
+use crate::mm::paging::{
+    strip_confidentiality_bits, strip_shared_address_bits, PageTable, PteFlags,
+};
 
 verus! {
 
@@ -75,15 +77,16 @@ pub struct PageEncryptionMasks {
 
 /// This function initializes the global `DEKO_FRAME_ALLOCATOR` with the given
 /// physical memory region for physical memory allocation.
-#[verifier::external_body] // todo: will fix later.
+#[verifier::external_body]  // todo: will fix later.
 pub fn init_frame_allocator(heap_start: &VirtAddr, heap_end: &VirtAddr)
     requires
-        // heap_start.wf(),
-        // heap_end.wf(),
-        // heap_start@ % 0x1000 == 0,
-        // heap_end@ % 0x1000 == 0,
-        // heap_end@ > heap_start@,
-        // valid_heap_param(heap_start.0, (heap_end.0 - heap_start.0) as u64, HEAP_SIZE as u64),
+// heap_start.wf(),
+// heap_end.wf(),
+// heap_start@ % 0x1000 == 0,
+// heap_end@ % 0x1000 == 0,
+// heap_end@ > heap_start@,
+// valid_heap_param(heap_start.0, (heap_end.0 - heap_start.0) as u64, HEAP_SIZE as u64),
+
 {
     let phys_start = PhysAddr(heap_start.0);
 
@@ -93,8 +96,9 @@ pub fn init_frame_allocator(heap_start: &VirtAddr, heap_end: &VirtAddr)
 // TODO: Add CPU core permission.
 #[inline(always)]
 pub fn virt_to_phys(vaddr: VirtAddr) -> (paddr: PhysAddr)
-    requires
-        // // vaddr.wf(),
+    requires  //
+// vaddr.wf(),
+
     ensures
         paddr.wf(),
 {
@@ -106,7 +110,8 @@ pub fn phys_to_virt(paddr: PhysAddr) -> (vaddr: VirtAddr)
     requires
         paddr.wf(),
     ensures
-        // vaddr.wf(),
+// vaddr.wf(),
+
 {
     if let Some(ms) = DEKO_MAPPING_SPACE.get() {
         if let Some(vaddr) = ms.phys_to_virt(paddr) {
@@ -243,5 +248,32 @@ impl DekoMemoryRegion {
     pub fn init_mem_region(&mut self, phys_start: PhysAddr, virt_start: VirtAddr, npages: u64) {
     }
 }
+
+#[verifier::external_body]
+pub fn test_read(addr: u64) {
+    let mut rcx: u64;
+
+    unsafe {
+        core::arch::asm!(
+            "1: movq ({0}), {1}",
+            "   xorq %rcx, %rcx",
+            "2:",
+            ".pushsection \"__early_exception_table\",\"a\"",
+            ".balign 16",
+            ".quad (1b)",
+            ".quad (2b)",
+            ".popsection",
+            in(reg) addr,
+            out(reg) _,
+            out("rcx") rcx,
+            options(att_syntax, nostack)
+        );
+    }
+
+    if rcx != 0 {
+        vstd::vpanic!("memory read error");
+    }
+}
+
 
 } // verus!

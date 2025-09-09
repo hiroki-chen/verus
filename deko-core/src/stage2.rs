@@ -3,6 +3,8 @@
 #![feature(abi_x86_interrupt)]
 #![feature(allocator_api)]
 #![feature(never_type)]
+#![allow(named_asm_labels)]
+#![allow(binary_asm_labels)]
 
 #[cfg(not(target_arch = "x86_64"))]
 compile_error!("Cannot be compiled against non x86_64 architecture!");

@@ -185,7 +185,8 @@ impl PlatformApi for Snp {
         {
             let addr = VirtAddr::new(start);
 
-            proof { assume(addr@ % 0x1000 == 0); // we can prove this.
+            proof {
+                assume(addr@ % 0x1000 == 0);  // we can prove this.
             }
 
             let (ret, cf) = Self::pvalidate(addr.0, 0x1000, true, Tracked(()));

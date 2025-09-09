@@ -199,6 +199,42 @@ impl<V> DekoPPtr<V> {
 }
 
 impl<V: WellFormed> DekoPPtr<V> {
+    /// Modifies the value behind the pointer in place; requires the memory to be initialized.
+    ///
+    /// # Safety
+    ///
+    /// Note that since verus does not support implicit mutable derefence we mark this function
+    /// as `external_body` but this is safe since the permission has been transferred in and out
+    /// of the function; the caller cannnot access the value behind the pointer during the call.
+    pub fn update_in_place(
+        &self,
+        Tracked(perm): Tracked<DekoPointsTo<V>>,
+        f: impl FnOnce(*mut V),
+    ) -> (r: Tracked<DekoPointsTo<V>>)
+        requires
+            perm.pptr() == self@,
+            perm.wf(),
+            perm.wf_with_val(),
+            perm.is_init(),
+            f.requires((perm.ptr(),)),
+        ensures
+            r@.pptr() == self@,
+            r@.wf(),
+            r@.wf_with_val(),
+            r@.ptr() == perm.ptr(),
+            f.ensures((r@.ptr(),), ()),
+    {
+        proof {
+            use_type_invariant(&perm);
+        }
+        let ptr: *mut V = vstd::raw_ptr::with_exposed_provenance(self.0.0, Tracked(perm.exposed));
+
+        f(ptr);
+
+        // reconstruct the permission token
+        Tracked(perm)
+    }
+
     /// Try to borrow this pointer.
     #[inline(always)]
     pub fn borrow_wf<'a>(self, Tracked(perm): Tracked<&'a DekoPointsTo<V>>) -> (v: &'a V)
@@ -257,6 +293,10 @@ impl<V> DekoPointsTo<V> {
     #[verifier::inline]
     pub open spec fn pptr(&self) -> PPtr<V> {
         PPtr(self.addr(), PhantomData)
+    }
+
+    pub closed spec fn ptr(&self) -> *mut V {
+        self.points_to.ptr()
     }
 
     pub closed spec fn mem_wf(&self) -> bool {

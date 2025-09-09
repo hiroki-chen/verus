@@ -254,7 +254,7 @@ pub struct IgvmParamBlock {
 
 impl WellFormed for IgvmParamBlock {
     open spec fn wf(&self) -> bool {
-        true
+        &&& self.debug_serial_port + 8 <= u16::MAX
     }
 }
 

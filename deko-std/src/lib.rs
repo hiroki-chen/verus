@@ -88,10 +88,6 @@ impl<V: WellFormed> RwLockPredicate<V> for TrivialPredicate<V> {
     }
 }
 
-// == Type alias for trivial types that do not require any predicate. ==
-#[cfg(feature = "alloc")]
-pub type BoxNoPred<V> = Box<V, TrivialPredicate<V>>;
-
 // #[cfg(feature = "alloc")]
 // pub type ArcNoPred<V> = Arc<V, TrivialPredicate<V>>;
 pub type MutexNoPred<V> = Mutex<V, TrivialPredicate<V>>;

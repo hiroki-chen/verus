@@ -83,7 +83,7 @@ pub struct DekoMemory<MM: MemoryManager> {
     /// memory callback that is used to allocate and deallocate memory.
     ///
     /// We do not apply an explicit lock on this allocator.
-    mamanger: Box<MM, MemoryManagerPredicate>,
+    mamanger: BoxWithPred<MM, MemoryManagerPredicate>,
     /// The type of the memory region.
     ty: MemoryRegionType,
 }
@@ -270,7 +270,7 @@ impl<V: WellFormed + Heap> WellFormed for DekoBuddyAllocator<V> {
 /// Please be aware that this is NOT:
 /// - the global allocator for Rust.
 /// - the virtual heap allocator, and
-/// 
+///
 /// this IS
 /// - the physical memory allocator that allocates physical pages.
 pub type DefaultDekoHeapAllocator = DekoBuddyAllocator<DekoHeap<HEAP_SIZE>>;

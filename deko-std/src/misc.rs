@@ -5,6 +5,22 @@ use crate::prelude::*;
 verus! {
 
 #[verifier::external_body]
+pub fn raw_vmgexit() {
+    unsafe {
+        core::arch::asm!("rep; vmmcall", options(att_syntax));
+    }
+}
+
+/// A tool for lifting the Seq into proof mode.
+#[verifier::external_body]
+pub proof fn tracked_new_seq<A>(len: nat, f: spec_fn(int) -> A) -> (r: Seq<A>)
+    ensures
+        r == Seq::new(len, |i: int| f(i)),
+{
+    unimplemented!();
+}
+
+#[verifier::external_body]
 pub fn early_die()
     opens_invariants none
 {
@@ -127,12 +143,13 @@ macro_rules! impl_wf_for_atomics {
 }
 
 #[macro_export]
+#[verusfmt::skip]
 macro_rules! with_permission {
-    ($name:ident, $($field:ident : $T:ty )? $(,)?) => {
+    ($name:ident, $($field:ident : $T:ty ),* $(,)?) => {
         paste::paste! {
                                                                                             verus! {
                 pub struct [<$name Permission>] {
-                    $($field: $T,)*
+                    $(pub $field: $T,)*
                 }
 
                 impl [<$name Permission>] {

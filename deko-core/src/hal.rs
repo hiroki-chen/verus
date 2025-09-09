@@ -280,6 +280,7 @@ pub fn setup_env(header: &Stage2LaunchInfo, idt: &mut Idt)
         vstd::vpanic!("Failed to initialize platform type; this is fatal.");
     }
     // Initialize the IDT.
+
     init_early_idt(idt);
     idt.load();
 
@@ -291,8 +292,7 @@ pub fn setup_env(header: &Stage2LaunchInfo, idt: &mut Idt)
         register_cpuid_table(header.cpuid_page);
     }
 
-    // Set up the kernel mapping.
-    // TODO: Make these addresses globally visible; seems we have to implement
+    // Set up the kernel mapping: now identity
     // an automatic invariant for OnceCell.
     let virt_start = VirtAddr::from(u64::from(STAGE2_START));
     let virt_end = VirtAddr::from(u64::from(header.stage2_end));
@@ -345,6 +345,8 @@ pub fn setup_env(header: &Stage2LaunchInfo, idt: &mut Idt)
     init_early_idt_late(idt);
 
     dispatch_to_platform!(init_platform_end, get_igvm_params(header));
+
+    // will not crash; good news.
 }
 
 } // verus!

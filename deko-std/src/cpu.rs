@@ -4,6 +4,14 @@ use crate::prelude::*;
 
 verus! {
 
+#[verifier::external_body]
+pub fn flush_tlb(addr: u64) {
+    // Flush TLB for the new mapping
+    unsafe {
+        core::arch::asm!("invlpg [{}]", in(reg) addr);
+    }
+}
+
 pub enum PrivilegeLevel {
     /// Ring 0, the most privileged level.
     Root,

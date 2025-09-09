@@ -449,7 +449,7 @@ impl Builder {
         stage2_path: Option<PathBuf>,
     ) -> Result<()> {
         // Build everything first
-        self.build(BuildTarget::Deko, true)?;
+        // self.build(BuildTarget::Deko, true)?;
 
         let stage2_path = stage2_path.unwrap_or_else(|| self.config.stage2_binary_path(true));
         let boot_img_path = self.config.igvm_path();

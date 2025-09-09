@@ -69,8 +69,10 @@ pub open spec fn sign_extend_ensures(addr: u64, ret: u64) -> bool {
     &&& vaddr_lower_bits(ret) == vaddr_lower_bits(addr)
 }
 
-pub const fn sign_extend(addr: u64) -> (r: u64)
-    // No requirements - accepts any u64
+pub const fn sign_extend(addr: u64) -> (r:
+    u64)
+// No requirements - accepts any u64
+
     ensures
         sign_extend_ensures(addr, r),
 {
@@ -105,9 +107,9 @@ impl Predicate<MappingSpace> for MappingSpacePred {
 
 #[derive(Clone, Copy)]
 pub struct FixedAddressMappingRange {
-    virt_start: VirtAddr,
-    virt_end: VirtAddr,
-    phys_start: PhysAddr,
+    pub virt_start: VirtAddr,
+    pub virt_end: VirtAddr,
+    pub phys_start: PhysAddr,
 }
 
 impl WellFormed for FixedAddressMappingRange {
@@ -137,6 +139,7 @@ impl FixedAddressMappingRange {
         // &&& virt_start@ % 0x1000 == phys_start@ % 0x1000
         // &&& virt_end@ > virt_start@
         // &&& virt_end@ - virt_start@ + phys_start@ < u64::MAX + 1
+
     }
 
     pub fn new(virt_start: VirtAddr, virt_end: VirtAddr, phys_start: PhysAddr) -> (r: Self)
@@ -155,7 +158,8 @@ impl FixedAddressMappingRange {
             self.wf(),
             paddr.wf(),
         ensures
-            // vaddr.wf(),
+    // vaddr.wf(),
+
     {
         // This is invalid.
         if paddr.0 < self.phys_start.0 {
@@ -178,7 +182,8 @@ impl MappingSpace {
             self.wf(),
             paddr.wf(),
         ensures
-            // vaddr.wf(),
+    // vaddr.wf(),
+
     {
         match self.kernel.phys_to_virt(paddr) {
             Some(vaddr) => Some(vaddr),
@@ -203,7 +208,7 @@ impl VirtAddr {
     /// In x86-64, virtual addresses must be in canonical form:
     /// - bits 0-47 are the address
     /// - bits 48-63 must be copies of bit 47 (i.e., sign-extended)
-    /// 
+    ///
     /// This creates two valid ranges:
     /// - `0x0000_0000_0000_0000` to `0x0000_7FFF_FFFF_FFFF` (user space)
     /// - `0xFFFF_8000_0000_0000` to `0xFFFF_FFFF_FFFF_FFFF` (kernel space)
@@ -234,8 +239,9 @@ impl WellFormed for VirtAddr {
     #[verifier::inline]
     open spec fn wf(&self) -> bool {
         // Address must be canonical (48-bit with sign extension)
-        self@ <= 0x0000_7FFF_FFFF_FFFF ||  // User space range
-        self@ >= 0xFFFF_8000_0000_0000      // Kernel space range
+        self@ <= 0x0000_7FFF_FFFF_FFFF ||   // User space range
+        self@ >= 0xFFFF_8000_0000_0000  // Kernel space range
+
     }
 }
 
@@ -259,15 +265,13 @@ impl WellFormed for PhysAddr {
 }
 
 impl From<u64> for VirtAddr {
-    fn from(value: u64) -> (r: Self)
-    {
+    fn from(value: u64) -> (r: Self) {
         VirtAddr::new(value)
     }
 }
 
 impl From<u32> for VirtAddr {
-    fn from(value: u32) -> (r: Self)
-    {
+    fn from(value: u32) -> (r: Self) {
         VirtAddr::new(value as u64)
     }
 }
