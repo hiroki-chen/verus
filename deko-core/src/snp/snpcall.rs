@@ -165,8 +165,6 @@ impl Snp {
             vstd::vpanic!("GHCB page address is incorrect!");
         }
 
-        early_dbg();
-
         let flags = PteFlags::from_bits_truncate(entry.borrow(Tracked(&perm)).0.0);
         if !flags.contains(PRESENT) {
             vstd::vpanic!("GHCB page is not present!");

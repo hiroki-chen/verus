@@ -412,7 +412,7 @@ impl GuestHostCommucationBlock {
         let mut info: u64 = 0;  // OUT instruction
 
         info |= (port as u64) << 16;
-        info |= 1 << size as u64;
+        info |= 1 << ((size as u64) + 3);
 
         let Tracked(perm) = Self::set_rax(ptr, Tracked(perm), value);
         Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::IOIO, info, 0);

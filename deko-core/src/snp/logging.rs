@@ -117,15 +117,6 @@ impl GHCBIoPort {
         requires
             self.wf(),
     {
-        let (current_ghcb, Tracked(current_ghcb_perm)) = current_ghcb();
-        let rdtsc = GuestHostCommucationBlock::rdtsc(current_ghcb, Tracked(current_ghcb_perm)).0;
-
-        if rdtsc == 0 {
-            // This means that the GHCB is not properly initialized.
-            vstd::vpanic!("GHCB not properly initialized");
-        }
-
-
         let divisor: u32 = 115200 / BAUD;
 
         self.outb_port(LCR, 0x3);  // 8n1
@@ -138,6 +129,15 @@ impl GHCBIoPort {
         self.outb_port(DLL, (divisor & 0xff) as u8);
         self.outb_port(DLH, ((divisor >> 8) & 0xff) as u8);
         self.outb_port(LCR, 0x03 & !DLAB);
+
+        self.outb_port(0, 'a' as u8);
+        self.outb_port(0, 'a' as u8);
+        self.outb_port(0, 'a' as u8);
+        self.outb_port(0, 'a' as u8);
+        self.outb_port(0, 'a' as u8);
+        self.outb_port(0, 'a' as u8);
+        self.outb_port(0, 'a' as u8);
+        self.outb_port(0, 'a' as u8);
     }
 
     fn outb_port(&self, port: u16, value: u8)
@@ -152,7 +152,7 @@ impl GHCBIoPort {
             Tracked(current_ghcb_perm),
             self.0 + port,
             value as u64,
-            1,
+            core::mem::size_of::<u8>() as u8,
         );
     }
 
