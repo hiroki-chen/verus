@@ -7,11 +7,13 @@
 //! to use logging. Also notice that logging is extremely dangerous as this could
 //! interfere with information flow control. So it should only be enabled on debug.
 use deko_std::prelude::*;
+#[cfg(feature = "logging")]
+use deko_std::snp::ghcb::*;
 use vstd::prelude::*;
 
 use crate::snp::ghcb::current_ghcb;
 #[cfg(feature = "logging")]
-use crate::snp::ghcb::GuestHostCommucationBlock;
+use crate::snp::ghcb::*;
 use crate::snp::Snp;
 
 #[cfg(feature = "logging")]
@@ -115,6 +117,15 @@ impl GHCBIoPort {
         requires
             self.wf(),
     {
+        let (current_ghcb, Tracked(current_ghcb_perm)) = current_ghcb();
+        let rdtsc = GuestHostCommucationBlock::rdtsc(current_ghcb, Tracked(current_ghcb_perm)).0;
+
+        if rdtsc == 0 {
+            // This means that the GHCB is not properly initialized.
+            vstd::vpanic!("GHCB not properly initialized");
+        }
+
+
         let divisor: u32 = 115200 / BAUD;
 
         self.outb_port(LCR, 0x3);  // 8n1
@@ -122,12 +133,11 @@ impl GHCBIoPort {
         self.outb_port(FCR, 0x0);  // No FIFO
         self.outb_port(MCR, 0x3);  // DTR + RTS
 
-        // let c = self.inb_port(LCR);
-        let c = 0x03;
-        self.outb_port(LCR, c | DLAB);
+        // ghcb might still be problematic.
+        self.outb_port(LCR, 0x03 | DLAB);
         self.outb_port(DLL, (divisor & 0xff) as u8);
         self.outb_port(DLH, ((divisor >> 8) & 0xff) as u8);
-        self.outb_port(LCR, c & !DLAB);
+        self.outb_port(LCR, 0x03 & !DLAB);
     }
 
     fn outb_port(&self, port: u16, value: u8)
@@ -135,7 +145,6 @@ impl GHCBIoPort {
             self.wf(),
             self.valid_port(port),
     {
-
         let (current_ghcb, Tracked(current_ghcb_perm)) = current_ghcb();
 
         GuestHostCommucationBlock::ioout(
@@ -159,7 +168,7 @@ impl GHCBIoPort {
             Tracked(current_ghcb_perm),
             self.0 + port,
             1,
-        ).0
+        ) as u8
     }
 
     #[inline(always)]
@@ -181,7 +190,7 @@ impl Snp {
         requires
             serial_port + 8 <= u16::MAX,
     {
-        let v = GHCBIoPort::new(serial_port);
+        let v = GHCBIoPort::new(0x3f8);
         v.init();
 
         GHCB_IO_PORT.init(v);

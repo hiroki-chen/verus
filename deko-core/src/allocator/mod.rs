@@ -4,7 +4,7 @@
 //! that returns raw memories. However, in many cases, we will need to allocate pages.
 use vstd::prelude::*;
 
-use crate::mm::paging::Page;
+use crate::mm::__private::Page;
 
 pub(crate) mod heap;
 

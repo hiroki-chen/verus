@@ -7,7 +7,7 @@ members = [
     "deko-macros",
     "deko-stage1",
     "deko-std",
-    "xtask",
+    "xtask", "deko-playground",
 ]
 
 [workspace.dependencies]

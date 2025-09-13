@@ -5,17 +5,19 @@ pub mod msr;
 pub mod types;
 
 use deko_std::prelude::*;
+use deko_std::snp::ghcb::GuestHostCommucationBlock;
 use vstd::atomic::{PAtomicBool, PAtomicU32, PermissionBool, PermissionU32};
 use vstd::cell::{PCell, PointsTo};
 use vstd::prelude::*;
 
 use crate::mm::paging::{DekoCpuPTOwner, PageTable, PteFlags, PERCPU_BASE, PTE_BASE};
 use crate::mm::virt_to_phys;
-use crate::snp::ghcb::GuestHostCommucationBlock;
 
 verus! {
 
 pub const CPUID_MAX_COUNT: usize = 128;
+
+pub const CPU_AREA_MAGIC: u64 = 0x114514;
 
 pub struct GuestVmsaRef {
     vmsa: Option<PhysAddr>,
@@ -172,6 +174,7 @@ pub exec static PERCPU_AREAS: RwLock<PerCpuAreas, PerCpuAreasInv>
 
 /// The structure that holds each core's own data.
 pub struct CpuData {
+    pub magic: u64,
     cpu_id: u64,
     /// The GHCB block for this CPU.
     ghcb: DekoPPtr<GuestHostCommucationBlock>,
@@ -382,6 +385,7 @@ impl CpuData {
             r.cpu_id() == cpu_id,
     {
         CpuData {
+            magic: CPU_AREA_MAGIC,
             ghcb,
             tss: X86Tss {
                 reserved0: 0,
@@ -428,7 +432,7 @@ impl CpuData {
             assume(perm.pgtable_perm.pptr() == page_table@);
         }
 
-        PageTable::set_page_shared(page_table, Tracked(perm.pgtable_perm), vaddr);
+        PageTable::set_shared_4k(page_table, Tracked(perm.pgtable_perm), vaddr);
     }
 
     pub closed spec fn cpu_id(&self) -> u64 {
@@ -469,43 +473,6 @@ impl CpuData {
             == self.pgtable()@  // the permission is for its own page table
 
     }
-
-    pub fn set_page_shared(
-        &self,
-        vaddr: VirtAddr,
-        paddr: PhysAddr,
-        Tracked(pgperm): Tracked<DekoPointsTo<PageTable>>,
-    )
-        requires
-            self.wf(),
-            vaddr.wf(),
-            paddr.wf(),
-            vaddr@ % 0x1000 == paddr@ % 0x1000,
-            self.is_valid_pgtable_request(&pgperm),
-        ensures
-            pgperm.wf(),
-    {
-    }
-
-    // /// Map the cpu data structure into the stage-2 page table.
-    // pub fn map_self_stage2(
-    //     ptr: DekoPPtr<Self>,
-    //     Tracked(perm): Tracked<DekoPointsTo<Self>>,
-    //     Tracked(pgperm): Tracked<DekoPointsTo<PageTable>>
-    // )
-    //     requires
-    //         self.wf(),
-    //         self.is_valid_pgtable_request(&pgperm),
-    //     ensures
-    //         pgperm.wf(),
-    // {
-    //     let vaddr = VirtAddr::from(self.as_ptr());
-    //     let paddr = virt_to_phys(vaddr);
-    //     let base = PERCPU_BASE;
-
-    //     PageTable::map_page(self.pgtable.clone(), Tracked(pgperm), base, paddr, PteFlags::data());
-    //     flush_tlb(base.0);
-    // }
 }
 
 /// This function is unsafe because the CPUID table address is provided by IGVM.

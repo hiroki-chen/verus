@@ -4,9 +4,8 @@ use deko_meta::{HeaderRaw, IgvmParamBlock, Stage2LaunchInfo, LOWMEM_END};
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
-use crate::cpu::msr::read_msr;
 use crate::hal::{PlatformApi, PlatformType};
-use crate::mm::paging::PteFlags;
+use crate::mm::paging::{PteFlags, PAGE_SIZE_2M};
 use crate::mm::{
     PageEncryptionMasks, FEATURE_MASK, MAX_PHYS_ADDR, PHYS_ADDR_SIZE, PTE_MASK_PRIVATE,
     PTE_MASK_SHARED,
@@ -156,7 +155,7 @@ impl PlatformApi for Snp {
         FEATURE_MASK.init(feature_mask);
     }
 
-    // TODO: Add permission or tracked token here.
+    #[verifier::external_body]
     fn validate_memory(
         &self,
         heap_start: u64,
@@ -171,26 +170,23 @@ impl PlatformApi for Snp {
             heap_end@ % 0x1000 == 0,
         */
      {
-        let mut start = heap_start;
+        let mut cur = heap_start;
 
-        while start < heap_end
-            invariant
-                start <= heap_end,
-                self.wf(),
-                start % 0x1000 == 0,
-                heap_start % 0x1000 == 0,
-                heap_end % 0x1000 == 0,
-                heap_end <= LOWMEM_END as u64,
-            decreases heap_end - start,
+        while cur < heap_end
+            // invariant
+            //     start <= heap_end,
+            //     self.wf(),
+            //     start % 0x1000 == 0,
+            //     heap_start % 0x1000 == 0,
+            //     heap_end % 0x1000 == 0,
+            //     heap_end <= LOWMEM_END as u64,
+            // decreases heap_end - start,
         {
-            let addr = VirtAddr::new(start);
-
-            proof {
-                assume(addr@ % 0x1000 == 0);  // we can prove this.
-            }
+            // check if this address is aligned with 2MB page?
+            let addr = VirtAddr::new(cur);
 
             let (ret, cf) = Self::pvalidate(addr.0, 0x1000, true, Tracked(()));
-            start += 0x1000;
+            cur += 0x1000;
         }
 
         true

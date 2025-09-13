@@ -115,11 +115,16 @@ impl<V: WellFormed, F: Predicate<V>> BoxInner<V, F> {
     }
 
     /// Allocates memory on the heap and leaves it uninitialized.
-    /// 
+    ///
     /// Please note that [`Box`] is just initialized on the heap allocated by the
     /// `allocator`, so the returning address must be within that region defined
     /// by the `allocator`; but we have no idea whether this pointer is virtual
     /// or physical. The caller must ensure that the pointer is used correctly.
+    ///
+    /// The typical use case for this is to allocate objects in low memory regions
+    /// where they are identity-mapped; i.e., the virtual address equals to their
+    /// physical address.
+    #[verifier::external_body]
     pub fn new_zeroed_with_f(allocator: &DefaultDekoHeapAllocator, Ghost(f): Ghost<F>) -> (s: (
         Self,
         Tracked<BoxPointsTo<V>>,
@@ -131,7 +136,11 @@ impl<V: WellFormed, F: Predicate<V>> BoxInner<V, F> {
             s.1@@.pptr() === s.0@@,
             s.1@@.is_uninit(),
     {
-        let (pptr, Tracked(pptr_perm)) = DekoPPtr::empty(allocator);
+        let (pptr, Tracked(mut pptr_perm)) = DekoPPtr::empty(allocator);
+
+        unsafe {
+            core::ptr::write_bytes(pptr.addr() as *mut u8, 0x00, core::mem::size_of::<V>());
+        }
 
         let tracked boxed_pt = BoxPointsTo { points_to: pptr_perm };
 
@@ -142,7 +151,7 @@ impl<V: WellFormed, F: Predicate<V>> BoxInner<V, F> {
     ///
     /// The users need to provide the allocator with an invariant function `f` that
     /// is used to verify the memory contents.
-    /// 
+    ///
     /// Similar to `new_zeroed_with_f`, the caller must ensure that the pointer
     /// is used correctly as virtual or physical address; or the write will fail.
     #[verifier::external_body]

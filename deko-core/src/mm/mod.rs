@@ -6,6 +6,7 @@
 //! - Kernel page frame allocator that allocates physical pages.
 //! - Some high level allocators that allocates pages from the page frame allocators.
 //! - A memory manager that manages the page tables and memory regions.
+pub mod __private;
 pub mod frame_allocator;
 pub mod paging;
 
@@ -102,7 +103,7 @@ pub fn virt_to_phys(vaddr: VirtAddr) -> (paddr: PhysAddr)
     ensures
         paddr.wf(),
 {
-    PageTable::virt_to_frame(vaddr).to_phys()
+    PageTable::virt_to_frame(vaddr).address()
 }
 
 #[inline(always)]
@@ -248,32 +249,5 @@ impl DekoMemoryRegion {
     pub fn init_mem_region(&mut self, phys_start: PhysAddr, virt_start: VirtAddr, npages: u64) {
     }
 }
-
-#[verifier::external_body]
-pub fn test_read(addr: u64) {
-    let mut rcx: u64;
-
-    unsafe {
-        core::arch::asm!(
-            "1: movq ({0}), {1}",
-            "   xorq %rcx, %rcx",
-            "2:",
-            ".pushsection \"__early_exception_table\",\"a\"",
-            ".balign 16",
-            ".quad (1b)",
-            ".quad (2b)",
-            ".popsection",
-            in(reg) addr,
-            out(reg) _,
-            out("rcx") rcx,
-            options(att_syntax, nostack)
-        );
-    }
-
-    if rcx != 0 {
-        vstd::vpanic!("memory read error");
-    }
-}
-
 
 } // verus!

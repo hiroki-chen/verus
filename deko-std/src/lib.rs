@@ -30,6 +30,9 @@ pub mod ptr;
 pub mod sync;
 pub mod wf;
 
+#[cfg(feature = "snp")]
+pub mod snp;
+
 // Export everything.
 pub mod prelude {
     pub use crate::address::*;
@@ -44,6 +47,8 @@ pub mod prelude {
     pub use crate::mem::*;
     pub use crate::misc::*;
     pub use crate::ptr::*;
+    #[cfg(feature = "snp")]
+    pub use crate::snp::*;
     pub use crate::sync::*;
     pub use crate::wf::*;
     pub use crate::*;

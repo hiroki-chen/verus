@@ -65,6 +65,7 @@ verus! {
 struct Allocator;
 
 #[verifier::external]
+#[cfg(feature = "global_alloc")]
 unsafe impl core::alloc::GlobalAlloc for Allocator {
     unsafe fn alloc(&self, _layout: core::alloc::Layout) -> *mut u8 {
         panic!("DekoHeapAllocator is not used as the global allocator by default. Use DekoHeapAllocator::alloc instead.");
@@ -78,7 +79,7 @@ unsafe impl core::alloc::GlobalAlloc for Allocator {
 /// We do not use Rust's global allocator by default so this is just a dummy one.
 /// Any use of the global allocator will panic.
 #[verifier::external]
-#[global_allocator]
+#[cfg_attr(feature = "global_alloc", global_allocator)]
 static __DISCARD: Allocator = Allocator;
 
 } // verus!

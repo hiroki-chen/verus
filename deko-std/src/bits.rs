@@ -28,7 +28,7 @@ macro_rules! deko_bitflags {
                 )*
             }
 
-            impl deko_std::prelude::WellFormed for $name {
+            impl WellFormed for $name {
                 open spec fn wf(&self) -> bool {
                     true
                 }
@@ -46,7 +46,7 @@ macro_rules! deko_bitflags {
 
         } // verus!
         paste::paste! {
-                                                                                        verus! {
+                                        verus! {
             #[allow(non_upper_case_globals)]
             $vis const [<$name _ALL_BITS>]: $T = $( (1 as $T) << $value )|*;
 
@@ -123,7 +123,7 @@ macro_rules! deko_bitflags {
                             all_bits == ($( ((1 as $T) << $value) )|*);
 
                     // Apply commutativity.
-                    deko_std::bits::[<bit_ $T _and_auto>]();
+                    [<bit_ $T _and_auto>]();
                 }
 
                 pub open spec fn inv(&self) -> bool {
@@ -217,11 +217,11 @@ macro_rules! deko_bitflags {
                                 if flag & ((1 as $T) << $value) != 0 {
                                     assert(other.contains($name::$Flag)) by {
                                         // Apply commutativity of `&` to isolate the bit.
-                                        deko_std::bits::[<bit_ $T _and_auto>]();
+                                        [<bit_ $T _and_auto>]();
                                     }
                                     assert(self@.contains($name::$Flag));
                                     assert(self.bits & ((1 as $T) << $value) != 0) by {
-                                        deko_std::bits::[<bit_ $T _and_auto>]();
+                                        [<bit_ $T _and_auto>]();
                                     }
                                 }
                             )*
@@ -250,7 +250,7 @@ macro_rules! deko_bitflags {
                 {
                     proof {
                         assert forall|flag: $name| (#[trigger] flag.bit() & 0) == 0 by {
-                            deko_std::bits::[<bit_ $T _and_auto>]();
+                            [<bit_ $T _and_auto>]();
                         }
                         // Necessary
                         assert(vstd::set::Set::empty() =~= from_bits(0));
@@ -285,7 +285,7 @@ macro_rules! deko_bitflags {
                         });
 
                         assert forall|flag: $name| (#[trigger] flag.bit() & all_bits) != 0 by {
-                            deko_std::bits::[<bit_ $T _and_auto>]();
+                            [<bit_ $T _and_auto>]();
                         }
                     }
 
@@ -333,7 +333,7 @@ macro_rules! deko_bitflags {
             }
 
             } // verus!
-                                                                                    } // paste
+                                    } // paste
     };
 }
 
@@ -360,7 +360,7 @@ macro_rules! deko_bitflags {
 macro_rules! deko_bitflags_quick {
     ($name:ident, $($bit_name:ident : { $($bits:expr),* }),* $(,)?) => {
         paste::paste! {
-                                                                                            verus! {
+                                            verus! {
                 impl [<$name Flags>] {
                     $(
                         #[inline(always)]
@@ -373,7 +373,7 @@ macro_rules! deko_bitflags_quick {
                     )*
                 }
             }
-                                                                                        }
+                                        }
     };
 }
 

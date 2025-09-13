@@ -5,10 +5,52 @@ use crate::prelude::*;
 verus! {
 
 #[verifier::external_body]
-pub fn flush_tlb(addr: u64) {
+pub fn read_msr(msr: u32) -> u64 {
+    let low: u32;
+    let high: u32;
+    unsafe {
+        core::arch::asm!("rdmsr",
+                in("ecx") msr,
+                out("eax") low,
+                out("edx") high,
+            );
+    }
+
+    ((high as u64) << 32) | (low as u64)
+}
+
+#[verifier::external_body]
+pub fn write_msr(msr: u32, value: u64) {
+    let low: u32 = value as u32;
+    let high: u32 = (value >> 32) as u32;
+    unsafe {
+        core::arch::asm!("wrmsr",
+                in("ecx") msr,
+                in("eax") low,
+                in("edx") high,
+            );
+    }
+}
+
+/// Enter a zone where interrupts are disabled.
+#[verifier::external_body]
+pub fn no_irq_zone<T>(f: impl FnOnce() -> T) -> T {
+    unsafe {
+        core::arch::asm!("cli", options(att_syntax, preserves_flags, nomem));
+    }
+    let v = f();
+    unsafe {
+        core::arch::asm!("sti", options(att_syntax, preserves_flags, nomem));
+    }
+
+    v
+}
+
+#[verifier::external_body]
+pub fn flush_tlb() {
     // Flush TLB for the new mapping
     unsafe {
-        core::arch::asm!("invlpg [{}]", in(reg) addr);
+        core::arch::asm!("movq %cr3, %rax", "movq %rax, %cr3", out("rax") _, options(nostack, att_syntax));
     }
 }
 

@@ -73,6 +73,8 @@ impl<V> DekoPPtr<V> {
             pt.1@.pptr() == pt.0@,
             pt.1@.is_uninit(),
             pt.1@.wf(),
+            pt.0.addr()
+                == addr as usize,
     // We don't put dealloc here as we do't "own" it.
 
         opens_invariants none

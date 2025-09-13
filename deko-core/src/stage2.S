@@ -18,9 +18,12 @@ startup_32:
   movw %ax, %gs
   movw %ax, %ss
 
-  ljmpl $0x8, $.Lsnp_cs
+  ljmpl $0x8, $.LSNP_setup
 
-.Lsnp_cs:
+// This pieceo of code sets up the initial page table for our 64bit DEKO monitor.
+// This page table identity-maps the physical addresses.
+.LSNP_setup:
+  // Clear out the page table.
   movl $pgtable_end, %ecx
   subl $pgtable, %ecx
   shrl $2, %ecx
@@ -29,13 +32,18 @@ startup_32:
   rep stosl
 
   call get_pte_c_bit
+  // The return value should be 0x80000 to be stored in 32bit registers.
   movl %eax, %edx
 
+  // Begin to fill the page table.
   movl $pgtable, %edi
+  // eax = &pgtable + 0x1000 + flags(7)
+  // level3 -> level2
   leal 0x1007(%edi), %eax
   movl %eax, 0(%edi)
   addl %edx, 4(%edi)
 
+  // level 2-> level 1 only four entries needed for now.
   addl $0x1000, %edi
   leal 0x1007(%edi), %eax
   movl $4, %ecx
@@ -47,12 +55,13 @@ startup_32:
   jnz 1b
   andl $0xfffff000, %edi
 
+  // level 1 -> level 0 is based on 2MB pages. note %eax.
   addl $0x1000, %edi
-  movl $0x00000183, %eax
+  movl $0x00000183, %eax  // 0x183 => 0001 1000 0011    GLOBAL / HUGE / W / P
   movl $2048, %ecx
   1: movl %eax, 0(%edi)
   addl %edx, 4(%edi)
-  addl $0x00200000, %eax
+  addl $0x00200000, %eax // 2MB offset!!!
   addl $8, %edi
   decl %ecx
   jnz 1b
@@ -216,6 +225,9 @@ startup_64:
   movl %ebp, %edi
   andq $~0xf, %rsp
   call deko_main
+
+.data
+.align 4
 
 idt32:
   .rept 32

@@ -1,15 +1,20 @@
 use deko_meta::IgvmParamBlock;
 use deko_std::prelude::*;
+use deko_std::snp::ghcb::GuestHostCommucationBlock;
 use vstd::cell::PCell;
 use vstd::prelude::*;
 
 use super::Snp;
 use crate::cpu::{
-    CpuData, CpuDataPermission, PerCpuAreas, PerCpuShared, CPUID_MAX_COUNT, PERCPU_AREAS,
+    CpuData, CpuDataPermission, PerCpuAreas, PerCpuShared, CPUID_MAX_COUNT, CPU_AREA_MAGIC,
+    PERCPU_AREAS,
 };
-use crate::mm::paging::{box_into_ptr, get_initial_pgtable, DekoCpuPTOwner, PageTable, PteFlags, PERCPU_BASE};
+use crate::mm::paging::{
+    get_initial_pgtable, strip_confidentiality_bits, DekoCpuPTOwner, PageTable, PteFlags,
+    PERCPU_BASE,
+};
 use crate::mm::{phys_to_virt, virt_to_phys, DEKO_FRAME_ALLOCATOR};
-use crate::snp::ghcb::{msr_register_ghcb_gpa, GuestHostCommucationBlock};
+use crate::snp::ghcb::msr_register_ghcb_gpa;
 
 verus! {
 
@@ -32,15 +37,14 @@ pub const RMP_RWX: u8 = RMP_NO_WRITE | RMP_WRITE;
 impl Snp {
     /// Set up the GHCB pages and other necessary state for SNP operation.
     #[inline]
-    fn init_guest_host(&self, cpu: DekoPPtr<CpuData>, Tracked(cpu_perm): Tracked<CpuDataPermission>)
-        requires
-            self.wf(),
-            cpu_perm.wf_with(cpu),
-    {
-        let ghcb = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).ghcb();
-
-        // The GHCB is allocated.
-        GuestHostCommucationBlock::validate_ghcb(cpu, Tracked(cpu_perm));
+    fn init_guest_host(
+        &self,
+        ghcb: DekoPPtr<GuestHostCommucationBlock>,
+        Tracked(ghcb_perm): Tracked<DekoPointsTo<GuestHostCommucationBlock>>,
+        pgtable: DekoPPtr<PageTable>,
+        Tracked(pgtable_perm): Tracked<DekoPointsTo<PageTable>>,
+    ) {
+        crate::snp::ghcb::validate_ghcb(ghcb, Tracked(ghcb_perm), pgtable, Tracked(pgtable_perm));
 
         let ghcb_vaddr = VirtAddr::new(ghcb.addr() as u64);
         let ghcb_paddr = virt_to_phys(ghcb_vaddr);
@@ -55,10 +59,12 @@ impl Snp {
             igvm_params.wf(),
     {
         let debug_console_port = igvm_params.debug_serial_port as u16;
+
         Self::init_ghcb_logging(debug_console_port);
         crate::logging::print_str("testtesttest");
     }
 
+    #[verifier::external_body]
     pub fn init_each_cpu(&self)
         requires
             self.wf(),
@@ -73,26 +79,34 @@ impl Snp {
 
             ptr
         };
-        // Need inter-CPU communication block.
-        // seems we should install the permission into the bsp cpu state.
+
+        // 1. First we set up the GHCB page for this CPU.
         let (bsp_pgtable, Tracked(bsp_pgtable_perm)) = get_initial_pgtable();
         let pgowner = Ghost(DekoCpuPTOwner::new(0, bsp_pgtable@.addr() as u64));
         let (ghcb, Tracked(ghcb_perm)) = Box::<GuestHostCommucationBlock>::new_zeroed(
             &DEKO_FRAME_ALLOCATOR.0,
         );
-        let (ghcb, Tracked(mut ghcb_perm)) = ghcb.into_ptr(Tracked(ghcb_perm));
+        let (ghcb, Tracked(ghcb_perm)) = ghcb.into_ptr(Tracked(ghcb_perm));
+        // Initialize the GHCB.
+        Self::heap_allocation_identity_check(ghcb.addr() as u64);
+        self.init_guest_host(ghcb, Tracked(ghcb_perm), bsp_pgtable, Tracked(bsp_pgtable_perm));
 
-        // FIXME: This creates a variable on the stack so this is problematic;
+        // 2. We now set up the percpu area for this CPU.
+        // Note that we do not need to initialize the percpu area since it is
+        // zeroed out by Box::new_zeroed.
+        // We just need to set up the page table entry and the CpuData struct.
         let (bsp_percpu, Tracked(bsp_percpu_perm)) = Box::new_zeroed(&DEKO_FRAME_ALLOCATOR.0);
-        let bsp_percpu_paddr = PhysAddr(bsp_percpu.addr() as u64); // note that this returns physical addr.
-        let (bsp_percpu_ptr, Tracked(mut bsp_percpu_perm)) = box_into_ptr(bsp_percpu, Tracked(bsp_percpu_perm));
+        let bsp_percpu_paddr = PhysAddr(bsp_percpu.addr() as u64);
+        let (bsp_percpu_ptr, Tracked(mut bsp_percpu_perm)) = bsp_percpu.into_ptr(
+            Tracked(bsp_percpu_perm),
+        );
 
-        // Initialize the percpu area.
+        // 3. Initialize the percpu area.
         let bsp_percpu = CpuData::new(bsp_pgtable, shared_area_ptr, pgowner, 0, ghcb);
         bsp_percpu_ptr.write(Tracked(&mut bsp_percpu_perm), bsp_percpu);
 
-        // This maps the PERCPU_BASE addr to the percpu area.
-        PageTable::map_page(
+        // 4. This maps the PERCPU_BASE addr to the percpu area so `this_cpu` workds.
+        PageTable::map_page_4k(
             bsp_pgtable,
             Tracked(bsp_pgtable_perm),
             PERCPU_BASE,
@@ -100,97 +114,115 @@ impl Snp {
             PteFlags::data(),
         );
 
-        let Tracked(bsp_percpu_perm) = CpuDataPermission::upgrade(bsp_percpu_ptr, Tracked(bsp_percpu_perm));
-
-        // The current allocation for bsp is problematic; let's just
-        // avoid using this right now.
-        self.init_guest_host(bsp_percpu_ptr, Tracked(bsp_percpu_perm));
+        // DEBUG 
+        Self::cpu_self_map_sanity_check(bsp_percpu_ptr.addr() as u64, ghcb.addr() as u64);
+        Self::ghcb_map_sanity_check(ghcb.addr() as u64);
     }
 
     #[verifier::external_body]
-    fn test() {
-    unsafe {
+    pub fn heap_allocation_identity_check(addr: u64) {
+        let vaddr = VirtAddr::new(addr);
+        let paddr = virt_to_phys(vaddr);
+        if paddr.0 != addr {
+            vstd::vpanic!("Heap allocation is not identity mapped");
+        }
+        let pvaddr = phys_to_virt(paddr);
+        if pvaddr.0 != addr {
+            vstd::vpanic!("Heap allocation is not identity mapped");
+        }
+    }
 
+    #[verifier::external_body]
+    pub fn ghcb_map_sanity_check(raw_addr: u64) {
         use crate::mm::paging::*;
 
-        let vaddr = PERCPU_BASE;
-
-        // --- Level 3: PML4 Check (from physical address) ---
-        let (pt, _) = get_initial_pgtable();
-        let pml4_direct_ptr = pt.addr() as *const [u64; 512];
-        
-        let pml4_idx = (vaddr.0 >> 39) & 0x1ff; // Should be 510
-        let pml4_entry = (*pml4_direct_ptr)[pml4_idx as usize];
-
-        if pml4_entry & 1 == 0 {
-            // If this fails, your mapping code didn't even create the top-level entry.
-            vstd::vpanic!("DIRECT CHECK FAILED: PML4 Entry for PERCPU_BASE is not present. PML4[510] = {:x}", pml4_entry);
+        if raw_addr != 0x10000 {
+            vstd::vpanic!("Invalid ghcb address");
         }
 
-
-        // --- Level 2: PDPT Check ---
-        // Get the physical address of the PDPT from the PML4 entry
-
-        // Convert it to a virtual address so we can read it
-        // (This relies on the kernel's direct physical-to-virtual mapping)
-        let pdpt_phys_addr = pml4_entry & 0x000f_ffff_ffff_f000;
-        let pdpt_phys_addr = strip_confidentiality_bits(pdpt_phys_addr);
-        let pdpt_phys_addr = strip_shared_address_bits(pdpt_phys_addr);
-
-        // BUG: The pdpt_phys_addr does not reside within the mapped regions?
-        let pdpt_virt_ptr = crate::mm::phys_to_virt(PhysAddr(pdpt_phys_addr)).0 as *const [u64; 512];
-
-        let pdpt_idx = (vaddr.0 >> 30) & 0x1ff;
-        let pdpt_entry = (*pdpt_virt_ptr)[pdpt_idx as usize];
-
-        if pdpt_entry & (1 | (1 << 51) | (1 << 1) | (1 << 63)) == 0 {
-            // If this fails, the PML4 entry was created, but the next level down was not.
-            vstd::vpanic!("DIRECT CHECK FAILED: PDPT Entry for PERCPU_BASE is not present. Value = {:x}", pdpt_entry);
+        let (ghcb, Tracked(ghcb_perm)) = crate::snp::ghcb::current_ghcb();
+        if ghcb.addr() as u64 != raw_addr {
+            vstd::vpanic!("GHCB mapping is incorrect");
         }
 
+        let (pgtable, Tracked(pgtable_perm)) = get_initial_pgtable();
+        let mapping = PageTable::walk(
+            pgtable,
+            Tracked(pgtable_perm),
+            VirtAddr(ghcb.addr() as u64),
+        );
 
-        if pdpt_entry & (1 << 7) != 0 { /* Is it a 1G page? Not expected for this layout */ }
+        let Mapping::Level0(entry, Tracked(perm)) = mapping else {
+            vstd::vpanic!("GHCB mapping is not a 4K page!");
+        };
 
-
-        // --- Level 1: Page Directory Check ---
-        // Get the physical address of the Page Directory from the PDPT entry
-        let pd_phys_addr = pdpt_entry & 0x000F_FFFF_FFFF_F000;
-        let pd_phys_addr = strip_confidentiality_bits(pd_phys_addr);
-        let pd_phys_addr = strip_shared_address_bits(pd_phys_addr);
-
-        let pd_virt_ptr = crate::mm::phys_to_virt(PhysAddr(pd_phys_addr)).0 as *const [u64; 512];
-        
-        let pd_idx = (vaddr.0 >> 21) & 0x1ff;
-        let pd_entry = (*pd_virt_ptr)[pd_idx as usize];
-
-        if pd_entry & (1 | (1 << 51) | (1 << 1) | (1 << 63)) == 0 {
-            vstd::vpanic!("DIRECT CHECK FAILED: Page Directory Entry for PERCPU_BASE is not present. Value = {:x}", pd_entry);
+        if entry.borrow(Tracked(&perm)).0.0 & (1 << 51) != 0 {
+            vstd::vpanic!("GHCB page is not shared!");
         }
-        if pd_entry & (1 << 7) != 0 { /* Is it a 2M page? Possible. */ }
 
-
-        // --- Level 0: Page Table Check ---
-        // Get the physical address of the final Page Table from the PD entry
-        let pt_phys_addr = pd_entry & 0x000F_FFFF_FFFF_F000;
-        let pt_phys_addr = strip_confidentiality_bits(pt_phys_addr);
-        let pt_phys_addr = strip_shared_address_bits(pt_phys_addr);
-        let pt_virt_ptr = crate::mm::phys_to_virt(PhysAddr(pt_phys_addr)).0 as *const [u64; 512];
-
-        let pt_idx = (vaddr.0 >> 12) & 0x1ff;
-        let pt_entry = (*pt_virt_ptr)[pt_idx as usize];
-
-        if pt_entry & (1 | (1 << 51) | (1 << 1) | (1 << 63)) == 0 {
-            vstd::vpanic!("DIRECT CHECK FAILED: Final Page Table Entry for PERCPU_BASE is not present. Value = {:x}", pt_entry);
+        let address = entry.borrow(Tracked(&perm)).address().0;
+        if address != (raw_addr & !(0xfff)) { // address != raw_addr so we need to check .
+            vstd::vpanic!("GHCB page address is incorrect!");
         }
-        
-        // correctly mapped now.
-        // svsm's physical mapped addr : 0x8008000000014063
-        let ptr = PERCPU_BASE.0 as *mut u32;
-        core::ptr::write_volatile(ptr, 0xDEADBEEF);
-        let val = core::ptr::read_volatile(ptr);
+
+        early_dbg();
+
+        let flags = PteFlags::from_bits_truncate(entry.borrow(Tracked(&perm)).0.0);
+        if !flags.contains(PRESENT) {
+            vstd::vpanic!("GHCB page is not present!");
+        }
     }
-    unsafe {
 
+    /// Sanity check that the CPU page is mapped correctly.
+    #[verifier::external_body]
+    pub fn cpu_self_map_sanity_check(raw_addr: u64, ghcb_addr: u64) {
+        use crate::mm::paging::*;
+
+        if raw_addr < 0x10000 || raw_addr >= 0xa0000 {
+            vstd::vpanic!("Invalid percpu address");
+        }
+        let (percpu, Tracked(percpu_perm)) = CpuData::this_cpu();
+        if percpu.addr() as u64 != PERCPU_BASE.0 {
+            vstd::vpanic!("PERCPU_BASE mapping is incorrect");
+        }
+
+        let (pgtable, Tracked(pgtable_perm)) = get_initial_pgtable();
+        let mapping = PageTable::walk(
+            pgtable,
+            Tracked(pgtable_perm),
+            VirtAddr(percpu.addr() as u64),
+        );
+
+        let Mapping::Level0(entry, Tracked(perm)) = mapping else {
+            vstd::vpanic!("Percpu mapping is not a 4K page!");
+        };
+
+        if entry.borrow(Tracked(&perm)).0.0 & (1 << 51) == 0 {
+            vstd::vpanic!("Percpu page is shared!");
+        }
+
+        let address = entry.borrow(Tracked(&perm)).address().0;
+        if address != raw_addr {
+            vstd::vpanic!("Percpu page address is incorrect!");
+        }
+
+        let flags = PteFlags::from_bits_truncate(entry.borrow(Tracked(&perm)).0.0);
+        if !flags.contains(PRESENT) {
+            vstd::vpanic!("Percpu page is not present!");
+        }
+
+        let magic = percpu.borrow(Tracked(&percpu_perm.ptr_perm)).magic;
+        if magic != CPU_AREA_MAGIC {
+            vstd::vpanic!("Magic number mismatch: expected 0x114514, got
+            {:#x}", magic);
+        }
+        let pgtable = percpu.borrow(Tracked(&percpu_perm.ptr_perm)).pgtable();
+        if pgtable.addr() != pgtable.addr() {
+            vstd::vpanic!("Percpu page table mismatch");
+        }
+        let ghcb = percpu.borrow(Tracked(&percpu_perm.ptr_perm)).ghcb();
+        if ghcb.addr() as u64 != ghcb_addr {
+            vstd::vpanic!("Percpu ghcb mismatch");
         }
     }
 
@@ -208,7 +240,7 @@ impl Snp {
         bool,
     ))
         requires
-            psize == 0x1000,
+            psize == 0x1000 || psize == 0x200000, // Either 4K or 2M page.
             vaddr % 0x1000
                 == 0,
     // todo: add more requirements here since we can track permission of the memory.
@@ -216,9 +248,9 @@ impl Snp {
     {
         let rax = vaddr;
         let ret: u64;
-        let rcx = 0u64;  // as we do not support huge pages we just assume 0.
+        let rcx = if psize == 0x1000 { RMP_4K } else { RMP_2M };
         let cf: u64;
-        let rdx = validate as u64;
+        let rdx = if validate { 1 } else { 0 };
 
         unsafe {
             core::arch::asm!(
@@ -226,14 +258,14 @@ impl Snp {
                 "pvalidate",
                 "adcq %r8, %r8",
                 in("rax")  rax,
-             in("rcx")  rcx,
-             in("rdx")  rdx,
-             lateout("rax") ret,
-             lateout("r8") cf,
-             options(att_syntax));
+                in("rcx")  rcx,
+                in("rdx")  rdx,
+                lateout("rax") ret,
+                lateout("r8") cf,
+                options(att_syntax));
         }
 
-        (ret, cf != 0)
+        (ret, cf == 0)
     }
 
     #[verifier::external_body]
