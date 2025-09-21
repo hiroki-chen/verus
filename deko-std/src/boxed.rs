@@ -51,14 +51,14 @@ impl<T: WellFormed> Box<T> {
 /// In some cases where we want to allocate a [`BoxInner`] directly from the physical
 /// memory and bypass the MMU. please use [`RawBox`] instea.
 #[verifier::reject_recursive_types(V)]
-pub struct BoxInner<V, F> {
+pub struct BoxInner<V: WellFormed, F> {
     ptr: DekoPPtr<V>,
     inv: Ghost<F>,
 }
 
 /// A thin wrapper around `DekoPointsTo<V>` that is used to track the points-to relation
 /// of a `BoxInner<V, F>`.
-pub tracked struct BoxPointsTo<V> {
+pub tracked struct BoxPointsTo<V: WellFormed> {
     points_to: DekoPointsTo<V>,
 }
 
@@ -93,7 +93,7 @@ impl<V: WellFormed, F: Predicate<V>> BoxInner<V, F> {
             self.wf(),
             perm@.pptr() === self@@,
             perm@.is_init(),
-            perm@.mem_wf(),
+            perm@.wf(),
         ensures
             *r == perm@.value(),
     {
@@ -103,10 +103,11 @@ impl<V: WellFormed, F: Predicate<V>> BoxInner<V, F> {
     #[inline]
     pub fn write(&self, Tracked(perm): Tracked<&mut BoxPointsTo<V>>, v: V)
         requires
+            v.wf(),
             self.wf(),
             self.inv(v),
             old(perm)@.pptr() == self@@,
-            old(perm)@.mem_wf(),
+            old(perm)@.wf(),
         ensures
             perm@.pptr() === self@@,
             perm@.is_init(),

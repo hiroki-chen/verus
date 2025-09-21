@@ -2,7 +2,6 @@
 use core::arch::asm;
 use core::fmt::{Debug, Formatter};
 
-use deko_meta::{HeaderRaw, BOOT_VERSION};
 use uefi::boot::{AllocateType, MemoryType};
 use uefi::mem::memory_map::MemoryMap;
 use uefi::prelude::*;
@@ -139,11 +138,11 @@ impl<'deko> DekoKernel<'deko> {
         let mmap_size = mmap.len();
 
         // Here we construct a header for the deko monitor.
-        let mut header = HeaderRaw::default();
-        header.version = BOOT_VERSION;
-        header.mmap = mmap.buffer().as_ptr() as _;
-        header.mmap_len = mmap_size as u64;
-        header.kernel_entry = self.start_address as u64;
+        // let mut header = HeaderRaw::default();
+        // header.version = BOOT_VERSION;
+        // header.mmap = mmap.buffer().as_ptr() as _;
+        // header.mmap_len = mmap_size as u64;
+        // header.kernel_entry = self.start_address as u64;
 
         // Note we do page table construction and virtual memory allocation
         // inside the deko monitor itself so at this timepoint the addresses
@@ -154,7 +153,7 @@ impl<'deko> DekoKernel<'deko> {
             "ud2",
             in(reg)  self.elf.header.pt2.entry_point(),
             // We also have an implicit argument here.
-            in("rdi") &header as *const HeaderRaw as u64,
+            // in("rdi") &header as *const HeaderRaw as u64,
             options(noreturn),
         );
     }

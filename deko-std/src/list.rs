@@ -27,6 +27,13 @@ impl<T: WellFormed> View for Node<T> {
     }
 }
 
+impl<V: WellFormed> WellFormed for Node<V> {
+    #[verifier(inline)]
+    open spec fn wf(&self) -> bool {
+        self@.wf()
+    }
+}
+
 #[verifier::reject_recursive_types(V)]
 #[verifier::ext_equal]
 pub tracked struct LinkedListInner<V: WellFormed> {

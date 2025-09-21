@@ -3,7 +3,7 @@ use vstd::prelude::*;
 verus! {
 
 /// A marker trait for types that are well-formed.
-pub trait WellFormed {
+pub trait WellFormed: Sized {
     spec fn wf(&self) -> bool;
 }
 

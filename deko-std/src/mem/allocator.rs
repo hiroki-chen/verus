@@ -9,8 +9,6 @@ use crate::prelude::*;
 
 verus! {
 
-pub const PAGE_SIZE: u64 = 0x1000;
-
 // 4096 bytes
 pub const PAGE_MASK: u64 = !(PAGE_SIZE - 1);
 

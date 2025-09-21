@@ -3,11 +3,11 @@ resolver = "2"
 members = [
     "deko-core",
     "deko-logging",
-    "deko-meta",
     "deko-macros",
     "deko-stage1",
     "deko-std",
-    "xtask", "deko-playground",
+    "xtask",
+    "deko-playground",
 ]
 
 [workspace.dependencies]
@@ -27,7 +27,6 @@ prettyplease_verus = { git = "https://github.com/ziqiaozhou/verus", rev = "7c4a5
 deko-core = { path = "deko-core", default-features = false }
 deko-logging = { path = "deko-logging" }
 deko-macros = { path = "deko-macros" }
-deko-meta = { path = "deko-meta" }
 deko-std = { path = "deko-std" }
 
 # the profile used for `cargo build`

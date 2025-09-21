@@ -135,11 +135,17 @@ tokenized_state_machine!(
 verus! {
 
 #[verifier::reject_recursive_types(V)]
-pub struct ArcInner<V> {
+pub struct ArcInner<V: WellFormed> {
     /// The strong counter.
     pub count: PAtomicU64,
     /// The actual data.
     pub data: V,
+}
+
+impl<V: WellFormed> WellFormed for ArcInner<V> {
+    closed spec fn wf(&self) -> bool {
+        self.data.wf()
+    }
 }
 
 /// A wrapped predicate for the `Arc` type.
@@ -277,6 +283,7 @@ impl<V, F> Arc<V, F> where V: WellFormed, F: Predicate<V> {
         requires
             f.inv(v),
             allocator.wf(),
+            v.wf(),
         ensures
             s.wf(),
             s@ == v,

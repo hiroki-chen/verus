@@ -4,6 +4,35 @@ use crate::prelude::*;
 
 verus! {
 
+/// Trait that defines safe casting relationships between types.
+/// Only types that implement this trait for each other can be safely cast.
+/// This prevents arbitrary casting while allowing legitimate conversions.
+///
+/// Note that we do not check the semantics behind the specifications,
+/// we assume if if there are legitimate convertion between two types,
+/// the developers have a basic understanding of the semantics and
+/// provide correct specifications.
+pub trait SafeCastInto<T: WellFormed + Sized>: WellFormed + Sized {
+    /// Specification function that defines when casting is valid
+    spec fn cast_valid(&self) -> bool;
+
+    spec fn cast_into(from: Self) -> T
+        recommends
+            Self::cast_valid(&from),
+    ;
+}
+
+// identity cast.
+impl<T: WellFormed + Sized> SafeCastInto<T> for T {
+    open spec fn cast_valid(&self) -> bool {
+        true
+    }
+
+    open spec fn cast_into(from: Self) -> T {
+        from
+    }
+}
+
 #[verifier::external_body]
 pub fn raw_vmgexit() {
     unsafe {
@@ -44,35 +73,28 @@ impl<V: WellFormed> WellFormed for vstd::cell::PointsTo<V> {
     }
 }
 
-pub trait IsConstant {
+pub trait Constant {
     spec fn is_constant(&self) -> bool;
 }
 
 #[verifier::external_body]
-pub proof fn lemma_is_constant_implies_constant<T: IsConstant, U: IsConstant>(
-    v: T,
-    f: spec_fn(T) -> U,
-)
-// f (c) is constant. <==> v is constant
-
+pub proof fn lemma_is_constant_implies_constant<T: Constant, U: Constant>(v: T, f: spec_fn(T) -> U)
     ensures
         v.is_constant() ==> f(v).is_constant(),
 {
 }
 
 #[verifier::external_body]
-pub proof fn lemma_is_constant_implies_constant_rev<T: IsConstant, U: IsConstant>(
+pub proof fn lemma_is_constant_implies_constant_rev<T: Constant, U: Constant>(
     v: T,
     f: spec_fn(T) -> U,
 )
-// f (c) is constant. <==> v is constant
-
     ensures
         f(v).is_constant() ==> v.is_constant(),
 {
 }
 
-impl<T: IsConstant> IsConstant for Option<T> {
+impl<T: Constant> Constant for Option<T> {
     #[verifier(inline)]
     open spec fn is_constant(&self) -> bool {
         match self {
@@ -82,28 +104,28 @@ impl<T: IsConstant> IsConstant for Option<T> {
     }
 }
 
-impl IsConstant for () {
+impl Constant for () {
     #[verifier(inline)]
     open spec fn is_constant(&self) -> bool {
         true
     }
 }
 
-impl<T1: IsConstant, T2: IsConstant> IsConstant for (T1, T2) {
+impl<T1: Constant, T2: Constant> Constant for (T1, T2) {
     #[verifier(inline)]
     open spec fn is_constant(&self) -> bool {
         self.0.is_constant() && self.1.is_constant()
     }
 }
 
-impl<T> IsConstant for Ghost<T> {
+impl<T> Constant for Ghost<T> {
     #[verifier(inline)]
     open spec fn is_constant(&self) -> bool {
         true
     }
 }
 
-impl<T> IsConstant for Tracked<T> {
+impl<T> Constant for Tracked<T> {
     #[verifier(inline)]
     open spec fn is_constant(&self) -> bool {
         true
@@ -115,7 +137,7 @@ impl<T> IsConstant for Tracked<T> {
 macro_rules! impl_spec_constant_for_basic {
     ($($type: ty),* $(,)?) => {
         $(verus!{
-            impl IsConstant for $type {
+            impl Constant for $type {
                 #[verifier(inline)]
                 open spec fn is_constant(&self) -> bool
                 {
@@ -145,10 +167,68 @@ macro_rules! impl_wf_for_atomics {
 #[macro_export]
 #[verusfmt::skip]
 macro_rules! with_permission {
-    ($name:ident, $($field:ident : $T:ty ),* $(,)?) => {
+    // Pattern 1: With attributes and generic type parameters with trait bounds
+    (
+        $(#[$attr:meta])+
+        $name:ident<$($generic:ident $(: $bound:path)?),*>, $($field:ident : $T:ty ),* $(,)?
+    ) => {
         paste::paste! {
                                                                                             verus! {
-                pub struct [<$name Permission>] {
+                $(#[$attr])+
+                pub tracked struct [<$name Permission>]<$($generic $(: $bound)?),*> {
+                    $($field: $T,)*
+                }
+            }
+                                                                                        }
+    };
+
+    // Pattern 2: With attributes and simple identifier (no generics)
+    (
+        $(#[$attr:meta])+
+        $name:ident, $($field:ident : $T:ty ),* $(,)?
+    ) => {
+        paste::paste! {
+                                                                                            verus! {
+                $(#[$attr])+
+                pub tracked struct [<$name Permission>] {
+                    $($field: $T,)*
+                }
+            }
+                                                                                        }
+    };
+
+    // Pattern 3: Generic type parameters with trait bounds (no attributes)
+    (
+        $name:ident<$($generic:ident $(: $bound:path)?),*>, $($field:ident : $T:ty ),* $(,)?
+    ) => {
+        paste::paste! {
+                                                                                            verus! {
+                pub tracked struct [<$name Permission>]<$($generic $(: $bound)?),*> {
+                    $(pub $field: $T,)*
+                }
+
+                impl<$($generic $(: $bound)?),*> [<$name Permission>]<$($generic),*> {
+                    /// The id of this permission.
+                    pub uninterp spec fn id(&self) -> int;
+
+                    // Auto getter.
+                    $(
+                        pub open spec fn [< $field >](&self) -> $T {
+                            self.$field
+                        }
+                    )*
+                }
+            }
+                                                                                        }
+    };
+
+    // Pattern 4: Simple identifier (no generics, no attributes)
+    (
+        $name:ident, $($field:ident : $T:ty ),* $(,)?
+    ) => {
+        paste::paste! {
+                                                                                            verus! {
+                pub tracked struct [<$name Permission>] {
                     $(pub $field: $T,)*
                 }
 
@@ -158,7 +238,7 @@ macro_rules! with_permission {
 
                     // Auto getter.
                     $(
-                        pub closed spec fn [< $field _spec >](&self) -> $T {
+                        pub open spec fn [< $field >](&self) -> $T {
                             self.$field
                         }
                     )*

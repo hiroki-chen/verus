@@ -17,7 +17,8 @@ use deko_std::sync::RwLockToks::reader;
 use vstd::atomic::PAtomicU8;
 use vstd::prelude::*;
 
-use crate::cpu::CpuData;
+use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
+use crate::cpu::DekoCpuCtx;
 use crate::mm::paging::{PageTable, PteFlags};
 use crate::mm::virt_to_phys;
 
@@ -26,20 +27,29 @@ verus! {
 /// Validates the GHCB page allocated for the current CPU core.
 #[verifier::external_body]
 pub fn validate_ghcb(
+    ctx: DekoPPtr<DekoCtx>,
+    Tracked(ctx_perm): Tracked<&mut DekoCtxPermission>,
     ghcb: DekoPPtr<GuestHostCommucationBlock>,
     Tracked(ghcb_perm): Tracked<DekoPointsTo<GuestHostCommucationBlock>>,
-    pgtable: DekoPPtr<PageTable>,
-    Tracked(pgtable_perm): Tracked<DekoPointsTo<PageTable>>,
-) {
-    let vaddr = VirtAddr::new(ghcb.addr() as u64);
-    let paddr = virt_to_phys(vaddr);
-
-    // Invalidate this page from the CVM.
-    crate::snp::Snp::pvalidate(vaddr.0, 0x1000, false, Tracked(()));
-    // Notify the hypervisor that this page is now valid.
-    msr_set_page_valid(paddr, false);
-
-    PageTable::set_shared_4k(pgtable, Tracked(pgtable_perm), vaddr);
+)
+    requires
+        old(ctx_perm).wf(),
+        old(ctx_perm).wf_with(ctx),
+        ghcb_perm.wf(),
+        ghcb_perm.is_init(),
+        ghcb_perm.pptr() == ghcb@,
+        ghcb_perm.addr() % 0x1000 == 0,
+    ensures
+        ctx_perm.wf(),
+        ctx_perm.wf_with(ctx),
+{
+    // let vaddr = VirtAddr::new(ghcb.addr() as u64);
+    // let paddr = virt_to_phys(vaddr);
+    // // Invalidate this page from the CVM.
+    // crate::snp::Snp::pvalidate(vaddr.0, 0x1000, false, Tracked(ctx_perm));
+    // // Notify the hypervisor that this page is now valid.
+    // msr_set_page_valid(paddr, false);
+    // PageTable::set_shared_4k(pgtable, Tracked(pgtable_perm), vaddr);
 }
 
 pub fn msr_register_ghcb_gpa(paddr: PhysAddr)
@@ -105,10 +115,9 @@ pub fn current_ghcb() -> (r: (
     ensures
         r.1@.wf(),
         r.1@.is_init(),
-        r.1@.wf_with_val(),
         r.1@.pptr() == r.0@,
 {
-    let (cpu, Tracked(perm)) = CpuData::this_cpu();
+    let (cpu, Tracked(perm)) = DekoCpuCtx::this_cpu();
     let cpu = cpu.borrow(Tracked(&perm.ptr_perm));
 
     // `this_cpu` is causing page fault so the mapping is problematic.

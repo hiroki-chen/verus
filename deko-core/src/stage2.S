@@ -217,12 +217,19 @@ startup_64:
 
   /*
     * Follow the C calling convention for x86-64:
-    *
-    * - Pass &Stage2LaunchInfo as the first argument (%rdi)
+    * - Wrap information as a `Ctx` struct and pass its pointer as the first argument (%rdi)
+    *   -  Store the Stage2Launchinfo pointer in ctx->stage2_info (offset 0)
+    *   -  Store the page table base address in ctx->pgtable (offset 8)
+    * - Pass control to deko_main
     * - Make sure (%rsp + 8) is 16b-aligned when control is transferred
     *   to deko_main
     */
-  movl %ebp, %edi
+  // movl %ebp, %edi
+  // movq $pgtable, %rsi 
+  movq $deko_bsp_ctx, %rdi
+  // Copy ebp to rdi
+  movl %ebp, (%rdi)
+  movq $pgtable, 8(%rdi)
   andq $~0xf, %rsp
   call deko_main
 
@@ -261,6 +268,11 @@ gdt64_end:
 gdt64_desc:
   .word gdt64_end - gdt64 - 1
   .quad gdt64
+
+.align 8
+deko_bsp_ctx:
+  .fill 0x1000, 1, 0
+deko_bsp_ctx_end:
 
 .align 0x1000
 .globl pgtable

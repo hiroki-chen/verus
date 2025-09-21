@@ -112,6 +112,10 @@ pub const SNP_HV_FEATURES_RESP: u64 = 0x81;
 
 pub const TERM_REQ: u64 = 0x100;
 
+/// This defines the layout of the GHCB as specified in the AMD SEV-SNP
+/// documentation; see:
+///
+/// https://www.amd.com/content/dam/amd/en/documents/epyc-technical-docs/specifications/56421.pdf
 #[repr(C)]
 pub struct GuestHostCommucationBlock {
     _reserved: Array<PAtomicU8, 0xcb>,
@@ -223,13 +227,11 @@ impl GuestHostCommucationBlock {
     ) -> (r: Tracked<DekoPointsTo<Self>>)
         requires
             perm.wf(),
-            perm.wf_with_val(),
             perm.is_init(),
             perm.pptr() == ptr@,
             index < perm.value().valid_bitmap()@.len(),
         ensures
             r@.wf(),
-            r@.wf_with_val(),
             r@.is_init(),
             r@.pptr() == ptr@,
     {
@@ -253,7 +255,6 @@ impl GuestHostCommucationBlock {
     ) -> (r: bool)
         requires
             perm.wf(),
-            perm.wf_with_val(),
             perm.pptr() == ptr@,
             (offset >> 3) & 0x3f < 64,
             (offset >> 9 & 0x1) < perm.value().valid_bitmap()@.len(),
@@ -275,14 +276,12 @@ impl GuestHostCommucationBlock {
     ) -> (r: Tracked<DekoPointsTo<Self>>)
         requires
             perm.wf(),
-            perm.wf_with_val(),
             perm.is_init(),
             perm.pptr() == ptr@,
             (offset >> 3) & 0x3f < 64,
             (offset >> 9 & 0x1) < perm.value().valid_bitmap()@.len(),
         ensures
             r@.wf(),
-            r@.wf_with_val(),
             r@.is_init(),
             r@.pptr() == ptr@,
     {
@@ -305,11 +304,9 @@ impl GuestHostCommucationBlock {
         requires
             perm.wf(),
             perm.is_init(),
-            perm.wf_with_val(),
             perm.pptr() == ptr@,
         ensures
             r@.wf(),
-            r@.wf_with_val(),
             r@.is_init(),
             r@.pptr() == ptr@,
     {
@@ -335,7 +332,6 @@ impl GuestHostCommucationBlock {
         if sw_exit_info_1 != 0 {
             vstd::vpanic!("GHCB VMGEXIT failed: {}", sw_exit_info_1);
         }
-
         Tracked(perm)
     }
 
@@ -346,11 +342,9 @@ impl GuestHostCommucationBlock {
         requires
             perm.wf(),
             perm.is_init(),
-            perm.wf_with_val(),
             perm.pptr() == ptr@,
         ensures
             r@.wf(),
-            r@.wf_with_val(),
             r@.is_init(),
             r@.pptr() == ptr@,
     {
@@ -373,11 +367,13 @@ impl GuestHostCommucationBlock {
         Tracked(perm)
     }
 
-    pub fn rdtsc(ptr: DekoPPtr<Self>, Tracked(perm): Tracked<DekoPointsTo<Self>>) -> (r: (u64, Tracked<DekoPointsTo<Self>>))
+    pub fn rdtsc(ptr: DekoPPtr<Self>, Tracked(perm): Tracked<DekoPointsTo<Self>>) -> (r: (
+        u64,
+        Tracked<DekoPointsTo<Self>>,
+    ))
         requires
             perm.wf(),
             perm.is_init(),
-            perm.wf_with_val(),
             perm.pptr() == ptr@,
     {
         let Tracked(perm) = Self::clear(ptr, Tracked(perm));

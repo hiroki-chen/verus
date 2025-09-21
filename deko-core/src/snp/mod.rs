@@ -1,11 +1,11 @@
 use core::sync::atomic::AtomicU32;
 
-use deko_meta::{HeaderRaw, IgvmParamBlock, Stage2LaunchInfo, LOWMEM_END};
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
+use crate::cpu::ctx::DekoCtxPermission;
 use crate::hal::{PlatformApi, PlatformType};
-use crate::mm::paging::{PteFlags, PAGE_SIZE_2M};
+use crate::mm::paging::PteFlags;
 use crate::mm::{
     PageEncryptionMasks, FEATURE_MASK, MAX_PHYS_ADDR, PHYS_ADDR_SIZE, PTE_MASK_PRIVATE,
     PTE_MASK_SHARED,
@@ -47,31 +47,6 @@ fn has_vtom() -> bool {
     snp_status.contains(VTOM)
 }
 
-/// The permission to the physical address in case there are some higher
-/// properties on it; e.g., if this is validated?
-pub tracked struct PSnpVirtAddr {
-    addr: u64,
-    validated: bool,
-}
-
-impl PSnpVirtAddr {
-    pub closed spec fn addr(&self) -> u64 {
-        self.addr
-    }
-
-    pub closed spec fn is_validated(&self) -> bool {
-        self.validated
-    }
-
-    pub proof fn validate(&mut self) {
-        self.validated = true;
-    }
-
-    pub proof fn invalidate(&mut self) {
-        self.validated = false;
-    }
-}
-
 pub exec static SNP_VTOM: OnceCellNoPred<usize>
     ensures
         SNP_VTOM.wf(),
@@ -90,7 +65,6 @@ pub struct Snp;
 
 impl Snp {
     #[inline(always)]
-    #[verifier::external_body]
     fn get_page_encryption_masks(&self) -> PageEncryptionMasks {
         if has_vtom() {
             vstd::vpanic!("We do not support VTOM yet");
@@ -111,7 +85,7 @@ impl PlatformApi for Snp {
         PlatformType::Snp
     }
 
-    fn init_platform(&self, header: &Stage2LaunchInfo) {
+    fn init_platform(&self, header: Stage2LaunchInfo) {
         // Set the top of the virtual memory.
         let vtom = header.vtom as usize;
         SNP_VTOM.init(vtom);
@@ -155,37 +129,33 @@ impl PlatformApi for Snp {
         FEATURE_MASK.init(feature_mask);
     }
 
-    #[verifier::external_body]
     fn validate_memory(
         &self,
+        Tracked(ctx_perm): Tracked<&mut DekoCtxPermission>,
         heap_start: u64,
         heap_end: u64,
-    ) -> bool/*
-        requires
-            self.wf(),
-            heap_start.wf(),
-            heap_end.wf(),
-            heap_end@ > heap_start@,
-            heap_start@ % 0x1000 == 0,
-            heap_end@ % 0x1000 == 0,
-        */
-     {
+    ) -> bool {
         let mut cur = heap_start;
 
         while cur < heap_end
-            // invariant
-            //     start <= heap_end,
-            //     self.wf(),
-            //     start % 0x1000 == 0,
-            //     heap_start % 0x1000 == 0,
-            //     heap_end % 0x1000 == 0,
-            //     heap_end <= LOWMEM_END as u64,
-            // decreases heap_end - start,
+            invariant
+                cur <= heap_end,
+                self.wf(),
+                cur % 0x1000 == 0,
+                heap_start % 0x1000 == 0,
+                heap_end % 0x1000 == 0,
+                heap_end <= LOWMEM_END as u64,
+            decreases heap_end - cur,
         {
             // check if this address is aligned with 2MB page?
             let addr = VirtAddr::new(cur);
 
-            let (ret, cf) = Self::pvalidate(addr.0, 0x1000, true, Tracked(()));
+            proof {
+                // Prove that the canonicalized address is also aligned to 4K.
+                VirtAddr::lemma_make_canonical_preserves_alignment_4k(cur, addr@);
+            }
+
+            let (ret, cf) = Self::pvalidate(addr.0, 0x1000, true, Tracked(ctx_perm));
             cur += 0x1000;
         }
 

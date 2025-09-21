@@ -6,17 +6,15 @@
 //! - Kernel page frame allocator that allocates physical pages.
 //! - Some high level allocators that allocates pages from the page frame allocators.
 //! - A memory manager that manages the page tables and memory regions.
-pub mod __private;
 pub mod frame_allocator;
 pub mod paging;
 
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
+use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
-use crate::mm::paging::{
-    strip_confidentiality_bits, strip_shared_address_bits, PageTable, PteFlags,
-};
+use crate::mm::paging::{PageTable, PageTableBehavior, PteFlags};
 
 verus! {
 
@@ -96,30 +94,35 @@ pub fn init_frame_allocator(heap_start: &VirtAddr, heap_end: &VirtAddr)
 
 // TODO: Add CPU core permission.
 #[inline(always)]
-pub fn virt_to_phys(vaddr: VirtAddr) -> (paddr: PhysAddr)
-    requires  //
-// vaddr.wf(),
-
+pub fn virt_to_phys(
+    ctx: DekoPPtr<DekoCpuCtx>,
+    Tracked(ctx_perm): Tracked<&DekoCpuCtxPermission>,
+    vaddr: VirtAddr,
+) -> (paddr: PhysAddr)
+    requires
+        vaddr.wf(),
     ensures
         paddr.wf(),
 {
-    PageTable::virt_to_frame(vaddr).address()
+    let private_bit = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).private_bit();
+    let shared_bit = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).shared_bit();
+
+    PageTable::virt_to_frame(vaddr).address(private_bit, shared_bit)
 }
 
 #[inline(always)]
-pub fn phys_to_virt(paddr: PhysAddr) -> (vaddr: VirtAddr)
+pub fn phys_to_virt(
+    ctx: DekoPPtr<DekoCpuCtx>,
+    Tracked(ctx_perm): Tracked<&DekoCpuCtxPermission>,
+    paddr: PhysAddr,
+) -> (vaddr: VirtAddr)
     requires
         paddr.wf(),
     ensures
 // vaddr.wf(),
 
 {
-    if let Some(ms) = DEKO_MAPPING_SPACE.get() {
-        if let Some(vaddr) = ms.phys_to_virt(paddr) {
-            return vaddr;
-        }
-    }
-    vstd::vpanic!("fatal runtime error!");
+    ctx.borrow(Tracked(&ctx_perm.ptr_perm)).kernel_mapping().phys_to_virt(paddr)
 }
 
 pub tracked struct DekoMemoryRegionPermission;
