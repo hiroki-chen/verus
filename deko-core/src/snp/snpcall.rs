@@ -81,7 +81,7 @@ impl Snp {
         // 1. First we set up the GHCB page for this CPU.
         // Get the page table from the context that was passed in
         let bsp_pgtable = ctx.borrow(Tracked(&ctx_perm.deko_ctx_ptr_perm)).pgtable;
-        let bsp_pgtable_perm = &ctx_perm.pgtable_perm;
+        let tracked bsp_pgtable_perm = &ctx_perm.pgtable_perm;
         let (ghcb, Tracked(ghcb_perm)) = Box::<GuestHostCommucationBlock>::new_zeroed(
             &DEKO_FRAME_ALLOCATOR.0,
         );

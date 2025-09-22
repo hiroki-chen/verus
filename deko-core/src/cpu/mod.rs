@@ -284,8 +284,12 @@ with_permission! {
 
 impl DekoCpuCtxPermission {
     pub open spec fn wf_with(&self, cpu_data: DekoPPtr<DekoCpuCtx>) -> bool {
-        true  // todo:" Implement me!"
-
+        &&& self.ptr_perm.pptr() == cpu_data@
+        &&& self.ptr_perm.is_init()
+        &&& self.ptr_perm.wf()
+        &&& self.pgtable_perm.wf_with_perm()
+        &&& self.ghcb_perm.is_init()
+        &&& self.ghcb_perm.wf()
     }
 }
 
@@ -364,6 +368,8 @@ impl Default for CpuidTable {
             r.reserved_2 == 0,
             r@ =~= Seq::new(CPUID_MAX_COUNT as nat, |i| CpuidFn::empty()),
     {
+        broadcast use deko_std::array::lemma_sized_t_makes_sized_array;
+
         CpuidTable { count: 0, reserved_1: 0, reserved_2: 0, func: Array::fill(CpuidFn::default()) }
     }
 }
@@ -422,6 +428,10 @@ impl DekoCpuCtx {
 
     pub closed spec fn private_bit_spec(&self) -> u64 {
         self.private_bit
+    }
+
+    pub closed spec fn pgtable_spec(&self) -> DekoPPtr<PageTable> {
+        self.pgtable
     }
 
     #[verifier::when_used_as_spec(shared_bit_spec)]
@@ -492,6 +502,8 @@ impl DekoCpuCtx {
         ensures
             r.wf(),
     {
+        broadcast use deko_std::array::lemma_sized_t_makes_sized_array;
+        
         DekoCpuCtx {
             magic: CPU_AREA_MAGIC,
             ghcb,
@@ -592,6 +604,9 @@ impl DekoCpuCtx {
         DekoPPtr<PageTable>,
         Tracked<&'a PageTablePermission>,
     ))
+        requires
+            ctx_perm.pgtable_perm.pgtable_perm.pptr() == self.pgtable_spec()@,
+            ctx_perm.pgtable_perm.wf(),
         ensures
             r.1@.pgtable_perm.pptr() == r.0@,
             r.1@.wf(),

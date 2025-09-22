@@ -98,8 +98,9 @@ macro_rules! deko_bitflags {
             }
 
             impl [<$name Flags>] {
-                pub proof fn lemma_from_bits_single(flag: $name)
+                pub broadcast proof fn lemma_from_bits_single(flag: $name)
                     ensures
+                        #[trigger]
                         from_bits(flag.bit()) =~= set![flag],
                 {
                     admit();

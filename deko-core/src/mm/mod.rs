@@ -101,6 +101,7 @@ pub fn virt_to_phys(
 ) -> (paddr: PhysAddr)
     requires
         vaddr.wf(),
+        ctx_perm.wf_with(ctx),
     ensures
         paddr.wf(),
 {
@@ -117,6 +118,7 @@ pub fn phys_to_virt(
     paddr: PhysAddr,
 ) -> (vaddr: VirtAddr)
     requires
+        ctx_perm.wf_with(ctx),
         paddr.wf(),
     ensures
 // vaddr.wf(),
