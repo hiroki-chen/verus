@@ -303,10 +303,11 @@ pub(crate) trait AstVisitor<R: Returner, Err, Scope: Scoper> {
                 let e1 = self.visit_expr(e)?;
                 R::ret(|| expr_new(ExprX::Loc(R::get(e1))))
             }
-            ExprX::Call(call_target, exprs) => {
+            ExprX::Call(call_target, exprs, opt_e) => {
                 let ct = self.visit_call_target(call_target)?;
                 let es = self.visit_exprs(exprs)?;
-                R::ret(|| expr_new(ExprX::Call(R::get(ct), R::get_vec_a(es))))
+                let oe = self.visit_opt_expr(opt_e)?;
+                R::ret(|| expr_new(ExprX::Call(R::get(ct), R::get_vec_a(es), R::get_opt(oe))))
             }
             ExprX::Ctor(dt, id, binders, opt_e) => {
                 let bs = self.visit_binders_expr(binders)?;
@@ -620,14 +621,9 @@ pub(crate) trait AstVisitor<R: Returner, Err, Scope: Scoper> {
                 let p = self.visit_place(p)?;
                 R::ret(|| expr_new(ExprX::BorrowMut(R::get(p))))
             }
-            ExprX::BorrowMutPhaseOne(p) => {
+            ExprX::TwoPhaseBorrowMut(p) => {
                 let p = self.visit_place(p)?;
-                R::ret(|| expr_new(ExprX::BorrowMutPhaseOne(R::get(p))))
-            }
-            ExprX::BorrowMutPhaseTwo(p, e) => {
-                let p = self.visit_place(p)?;
-                let e = self.visit_expr(e)?;
-                R::ret(|| expr_new(ExprX::BorrowMutPhaseTwo(R::get(p), R::get(e))))
+                R::ret(|| expr_new(ExprX::TwoPhaseBorrowMut(R::get(p))))
             }
             ExprX::AssumeResolved(e, t) => {
                 let e = self.visit_expr(e)?;
@@ -637,6 +633,13 @@ pub(crate) trait AstVisitor<R: Returner, Err, Scope: Scoper> {
             ExprX::ReadPlace(p, read_type) => {
                 let p = self.visit_place(p)?;
                 R::ret(|| expr_new(ExprX::ReadPlace(R::get(p), *read_type)))
+            }
+            ExprX::UseLeftWhereRightCanHaveNoAssignments(e1, e2) => {
+                let e1 = self.visit_expr(e1)?;
+                let e2 = self.visit_expr(e2)?;
+                R::ret(|| {
+                    expr_new(ExprX::UseLeftWhereRightCanHaveNoAssignments(R::get(e1), R::get(e2)))
+                })
             }
         }
     }
