@@ -9,7 +9,7 @@ use crate::cpu::{
     DekoCpuCtx, DekoCpuCtxPermission, PerCpuAreas, PerCpuShared, CPUID_MAX_COUNT, CPU_AREA_MAGIC,
     PERCPU_AREAS,
 };
-use crate::mm::paging::{PageTable, PageTableBehavior, PteFlags};
+use crate::mm::paging::{PageTable, PteFlags};
 use crate::mm::{phys_to_virt, virt_to_phys, DEKO_FRAME_ALLOCATOR};
 use crate::snp::ghcb::msr_register_ghcb_gpa;
 

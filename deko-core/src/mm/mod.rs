@@ -14,7 +14,7 @@ use vstd::prelude::*;
 
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
-use crate::mm::paging::{PageTable, PageTableBehavior, PteFlags};
+use crate::mm::paging::{PageTable, PteFlags};
 
 verus! {
 
@@ -108,7 +108,10 @@ pub fn virt_to_phys(
     let private_bit = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).private_bit();
     let shared_bit = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).shared_bit();
 
-    PageTable::virt_to_frame(vaddr).address(private_bit, shared_bit)
+    PageTable::virt_to_frame(vaddr, private_bit, Tracked(&ctx_perm.pgtable_perm)).address(
+        private_bit,
+        shared_bit,
+    )
 }
 
 #[inline(always)]

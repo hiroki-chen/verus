@@ -12,7 +12,7 @@ use vstd::cell::{PCell, PointsTo};
 use vstd::prelude::*;
 
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
-use crate::mm::paging::{PageTable, PageTableBehavior, PageTablePermission, PteFlags, PTE_BASE};
+use crate::mm::paging::{PageTable, PageTablePermission, PteFlags};
 use crate::mm::virt_to_phys;
 
 verus! {
@@ -503,7 +503,7 @@ impl DekoCpuCtx {
             r.wf(),
     {
         broadcast use deko_std::array::lemma_sized_t_makes_sized_array;
-        
+
         DekoCpuCtx {
             magic: CPU_AREA_MAGIC,
             ghcb,

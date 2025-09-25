@@ -12,8 +12,7 @@ pub struct Array<T: WellFormed, const N: usize>(pub [T; N]);
 // Prove it later.
 pub broadcast proof fn lemma_sized_t_makes_sized_array<T: Sized + WellFormed, const N: usize>()
     ensures
-        #[trigger]
-        Array::<T, N>::size_wf(),
+        #[trigger] Array::<T, N>::size_wf(),
 {
     admit();
 }

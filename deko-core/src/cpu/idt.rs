@@ -79,7 +79,6 @@ const IDT_TYPE_INT: u8 = 0x0e;
 
 const IDT_TYPE_TRAP: u8 = 0x0f;
 
-
 pub fn create_early_idt() -> (arr: Array<IdtEntry, 256>)
     ensures
         arr.wf(),

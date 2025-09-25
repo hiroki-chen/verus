@@ -61,16 +61,15 @@ impl<V: WellFormed> DekoPPtr<V> {
     /// are only accessed by the CPU core that owns them.
     pub uninterp spec fn bound_cpu_id(&self) -> nat;
 
-    /// Casts (re-interpret) this pointer into a pointer of another type `T`. The size and alignment
-    /// of `T` must be the same as `V`.
+    /// Casts (re-interpret) this pointer into a pointer of another type `T`.
+    ///
+    /// The trait must be implemented between `V` and `T` to ensure that the cast
+    /// is (semantically) valid.
     ///
     /// Since this function does not explicitly creates/consumes any permission tokens, it is safe to use
     /// this function to create multiple aliases to the same memory location.
     #[inline]
-    pub fn cast_into<T: Sized + WellFormed>(&self) -> (r: DekoPPtr<T>)
-        requires
-            core::mem::size_of::<V>() == core::mem::size_of::<T>(),
-            core::mem::align_of::<V>() == core::mem::align_of::<T>(),
+    pub fn cast_into<T>(&self) -> (r: DekoPPtr<T>) where V: SafeCastInto<T>, T: WellFormed + Sized
         ensures
             r.addr() == self.addr(),
     {

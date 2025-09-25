@@ -57,9 +57,6 @@ pub const VADDR_UPPER_MASK: u64 = 0xFFFF_8000_0000_0000u64;
 #[verifier::inline]
 pub const VADDR_RANGE_SIZE: u64 = 0x1_0000_0000_0000u64;
 
-/// Base virtual address for page table self-mapping.
-pub const PTE_BASE: VirtAddr = VirtAddr(0xFFFFF68000000000);
-
 /// Checks if bit 47 (the sign bit) is set in an address.
 ///
 /// This determines whether an address should be sign-extended to the upper
@@ -496,6 +493,17 @@ impl FixedAddressMappingRange {
 }
 
 impl MappingSpace {
+    pub open spec fn phys_to_virt_spec(&self, paddr: PhysAddr) -> VirtAddr
+        recommends
+            self.kernel.in_range_spec(paddr) || self.physmap.in_range_spec(paddr),
+    {
+        if self.kernel.in_range_spec(paddr) {
+            self.kernel.phys_to_virt_spec(paddr)
+        } else {
+            self.physmap.phys_to_virt_spec(paddr)
+        }
+    }
+
     /// Translates a physical address using the appropriate mapping range.
     ///
     /// This function automatically selects between kernel and physmap ranges
@@ -526,6 +534,7 @@ impl MappingSpace {
             self.kernel.in_range_spec(paddr) || self.physmap.in_range_spec(paddr),
         ensures
             vaddr.wf(),
+            vaddr == self.phys_to_virt_spec(paddr),
     {
         if self.kernel.in_range(paddr) {
             return self.kernel.phys_to_virt(paddr);
