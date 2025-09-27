@@ -134,17 +134,23 @@ impl PlatformApi for Snp {
         Tracked(ctx_perm): Tracked<&mut DekoCtxPermission>,
         heap_start: u64,
         heap_end: u64,
-    ) -> bool {
+    ) -> (r: bool)
+        ensures
+            ctx_perm.wf(),
+            old(ctx_perm).deko_ctx_ptr_perm.pptr() === ctx_perm.deko_ctx_ptr_perm.pptr(),
+    {
         let mut cur = heap_start;
 
         while cur < heap_end
             invariant
                 cur <= heap_end,
                 self.wf(),
+                ctx_perm.wf(),
                 cur % 0x1000 == 0,
                 heap_start % 0x1000 == 0,
                 heap_end % 0x1000 == 0,
                 heap_end <= LOWMEM_END as u64,
+                old(ctx_perm).deko_ctx_ptr_perm.pptr() === ctx_perm.deko_ctx_ptr_perm.pptr(),
             decreases heap_end - cur,
         {
             // check if this address is aligned with 2MB page?

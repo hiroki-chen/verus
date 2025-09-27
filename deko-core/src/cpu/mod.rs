@@ -287,9 +287,15 @@ impl DekoCpuCtxPermission {
         &&& self.ptr_perm.pptr() == cpu_data@
         &&& self.ptr_perm.is_init()
         &&& self.ptr_perm.wf()
+        &&& self.ptr_perm.value().kernel_mapping().wf()
         &&& self.pgtable_perm.wf_with_perm()
+        &&& self.pgtable_perm.pgtable_perm.pptr() == self.ptr_perm.value().pgtable_spec()@
+        &&& self.pgtable_perm.mapping_space === self.ptr_perm.value().kernel_mapping_spec()
+        &&& self.pgtable_perm.private_bit == self.ptr_perm.value().private_bit_spec()
+        &&& self.pgtable_perm.shared_bit == self.ptr_perm.value().shared_bit_spec()
         &&& self.ghcb_perm.is_init()
         &&& self.ghcb_perm.wf()
+        &&& self.ghcb_perm.pptr() == self.ptr_perm.value().ghcb_spec()@
     }
 }
 

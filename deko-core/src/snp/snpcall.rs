@@ -245,10 +245,11 @@ impl Snp {
     ) -> (r: (u64, bool))
         requires
             psize == 0x1000 || psize == 0x200000,  // Either 4K or 2M page.
-            vaddr % 0x1000
-                == 0,
-    // todo: add more requirements here since we can track permission of the memory.
-
+            vaddr % 0x1000 == 0,
+            old(perm).wf(),
+        ensures
+            perm.wf(),
+            old(perm).deko_ctx_ptr_perm.pptr() === perm.deko_ctx_ptr_perm.pptr(),
     {
         let rax = vaddr;
         let ret: u64;
@@ -284,15 +285,16 @@ impl Snp {
     pub fn rmpadjust(
         vaddr: u64,
         psize: u64,
-        // attr: __RmpAttribute,
-        Tracked(core): Tracked<DekoCpuCore>,
-        Tracked(core2): Tracked<DekoCpuCore>,
-        Tracked(perm): Tracked<()>,
+        Tracked(perm): Tracked<&mut DekoCtxPermission>,
     ) -> (ret: u64)
         requires
-            true,
+            old(perm).wf(),
         ensures
-            true,
+            perm.wf(),
+            old(perm).deko_ctx_ptr_perm.pptr()
+                === perm.deko_ctx_ptr_perm.pptr(),
+    // todo: old(perm).rmpadjust_spec == perm.
+
     {
         let ret: u64;
 

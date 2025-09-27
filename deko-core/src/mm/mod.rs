@@ -92,7 +92,6 @@ pub fn init_frame_allocator(heap_start: &VirtAddr, heap_end: &VirtAddr)
     DEKO_FRAME_ALLOCATOR.init(phys_start.0, heap_end.0 - heap_start.0);
 }
 
-// TODO: Add CPU core permission.
 #[inline(always)]
 pub fn virt_to_phys(
     ctx: DekoPPtr<DekoCpuCtx>,
@@ -102,6 +101,7 @@ pub fn virt_to_phys(
     requires
         vaddr.wf(),
         ctx_perm.wf_with(ctx),
+        ctx_perm.pgtable_perm.map_valid(vaddr, 0),
     ensures
         paddr.wf(),
 {
@@ -121,8 +121,10 @@ pub fn phys_to_virt(
     paddr: PhysAddr,
 ) -> (vaddr: VirtAddr)
     requires
-        ctx_perm.wf_with(ctx),
         paddr.wf(),
+        ctx_perm.wf_with(ctx),
+        ctx_perm.ptr_perm.value().kernel_mapping().kernel.in_range_spec(paddr)
+            || ctx_perm.ptr_perm.value().kernel_mapping().physmap.in_range_spec(paddr),
     ensures
 // vaddr.wf(),
 

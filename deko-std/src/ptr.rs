@@ -151,7 +151,7 @@ impl<V: WellFormed> DekoPPtr<V> {
     }
 
     /// Use `addr()` instead
-    pub closed spec fn spec_addr(p: DekoPPtr<V>) -> usize {
+    pub open spec fn spec_addr(p: DekoPPtr<V>) -> usize {
         p@.addr()
     }
 
@@ -596,7 +596,7 @@ impl<V: WellFormed> DekoPointsTo<V> {
 impl<T: WellFormed> View for DekoPPtr<T> {
     type V = PPtr<T>;
 
-    closed spec fn view(&self) -> Self::V {
+    open spec fn view(&self) -> Self::V {
         self.0
     }
 }

@@ -11,16 +11,11 @@ pub enum Foo {
 }
 
 impl Foo {
-    fn foo()
-        requires
-            false,  // <- always true.
-    {
-        let a = Foo::Apple(123);
-        let b = Foo::Banana(234);
+    fn foo() {
+        let a = vstd::simple_pptr::PPtr::<u64>::from_addr(0x123);
+        let b = vstd::simple_pptr::PPtr::<u64>(a.addr(), core::marker::PhantomData);
 
-        proof {
-            assert(a == b);
-        }
+        assert(a == b);
     }
 }
 

@@ -233,7 +233,7 @@ pub trait PlatformApi: Sync + Send + WellFormed {
         Tracked(ctx): Tracked<&mut DekoCtxPermission>,
         heap_start: u64,
         heap_end: u64,
-    ) -> bool
+    ) -> (r: bool)
         requires
             self.wf(),
             old(ctx).wf(),
@@ -241,6 +241,8 @@ pub trait PlatformApi: Sync + Send + WellFormed {
             heap_start % 0x1000 == 0,
             heap_end % 0x1000 == 0,
             heap_end <= LOWMEM_END as u64,
+        ensures
+            ctx.wf(),
     {
         true
     }
@@ -305,18 +307,19 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
 
     // Set up the kernel mapping: now identity
     // an automatic invariant for OnceCell.
-    let virt_start = VirtAddr::from(u64::from(STAGE2_START));
-    let virt_end = VirtAddr::from(u64::from(header.stage2_end));
-    let phys_start = PhysAddr::from(u64::from(STAGE2_START));
+    let virt_start = VirtAddr(u64::from(STAGE2_START));
+    let virt_end = VirtAddr(u64::from(header.stage2_end));
+    let phys_start = PhysAddr(u64::from(STAGE2_START));
     let kernel_mapping = FixedAddressMappingRange::new(virt_start, virt_end, phys_start);
 
     // SVSM ref: Create a simple heap mapping using the lower memory region.
-    let zero = VirtAddr::from(0u64);
-    let lowmem = VirtAddr::from(LOWMEM_END as u64);
+    let zero = VirtAddr(0u64);
+    let lowmem = VirtAddr(LOWMEM_END as u64);
     let heap_mapping = FixedAddressMappingRange::new(zero, lowmem, PhysAddr::from(0u64));
 
-    // dispatch_to_platform!(validate_memory, Tracked(&mut ctx_perm), 0, LOWMEM_END as u64);
     snp.validate_memory(Tracked(&mut ctx_perm), 0, LOWMEM_END as u64);
+
+    assert(ctx_perm.wf());
 
     let mapping_space = MappingSpace { kernel: kernel_mapping, physmap: heap_mapping };
     DEKO_MAPPING_SPACE.init(mapping_space);
@@ -331,11 +334,6 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
         crate::theories::stage2_heap_valid_params();
 
         let heap_start_val = heap_start@;
-
-        // assert((heap_start_val & 0x0000_FFFF_FFFF_F000u64) >> 9 == 0x80u64) by (bit_vector)
-        //     requires
-        //         (heap_start_val == 0x10000),
-        // ;
     }
 
     init_frame_allocator(&heap_start, &heap_end);
