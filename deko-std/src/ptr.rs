@@ -137,9 +137,10 @@ impl<V: WellFormed> DekoPPtr<V> {
         requires
             perm.pptr() == self@,
             perm.is_init(),
-            perm.mem_wf(),
+            perm.wf(),
         ensures
             *v == perm.value(),
+            v.wf(),
         opens_invariants none
         no_unwind
     {

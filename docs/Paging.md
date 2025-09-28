@@ -1,6 +1,6 @@
 # Page Table
 
-The memory layout is built from SVSM's IGVM builder, so the initial page table is just an identity mapping that maps virtual address to their physical addresses except that they are sign extended to make them cacnonical in x86_64 mode.
+The memory layout is constructed by the IGVM builder, and the initial page table is just an identity mapping that maps virtual address to their physical addresses except that they are sign extended to make them cacnonical in x86_64 mode.
 
 The page table is also self-mapped to ensure that we can modify it through a virtual address that points to its physical address. This is often done by mapping the 490th entry of the root page table (PML) to its own physical address. The virtual address of the PML is `PTE_BASE` so we can modify "itself".
 
@@ -38,3 +38,6 @@ You modify the page table entries through their virtual addresses but the pointe
                |                          |                                                                                                           
                +--------------------------+                                                                                                           
 ```
+## Abstract Model of the Page Table and Verification
+
+An "abstract model" in Verus is a purely mathematical specification We'll use Verus's built-in spec types, primarily `Map`, to define what a page table is in terms of its behavior, completely ignoring implementation details like the 4-level structure.
