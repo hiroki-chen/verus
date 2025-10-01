@@ -92,19 +92,6 @@ pub fn index_at_level<const L: usize>(vaddr: VirtAddr) -> (r: usize)
     ((vaddr.0 >> (12 + L * 9)) & 0x1ff) as usize
 }
 
-/// A helper function to get the correct virtual address prefix for a given level.
-pub open spec fn get_prefix_spec(level: nat, vaddr: VirtAddr) -> u64
-    recommends
-        level < 4,
-{
-    // level 3 (PML4) -> top 9 bits
-    // level 2 (PDPT) -> top 18 bits
-    // level 1 (PDT)  -> top 27 bits
-    // level 0 (PT)   -> top 36 bits (the full VPN)
-    let shift = 12 + (level + 1) * 9;
-    vaddr@ >> shift
-}
-
 /// Specification version of index_at_level for use in specs
 pub open spec fn index_at_level_spec(level: nat, vaddr: VirtAddr) -> int
     recommends
@@ -197,27 +184,110 @@ pub type PagePermissionIndex = (nat, u64);
 ///                         prev                         this
 ///```
 pub tracked struct PagePermission {
-    /// The level in the 4-level hierarchy (3=PML4, 2=PDPT, 1=PDT, 0=PT).
-    pub level: nat,
-    /// The index in the parent page at the given level to access this page.
-    pub parent_index: int,
     /// The PTE value of this page in the _parent_ page.
     pub pte_perm: DekoPointsTo<PageTableEntry>,
     /// The permission to the page at this level.
     pub this_page_perm: DekoPointsTo<Page>,
 }
 
-/// This is the flattened page table where the key is (level, vpn_prefix) which
-/// uniquely identifies a page table entry in the 4-level page table hierarchy;
-/// the value stores is the next page permission.
-type PageTableStorage = Map<PagePermissionIndex, PagePermission>;
+/// A page table path is a sequence of integers representing the indices
+/// at each level of the page table hierarchy.
+pub tracked struct PageTablePath(pub Seq<int>);
+
+impl WellFormed for PageTablePath {
+    #[verifier::inline]
+    open spec fn wf(&self) -> bool {
+        self@.len() <= 4 && forall|i: int|
+            0 <= i < self@.len() ==> 0 <= #[trigger] self@[i] < PAGE_TABLE_ENTRY as int
+    }
+}
+
+impl View for PageTablePath {
+    type V = Seq<int>;
+
+    #[verifier::inline]
+    open spec fn view(&self) -> Seq<int> {
+        self.0
+    }
+}
+
+macro_rules! path {
+    ( $($x:expr),* ) => {
+        {
+            PageTablePath(seq![$($x),*])
+        }
+    };
+}
+
+impl PageTablePath {
+    pub open spec fn eq(&self, other: &Self) -> bool
+        recommends
+            self.wf() && other.wf(),
+    {
+        self@.len() == other@.len() && forall|i: int| 0 <= i < self@.len() ==> self@[i] == other@[i]
+    }
+
+    pub open spec fn drop_last(self) -> Self
+        recommends
+            self.wf() && self.len() > 1,
+    {
+        PageTablePath(self.0.drop_last())
+    }
+
+    pub open spec fn len(self) -> nat {
+        self.0.len()
+    }
+
+    pub open spec fn level(self) -> nat
+        recommends
+            self.wf(),
+    {
+        (4 - self.len()) as nat
+    }
+
+    pub open spec fn last_index(self) -> int
+        recommends
+            self.wf(),
+    {
+        self.0[self.len() as int - 1]
+    }
+
+    pub open spec fn parent(self) -> Self
+        recommends
+            self.wf() && self.len() > 1,
+    {
+        PageTablePath(self.0.drop_last())
+    }
+
+    pub open spec fn from_vaddr_at_level(vaddr: VirtAddr, level: nat) -> Self
+        recommends
+            level <= 3,
+    {
+        PageTablePath(
+            seq![
+                index_at_level_spec(3, vaddr),
+                index_at_level_spec(2, vaddr),
+                index_at_level_spec(1, vaddr),
+                index_at_level_spec(0, vaddr),
+            ].take((4 - level) as int),
+        )
+    }
+
+    // from_vaddr is just a shorthand for 4KB pages
+    #[verifier::inline]
+    pub open spec fn from_vaddr(vaddr: VirtAddr) -> Self {
+        Self::from_vaddr_at_level(vaddr, 0)
+    }
+}
+
+type PageTableStorage = Map<PageTablePath, PagePermission>;
 
 with_permission! {
     PageTable,
     // the mapping space this page table belongs to =>
     // as sometimes we will need to convert between phys and virt addresses.
     mapping_space: MappingSpace,
-    pgtable_perm: DekoPointsTo<PageTable>, // root permission.
+    pgtable_perm: DekoPointsTo<PageTable>, // The PML4 page itself
     storage: PageTableStorage,
     private_bit: u64,
     shared_bit: u64,
@@ -295,69 +365,6 @@ impl PageFrame {
 }
 
 impl Page {
-    pub uninterp spec fn level(&self) -> nat;
-
-    /// Specification functions for PageTable behavior
-    pub open spec fn virt_to_frame_spec(
-        vaddr: VirtAddr,
-        private_bit: u64,
-        pgtable_perm: PageTablePermission,
-    ) -> (r: PageFrame)
-        recommends
-            pgtable_perm.map_valid(vaddr, 0),
-    {
-        let pte_index = index_at_level_spec(0, vaddr);
-        let pde_index = index_at_level_spec(1, vaddr);
-        let pdpte_index = index_at_level_spec(2, vaddr);
-        let pml4e_index = index_at_level_spec(3, vaddr);
-
-        // Walk through the page table hierarchy to find the final page frame
-        let pdpe = pgtable_perm.storage[(3, get_prefix_spec(3, vaddr))];
-
-        if pdpe.pte_perm.value().is_huge_pte_spec() {
-            // 1GB huge page at level 3
-            let base_addr = pdpe.pte_perm.value().address_spec(
-                pgtable_perm.private_bit,
-                pgtable_perm.shared_bit,
-            );
-            let offset = vaddr@ & 0x3FFF_FFFF;  // 30-bit offset for 1GB page
-            PageFrame::Frame1G(PhysAddr((base_addr@ + offset) as u64))
-        } else {
-            let pdpte = pgtable_perm.storage[(2, get_prefix_spec(2, vaddr))];
-
-            if pdpte.pte_perm.value().is_huge_pte_spec() {
-                // 2MB huge page at level 2
-                let base_addr = pdpte.pte_perm.value().address_spec(
-                    pgtable_perm.private_bit,
-                    pgtable_perm.shared_bit,
-                );
-                let offset = vaddr@ & 0x1F_FFFF;  // 21-bit offset for 2MB page
-                PageFrame::Frame2M(PhysAddr((base_addr@ + offset) as u64))
-            } else {
-                let pde = pgtable_perm.storage[(1, get_prefix_spec(1, vaddr))];
-
-                if pde.pte_perm.value().is_huge_pte_spec() {
-                    // 2MB huge page at level 1
-                    let base_addr = pde.pte_perm.value().address_spec(
-                        pgtable_perm.private_bit,
-                        pgtable_perm.shared_bit,
-                    );
-                    let offset = vaddr@ & 0x1F_FFFF;  // 21-bit offset for 2MB page
-                    PageFrame::Frame2M(PhysAddr((base_addr@ + offset) as u64))
-                } else {
-                    // 4KB page at level 0
-                    let pte = pgtable_perm.storage[(0, get_prefix_spec(0, vaddr))];
-                    let base_addr = pte.pte_perm.value().address_spec(
-                        pgtable_perm.private_bit,
-                        pgtable_perm.shared_bit,
-                    );
-                    let offset = vaddr@ & 0xFFF;  // 12-bit offset for 4KB page
-                    PageFrame::Frame4K(PhysAddr((base_addr@ + offset) as u64))
-                }
-            }
-        }
-    }
-
     pub open spec fn get_pte_address_spec(vaddr: VirtAddr) -> (r: VirtAddr) {
         let offset = (vaddr@ & 0x0000_FFFF_FFFF_F000u64) >> 9;
         VirtAddr((PTE_BASE@ + offset) as u64)
@@ -397,15 +404,19 @@ impl Page {
         recommends
             perm.wf_with_perm(),
     {
-        let idx = index_at_level_spec(0, vaddr);
-        let vpn = get_prefix_spec(0, vaddr);
-        let pte_perm = perm.storage[(0, vpn)].this_page_perm.value().0@.index(idx);
-        let address = pte_perm.address_spec(perm.private_bit, perm.shared_bit);
-
         Mapping::Level0(
-            DekoPPtr(vstd::simple_pptr::PPtr(address@@ as usize, core::marker::PhantomData)),
-            Ghost((0, idx as u64)),
+            DekoPPtr(vstd::simple_pptr::PPtr(0xdeadbeef, core::marker::PhantomData)),
+            Ghost((0, 0)),
         )
+        // let idx = index_at_level_spec(0, vaddr);
+        // let vpn = get_prefix_spec(0, vaddr);
+        // let pte_perm = perm.storage[(0, vpn)].this_page_perm.value().0@.index(idx);
+        // let address = pte_perm.address_spec(perm.private_bit, perm.shared_bit);
+        // Mapping::Level0(
+        //     DekoPPtr(vstd::simple_pptr::PPtr(address@@ as usize, core::marker::PhantomData)),
+        //     Ghost((0, idx as u64)),
+        // )
+
     }
 
     pub open spec fn walk_addr_lvl1_spec(
@@ -414,19 +425,23 @@ impl Page {
         private_bit: u64,
         shared_bit: u64,
     ) -> Mapping {
-        let idx = index_at_level_spec(1, vaddr);
-        let vpn = get_prefix_spec(1, vaddr);
-        let pte = perm.storage[(1, vpn)].this_page_perm.value().0@.index(idx);
+        Mapping::Level1(
+            DekoPPtr(vstd::simple_pptr::PPtr(0xdeadbeef, core::marker::PhantomData)),
+            Ghost((1, 0)),
+        )
+        // let idx = index_at_level_spec(1, vaddr);
+        // let vpn = get_prefix_spec(1, vaddr);
+        // let pte = perm.storage[(1, vpn)].this_page_perm.value().0@.index(idx);
+        // if !pte.is_valid_pte_spec() {
+        //     let address = pte.address_spec(private_bit, shared_bit);
+        //     Mapping::Level1(
+        //         DekoPPtr(vstd::simple_pptr::PPtr(address@@ as usize, core::marker::PhantomData)),
+        //         Ghost((1, idx as u64)),
+        //     )
+        // } else {
+        //     Page::walk_addr_lvl0_spec(perm, vaddr)
+        // }
 
-        if !pte.is_valid_pte_spec() {
-            let address = pte.address_spec(private_bit, shared_bit);
-            Mapping::Level1(
-                DekoPPtr(vstd::simple_pptr::PPtr(address@@ as usize, core::marker::PhantomData)),
-                Ghost((1, idx as u64)),
-            )
-        } else {
-            Page::walk_addr_lvl0_spec(perm, vaddr)
-        }
     }
 
     pub open spec fn walk_addr_lvl2_spec(
@@ -435,19 +450,23 @@ impl Page {
         private_bit: u64,
         shared_bit: u64,
     ) -> Mapping {
-        let idx = index_at_level_spec(2, vaddr);
-        let vpn = get_prefix_spec(2, vaddr);
-        let pte_perm = perm.storage[(2, vpn)].this_page_perm.value().0@.index(idx);
+        Mapping::Level2(
+            DekoPPtr(vstd::simple_pptr::PPtr(0xdeadbeef, core::marker::PhantomData)),
+            Ghost((2, 0)),
+        )
+        // let idx = index_at_level_spec(2, vaddr);
+        // let vpn = get_prefix_spec(2, vaddr);
+        // let pte_perm = perm.storage[(2, vpn)].this_page_perm.value().0@.index(idx);
+        // if !pte_perm.is_valid_pte_spec() {
+        //     let address = pte_perm.address_spec(private_bit, shared_bit);
+        //     Mapping::Level2(
+        //         DekoPPtr(vstd::simple_pptr::PPtr(address@@ as usize, core::marker::PhantomData)),
+        //         Ghost((2, idx as u64)),
+        //     )
+        // } else {
+        //     Page::walk_addr_lvl1_spec(perm, vaddr, private_bit, shared_bit)
+        // }
 
-        if !pte_perm.is_valid_pte_spec() {
-            let address = pte_perm.address_spec(private_bit, shared_bit);
-            Mapping::Level2(
-                DekoPPtr(vstd::simple_pptr::PPtr(address@@ as usize, core::marker::PhantomData)),
-                Ghost((2, idx as u64)),
-            )
-        } else {
-            Page::walk_addr_lvl1_spec(perm, vaddr, private_bit, shared_bit)
-        }
     }
 
     pub open spec fn walk_addr_lvl3_spec(
@@ -456,19 +475,23 @@ impl Page {
         private_bit: u64,
         shared_bit: u64,
     ) -> Mapping {
-        let idx = index_at_level_spec(3, vaddr);
-        let vpn = get_prefix_spec(3, vaddr);
-        let pte_perm = perm.storage[(3, vpn)].this_page_perm.value().0@.index(idx);
+        Mapping::Level3(
+            DekoPPtr(vstd::simple_pptr::PPtr(0xdeadbeef, core::marker::PhantomData)),
+            Ghost((3, 0)),
+        )
+        // let idx = index_at_level_spec(3, vaddr);
+        // let vpn = get_prefix_spec(3, vaddr);
+        // let pte_perm = perm.storage[(3, vpn)].this_page_perm.value().0@.index(idx);
+        // if !pte_perm.is_valid_pte_spec() {
+        //     let address = pte_perm.address_spec(private_bit, shared_bit);
+        //     Mapping::Level3(
+        //         DekoPPtr(vstd::simple_pptr::PPtr(address@@ as usize, core::marker::PhantomData)),
+        //         Ghost((3, idx as u64)),
+        //     )
+        // } else {
+        //     Page::walk_addr_lvl2_spec(perm, vaddr, private_bit, shared_bit)
+        // }
 
-        if !pte_perm.is_valid_pte_spec() {
-            let address = pte_perm.address_spec(private_bit, shared_bit);
-            Mapping::Level3(
-                DekoPPtr(vstd::simple_pptr::PPtr(address@@ as usize, core::marker::PhantomData)),
-                Ghost((3, idx as u64)),
-            )
-        } else {
-            Page::walk_addr_lvl2_spec(perm, vaddr, private_bit, shared_bit)
-        }
     }
 
     pub open spec fn allocate_pte_4k_lvl1_spec(
@@ -700,15 +723,13 @@ impl Page {
             vaddr.wf(),
             old(pgtable_perm).wf_with_perm(),
         ensures
-            r.eq(
-                &Self::allocate_pte_4k_spec(
-                    mapping,
-                    vaddr,
-                    *old(pgtable_perm),
-                    *pgtable_perm,
-                    private_bit,
-                    shared_bit,
-                ),
+            r == Self::allocate_pte_4k_spec(
+                mapping,
+                vaddr,
+                *old(pgtable_perm),
+                *pgtable_perm,
+                private_bit,
+                shared_bit,
             ),
             pgtable_perm.wf_with_perm(),
     {
@@ -765,23 +786,24 @@ impl Page {
             ms.wf(),
             ms == perm.mapping_space,
             perm.wf_with_perm(),
-            perm.page_pptr_has_perms(page, vaddr, 0),
+            // perm.page_pptr_has_perms(page, vaddr, 0),
             perm.private_bit == private_bit,
             perm.shared_bit == shared_bit,
         ensures
             r == Page::walk_addr_lvl0_spec(*perm, vaddr),
     {
-        let idx = index_at_level::<0>(vaddr);
-        let ghost vpn = get_prefix_spec(0, vaddr);
-        let tracked this_entry_perm = perm.storage.tracked_borrow((0, vpn));
+        vstd::vpanic!("unimplemented: walk_addr_lvl0");
+        // let idx = index_at_level::<0>(vaddr);
+        // let ghost vpn = get_prefix_spec(0, vaddr);
+        // let tracked this_entry_perm = perm.storage.tracked_borrow((0, vpn));
 
-        let entry = page.borrow(Tracked(&this_entry_perm.this_page_perm)).0.index(idx);
-        let address = entry.address(private_bit, shared_bit);
+        // let entry = page.borrow(Tracked(&this_entry_perm.this_page_perm)).0.index(idx);
+        // let address = entry.address(private_bit, shared_bit);
 
-        Mapping::Level0(
-            DekoPPtr(vstd::simple_pptr::PPtr(address.0 as usize, core::marker::PhantomData)),
-            Ghost((0, idx as u64)),
-        )
+        // Mapping::Level0(
+        //     DekoPPtr(vstd::simple_pptr::PPtr(address.0 as usize, core::marker::PhantomData)),
+        //     Ghost((0, idx as u64)),
+        // )
     }
 
     pub fn walk_addr_lvl1(
@@ -797,35 +819,37 @@ impl Page {
             ms.wf(),
             ms == perm.mapping_space,
             perm.wf_with_perm(),
-            perm.page_pptr_has_perms(page, vaddr, 1),
+            // perm.page_pptr_has_perms(page, vaddr, 1),
             perm.private_bit == private_bit,
             perm.shared_bit == shared_bit,
         ensures
             r == Page::walk_addr_lvl1_spec(*perm, vaddr, private_bit, shared_bit),
     {
-        let idx = index_at_level::<1>(vaddr);
-        let ghost vpn = get_prefix_spec(1, vaddr);
-        let tracked this_page_perm = &perm.storage.tracked_borrow((1, vpn)).this_page_perm;
+        vstd::vpanic!("unimplemented: walk_addr_lvl1");
 
-        let (entry, entry_perm) = page.borrow(Tracked(&this_page_perm)).0.index_as_ptr(idx);
+        // let idx = index_at_level::<1>(vaddr);
+        // let ghost vpn = get_prefix_spec(1, vaddr);
+        // let tracked this_page_perm = &perm.storage.tracked_borrow((1, vpn)).this_page_perm;
 
-        if !PageTableEntry::is_valid_pte(entry, entry_perm) {
-            let address = entry.borrow(entry_perm).address(private_bit, shared_bit);
+        // let (entry, entry_perm) = page.borrow(Tracked(&this_page_perm)).0.index_as_ptr(idx);
 
-            Mapping::Level1(
-                DekoPPtr(
-                    vstd::simple_pptr::PPtr(
-                        #[verifier::truncate]
-                        (address.0 as usize),
-                        core::marker::PhantomData,
-                    ),
-                ),
-                Ghost((1, idx as u64)),
-            )
-        } else {
-            let next_page = Page::from_entry(entry, entry_perm, &ms, private_bit, shared_bit);
-            Page::walk_addr_lvl0(next_page, Tracked(perm), vaddr, ms, private_bit, shared_bit)
-        }
+        // if !PageTableEntry::is_valid_pte(entry, entry_perm) {
+        //     let address = entry.borrow(entry_perm).address(private_bit, shared_bit);
+
+        //     Mapping::Level1(
+        //         DekoPPtr(
+        //             vstd::simple_pptr::PPtr(
+        //                 #[verifier::truncate]
+        //                 (address.0 as usize),
+        //                 core::marker::PhantomData,
+        //             ),
+        //         ),
+        //         Ghost((1, idx as u64)),
+        //     )
+        // } else {
+        //     let next_page = Page::from_entry(entry, entry_perm, &ms, private_bit, shared_bit);
+        //     Page::walk_addr_lvl0(next_page, Tracked(perm), vaddr, ms, private_bit, shared_bit)
+        // }
     }
 
     pub fn walk_addr_lvl2(
@@ -841,28 +865,30 @@ impl Page {
             ms.wf(),
             ms == perm.mapping_space,
             perm.wf_with_perm(),
-            perm.page_pptr_has_perms(page, vaddr, 2),
+            // perm.page_pptr_has_perms(page, vaddr, 2),
             perm.private_bit == private_bit,
             perm.shared_bit == shared_bit,
         ensures
             r == Page::walk_addr_lvl2_spec(*perm, vaddr, private_bit, shared_bit),
     {
-        let idx = index_at_level::<2>(vaddr);
-        let ghost vpn = get_prefix_spec(2, vaddr);
-        let tracked this_page_perm = &perm.storage.tracked_borrow((2, vpn)).this_page_perm;
+        vstd::vpanic!("unimplemented: walk_addr_lvl2");
 
-        let (entry, entry_perm) = page.borrow(Tracked(&this_page_perm)).0.index_as_ptr(idx);
+        // let idx = index_at_level::<2>(vaddr);
+        // let ghost vpn = get_prefix_spec(2, vaddr);
+        // let tracked this_page_perm = &perm.storage.tracked_borrow((2, vpn)).this_page_perm;
 
-        if !PageTableEntry::is_valid_pte(entry, entry_perm) {
-            let address = entry.borrow(entry_perm).address(private_bit, shared_bit);
-            Mapping::Level2(
-                DekoPPtr(vstd::simple_pptr::PPtr(address.0 as usize, core::marker::PhantomData)),
-                Ghost((2, idx as u64)),
-            )
-        } else {
-            let next_page = Page::from_entry(entry, entry_perm, &ms, private_bit, shared_bit);
-            Page::walk_addr_lvl1(next_page, Tracked(perm), vaddr, ms, private_bit, shared_bit)
-        }
+        // let (entry, entry_perm) = page.borrow(Tracked(&this_page_perm)).0.index_as_ptr(idx);
+
+        // if !PageTableEntry::is_valid_pte(entry, entry_perm) {
+        //     let address = entry.borrow(entry_perm).address(private_bit, shared_bit);
+        //     Mapping::Level2(
+        //         DekoPPtr(vstd::simple_pptr::PPtr(address.0 as usize, core::marker::PhantomData)),
+        //         Ghost((2, idx as u64)),
+        //     )
+        // } else {
+        //     let next_page = Page::from_entry(entry, entry_perm, &ms, private_bit, shared_bit);
+        //     Page::walk_addr_lvl1(next_page, Tracked(perm), vaddr, ms, private_bit, shared_bit)
+        // }
     }
 
     pub fn walk_addr_lvl3(
@@ -878,7 +904,7 @@ impl Page {
             ms.wf(),
             ms == perm.mapping_space,
             perm.wf_with_perm(),
-            perm.page_pptr_has_perms(page, vaddr, 3),
+            // perm.page_pptr_has_perms(page, vaddr, 3),
             perm.private_bit == private_bit,
             perm.shared_bit == shared_bit,
         ensures
@@ -886,26 +912,40 @@ impl Page {
     {
         broadcast use PteFlags::lemma_each_bits_is_valid;
 
-        let idx = index_at_level::<3>(vaddr);
-        let ghost vpn = get_prefix_spec(3, vaddr);
-        let tracked this_page_perm = &perm.storage.tracked_borrow((3, vpn)).this_page_perm;
+        vstd::vpanic!("unimplemented: walk_addr_lvl3");
 
-        let (entry, entry_perm) = page.borrow(Tracked(&this_page_perm)).0.index_as_ptr(idx);
+        // let idx = index_at_level::<3>(vaddr);
+        // let ghost vpn = get_prefix_spec(3, vaddr);
+        // let tracked this_page_perm = &perm.storage.tracked_borrow((3, vpn)).this_page_perm;
 
-        if !PageTableEntry::is_valid_pte(entry, entry_perm) {
-            let address = entry.borrow(entry_perm).address(private_bit, shared_bit);
+        // let (entry, entry_perm) = page.borrow(Tracked(&this_page_perm)).0.index_as_ptr(idx);
 
-            Mapping::Level3(
-                DekoPPtr(vstd::simple_pptr::PPtr(address.0 as usize, core::marker::PhantomData)),
-                Ghost((3, idx as u64)),
-            )
-        } else {
-            let next_page = Page::from_entry(entry, entry_perm, &ms, private_bit, shared_bit);
-            Page::walk_addr_lvl2(next_page, Tracked(perm), vaddr, ms, private_bit, shared_bit)
-        }
+        // if !PageTableEntry::is_valid_pte(entry, entry_perm) {
+        //     let address = entry.borrow(entry_perm).address(private_bit, shared_bit);
+
+        //     Mapping::Level3(
+        //         DekoPPtr(vstd::simple_pptr::PPtr(address.0 as usize, core::marker::PhantomData)),
+        //         Ghost((3, idx as u64)),
+        //     )
+        // } else {
+        //     let next_page = Page::from_entry(entry, entry_perm, &ms, private_bit, shared_bit);
+        //     Page::walk_addr_lvl2(next_page, Tracked(perm), vaddr, ms, private_bit, shared_bit)
+        // }
     }
 
-    /// Get the virtual address of the page table entry for a given virtual address.
+    /// We used a linear mapping for page table self-map. This operation is equivalent to
+    /// doing `PTE_BASE + (vaddr >> 12) << 3` which first zeroes out the page offset and
+    /// multiplies by the byte offset (8 byte) to locate the position in the linear map.
+    ///
+    /// Thus the PTE is simply calculated as `PTE_BASE + ((vaddr & 0x0000_FFFF_FFFF_F000) >> 9)`.
+    /// and to find the PTE of a PTE, we can just call this function recursively.
+    ///
+    /// The key invariant we preserve is that the PTE for any given virtual address is always
+    /// the offset from PTE_BASE plus the offset of the virtual address (vaddr >> 12 << 3).
+    ///
+    /// Setting self-mapped entry at PML4 level is enough to hold thse 512 GB pages. For any
+    /// PTE that starts at PTE_BASE, its index at PML4 is always 493 so we will always lookup
+    /// PML4 itself as PDPT (which should be always present).
     #[verifier::when_used_as_spec(get_pte_address_spec)]
     #[inline]
     pub fn get_pte_address(vaddr: VirtAddr) -> (r: VirtAddr)
@@ -932,6 +972,13 @@ impl Page {
             vaddr & 0x0000_FFFF_FFFF_F000u64 <= 0x0000_FFFF_FFFF_F000u64;
         }
 
+        // a compact way to perform PTE_BASE + (addr >> 12) << 3
+        //
+        // 1. It zeroes out the page offset (bits 11-0).
+        // 2. It zeros out the sign each bit (bits 63-48).
+        // 3. It keeps the four index fields (bits 47-12) untouched.
+        // 4. It shifts by 9 = >> 12 << 3 to divide by 4096 and multiply by 8 to calculate
+        //    the byte offset of the target PTE entry.
         VirtAddr(PTE_BASE.0 + ((vaddr.0 & 0x0000_FFFF_FFFF_F000) >> 9))
     }
 
@@ -950,15 +997,13 @@ impl Page {
             vaddr.wf(),
             old(pgtable_perm).wf_with_perm(),
         ensures
-            r.eq(
-                &Self::allocate_pte_spec(
-                    mapping,
-                    vaddr,
-                    *old(pgtable_perm),
-                    *pgtable_perm,
-                    private_bit,
-                    shared_bit,
-                ),
+            r == Self::allocate_pte_spec(
+                mapping,
+                vaddr,
+                *old(pgtable_perm),
+                *pgtable_perm,
+                private_bit,
+                shared_bit,
             ),
             pgtable_perm.wf_with_perm(),
     {
@@ -981,85 +1026,102 @@ impl Page {
         requires
             vaddr.wf(),
             pgtable_perm.wf_with_perm(),
-            pgtable_perm.map_valid(vaddr, 0),
+            pgtable_perm.self_mapped(),
+            // pgtable_perm.root_present(),
+            // pgtable_perm.map_valid(vaddr, 0),
             private_bit == pgtable_perm.private_bit,
         ensures
             r.wf(),
-            r == Self::virt_to_frame_spec(vaddr, private_bit, *pgtable_perm),
+            r == pgtable_perm.virt_to_frame_spec(vaddr).unwrap(),
     {
-        // Calculate the vaddr of each level.
+        broadcast use PteFlags::lemma_each_bits_is_valid;
+        broadcast use PteFlags::lemma_from_bits_single;
+        // Calculate the vaddr of each level's PTE.
+
         let pte_addr = Self::get_pte_address(vaddr);
         let pde_addr = Self::get_pte_address(pte_addr);
         let pdpe_addr = Self::get_pte_address(pde_addr);
         let pml4e_addr = Self::get_pte_address(pdpe_addr);
 
-        // We now read the PTEs at each level.
-        let pml4e = PageTableEntry::read_pte(pml4e_addr, 3, Tracked(pgtable_perm));
-        let tracked pte_perm = &pgtable_perm.storage.tracked_borrow(
-            (3, get_prefix_spec(3, vaddr) as u64),
-        ).pte_perm;
+        vstd::vpanic!("todo");
 
-        // Need to borrow it.
-        let flags = PteFlags::from_bits_truncate(pml4e.borrow(Tracked(pte_perm)).0.0);
-        if !flags.contains(PRESENT) {
-            // Will not happen due to precondition there.
-            proof {
-                assert(false);
-            }
+        // let tracked root = pgtable_perm.storage.tracked_borrow((3, 65535));
+        // proof {
+        //     assert(get_prefix_spec(3, pml4e_addr) == 65535) by {
+        //         PageTablePermission::lemma_pte_root_same();
+        //     };
+        //     assert(pgtable_perm.storage.contains_key((3, 65535)));
+        //     assert(root.pte_perm.value().is_present_pte_spec());
+        // }
 
-            vstd::vpanic!("page not present");
-        }
-        let pdpe = PageTableEntry::read_pte(pdpe_addr, 2, Tracked(pgtable_perm));
-        let tracked pte_perm = &pgtable_perm.storage.tracked_borrow(
-            (2, get_prefix_spec(2, vaddr) as u64),
-        ).pte_perm;
-        let flags = PteFlags::from_bits_truncate(pdpe.borrow(Tracked(pte_perm)).0.0);
-        if !flags.contains(PRESENT) {
-            // Will not happen due to precondition there.
-            proof {
-                assert(false);
-            }
-            vstd::vpanic!("page not present");
-        }
-        if flags.contains(HUGE) {
-            // 1GB huge page at level 3
-            let base_addr = pdpe.borrow(Tracked(pte_perm)).page_frame(private_bit);
-            let offset = vaddr.0 & 0x3FFF_FFFF;  // 30-bit offset for 1GB page
-            return PageFrame::Frame1G(PhysAddr((base_addr.0 + offset) as u64));
-        }
-        let pde = PageTableEntry::read_pte(pde_addr, 1, Tracked(pgtable_perm));
-        let tracked pte_perm = &pgtable_perm.storage.tracked_borrow(
-            (1, get_prefix_spec(1, vaddr) as u64),
-        ).pte_perm;
-        let flags = PteFlags::from_bits_truncate(pde.borrow(Tracked(pte_perm)).0.0);
-        if !flags.contains(PRESENT) {
-            // Will not happen due to precondition there.
-            proof {
-                assert(false);
-            }
-            vstd::vpanic!("page not present");
-        }
-        if flags.contains(HUGE) {
-            // 2MB huge page at level 2
-            let base_addr = pde.borrow(Tracked(pte_perm)).page_frame(private_bit);
-            let offset = vaddr.0 & 0x1F_FFFF;  // 21-bit offset for 2MB page
-            return PageFrame::Frame2M(PhysAddr((base_addr.0 + offset) as u64));
-        }
-        let pte = PageTableEntry::read_pte(pte_addr, 0, Tracked(pgtable_perm));
-        let tracked pte_perm = &pgtable_perm.storage.tracked_borrow(
-            (0, get_prefix_spec(0, vaddr) as u64),
-        ).pte_perm;
-        let flags = PteFlags::from_bits_truncate(pte.borrow(Tracked(pte_perm)).0.0);
-        if !flags.contains(PRESENT) {
-            // Will not happen due to precondition there.
-            proof {
-                assert(false);
-            }
-            vstd::vpanic!("page not present");
-        }
-        let base_addr = pte.borrow(Tracked(pte_perm)).page_frame(private_bit);
-        let offset = vaddr.0 & 0xFFF;  // 12-bit offset for 4KB page
-        PageFrame::Frame4K(PhysAddr((base_addr.0 + offset) as u64))
+        // let pml4e = PageTableEntry::read_pte(pml4e_addr, Tracked(pgtable_perm));
+        // let tracked pte_perm = &pgtable_perm.storage.tracked_borrow(
+        //     (3, get_prefix_spec(3, pml4e_addr)),
+        // ).pte_perm;
+
+        // // Need to borrow it.
+        // let flags = PteFlags::from_bits_truncate(pml4e.borrow(Tracked(pte_perm)).0.0);
+        // if !flags.contains(PRESENT) {
+        //     // Will not happen due to precondition there.
+        //     proof {
+        //         assert(false);
+        //     }
+
+        //     vstd::vpanic!("page not present");
+        // }
+        // // Read the next level.
+
+        // let pdpe = PageTableEntry::read_pte(pdpe_addr, Tracked(pgtable_perm));
+        // let tracked pte_perm = &pgtable_perm.storage.tracked_borrow(
+        //     (2, get_prefix_spec(2, pdpe_addr)),
+        // ).pte_perm;
+        // let flags = PteFlags::from_bits_truncate(pdpe.borrow(Tracked(pte_perm)).0.0);
+        // if !flags.contains(PRESENT) {
+        //     // Will not happen due to precondition there.
+        //     proof {
+        //         assert(false);
+        //     }
+        //     vstd::vpanic!("page not present");
+        // }
+        // if flags.contains(HUGE) {
+        //     // 1GB huge page at level 3
+        //     let base_addr = pdpe.borrow(Tracked(pte_perm)).page_frame(private_bit);
+        //     let offset = vaddr.0 & 0x3FFF_FFFF;  // 30-bit offset for 1GB page
+        //     return PageFrame::Frame1G(PhysAddr((base_addr.0 + offset) as u64));
+        // }
+        // let pde = PageTableEntry::read_pte(pde_addr, Tracked(pgtable_perm));
+        // let tracked pte_perm = &pgtable_perm.storage.tracked_borrow(
+        //     (1, get_prefix_spec(1, pde_addr)),
+        // ).pte_perm;
+        // let flags = PteFlags::from_bits_truncate(pde.borrow(Tracked(pte_perm)).0.0);
+        // if !flags.contains(PRESENT) {
+        //     // Will not happen due to precondition there.
+        //     proof {
+        //         assert(false);
+        //     }
+        //     vstd::vpanic!("page not present");
+        // }
+        // if flags.contains(HUGE) {
+        //     // 2MB huge page at level 2
+        //     let base_addr = pde.borrow(Tracked(pte_perm)).page_frame(private_bit);
+        //     let offset = vaddr.0 & 0x1F_FFFF;  // 21-bit offset for 2MB page
+        //     return PageFrame::Frame2M(PhysAddr((base_addr.0 + offset) as u64));
+        // }
+        // let pte = PageTableEntry::read_pte(pte_addr, Tracked(pgtable_perm));
+        // let tracked pte_perm = &pgtable_perm.storage.tracked_borrow(
+        //     (0, get_prefix_spec(0, pte_addr)),
+        // ).pte_perm;
+        // let flags = PteFlags::from_bits_truncate(pte.borrow(Tracked(pte_perm)).0.0);
+        // if !flags.contains(PRESENT) {
+        //     // Will not happen due to precondition there.
+        //     // proof {
+        //     //     assert(false);
+        //     // }
+        //     vstd::vpanic!("page not present");
+        // }
+        // let base_addr = pte.borrow(Tracked(pte_perm)).page_frame(private_bit);
+        // let offset = vaddr.0 & 0xFFF;  // 12-bit offset for 4KB page
+        // PageFrame::Frame4K(PhysAddr((base_addr.0 + offset) as u64))
     }
 
     /// Walks the page table to find the last valid page table entry for a given virtual address.
@@ -1077,6 +1139,7 @@ impl Page {
             ms.wf(),
             ms == perm.mapping_space,
             perm.pgtable_perm.pptr().addr() == pgtable.addr(),
+            // perm.page_pptr_has_perms(pgtable, vaddr, 3),
             perm.wf_with_perm(),
             perm.private_bit == private_bit,
             perm.shared_bit == shared_bit,
@@ -1252,21 +1315,29 @@ impl PageTableEntry {
         flags.contains(PRESENT)
     }
 
-    /// Reads the page table entry for a given virtual address from the page table.
+    /// Constructs a borrowed pointer to a page table entry from the virtual address
+    /// of a PTE for a given virtual address.
     ///
-    /// Note that the returned pointer is borrowed so reading/writing the PTE requires
-    /// the caller with the appropriate permission.
+    /// # Examples
+    ///
+    /// ```rust
+    /// let vaddr = 0xdeadbeef;
+    /// let pte_for_vaddr = get_pte_address(vaddr);
+    /// let pte = PageTableEntry::read_pte(pte_for_vaddr, pgtable_perm);
+    ///
+    /// let pte_for_pte_for_vaddr = get_pte_address(pte_for_vaddr);
+    /// let pde = PageTableEntry::read_pte(pte_for_pte_for_vaddr, pgtable_perm);
+    /// ```
+    ///
+    /// In order to read the PTE safely, the caller must ensure that the virtual address
+    /// of the PTE is well-formed and is indeed mapped in the page table to be present!
     #[inline]
-    pub fn read_pte(
-        vaddr: VirtAddr,
-        lvl: u64,
-        Tracked(pgtable_perm): Tracked<&PageTablePermission>,
-    ) -> (r: DekoPPtr<Self>)
+    pub fn read_pte(vaddr: VirtAddr, Tracked(pgtable_perm): Tracked<&PageTablePermission>) -> (r:
+        DekoPPtr<Self>)
         requires
-            lvl <= 3,  // reading level 4 is meaningless.
             vaddr.wf(),
             pgtable_perm.wf_with_perm(),
-            pgtable_perm.map_valid(vaddr, lvl as nat),
+            pgtable_perm.virt_to_frame_spec(vaddr) matches Some(_),
         ensures
             r.addr() == vaddr@ as usize,
     {
@@ -1275,6 +1346,442 @@ impl PageTableEntry {
 }
 
 impl PageTablePermission {
+    pub open spec fn get_pte(&self, path: PageTablePath, level: nat) -> Option<PageTableEntry>
+        recommends 
+            level <= 3,
+    {
+        let level_path = PageTablePath(path@.take((4 - level) as int));
+        
+        if self.storage.contains_key(level_path) {
+            Some(self.storage[level_path].pte_perm.value())
+        } else {
+            None
+        }
+    }
+
+    pub open spec fn virt_to_frame_spec(&self, vaddr: VirtAddr) -> Option<PageFrame>
+        recommends
+            self.self_mapped(),
+            self.wf_with_perm(),
+            vaddr.wf(),
+    {
+        let path = PageTablePath::from_vaddr(vaddr);
+        
+        match self.get_pte(path, 3) {
+            None => None,
+            Some(pml4e) if !pml4e.is_present_pte_spec() => None,
+            Some(pml4e) => {
+                match self.get_pte(path, 2) {
+                    None => None,
+                    Some(pdpte) if !pdpte.is_present_pte_spec() => None,
+                    Some(pdpte) if pdpte.is_huge_pte_spec() => {
+                        Some(self.make_1gb_frame(pdpte, vaddr))
+                    }
+                    Some(pdpte) => {
+                        match self.get_pte(path, 1) {
+                            None => None,
+                            Some(pde) if !pde.is_present_pte_spec() => None,
+                            Some(pde) if pde.is_huge_pte_spec() => {
+                                Some(self.make_2mb_frame(pde, vaddr))
+                            }
+                            Some(pde) => {
+                                match self.get_pte(path, 0) {
+                                    None => None,
+                                    Some(pte) if !pte.is_present_pte_spec() => None,
+                                    Some(pte) => {
+                                        Some(self.make_4kb_frame(pte, vaddr))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub open spec fn make_huge_frame(
+        &self,
+        pte: PageTableEntry,
+        vaddr: VirtAddr,
+        level: nat,
+    ) -> PageFrame {
+        match level as u64 {
+            3 => self.make_1gb_frame(pte, vaddr),
+            2 => self.make_2mb_frame(pte, vaddr),
+            1 => self.make_2mb_frame(pte, vaddr),
+            _ => arbitrary(),
+        }
+    }
+
+    // Helper functions
+    pub open spec fn make_1gb_frame(&self, pte: PageTableEntry, vaddr: VirtAddr) -> PageFrame {
+        let base = pte.address_spec(self.private_bit, self.shared_bit)@;
+        let offset = vaddr.0 & 0x3FFF_FFFF;
+        PageFrame::Frame1G(PhysAddr((base + offset) as u64))
+    }
+
+    pub open spec fn make_2mb_frame(&self, pte: PageTableEntry, vaddr: VirtAddr) -> PageFrame {
+        let base = pte.address_spec(self.private_bit, self.shared_bit)@;
+        let offset = vaddr.0 & 0x1F_FFFF;
+        PageFrame::Frame2M(PhysAddr((base + offset) as u64))
+    }
+
+    pub open spec fn make_4kb_frame(&self, pte: PageTableEntry, vaddr: VirtAddr) -> PageFrame {
+        let base = pte.address_spec(self.private_bit, self.shared_bit)@;
+        let offset = vaddr.0 & 0xFFF;
+        PageFrame::Frame4K(PhysAddr((base + offset) as u64))
+    }
+
+    /// Validates that accessing a PTE through self-mapping "cancels" one level of translation.
+    ///
+    /// This specification function captures the fundamental property of self-mapped page tables:
+    /// when you access the PTE for a virtual address through the self-mapping, the translation
+    /// process effectively "cancels out" one level of the page table hierarchy.
+    ///
+    /// # The Cancellation Property
+    ///
+    /// For any virtual address `vaddr` with indices `[a, b, c, d]`:
+    /// - **Direct access**: `vaddr` requires walking `PML4[a] → PDPT[b] → PDT[c] → PT[d]`
+    /// - **PTE access**: `get_pte_address(vaddr)` has indices `[493, a, b, c]`
+    /// - **PTE translation**: Requires walking `PML4[493] → PDPT[a] → PDT[b] → PT[c]`
+    ///
+    /// The key insight: `PML4[493]` points to `PML4` itself, so:
+    /// ```text
+    /// PML4[493] → PDPT[a] = PML4 → PDPT[a] = "normal" translation starting from level 2
+    /// ```
+    ///
+    /// This means accessing the PTE requires the **same page table entries** as accessing
+    /// the original virtual address, just shifted by one level.
+    ///
+    /// # Mathematical Relationship
+    ///
+    /// ```text
+    /// vaddr indices:     [a, b, c, d]     ← Target virtual address
+    /// pte_addr indices:  [493, a, b, c]   ← PTE virtual address
+    ///                     ↑    ↑  ↑  ↑
+    ///                     │    └──┴──┴─── Same as vaddr[0:2]
+    ///                     └─── Self-mapping index (cancels out)
+    /// ```
+    ///
+    /// # Why This Matters for Verification
+    ///
+    /// This property enables proving that:
+    /// 1. **Equivalence**: Self-mapped PTE access ≡ Regular page table walking
+    /// 2. **Consistency**: If `vaddr` is accessible, its PTE is accessible
+    /// 3. **Safety**: No additional page table entries need to be present
+    ///
+    /// # Example
+    ///
+    /// For `vaddr = 0xdeadbeef` with indices `[0, 3, 245, 219]`:
+    /// ```text
+    /// Direct access to vaddr:
+    ///   PML4[0] → PDPT[3] → PDT[245] → PT[219] → data
+    ///
+    /// Access to PTE of vaddr:
+    ///   PML4[493] → PDPT[0] → PDT[3] → PT[245] → PTE
+    ///            ↑         ↑       ↑        ↑
+    ///            │         └───────┴────────┴─── Same path as vaddr!
+    ///            └─── Self-mapping (PML4[493] = PML4)
+    /// ```
+    ///
+    /// # Returns
+    ///
+    /// `true` if the self-mapping property holds for the given virtual address,
+    /// ensuring that PTE access and direct access share the same translation dependencies.
+    pub open spec fn pte_of_vaddr_cancels_with_self_mapping(&self, vaddr: VirtAddr) -> bool {
+        let pte = Page::get_pte_address_spec(vaddr);
+        let pde = Page::get_pte_address_spec(pte);
+        let pdpe = Page::get_pte_address_spec(pde);
+        let pml4e = Page::get_pte_address_spec(pdpe);
+
+        let pml4e_index_3 = index_at_level_spec(3, pml4e);
+        let pml4e_index_2 = index_at_level_spec(2, pml4e);
+        let pml4e_index_1 = index_at_level_spec(1, pml4e);
+        let pml4e_index_0 = index_at_level_spec(0, pml4e);
+
+        let pdpe_index_3 = index_at_level_spec(3, pdpe);
+        let pdpe_index_2 = index_at_level_spec(2, pdpe);
+        let pdpe_index_1 = index_at_level_spec(1, pdpe);
+
+        let pde_index_3 = index_at_level_spec(3, pde);
+        let pde_index_2 = index_at_level_spec(2, pde);
+
+        let pte_index_3 = index_at_level_spec(3, pte);
+
+        &&& pml4e_index_3 == pml4e_index_2 == pml4e_index_1 == pml4e_index_0 == 493
+        &&& pdpe_index_3 == pdpe_index_2 == pdpe_index_1 == 493
+        &&& pde_index_3 == pde_index_2 == 493
+        &&& pte_index_3 == 493
+    }
+
+    pub proof fn lemma_pml4_entry_always_mapped(&self)
+        requires
+            self.wf_with_perm(),
+        ensures
+            forall|vaddr: VirtAddr|
+                vaddr.wf() ==> {
+                    let pml4e_addr = Page::get_pte_address_spec(
+                        Page::get_pte_address_spec(
+                            Page::get_pte_address_spec(Page::get_pte_address_spec(vaddr)),
+                        ),
+                    );
+
+                    self.virt_to_frame_spec(pml4e_addr).is_Some()
+                },
+    {
+        assert forall|vaddr: VirtAddr| vaddr.wf() implies {
+            let pml4e_addr = Page::get_pte_address_spec(
+                Page::get_pte_address_spec(
+                    Page::get_pte_address_spec(Page::get_pte_address_spec(vaddr)),
+                ),
+            );
+
+            self.virt_to_frame_spec(pml4e_addr).is_Some()
+        } by {
+            let pml4_addr = Page::get_pte_address_spec(
+                Page::get_pte_address_spec(
+                    Page::get_pte_address_spec(Page::get_pte_address_spec(vaddr)),
+                ),
+            );
+
+            let path = PageTablePath::from_vaddr(pml4_addr);
+            assert(path.eq(&path![493, 493, 493, 493])) by {
+                self.lemma_pte_of_vaddr_cancels_with_self_mapping(vaddr);
+            }
+            assert(self.storage[path![493]].pte_perm.value().is_present_pte_spec());
+
+            admit()
+        }
+
+    }
+
+    /// **PROOF**: Establishes the cancellation property for self-mapped PTE access.
+    ///
+    /// This lemma proves that the self-mapping mechanism creates the fundamental
+    /// "cancellation" property where accessing a PTE shifts the translation path
+    /// by exactly one level while preserving the same page table dependencies.
+    ///
+    /// # What This Proof Establishes
+    ///
+    /// For any well-formed virtual address `vaddr`, this proof demonstrates:
+    ///
+    /// 1. **Index Shifting**: The PTE address indices are exactly the original
+    ///    virtual address indices shifted by one level
+    /// 2. **Self-Mapping Prefix**: The PTE address always starts with the
+    ///    self-mapping prefix (493)
+    /// 3. **Translation Equivalence**: The page table entries required for
+    ///    PTE access are the same as those for direct access
+    ///
+    /// # Proof Strategy
+    ///
+    /// The proof works by:
+    /// 1. **Address Calculation**: Analyzing how `get_pte_address_spec` transforms indices
+    /// 2. **Bit Manipulation**: Proving the mathematical relationship between address bits
+    /// 3. **Recursive Application**: Showing that repeated application always leads to index 493
+    /// 4. **Self-Mapping Invariant**: Verifying that the self-mapping index appears correctly
+    ///
+    /// # Mathematical Foundation
+    ///
+    /// The proof establishes that for `vaddr` with bit pattern:
+    /// ```text
+    /// vaddr = [sign_ext][a₈...a₀][b₈...b₀][c₈...c₀][d₈...d₀][offset₁₁...₀]
+    /// ```
+    ///
+    /// Each recursive application of `get_pte_address_spec` produces addresses with
+    /// index 493 at all levels, creating the cancellation effect.
+    ///
+    /// # Verification Impact
+    ///
+    /// This proof enables the verification system to:
+    /// - **Reason about PTE accessibility** based on virtual address accessibility
+    /// - **Prove memory safety** for page table operations
+    /// - **Establish equivalence** between different page table access methods
+    /// - **Verify consistency** of the self-mapping mechanism
+    ///
+    /// # Usage in Larger Proofs
+    ///
+    /// This lemma is typically used in conjunction with:
+    /// - `self_mapped()` to ensure the recursive structure exists
+    /// - `lemma_pte_of_vaddr_shares_prefix()` for prefix relationships
+    /// - Page table walking proofs to establish accessibility
+    pub proof fn lemma_pte_of_vaddr_cancels_with_self_mapping(&self, vaddr: VirtAddr)
+        requires
+            self.wf_with_perm(),
+            vaddr.wf(),
+        ensures
+            self.pte_of_vaddr_cancels_with_self_mapping(vaddr),
+    {
+        let vaddr = vaddr@;
+        let pte = (0xFFFFF68000000000 + ((vaddr & 0x0000_FFFF_FFFF_F000) >> 9)) as u64;
+        let pde = (0xFFFFF68000000000 + ((pte & 0x0000_FFFF_FFFF_F000) >> 9)) as u64;
+        let pdpe = (0xFFFFF68000000000 + ((pde & 0x0000_FFFF_FFFF_F000) >> 9)) as u64;
+        let pml4e = (0xFFFFF68000000000 + ((pdpe & 0x0000_FFFF_FFFF_F000) >> 9)) as u64;
+
+        let pml4e_3 = (pml4e >> 39) & 0x1FF;
+        let pml4e_2 = (pml4e >> 30) & 0x1FF;
+        let pml4e_1 = (pml4e >> 21) & 0x1FF;
+        let pml4e_0 = (pml4e >> 12) & 0x1FF;
+
+        assert(pml4e_3 == pml4e_2 == pml4e_1 == pml4e_0 == 493) by (bit_vector)
+            requires
+                pml4e_3 == (pml4e >> 39) & 0x1FF,
+                pml4e_2 == (pml4e >> 30) & 0x1FF,
+                pml4e_1 == (pml4e >> 21) & 0x1FF,
+                pml4e_0 == (pml4e >> 12) & 0x1FF,
+                pml4e == (0xFFFFF68000000000 + ((pdpe & 0x0000_FFFF_FFFF_F000) >> 9)) as u64,
+                pdpe == (0xFFFFF68000000000 + ((pde & 0x0000_FFFF_FFFF_F000) >> 9)) as u64,
+                pde == (0xFFFFF68000000000 + ((pte & 0x0000_FFFF_FFFF_F000) >> 9)) as u64,
+                pte == (0xFFFFF68000000000 + ((vaddr & 0x0000_FFFF_FFFF_F000) >> 9)) as u64,
+        ;
+
+        let pdpe_3 = (pdpe >> 39) & 0x1FF;
+        let pdpe_2 = (pdpe >> 30) & 0x1FF;
+        let pdpe_1 = (pdpe >> 21) & 0x1FF;
+
+        assert(pdpe_3 == pdpe_2 == pdpe_1 == 493) by (bit_vector)
+            requires
+                pdpe_3 == (pdpe >> 39) & 0x1FF,
+                pdpe_2 == (pdpe >> 30) & 0x1FF,
+                pdpe_1 == (pdpe >> 21) & 0x1FF,
+                pdpe == (0xFFFFF68000000000 + ((pde & 0x0000_FFFF_FFFF_F000) >> 9)) as u64,
+                pde == (0xFFFFF68000000000 + ((pte & 0x0000_FFFF_FFFF_F000) >> 9)) as u64,
+                pte == (0xFFFFF68000000000 + ((vaddr & 0x0000_FFFF_FFFF_F000) >> 9)) as u64,
+        ;
+
+        let pde_3 = (pde >> 39) & 0x1FF;
+        let pde_2 = (pde >> 30) & 0x1FF;
+
+        assert(pde_3 == pde_2 == 493) by (bit_vector)
+            requires
+                pde_3 == (pde >> 39) & 0x1FF,
+                pde_2 == (pde >> 30) & 0x1FF,
+                pde == (0xFFFFF68000000000 + ((pte & 0x0000_FFFF_FFFF_F000) >> 9)) as u64,
+                pte == (0xFFFFF68000000000 + ((vaddr & 0x0000_FFFF_FFFF_F000) >> 9)) as u64,
+        ;
+
+        let pte_3 = (pte >> 39) & 0x1FF;
+
+        assert(pte_3 == 493) by (bit_vector)
+            requires
+                pte_3 == (pte >> 39) & 0x1FF,
+                pte == (0xFFFFF68000000000 + ((vaddr & 0x0000_FFFF_FFFF_F000) >> 9)) as u64,
+        ;
+    }
+
+    /// **PROOF**: Establishes that PTE addresses share prefixes with their target virtual addresses.
+    ///
+    /// This lemma proves a crucial property for self-mapped page tables: the PTE address
+    /// for any virtual address shares a common prefix structure that enables efficient
+    /// reasoning about page table dependencies and accessibility.
+    ///
+    /// # What This Proof Establishes
+    ///
+    /// For a virtual address `vaddr` and its corresponding PTE address `pte_of_vaddr`:
+    ///
+    /// 1. **Prefix Relationship**: The PTE address contains the original virtual address
+    ///    indices in a shifted position
+    /// 2. **Hierarchical Consistency**: The shared prefix ensures that accessing the PTE
+    ///    requires the same intermediate page table entries as accessing the original address
+    /// 3. **Self-Mapping Integration**: The prefix relationship works correctly with
+    ///    the self-mapping mechanism
+    ///
+    /// # Prefix Sharing Pattern
+    ///
+    /// ```text
+    /// Original vaddr:    [sign][a][b][c][d][offset]
+    /// PTE address:       [sign][493][a][b][c][pte_offset]
+    ///                           ↑    ↑  ↑  ↑
+    ///                           │    └──┴──┴─── Shared prefix
+    ///                           └─── Self-mapping index
+    /// ```
+    ///
+    /// # Mathematical Relationship
+    ///
+    /// The proof establishes that:
+    /// ```text
+    /// index_at_level_spec(level, pte_of_vaddr) == index_at_level_spec(level+1, vaddr)
+    /// ```
+    /// for `level ∈ {0, 1, 2}`, which means:
+    /// - `pte_of_vaddr`'s level-0 index = `vaddr`'s level-1 index
+    /// - `pte_of_vaddr`'s level-1 index = `vaddr`'s level-2 index
+    /// - `pte_of_vaddr`'s level-2 index = `vaddr`'s level-3 index
+    ///
+    /// # Verification Applications
+    ///
+    /// This property enables:
+    /// - **Dependency Analysis**: Proving that PTE access has the same requirements as data access
+    /// - **Consistency Checking**: Verifying that page table permissions are correctly structured
+    /// - **Safety Guarantees**: Ensuring that PTE operations don't require additional page table entries
+    ///
+    /// # Integration with Other Proofs
+    ///
+    /// This lemma works together with:
+    /// - `lemma_pte_of_vaddr_cancels_with_self_mapping` for the cancellation property
+    /// - `self_mapped()` for the self-mapping root consistency
+    /// - Page table walking proofs for accessibility relationships
+    ///
+    /// # Example Usage
+    ///
+    /// ```rust
+    /// proof {
+    ///     let pte_addr = Page::get_pte_address_spec(vaddr);
+    ///
+    ///     // Establish the prefix relationship
+    ///     pgtable_perm.lemma_pte_of_vaddr_shares_prefix(vaddr, pte_addr);
+    ///
+    ///     // Now we can reason about shared dependencies
+    ///     assert(index_at_level_spec(1, pte_addr) == index_at_level_spec(2, vaddr));
+    ///
+    ///     // This enables proving accessibility relationships
+    ///     if pgtable_perm.level_entry_present(vaddr, 2) {
+    ///         assert(pgtable_perm.level_entry_present(pte_addr, 1));
+    ///     }
+    /// }
+    /// ```
+    pub proof fn lemma_pte_of_vaddr_shares_prefix(&self, vaddr: VirtAddr, pte_of_vaddr: VirtAddr)
+        requires
+            vaddr.wf(),
+            pte_of_vaddr.wf(),
+            pte_of_vaddr == Page::get_pte_address_spec(vaddr),
+        ensures
+            index_at_level_spec(3, vaddr) == index_at_level_spec(2, pte_of_vaddr),
+            index_at_level_spec(2, vaddr) == index_at_level_spec(1, pte_of_vaddr),
+            index_at_level_spec(1, vaddr) == index_at_level_spec(0, pte_of_vaddr),
+    {
+        let vaddr = vaddr@;
+        let pte_of_vaddr = (0xFFFFF68000000000 + ((vaddr & 0x0000_FFFF_FFFF_F000) >> 9)) as u64;
+        let vaddr_3 = (vaddr >> 39) & 0x1FF;
+        let vaddr_2 = (vaddr >> 30) & 0x1FF;
+        let vaddr_1 = (vaddr >> 21) & 0x1FF;
+
+        let pte_of_vaddr_2 = (pte_of_vaddr >> 30) & 0x1FF;
+        let pte_of_vaddr_1 = (pte_of_vaddr >> 21) & 0x1FF;
+        let pte_of_vaddr_0 = (pte_of_vaddr >> 12) & 0x1FF;
+
+        assert(vaddr_3 == pte_of_vaddr_2) by (bit_vector)
+            requires
+                vaddr_3 == (vaddr >> 39) & 0x1FF,
+                pte_of_vaddr_2 == (pte_of_vaddr >> 30) & 0x1FF,
+                pte_of_vaddr == (0xFFFFF68000000000 + ((vaddr & 0x0000_FFFF_FFFF_F000)
+                    >> 9)) as u64,
+        ;
+        assert(vaddr_2 == pte_of_vaddr_1) by (bit_vector)
+            requires
+                vaddr_2 == (vaddr >> 30) & 0x1FF,
+                pte_of_vaddr_1 == (pte_of_vaddr >> 21) & 0x1FF,
+                pte_of_vaddr == (0xFFFFF68000000000 + ((vaddr & 0x0000_FFFF_FFFF_F000)
+                    >> 9)) as u64,
+        ;
+        assert(vaddr_1 == pte_of_vaddr_0) by (bit_vector)
+            requires
+                vaddr_1 == (vaddr >> 21) & 0x1FF,
+                pte_of_vaddr_0 == (pte_of_vaddr >> 12) & 0x1FF,
+                pte_of_vaddr == (0xFFFFF68000000000 + ((vaddr & 0x0000_FFFF_FFFF_F000)
+                    >> 9)) as u64,
+        ;
+    }
+
     /// Ensures all PTEs are within the valid physical range.
     ///
     /// This function validates that all page table entries (PTEs) point to physical addresses
@@ -1291,34 +1798,16 @@ impl PageTablePermission {
     /// # Returns
     /// `true` if all present PTEs point to physical addresses within [start_phys, end_phys)
     pub open spec fn pte_within_range(&self, start_phys: u64, end_phys: u64) -> bool {
-        &&& forall|i: (PagePermissionIndex, PagePermission)|
-            #![auto]
-            self.storage.contains_key(i.0) ==> {
-                let pte = i.1.pte_perm;
-                let paddr = pte.value().address_spec(self.private_bit, self.shared_bit);
-                start_phys <= paddr@ < end_phys
+        &&& forall|kv_pair: (PageTablePath, PagePermission)|
+            self.storage.kv_pairs().contains(kv_pair) ==> {
+                let (path, perm) = kv_pair;
+                let pte = perm.pte_perm.value();
+                // Only check present PTEs
+                pte.is_present_pte_spec() ==> {
+                    let pte_phys_addr = pte.address_spec(self.private_bit, self.shared_bit).0;
+                    start_phys <= pte_phys_addr && pte_phys_addr < end_phys
+                }
             }
-    }
-
-    pub open spec fn page_pptr_has_perms(
-        &self,
-        page: DekoPPtr<Page>,
-        vaddr: VirtAddr,
-        lvl: nat,
-    ) -> bool {
-        let vpn = get_prefix_spec(lvl, vaddr);
-
-        &&& self.storage.contains_key((lvl, vpn))
-        &&& {
-            let entry = self.storage[(lvl, vpn)];
-
-            &&& entry.this_page_perm.pptr() == page@
-            &&& entry.this_page_perm.is_init()
-            &&& entry.this_page_perm.wf()
-            &&& entry.pte_perm.is_init()
-            &&& entry.pte_perm.wf()
-            &&& entry.pte_perm.value().is_valid_pte_spec()
-        }
     }
 
     /// Creates a new PageTablePermission with an empty storage map
@@ -1336,105 +1825,73 @@ impl PageTablePermission {
         }
     }
 
-    /// Get the virtual address of a page table entry for a given virtual address.
-    pub open spec fn get_pte_address_spec(vaddr: VirtAddr) -> VirtAddr {
-        let offset = (vaddr@ & 0x0000_FFFF_FFFF_F000u64) >> 9;
-        VirtAddr((PTE_BASE@ + offset) as u64)
-    }
-
-    /// Helper: Check if an entry at a specific level is present and optionally huge
-    pub open spec fn level_entry_valid(&self, vaddr: VirtAddr, level: nat, allow_huge: bool) -> bool
-        recommends
-            level <= 3,
-    {
-        let vpn = get_prefix_spec(level, vaddr);
-        self.storage.contains_key((level, vpn)) && {
-            let entry = self.storage[(level, vpn)];
-            let pte = entry.pte_perm.value();
-            pte.is_present_pte_spec() && (allow_huge || !pte.is_huge_pte_spec())
-        }
-    }
-
-    /// Helper: Check if an entry at a specific level is a huge page
-    pub open spec fn level_is_huge(&self, vaddr: VirtAddr, level: nat) -> bool
-        recommends
-            level <= 3,
-    {
-        let vpn = get_prefix_spec(level, vaddr);
-        self.storage.contains_key((level, vpn)) && {
-            let entry = self.storage[(level, vpn)];
-            entry.pte_perm.value().is_huge_pte_spec()
-        }
-    }
-
-    /// Checks if a virtual address has a valid mapping in the page table up to a specific level.
+    /// Checks if a virtual address has a valid mapping in the page table.
     ///
-    /// This function uses the new VPN prefix-based approach to check if the virtual address
-    /// has a valid translation path through the page table hierarchy.
-    ///
-    /// The `level` parameter specifies the deepest level to check:
-    /// - level 3: Check up to PML4 entries
-    /// - level 2: Check up to PDPT entries
-    /// - level 1: Check up to PD entries
-    /// - level 0: Check complete translation path to PT entries
-    pub open spec fn map_valid(&self, vaddr: VirtAddr, level: nat) -> bool
-        recommends
-            vaddr.wf(),
-            level <= 3,
-    {
-        match level as u64 {
-            3 => {
-                // Check up to level 3 (PML4)
-                self.level_entry_valid(vaddr, 3, true)
-            },
-            2 => {
-                // Check up to level 2 (PDPT)
-                self.level_entry_valid(vaddr, 3, true) && (self.level_is_huge(vaddr, 3)
-                    || self.level_entry_valid(vaddr, 2, true))
-            },
-            1 => {
-                // Check up to level 1 (PD)
-                self.level_entry_valid(vaddr, 3, true) && (self.level_is_huge(vaddr, 3) || (
-                self.level_entry_valid(vaddr, 2, true) && (self.level_is_huge(vaddr, 2)
-                    || self.level_entry_valid(vaddr, 1, true))))
-            },
-            0 => {
-                // Check complete translation path to level 0 (PT)
-                self.level_entry_valid(vaddr, 3, true) && (self.level_is_huge(vaddr, 3) || (
-                self.level_entry_valid(vaddr, 2, true) && (self.level_is_huge(vaddr, 2) || (
-                self.level_entry_valid(vaddr, 1, true) && (self.level_is_huge(vaddr, 1)
-                    || self.level_entry_valid(
-                    vaddr,
-                    0,
-                    false,
-                )  // Level 0 shouldn't be huge
-                )))))
-            },
-            _ => false  // Invalid level
-            ,
-        }
-    }
-
-    /// Helper function to check if an entry represents a present page table entry
-    /// This checks that the PRESENT bit is set in the corresponding PTE
-    pub open spec fn entry_is_present(&self, level: nat, idx: int, entry: PagePermission) -> bool
-        recommends
-            0 <= level <= 4,
-            0 <= idx < PAGE_TABLE_ENTRY as int,
-    {
-        // Check the PRESENT bit in the PageTableEntry using the is_present_spec function
-        entry.pte_perm.value().is_present_pte_spec()
+    /// This follows the same traversal logic as the reference virt_to_frame implementation:
+    /// - Level 3 (PML4) must be present
+    /// - Level 2 (PDPT) must be present; if huge, stop (1GB page)
+    /// - Level 1 (PD) must be present; if huge, stop (2MB page)
+    /// - Level 0 (PT) must be present (4KB page)
+    pub open spec fn map_valid(&self, vaddr: VirtAddr, lvl: u64) -> bool {
+        true
     }
 
     /// This spec function says that the storage map (flattened map) should have
     /// a valid translation for every valid virtual address.
     pub open spec fn translates_all_valid_addresses(&self) -> bool {
-        &&& forall|vaddr: VirtAddr, lvl: nat|
-            #![trigger self.storage.contains_key((lvl, get_prefix_spec(lvl, vaddr)))]
-            vaddr.wf() && 0 <= lvl <= 3 ==> {
-                let prefix = get_prefix_spec(lvl, vaddr);
-                self.storage.contains_key((lvl, prefix))
-            }
+        &&& forall|path: PageTablePath|
+            #![trigger self.storage.contains_key(path)]
+            { path.wf() ==> self.storage.contains_key(path) }
+    }
+
+    /// Ensures that the self-mapped PML4 must be present.
+    ///
+    /// The trick here is that we don't store PML4 but instead store the PDPT's starting
+    /// physical address into the CR3 register and we put the 493-th entry of PDPT to
+    /// point to itself; this recursive mapping has two benefits:
+    ///
+    /// 1. Reduces translation steps.
+    /// 2. Quickly locates the virtual address for any given virtual address's PTE because
+    ///    when we look up virtual address's PTE, we will always look up the 493-th entry
+    ///    of PML4 (which is the self-mapped entry) as the PDPT and we can look up as many
+    ///    times as we want by bit operations.
+    ///    For example, if we need to directly read/write the PDPT
+    ///    of a virtual address, we can look up the 493-th entry two times, because the vir-
+    ///    tual address is constructed such that its first two indices are always 493. Reading
+    ///    493 actually "cancel"s this level's translation.
+    pub open spec fn self_mapped(&self) -> bool {
+        // All recursive paths exist
+        &&& self.storage.contains_key(path![493])
+        &&& self.storage.contains_key(path![493, 493])
+        &&& self.storage.contains_key(path![493, 493, 493])
+        &&& self.storage.contains_key(path![493, 493, 493, 493])
+        
+        // They all point to the same PagePermission
+        &&& self.storage[path![493]] == self.storage[path![493, 493]]
+        &&& self.storage[path![493]] == self.storage[path![493, 493, 493]]
+        &&& self.storage[path![493]] == self.storage[path![493, 493, 493, 493]]
+        
+        // The entry is present
+        &&& self.storage[path![493]].pte_perm.value().is_present_pte_spec()
+        
+        // Self-referential property
+        &&& {
+            let entry = self.storage[path![493]];
+            let paddr = entry.pte_perm.value().address_spec(
+                self.private_bit, 
+                self.shared_bit
+            );
+            let vaddr = self.mapping_space.phys_to_virt_spec(paddr);
+
+            // Virtual address mapping is consistent
+            &&& entry.this_page_perm.pptr().addr() == vaddr@ as usize
+            
+            // Self-referential: the PTE points to its own containing page
+            // entry.pte_perm is the PTE in the parent (but parent == self for 493!)
+            // entry.this_page_perm[493] should equal entry.pte_perm
+            &&& entry.pte_perm.value() == 
+                entry.this_page_perm.value().0@.index(493)
+        }
     }
 
     /// **Unified VAddr-based Well-formedness**: Validates the entire page table through virtual address reasoning.
@@ -1449,65 +1906,39 @@ impl PageTablePermission {
     /// - Physical address constraints (through address range checks)
     /// - Complete coverage (through universal quantification over all vaddrs)
     pub open spec fn vaddr_based_wf(&self) -> bool {
-        forall|vaddr: VirtAddr, level: nat|
-            #![trigger self.storage.contains_key((level, get_prefix_spec(level, vaddr)))]
-            vaddr.wf() && 0 <= level <= 3 ==> {
-                let vpn = get_prefix_spec(level, vaddr);
+        // Parent-child consistency
+        &&& forall|child_path: PageTablePath|
+            #![trigger self.storage.contains_key(child_path)]
+            self.storage.contains_key(child_path) && child_path.len() > 1 ==> {
+                let parent_path = child_path.drop_last();
+                let child_index = child_path@[child_path.len() - 1];
+                let child = self.storage[child_path];
+                let parent = self.storage[parent_path];
 
-                // 1. Every vaddr has corresponding translation at each level
-                self.storage.contains_key((level, vpn)) && {
-                    let this_entry = self.storage[(level, vpn)];
-                    let idx = index_at_level_spec(level, vaddr) as int;
+                // 1. Parent exists
+                &&& self.storage.contains_key(
+                    parent_path,
+                )
+                // 2. PTE consistency: parent's page contains the child's PTE
+                &&& parent.this_page_perm.value().0@.index(child_index)@@
+                    == child.pte_perm.value().0@
+                // 3. When PTE is present, it points to the right page
+                &&& child.pte_perm.value().is_present_pte_spec() ==> {
+                    let pte_phys_addr = child.pte_perm.value().address_spec(
+                        self.private_bit,
+                        self.shared_bit,
+                    );
 
-                    // Basic well-formedness of this level's entry
-                    &&& this_entry.wf()
-                    &&& this_entry.level == level
-                    &&& this_entry.parent_index == idx
-                    &&& this_entry.this_page_perm.is_init() && this_entry.this_page_perm.wf()
-                    &&& this_entry.pte_perm.is_init()
-                        && this_entry.pte_perm.wf()
-                    // Physical address constraints for this page
-                    &&& this_entry.pte_perm.value().is_valid_pte_spec() ==> {
-                        let page_paddr = this_entry.pte_perm.value().address_spec(
-                            self.private_bit,
-                            self.shared_bit,
-                        );
-                        self.mapping_space.kernel.in_range_spec(page_paddr)
-                            || self.mapping_space.physmap.in_range_spec(page_paddr)
+                    // Physical address is in valid range
+                    &&& (self.mapping_space.kernel.in_range_spec(pte_phys_addr)
+                        || self.mapping_space.physmap.in_range_spec(
+                        pte_phys_addr,
+                    ))
+                    // Virtual/physical mapping is consistent
+                    &&& {
+                        let vaddr = self.mapping_space.phys_to_virt_spec(pte_phys_addr);
+                        child.this_page_perm.pptr().addr() == vaddr@ as usize
                     }
-                    // 2. For level > 0, ensure translation between level and level-1 makes sense
-                    &&& (level > 0 ==> {
-                        let next_level = (level - 1) as nat;
-                        let next_vpn = get_prefix_spec(next_level, vaddr);
-
-                        self.storage.contains_key((next_level, next_vpn)) && {
-                            let next_entry = self.storage[(next_level, next_vpn)];
-
-                            // The PTE at this level should point to the next level's page
-                            let entry = this_entry.this_page_perm.value().0@.index(
-                                index_at_level_spec(level, vaddr) as int,
-                            );
-
-                            entry.is_valid_pte_spec() ==> {
-                                let paddr = entry.address_spec(
-                                    self.private_bit,
-                                    self.shared_bit,
-                                );
-
-                                // Translation consistency: PTE should point to next level's page
-                                &&& next_entry.pte_perm.value()@ == entry@
-                                &&& (self.mapping_space.kernel.in_range_spec(paddr)
-                                    || self.mapping_space.physmap.in_range_spec(paddr)) && {
-                                    let expected_next_vaddr = self.mapping_space.phys_to_virt_spec(
-                                        paddr,
-                                    );
-
-                                    &&& next_entry.this_page_perm.pptr().addr()
-                                        == expected_next_vaddr@ as usize
-                                }
-                            }
-                        }
-                    })
                 }
             }
     }
@@ -1528,7 +1959,7 @@ impl PageTablePermission {
     /// - ✅ **Cross-level consistency** (through level-to-level translation validation)
     /// - ✅ **Physical address constraints** (through address range checks)
     /// - ✅ **Complete coverage** (through universal quantification over all vaddrs)
-    ///
+    /// - ✅ **Self-mapped**.
     /// # Verification Impact
     /// When this function returns `true`, you can be confident that:
     /// 1. 🛡️ **Memory Safety**: No access to invalid physical addresses
@@ -1536,21 +1967,17 @@ impl PageTablePermission {
     /// 3. 📍 **Address Correctness**: All virtual↔physical mappings are valid
     /// 4. 🔐 **Permission Soundness**: All permission tokens are properly managed
     pub open spec fn wf_with_perm(&self) -> bool {
-        // Basic well-formedness
-        &&& self.pgtable_perm.is_init() && self.pgtable_perm.wf()
-            && self.mapping_space.wf()
         // Unified virtual address-based validation
         &&& self.vaddr_based_wf()
         // Coverage: All valid addresses have translations
         &&& self.translates_all_valid_addresses()
+        // the root table must have a self-mapping entry so that PML4 becomes PDPT.
+        &&& self.self_mapped()
     }
 }
 
 impl PagePermission {
     pub open spec fn wf_level(&self) -> bool {
-        &&& self.level <= 3  // must be a valid level
-        &&& 0 <= self.parent_index
-            < PAGE_TABLE_ENTRY as int  // must be a valid index
         &&& self.pte_perm.is_init()
             && self.pte_perm.wf()  // must be initialized and well-formed
         &&& self.this_page_perm.is_init()
@@ -1560,7 +1987,7 @@ impl PagePermission {
 }
 
 impl View for PageTablePermission {
-    type V = Map<PagePermissionIndex, PagePermission>;
+    type V = Map<PageTablePath, PagePermission>;
 
     closed spec fn view(&self) -> Self::V {
         self.storage

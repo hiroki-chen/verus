@@ -101,7 +101,6 @@ pub fn virt_to_phys(
     requires
         vaddr.wf(),
         ctx_perm.wf_with(ctx),
-        ctx_perm.pgtable_perm.map_valid(vaddr, 0),
     ensures
         paddr.wf(),
 {
