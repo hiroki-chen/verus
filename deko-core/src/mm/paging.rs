@@ -1515,6 +1515,7 @@ impl PageTablePermission {
         &&& pte_index_3 == 493
     }
 
+    #[verifier::spinoff_prover]
     pub proof fn lemma_pml4_entry_always_mapped(&self)
         requires
             self.wf_with_perm(),
@@ -1527,7 +1528,7 @@ impl PageTablePermission {
                         ),
                     );
 
-                    self.virt_to_frame_spec(pml4e_addr).is_Some()
+                    self.virt_to_frame_spec(pml4e_addr) matches Some(_)
                 },
     {
         assert forall|vaddr: VirtAddr| vaddr.wf() implies {
@@ -1537,7 +1538,7 @@ impl PageTablePermission {
                 ),
             );
 
-            self.virt_to_frame_spec(pml4e_addr).is_Some()
+            self.virt_to_frame_spec(pml4e_addr) matches Some(_)
         } by {
             let pml4_addr = Page::get_pte_address_spec(
                 Page::get_pte_address_spec(
@@ -1546,14 +1547,39 @@ impl PageTablePermission {
             );
 
             let path = PageTablePath::from_vaddr(pml4_addr);
-            assert(path.eq(&path![493, 493, 493, 493])) by {
+            assert(path@ == path![493, 493, 493, 493]@) by {
                 self.lemma_pte_of_vaddr_cancels_with_self_mapping(vaddr);
             }
+
+            assert(self.storage[path![493]] == self.storage[path![493, 493]]);
+            assert(self.storage[path![493, 493]] == self.storage[path![493, 493, 493]]);
+            assert(self.storage[path![493, 493, 493]] == self.storage[path![493, 493, 493, 493]]);
             assert(self.storage[path![493]].pte_perm.value().is_present_pte_spec());
 
-            admit()
-        }
+            let level3 = self.get_pte(path, 3).unwrap();
+            assert(PageTablePath(path@.take(1 as int))@ == path![493]@);
+            assert(level3.is_present_pte_spec());
 
+            let level2 = self.get_pte(path, 2).unwrap();
+            assert(PageTablePath(path@.take(2 as int))@ == path![493, 493]@);
+            assert(level2.is_present_pte_spec());
+
+            if level2.is_huge_pte_spec() {
+
+            } else {
+                let level1 = self.get_pte(path, 1).unwrap();
+                assert(PageTablePath(path@.take(3 as int))@ == path![493, 493, 493]@);
+                assert(level1.is_present_pte_spec());
+
+                if level1.is_huge_pte_spec() {
+
+                } else {
+                    let level0 = self.get_pte(path, 0).unwrap();
+                    assert(PageTablePath(path@.take(4 as int))@ == path![493, 493, 493, 493]@);
+                    assert(level0.is_present_pte_spec());
+                }
+            }
+        }
     }
 
     /// **PROOF**: Establishes the cancellation property for self-mapped PTE access.
@@ -1781,6 +1807,7 @@ impl PageTablePermission {
                     >> 9)) as u64,
         ;
     }
+
 
     /// Ensures all PTEs are within the valid physical range.
     ///
