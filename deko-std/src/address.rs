@@ -101,7 +101,7 @@ pub open spec fn sign_extend_impl(addr: u64) -> u64 {
 /// 1. Preserving addresses already in the lower canonical range
 /// 2. Mapping intermediate values to the upper canonical range
 /// 3. Using bit 47 to determine the target range for other values
-pub closed spec fn sign_extend_spec(addr: u64) -> u64
+pub open spec fn sign_extend_spec(addr: u64) -> u64
     recommends
         addr < VADDR_RANGE_SIZE,
 {
