@@ -1755,6 +1755,19 @@ impl PageTablePermission {
         ;
     }
 
+    // #[verifier::spinoff_prover]
+    // pub proof fn lemma_pdpe_reads_present_can_read_pde(
+    //     &self,
+    //     pdpe_addr: VirtAddr,
+    //     pde_addr: VirtAddr,
+    // )
+    //     requires
+    //         self.wf_with_perm(),
+    //         pdpe_addr.wf() && pde_addr.wf(),
+    //         PageTablePath::from_vaddr(pde_addr)@ == path![493, 493]@,
+    //     ensures
+    //         self.virt_to_frame_spec(pdpe_addr) matches Some(_),
+    // {}
     #[verifier::spinoff_prover]
     pub proof fn lemma_pml4e_reads_present_can_read_pdpe(
         &self,
@@ -1763,8 +1776,9 @@ impl PageTablePermission {
     )
         requires
             self.wf_with_perm(),
-            pml4_addr.wf() && pdpe_addr.wf(),
-            PageTablePath::from_vaddr(pdpe_addr)@ == path![493, 493, 493]@,
+            pml4_addr.wf(),
+            pdpe_addr.wf(),
+            PageTablePath::from_vaddr(pdpe_addr)@.take(3) == path![493, 493, 493]@,
             Page::get_pte_address_spec(pdpe_addr) == pml4_addr,
             self.virt_to_frame_spec(pml4_addr) matches Some(_),
             PageTableEntry::read_pte_spec(pml4_addr, self).is_present_pte_spec(),
@@ -1773,30 +1787,72 @@ impl PageTablePermission {
     {
         let pml4_path = PageTablePath::from_vaddr(pml4_addr);
         let pdpe_path = PageTablePath::from_vaddr(pdpe_addr);
+
+        self.lemma_pte_of_vaddr_shares_prefix(pdpe_addr, pml4_addr);
         assert(pml4_path.wf() && pdpe_path.wf()) by {
             PageTablePath::lemma_from_vaddr_at_level_makes_wf(pml4_addr, 0);
             PageTablePath::lemma_from_vaddr_at_level_makes_wf(pdpe_addr, 0);
         }
+        assert(pdpe_path@.take(3) == path![493, 493, 493]@);
         assert(pml4_path@ == path![493, 493, 493, 493]@);
-        assert(pdpe_path@ == path![493, 493, 493]@);
 
         let read_pte = PageTableEntry::read_pte_spec(pml4_addr, self);
-        assert((pml4_addr@ >> 3 & 0x1ff) == pdpe_path@[3]) by {
-            self.lemma_pte_of_vaddr_shares_prefix(pdpe_addr, pml4_addr);
-        }
+        assert((pml4_addr@ >> 3 & 0x1ff) == pdpe_path@[3]);
         assert(read_pte == self.storage[pml4_path].this_page_perm.value().0@.index(
             pdpe_path@[3] as int,
         ));
-        assert(self.storage[pml4_path].this_page_perm.value()
-            == self.storage[path![493, 493, 493]].this_page_perm.value()) by {
-            self.lemma_self_mapped_same_page_perm();
-            self.same_vaddr_reads_same_value(
-                self.storage[pml4_path].this_page_perm,
-                self.storage[path![493, 493, 493]].this_page_perm,
-            );
-        };
+        self.lemma_self_mapped_same_page_perm();
 
-        // Now Verus automatically knows that the pdpe is present.
+        assert(forall|p: PageTablePath| #![auto] p.wf() ==> { self.storage[p].wf_level() });
+        self.same_vaddr_reads_same_value(
+            self.storage[path![493, 493, 493, 493]].this_page_perm,
+            self.storage[path![493, 493, 493]].this_page_perm,
+        );
+        self.same_vaddr_reads_same_value(
+            self.storage[path![493, 493, 493]].this_page_perm,
+            self.storage[path![493, 493]].this_page_perm,
+        );
+        self.same_vaddr_reads_same_value(
+            self.storage[path![493, 493]].this_page_perm,
+            self.storage[path![493]].this_page_perm,
+        );
+
+        let p3 = self.storage[path![493]].pte_perm.value();
+        assert(p3.is_present_pte_spec()); // trivial: by self_mapped.
+
+        let p2 = self.storage[path![493, 493]].pte_perm.value();
+        assert(p2.is_present_pte_spec()) by {
+            assert(path![493, 493].drop_last()@ == path![493]@);
+            assert(p2 == self.storage[path![493]].this_page_perm.value().0@.index(493));
+        }
+
+        let p1 = self.storage[path![493, 493, 493]].pte_perm.value();
+        assert(p1.is_present_pte_spec()) by {
+            assert(path![493, 493, 493].drop_last()@ == path![493, 493]@);
+            assert(p1 == self.storage[path![493, 493]].this_page_perm.value().0@.index(493));
+            assert(p1 == self.storage[path![493]].this_page_perm.value().0@.index(493));
+            // by lemma_self_mapped_same_page_perm
+        }
+
+        let idx = pdpe_path@[3] as int;
+        let p0 = self.storage[path![493, 493, 493, idx]].pte_perm.value();
+        assert(p0.is_present_pte_spec()) by {
+            // this proof is rather interesting.
+            assert(path![493, 493, 493, idx].drop_last()@ == path![493, 493, 493]@);
+            assert(p0 == self.storage[path![493, 493, 493]].this_page_perm.value().0@.index(idx));
+            assert(p0 == self.storage[path![493, 493]].this_page_perm.value().0@.index(idx));
+            assert(p0 == self.storage[path![493]].this_page_perm.value().0@.index(idx));
+
+            assert(read_pte == self.storage[pml4_path].this_page_perm.value().0@.index(idx));
+            assert(pml4_path@ == path![493, 493, 493, 493]@);
+        }
+
+        // Now tell Verus how virt_to_frame_spec works.
+        assert(pdpe_path@.take(4) == path![493, 493, 493, idx]@);
+        assert(pdpe_path@.take(3) == path![493, 493, 493]@);
+        assert(pdpe_path@.take(2) == path![493, 493]@);
+        assert(pdpe_path@.take(1) == path![493]@);
+        // Q.E.D.
     }
 
     /// Verus has no idea of the provenance of `DekoPointsTo` in the paging system,
@@ -2189,6 +2245,7 @@ impl PageTablePermission {
             index_at_level_spec(2, vaddr) == index_at_level_spec(1, pte_of_vaddr),
             index_at_level_spec(1, vaddr) == index_at_level_spec(0, pte_of_vaddr),
             index_at_level_spec(0, vaddr) == (pte_of_vaddr@ >> 3) & 0x1FF,
+            index_at_level_spec(3, pte_of_vaddr) == 493,
     {
         let vaddr = vaddr@;
         let pte_of_vaddr = (0xFFFFF68000000000 + ((vaddr & 0x0000_FFFF_FFFF_F000) >> 9)) as u64;
@@ -2225,6 +2282,12 @@ impl PageTablePermission {
         assert(vaddr_0 == (pte_of_vaddr >> 3) & 0x1FF) by (bit_vector)
             requires
                 vaddr_0 == (vaddr >> 12) & 0x1FF,
+                pte_of_vaddr == (0xFFFFF68000000000 + ((vaddr & 0x0000_FFFF_FFFF_F000)
+                    >> 9)) as u64,
+        ;
+
+        assert((pte_of_vaddr >> 39) & 0x1FF == 493) by (bit_vector)
+            requires
                 pte_of_vaddr == (0xFFFFF68000000000 + ((vaddr & 0x0000_FFFF_FFFF_F000)
                     >> 9)) as u64,
         ;
@@ -2338,8 +2401,9 @@ impl PageTablePermission {
 
             // Physical address is in valid range
             &&& (self.mapping_space.kernel.in_range_spec(paddr)
-                || self.mapping_space.physmap.in_range_spec(paddr))
-            &&& entry.wf_level()
+                || self.mapping_space.physmap.in_range_spec(
+                paddr,
+            ))
             // Virtual address mapping is consistent
             &&& entry.this_page_perm.pptr().addr() == self.mapping_space.phys_to_virt_spec(
                 paddr,
