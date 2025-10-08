@@ -7,10 +7,9 @@
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
-verus! {
+use crate::prelude::*;
 
-#[link_section = ".ro_after_init"]
-pub exec static GLOBAL_GDT: GlobalDescriptorTable = GlobalDescriptorTable::new();
+verus! {
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -50,6 +49,7 @@ impl GDTEntry {
     }
 }
 
+#[repr(C)]
 pub struct GlobalDescriptorTable {
     pub entries: Array<GDTEntry, 8>,  // there are 8 entries in our GDT
 }
@@ -62,7 +62,10 @@ impl WellFormed for GlobalDescriptorTable {
 
 impl GlobalDescriptorTable {
     #[verifier::external_body]
-    pub const fn new() -> Self {
+    pub const fn new() -> (r: Self)
+        ensures
+            r.wf(),
+    {
         Self {
             entries: Array::new(
                 [
@@ -80,7 +83,10 @@ impl GlobalDescriptorTable {
     }
 
     #[verifier::external_body]
-    pub fn load_selectors(&self) {
+    pub fn load_selectors(&self)
+        requires
+            self.wf(),
+    {
         self.load();
 
         unsafe {
@@ -108,7 +114,10 @@ impl GlobalDescriptorTable {
     }
 
     #[verifier::external_body]
-    pub fn load(&self) {
+    pub fn load(&self)
+        requires
+            self.wf(),
+    {
         let desc = GDTDesc {
             limit: (core::mem::size_of::<GDTEntry>() * 8 - 1) as u16,
             base: VirtAddr::from(&self.entries as *const _),
@@ -122,10 +131,26 @@ impl GlobalDescriptorTable {
             );
         }
     }
+
+    #[inline]
+    pub fn init_gdt(cpu_perm: Tracked<&DekoCpuCore>)
+        requires
+            cpu_perm@.wf(),
+            cpu_perm@.is_bsp(),
+    {
+        GLOBAL_GDT.load_selectors();
+    }
 }
 
-pub fn init_gdt() {
-    GLOBAL_GDT.load_selectors();
+} // verus!
+verus! {
+
+#[link_section = ".ro_after_init"]
+exec static GLOBAL_GDT: GlobalDescriptorTable
+    ensures
+        GLOBAL_GDT.wf(),
+{
+    GlobalDescriptorTable::new()
 }
 
 } // verus!

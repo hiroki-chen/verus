@@ -18,9 +18,12 @@ startup_32:
   movw %ax, %gs
   movw %ax, %ss
 
-  ljmpl $0x8, $.Lsnp_cs
+  ljmpl $0x8, $.LSNP_setup
 
-.Lsnp_cs:
+// This pieceo of code sets up the initial page table for our 64bit DEKO monitor.
+// This page table identity-maps the physical addresses.
+.LSNP_setup:
+  // Clear out the page table.
   movl $pgtable_end, %ecx
   subl $pgtable, %ecx
   shrl $2, %ecx
@@ -29,13 +32,18 @@ startup_32:
   rep stosl
 
   call get_pte_c_bit
+  // The return value should be 0x80000 to be stored in 32bit registers.
   movl %eax, %edx
 
+  // Begin to fill the page table.
   movl $pgtable, %edi
+  // eax = &pgtable + 0x1000 + flags(7)
+  // level3 -> level2
   leal 0x1007(%edi), %eax
   movl %eax, 0(%edi)
   addl %edx, 4(%edi)
 
+  // level 2-> level 1 only four entries needed for now.
   addl $0x1000, %edi
   leal 0x1007(%edi), %eax
   movl $4, %ecx
@@ -47,12 +55,13 @@ startup_32:
   jnz 1b
   andl $0xfffff000, %edi
 
+  // level 1 -> level 0 is based on 2MB pages. note %eax.
   addl $0x1000, %edi
-  movl $0x00000183, %eax
+  movl $0x00000183, %eax  // 0x183 => 0001 1000 0011    GLOBAL / HUGE / W / P
   movl $2048, %ecx
   1: movl %eax, 0(%edi)
   addl %edx, 4(%edi)
-  addl $0x00200000, %eax
+  addl $0x00200000, %eax // 2MB offset!!!
   addl $8, %edi
   decl %ecx
   jnz 1b
@@ -208,14 +217,24 @@ startup_64:
 
   /*
     * Follow the C calling convention for x86-64:
-    *
-    * - Pass &Stage2LaunchInfo as the first argument (%rdi)
+    * - Wrap information as a `Ctx` struct and pass its pointer as the first argument (%rdi)
+    *   -  Store the Stage2Launchinfo pointer in ctx->stage2_info (offset 0)
+    *   -  Store the page table base address in ctx->pgtable (offset 8)
+    * - Pass control to deko_main
     * - Make sure (%rsp + 8) is 16b-aligned when control is transferred
     *   to deko_main
     */
-  movl %ebp, %edi
+  // movl %ebp, %edi
+  // movq $pgtable, %rsi 
+  movq $deko_bsp_ctx, %rdi
+  // Copy ebp to rdi
+  movl %ebp, (%rdi)
+  movq $pgtable, 8(%rdi)
   andq $~0xf, %rsp
   call deko_main
+
+.data
+.align 4
 
 idt32:
   .rept 32
@@ -249,6 +268,11 @@ gdt64_end:
 gdt64_desc:
   .word gdt64_end - gdt64 - 1
   .quad gdt64
+
+.align 8
+deko_bsp_ctx:
+  .fill 0x1000, 1, 0
+deko_bsp_ctx_end:
 
 .align 0x1000
 .globl pgtable

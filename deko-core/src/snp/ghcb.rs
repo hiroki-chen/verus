@@ -9,65 +9,119 @@
 //! interact with it, including sending and receiving messages via the GHCB
 //! protocol.
 use deko_std::prelude::*;
+use deko_std::snp::ghcb::{
+    GuestHostCommucationBlock, SNP_REG_GHCB_GPA_REQ, SNP_REG_GHCB_GPA_RESP, SNP_STATE_CHANGE_REQ,
+    SNP_STATE_CHANGE_RESP,
+};
+use deko_std::sync::RwLockToks::reader;
 use vstd::atomic::PAtomicU8;
 use vstd::prelude::*;
 
+use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
+use crate::cpu::DekoCpuCtx;
+use crate::mm::paging::{PageTable, PteFlags};
+use crate::mm::virt_to_phys;
+
 verus! {
 
-#[repr(C)]
-pub struct GuestHostCommucationBlock {
-    _reserved: Array<u8, 0xcb>,
-    pub cpl: PAtomicU8,  // tweak: this is now `repr[(C)]`
-    _reserved2: Array<u8, 0x74>,
-    pub xss: u64,
-    _reserved3: Array<u8, 0x18>,
-    pub dr7: u64,
-    _reserved4: Array<u8, 0x90>,
-    pub rax: u64,
-    _reserved5: Array<u8, 0x100>,
-    _reserved6: u64,
-    pub rcx: u64,
-    pub rdx: u64,
-    pub rbx: u64,
-    _reserved7: Array<u8, 0x70>,
-    /// Guest controlled exit code.
-    pub sw_exitcode: u64,
-    /// Guest controlled exit info 1.
-    pub sw_exitinfo1: u64,
-    /// Guest controlled exit info 2.
-    pub sw_exitinfo2: u64,
-    /// Guest controlled additional information.
-    pub sw_scratch: u64,
-    _reserved8: Array<u8, 0x38>,
-    pub xcr0: u64,
-    /// Bitmap to indicate valid qwords in the save state area
-    /// starting from offset 0x000 through offset 0xe3f.
-    pub valid_bitmap: Array<u8, 0x10>,
-    pub x87_state_gpa: u64,
-    _reserved9: Array<u8, 0x3f8>,
-    pub shared_buffer: Array<u8, 0x7f0>,
-    _reserved10: Array<u8, 0x0a>,
-    /// Version of the GHCB protocol used by the guest.
-    pub ghcb_protocol_version: u16,
-    /// Provides an indicator of the usage and format of the GHCB:
-    /// - 0x0000_0000: The GHCB page follows the format defined in
-    ///                the AMD's manual.
-    /// - Any other value can be used by the hypervisor, which can
-    ///             determine its own format.
-    pub ghcb_usage: u32,
+/// Validates the GHCB page allocated for the current CPU core.
+#[verifier::external_body]
+pub fn validate_ghcb(
+    ctx: DekoPPtr<DekoCtx>,
+    Tracked(ctx_perm): Tracked<&mut DekoCtxPermission>,
+    ghcb: DekoPPtr<GuestHostCommucationBlock>,
+    Tracked(ghcb_perm): Tracked<DekoPointsTo<GuestHostCommucationBlock>>,
+)
+    requires
+        old(ctx_perm).wf(),
+        old(ctx_perm).wf_with(ctx),
+        ghcb_perm.wf(),
+        ghcb_perm.is_init(),
+        ghcb_perm.pptr() == ghcb@,
+        ghcb_perm.addr() % 0x1000 == 0,
+    ensures
+        ctx_perm.wf(),
+        ctx_perm.wf_with(ctx),
+{
+    // let vaddr = VirtAddr::new(ghcb.addr() as u64);
+    // let paddr = virt_to_phys(vaddr);
+    // // Invalidate this page from the CVM.
+    // crate::snp::Snp::pvalidate(vaddr.0, 0x1000, false, Tracked(ctx_perm));
+    // // Notify the hypervisor that this page is now valid.
+    // msr_set_page_valid(paddr, false);
+    // PageTable::set_shared_4k(pgtable, Tracked(pgtable_perm), vaddr);
 }
 
-impl WellFormed for GuestHostCommucationBlock {
-    closed spec fn wf(&self) -> bool {
-        &&& self.ghcb_protocol_version == 0x0001 || self.ghcb_protocol_version == 0x0002
-        &&& self.ghcb_usage == 0x0000_0000
+pub fn msr_register_ghcb_gpa(paddr: PhysAddr)
+    requires
+        paddr.wf(),
+{
+    let mut addr = paddr.0;
+
+    addr |= SNP_REG_GHCB_GPA_REQ;
+    let response = no_irq_zone(
+        ||
+            {
+                write_msr(MSR_AMD64_SEV_ES_GHCB, addr);
+                raw_vmgexit();
+                read_msr(MSR_AMD64_SEV_ES_GHCB)
+            },
+    );
+
+    if response & 0xfff != SNP_REG_GHCB_GPA_RESP {
+        vstd::vpanic!("Failed to register GHCB GPA via MSR");
+    }
+    if response & !(0xfff) != paddr.0 {
+        vstd::vpanic!("Failed to register GHCB GPA via MSR");
+    }
+}
+
+/// Set a page to be shared to tell the hypervisor to re-claim it.
+pub fn msr_set_page_valid(paddr: PhysAddr, valid: bool)
+    requires
+        paddr.wf(),
+{
+    let mut addr = paddr.0 & 0x000f_ffff_ffff_f000u64;
+    if valid {
+        addr |= 1u64 << 52;
+    } else {
+        addr |= 2u64 << 52;
+    }
+    addr |= SNP_STATE_CHANGE_REQ;
+
+    // Change of the state is critical so we do this in a no-irq zone.
+    let response = no_irq_zone(
+        ||
+            {
+                write_msr(MSR_AMD64_SEV_ES_GHCB, addr);
+                raw_vmgexit();
+                read_msr(MSR_AMD64_SEV_ES_GHCB)
+            },
+    );
+
+    if response & 0xfff != SNP_STATE_CHANGE_RESP {
+        vstd::vpanic!("Failed to change the page state via GHCB");
+    }
+    if response & !(0xfff) != 0 {
+        vstd::vpanic!("Failed to change the page state via GHCB");
     }
 }
 
 /// Fetch the current GHCB structure for this specific CPU core.
-#[verifier::external_body]
-fn current_ghcb() -> &'static GuestHostCommucationBlock {
-    vstd::vpanic!("todo")
+pub fn current_ghcb() -> (r: (
+    DekoPPtr<GuestHostCommucationBlock>,
+    Tracked<DekoPointsTo<GuestHostCommucationBlock>>,
+))
+    ensures
+        r.1@.wf(),
+        r.1@.is_init(),
+        r.1@.pptr() == r.0@,
+{
+    let (cpu, Tracked(perm)) = DekoCpuCtx::this_cpu();
+    let cpu = cpu.borrow(Tracked(&perm.ptr_perm));
+
+    // `this_cpu` is causing page fault so the mapping is problematic.
+    (cpu.ghcb(), Tracked(perm.ghcb_perm))
 }
 
 } // verus!

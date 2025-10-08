@@ -30,6 +30,9 @@ pub mod ptr;
 pub mod sync;
 pub mod wf;
 
+#[cfg(feature = "snp")]
+pub mod snp;
+
 // Export everything.
 pub mod prelude {
     pub use crate::address::*;
@@ -44,6 +47,8 @@ pub mod prelude {
     pub use crate::mem::*;
     pub use crate::misc::*;
     pub use crate::ptr::*;
+    #[cfg(feature = "snp")]
+    pub use crate::snp::*;
     pub use crate::sync::*;
     pub use crate::wf::*;
     pub use crate::*;
@@ -87,10 +92,6 @@ impl<V: WellFormed> RwLockPredicate<V> for TrivialPredicate<V> {
         true
     }
 }
-
-// == Type alias for trivial types that do not require any predicate. ==
-#[cfg(feature = "alloc")]
-pub type BoxNoPred<V> = Box<V, TrivialPredicate<V>>;
 
 // #[cfg(feature = "alloc")]
 // pub type ArcNoPred<V> = Arc<V, TrivialPredicate<V>>;

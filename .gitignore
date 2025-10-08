@@ -10,3 +10,4 @@ build
 *.elf
 
 .gdb_history
+.verus-*

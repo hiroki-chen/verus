@@ -12,6 +12,7 @@ pub mod paging;
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
+use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
 use crate::mm::paging::{PageTable, PteFlags};
 
@@ -75,45 +76,59 @@ pub struct PageEncryptionMasks {
 
 /// This function initializes the global `DEKO_FRAME_ALLOCATOR` with the given
 /// physical memory region for physical memory allocation.
-#[verifier::external_body] // todo: will fix later.
+#[verifier::external_body]  // todo: will fix later.
 pub fn init_frame_allocator(heap_start: &VirtAddr, heap_end: &VirtAddr)
     requires
-        // heap_start.wf(),
-        // heap_end.wf(),
-        // heap_start@ % 0x1000 == 0,
-        // heap_end@ % 0x1000 == 0,
-        // heap_end@ > heap_start@,
-        // valid_heap_param(heap_start.0, (heap_end.0 - heap_start.0) as u64, HEAP_SIZE as u64),
+// heap_start.wf(),
+// heap_end.wf(),
+// heap_start@ % 0x1000 == 0,
+// heap_end@ % 0x1000 == 0,
+// heap_end@ > heap_start@,
+// valid_heap_param(heap_start.0, (heap_end.0 - heap_start.0) as u64, HEAP_SIZE as u64),
+
 {
     let phys_start = PhysAddr(heap_start.0);
 
     DEKO_FRAME_ALLOCATOR.init(phys_start.0, heap_end.0 - heap_start.0);
 }
 
-// TODO: Add CPU core permission.
 #[inline(always)]
-pub fn virt_to_phys(vaddr: VirtAddr) -> (paddr: PhysAddr)
+pub fn virt_to_phys(
+    ctx: DekoPPtr<DekoCpuCtx>,
+    Tracked(ctx_perm): Tracked<&DekoCpuCtxPermission>,
+    vaddr: VirtAddr,
+) -> (paddr: PhysAddr)
     requires
-        // // vaddr.wf(),
+        vaddr.wf(),
+        ctx_perm.wf_with(ctx),
     ensures
         paddr.wf(),
 {
-    PageTable::virt_to_frame(vaddr).to_phys()
+    let private_bit = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).private_bit();
+    let shared_bit = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).shared_bit();
+
+    PageTable::virt_to_frame(vaddr, private_bit, Tracked(&ctx_perm.pgtable_perm)).address(
+        private_bit,
+        shared_bit,
+    )
 }
 
 #[inline(always)]
-pub fn phys_to_virt(paddr: PhysAddr) -> (vaddr: VirtAddr)
+pub fn phys_to_virt(
+    ctx: DekoPPtr<DekoCpuCtx>,
+    Tracked(ctx_perm): Tracked<&DekoCpuCtxPermission>,
+    paddr: PhysAddr,
+) -> (vaddr: VirtAddr)
     requires
         paddr.wf(),
+        ctx_perm.wf_with(ctx),
+        ctx_perm.ptr_perm.value().kernel_mapping().kernel.in_range_spec(paddr)
+            || ctx_perm.ptr_perm.value().kernel_mapping().physmap.in_range_spec(paddr),
     ensures
-        // vaddr.wf(),
+// vaddr.wf(),
+
 {
-    if let Some(ms) = DEKO_MAPPING_SPACE.get() {
-        if let Some(vaddr) = ms.phys_to_virt(paddr) {
-            return vaddr;
-        }
-    }
-    vstd::vpanic!("fatal runtime error!");
+    ctx.borrow(Tracked(&ctx_perm.ptr_perm)).kernel_mapping().phys_to_virt(paddr)
 }
 
 pub tracked struct DekoMemoryRegionPermission;

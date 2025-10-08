@@ -1,20 +1,25 @@
+pub mod ctx;
 pub mod gdt;
 pub mod idt;
+pub mod irq;
 pub mod msr;
 pub mod types;
 
 use deko_std::prelude::*;
+use deko_std::snp::ghcb::GuestHostCommucationBlock;
 use vstd::atomic::{PAtomicBool, PAtomicU32, PermissionBool, PermissionU32};
 use vstd::cell::{PCell, PointsTo};
 use vstd::prelude::*;
 
-use crate::mm::paging::{DekoCpuPTOwner, PageTable, PteFlags, PERCPU_BASE, PTE_BASE};
+use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
+use crate::mm::paging::{PageTable, PageTablePermission, PteFlags};
 use crate::mm::virt_to_phys;
-use crate::snp::ghcb::GuestHostCommucationBlock;
 
 verus! {
 
 pub const CPUID_MAX_COUNT: usize = 128;
+
+pub const CPU_AREA_MAGIC: u64 = 0x114514;
 
 pub struct GuestVmsaRef {
     vmsa: Option<PhysAddr>,
@@ -169,15 +174,129 @@ pub exec static PERCPU_AREAS: RwLock<PerCpuAreas, PerCpuAreasInv>
     lock
 }
 
-/// The structure that holds each core's own data.
-pub struct CpuData {
-    cpu_id: u64,
+/// Physical per-CPU data structure and hardware interface.
+///
+/// `DekoCpuCtx` represents the physical per-CPU area that contains all CPU-specific
+/// state and provides the hardware interface for the Deko hypervisor. This structure
+/// is mapped at a fixed virtual address (`PERCPU_BASE`) for each CPU core and serves
+/// as the entry point for accessing CPU-local resources.
+///
+/// # Architectural Relationship
+///
+/// `DekoCpuCtx` is the lowest level in the three-tier CPU context architecture:
+///
+/// - **[`DekoCpuCore`]** (deko-std): Low-level hardware abstraction and permission tracking
+/// - **[`DekoCtx`]** (deko-core): High-level resource management and ownership
+/// - **[`DekoCpuCtx`]** (this type): Physical per-CPU data structure and hardware interface
+///
+/// ## Relationship Structure
+///
+/// ```text
+/// DekoCpuCtx (This type - Physical CPU)
+///     ├── ctx: DekoPPtr<DekoCtx> → High-level context
+///     ├── ghcb: GHCB (Hardware interface)
+///     ├── tss: TSS (Hardware state)
+///     └── shared_area: Per-CPU shared data
+///
+/// DekoCtx (High-level context)
+///     ├── pgtable: Page tables
+///     ├── gdt: Global Descriptor Table
+///     └── mapping_space: Address mappings
+///
+/// DekoCpuCore (Permission tracking)
+///     ├── cpu_core_id: Core identifier
+///     ├── registers: Register permissions
+///     └── privilege_level: Current ring level
+/// ```
+///
+/// # Key Components
+///
+/// - **`ctx`**: Pointer to the high-level [`DekoCtx`] execution context
+/// - **`ghcb`**: Guest-Host Communication Block for AMD SEV-SNP
+/// - **`tss`**: Task State Segment for x86-64 hardware
+/// - **`shared_area`**: Pointer to shared per-CPU data structures
+/// - **`private_bit/shared_bit`**: Memory confidentiality control bits
+///
+/// # Hardware Interface
+///
+/// This structure provides the primary interface to hardware features:
+///
+/// - **Memory Confidentiality**: Controls private/shared memory bits
+/// - **Guest-Host Communication**: GHCB for hypervisor calls
+/// - **Task Switching**: TSS for hardware task management
+/// - **Per-CPU Storage**: Fixed virtual address mapping
+///
+/// # Usage Pattern
+///
+/// ```rust
+/// // 1. Get the current CPU's context (always succeeds)
+/// let (cpu_ctx, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+///
+/// // 2. Access the high-level execution context
+/// let deko_ctx = cpu_ctx.borrow(Tracked(&cpu_perm.ptr_perm)).ctx;
+///
+/// // 3. Use hardware features
+/// cpu_ctx.map_shared_page(vaddr, Tracked(cpu_perm));
+/// ```
+///
+/// # Memory Layout
+///
+/// Each `DekoCpuCtx` is mapped at `PERCPU_BASE + (cpu_id * PAGE_SIZE)` and contains:
+///
+/// - Magic number for validation
+/// - CPU identification and state
+/// - Hardware interface structures
+/// - Pointers to other context levels
+///
+/// # Safety Guarantees
+///
+/// - **Fixed Mapping**: Always accessible at known virtual address
+/// - **Per-CPU Isolation**: Each CPU has its own independent instance
+/// - **Hardware Integration**: Direct interface to x86-64 and SEV-SNP features
+/// - **Permission Control**: All access requires proper permission structures
+///
+/// [`DekoCpuCore`]: deko_std::cpu::DekoCpuCore
+/// [`DekoCtx`]: crate::cpu::ctx::DekoCtx
+pub struct DekoCpuCtx {
+    pub magic: u64,
+    pub cpu_id: u64,
     /// The GHCB block for this CPU.
-    ghcb: PCell<GuestHostCommucationBlock>,
+    ghcb: DekoPPtr<GuestHostCommucationBlock>,
     tss: X86Tss,
-    pgtable: DekoPPtr<PageTable>,
+    /// The page table for this CPU.
     shared_area: DekoPPtr<PerCpuShared>,
-    pgowner: Ghost<DekoCpuPTOwner>,
+    /// The page table of this CPU.
+    pgtable: DekoPPtr<PageTable>,
+    /// The private bit of the PTE of this core.
+    private_bit: u64,
+    /// The shared bit of the PTE of this core.
+    shared_bit: u64,
+    /// The high-level kernel mapping context for this CPU.
+    kernel_mapping: MappingSpace,
+}
+
+with_permission! {
+    DekoCpuCtx,
+    ptr_perm: DekoPointsTo<DekoCpuCtx>,
+    pgtable_perm: PageTablePermission,
+    ghcb_perm: DekoPointsTo<GuestHostCommucationBlock>,
+}
+
+impl DekoCpuCtxPermission {
+    pub open spec fn wf_with(&self, cpu_data: DekoPPtr<DekoCpuCtx>) -> bool {
+        &&& self.ptr_perm.pptr() == cpu_data@
+        &&& self.ptr_perm.is_init()
+        &&& self.ptr_perm.wf()
+        &&& self.ptr_perm.value().kernel_mapping().wf()
+        &&& self.pgtable_perm.wf_with_perm()
+        &&& self.pgtable_perm.pgtable_perm.pptr() == self.ptr_perm.value().pgtable_spec()@
+        &&& self.pgtable_perm.mapping_space === self.ptr_perm.value().kernel_mapping_spec()
+        &&& self.pgtable_perm.private_bit == self.ptr_perm.value().private_bit_spec()
+        &&& self.pgtable_perm.shared_bit == self.ptr_perm.value().shared_bit_spec()
+        &&& self.ghcb_perm.is_init()
+        &&& self.ghcb_perm.wf()
+        &&& self.ghcb_perm.pptr() == self.ptr_perm.value().ghcb_spec()@
+    }
 }
 
 #[repr(C, packed)]
@@ -255,6 +374,8 @@ impl Default for CpuidTable {
             r.reserved_2 == 0,
             r@ =~= Seq::new(CPUID_MAX_COUNT as nat, |i| CpuidFn::empty()),
     {
+        broadcast use deko_std::array::lemma_sized_t_makes_sized_array;
+
         CpuidTable { count: 0, reserved_1: 0, reserved_2: 0, func: Array::fill(CpuidFn::default()) }
     }
 }
@@ -292,13 +413,11 @@ impl WellFormed for X86Tss {
     }
 }
 
-impl WellFormed for CpuData {
+impl WellFormed for DekoCpuCtx {
     closed spec fn wf(&self) -> bool {
         &&& self.tss.wf()
-        &&& self.pgowner.wf()
         &&& self.cpu_id < CPUID_MAX_COUNT as u64
-        &&& self.pgowner@.cpu_id() == self.cpu_id
-        &&& self.pgowner@.pgtable() === self.pgtable@.addr() as u64
+        &&& self.magic == CPU_AREA_MAGIC
     }
 }
 
@@ -306,46 +425,93 @@ impl X86Tss {
 
 }
 
-impl CpuData {
+impl DekoCpuCtx {
     uninterp spec fn addr(&self) -> u64;
 
-    pub fn install_ghcb(
-        &self,
-        Tracked(ghcb_perm): Tracked<&mut PointsTo<GuestHostCommucationBlock>>,
-    )
-        requires
-            self.wf(),
-            self.ghcb().id() == old(ghcb_perm).id(),
-            old(ghcb_perm).is_uninit(),
-        ensures
-            self.ghcb().id() == ghcb_perm.id(),
-    // ghcb_perm.is_init(),
-
-    {
-        // let ghcb = balabla
-        // self.ghcb.put(ghcb, ghcb_perm);
+    pub closed spec fn shared_bit_spec(&self) -> u64 {
+        self.shared_bit
     }
 
-    /// Create a new CPU data structure.
+    pub closed spec fn private_bit_spec(&self) -> u64 {
+        self.private_bit
+    }
+
+    pub closed spec fn pgtable_spec(&self) -> DekoPPtr<PageTable> {
+        self.pgtable
+    }
+
+    #[verifier::when_used_as_spec(shared_bit_spec)]
+    #[inline]
+    pub fn shared_bit(&self) -> (r: u64)
+        requires
+            self.wf(),
+        ensures
+            r == self.shared_bit_spec(),
+    {
+        self.shared_bit
+    }
+
+    #[verifier::when_used_as_spec(private_bit_spec)]
+    #[inline]
+    pub fn private_bit(&self) -> (r: u64)
+        requires
+            self.wf(),
+        ensures
+            r == self.private_bit_spec(),
+    {
+        self.private_bit
+    }
+
+    pub closed spec fn kernel_mapping_spec(&self) -> MappingSpace {
+        self.kernel_mapping
+    }
+
+    #[verifier::when_used_as_spec(kernel_mapping_spec)]
+    #[inline]
+    pub fn kernel_mapping(&self) -> (r: MappingSpace)
+        requires
+            self.wf(),
+        ensures
+            r == self.kernel_mapping_spec(),
+    {
+        self.kernel_mapping
+    }
+
+    // todo: ensure only `this cpu` can call this function using
+    #[verifier::external_body]
+    pub fn this_cpu() -> (r: (DekoPPtr<Self>, Tracked<DekoCpuCtxPermission>))
+        ensures
+            r.0@ == r.1@.ptr_perm().pptr(),
+            r.0.addr() as u64 == PERCPU_BASE@,
+            r.1@.wf_with(r.0),
+    {
+        // SAFETY: The PerCPU area is always mapped at the same virtual address, so
+        // dereferencing a pointer to that address is safe. The PerCPU area is also
+        // never freed, so using a static lifetime is safe as well.
+        let (ptr, Tracked(ptr_perm)) = unsafe { DekoPPtr::<Self>::from_raw_uninit(PERCPU_BASE.0) };
+
+        (ptr, Tracked::assume_new())
+    }
+
+    /// Creates a new CPU data structure.
     pub fn new(
         pgtable: DekoPPtr<PageTable>,
         shared_area: DekoPPtr<PerCpuShared>,
-        pgowner: Ghost<DekoCpuPTOwner>,
+        ghcb: DekoPPtr<GuestHostCommucationBlock>,
         cpu_id: u64,
-        ghcb: PCell<GuestHostCommucationBlock>,
+        shared_bit: u64,
+        private_bit: u64,
+        kernel_mapping: MappingSpace,
     ) -> (r: Self)
         requires
-            pgowner@.wf(),
             cpu_id < CPUID_MAX_COUNT as u64,
-            pgowner@.cpu_id() == cpu_id,
-            pgowner@.pgtable() === pgtable@.addr() as u64,
         ensures
             r.wf(),
-            r.pgtable() == pgtable,
-            r.pgowner() == pgowner,
-            r.cpu_id() == cpu_id,
     {
-        CpuData {
+        broadcast use deko_std::array::lemma_sized_t_makes_sized_array;
+
+        DekoCpuCtx {
+            magic: CPU_AREA_MAGIC,
             ghcb,
             tss: X86Tss {
                 reserved0: 0,
@@ -358,8 +524,10 @@ impl CpuData {
             },
             pgtable,
             shared_area,
-            pgowner,
             cpu_id,
+            private_bit,
+            shared_bit,
+            kernel_mapping,
         }
     }
 
@@ -374,61 +542,82 @@ impl CpuData {
             // todo: add something to ensure the address is valid.
             ,
     {
-        self as *const CpuData as u64
+        self as *const DekoCpuCtx as u64
+    }
+
+    pub fn map_shared_page(
+        ptr: DekoPPtr<Self>,
+        Tracked(perm): Tracked<&mut DekoCpuCtxPermission>,
+        vaddr: VirtAddr,
+    )
+        requires
+            vaddr.wf(),
+            vaddr@ % 0x1000 == 0,
+            old(perm).wf_with(ptr),
+        ensures
+            perm.wf_with(ptr),
+    {
+        let pgtable = ptr.borrow(Tracked(&perm.ptr_perm)).pgtable;
+        let private_bit = ptr.borrow(Tracked(&perm.ptr_perm)).private_bit;
+        let shared_bit = ptr.borrow(Tracked(&perm.ptr_perm)).shared_bit;
+
+        PageTable::set_shared_4k(
+            pgtable,
+            Tracked(&mut perm.pgtable_perm),
+            vaddr,
+            private_bit,
+            shared_bit,
+        );
+    }
+
+    pub fn map_page_4k(
+        ptr: DekoPPtr<Self>,
+        Tracked(perm): Tracked<&mut DekoCpuCtxPermission>,
+        vaddr: VirtAddr,
+        paddr: PhysAddr,
+        flags: PteFlags,
+    ) {
     }
 
     pub closed spec fn cpu_id(&self) -> u64 {
         self.cpu_id
     }
 
-    pub closed spec fn pgtable(&self) -> DekoPPtr<PageTable> {
-        self.pgtable
+    pub closed spec fn ghcb_spec(&self) -> DekoPPtr<GuestHostCommucationBlock> {
+        self.ghcb
     }
 
-    pub closed spec fn pgowner(&self) -> Ghost<DekoCpuPTOwner> {
-        self.pgowner
-    }
-
-    pub closed spec fn ghcb(&self) -> &PCell<GuestHostCommucationBlock> {
-        &self.ghcb
+    // When possible, define all these getter and setter by macros.
+    #[verifier::when_used_as_spec(ghcb_spec)]
+    #[inline]
+    pub fn ghcb(&self) -> (r: DekoPPtr<GuestHostCommucationBlock>)
+        ensures
+            r == self.ghcb_spec(),
+    {
+        self.ghcb
     }
 
     pub open spec fn is_valid_pgtable_request(&self, pgperm: &DekoPointsTo<PageTable>) -> bool {
         &&& pgperm.is_init()
-        &&& pgperm.wf_with_val()
-        &&& pgperm.pptr()
-            == self.pgtable()@  // the permission is for its own page table
-
     }
 
-    /// Map the cpu data structure into the stage-2 page table.
-    pub fn map_self_stage2(&self, Tracked(pgperm): Tracked<DekoPointsTo<PageTable>>)
+    /// Get the page table for this CPU core.
+    ///
+    /// This method retrieves the page table from this CPU's context,
+    /// providing both the pointer and the necessary permissions.
+    /// This is the preferred way to access the page table for the current core.
+    pub fn get_pgtable<'a>(&'a self, Tracked(ctx_perm): Tracked<&'a DekoCpuCtxPermission>) -> (r: (
+        DekoPPtr<PageTable>,
+        Tracked<&'a PageTablePermission>,
+    ))
         requires
-            self.wf(),
-            self.is_valid_pgtable_request(&pgperm),
+            ctx_perm.pgtable_perm.pgtable_perm.pptr() == self.pgtable_spec()@,
+            ctx_perm.pgtable_perm.wf(),
         ensures
-            pgperm.wf(),
+            r.1@.pgtable_perm.pptr() == r.0@,
+            r.1@.wf(),
     {
-        let vaddr = VirtAddr::from(self.as_ptr());
-        let paddr = virt_to_phys(vaddr);
-        let base = PERCPU_BASE;
-
-        // proof {
-        //     let base_addr = base@;
-        //     assert(0xF68000000000 + ((base_addr & 0x0000_FFFF_FFFF_F000u64) >> 9)
-        //         <= 0x0000_FFFF_FFFF_FFFFu64) by (bit_vector)
-        //         requires
-        //             base_addr == 0xFF0000000000,
-        //     ;
-        // }
-
-        PageTable::map_page(
-            self.pgtable.clone(),
-            Tracked(pgperm),
-            PERCPU_BASE,
-            paddr,
-            PteFlags::data(),
-        );
+        (self.pgtable, Tracked(&ctx_perm.pgtable_perm))
     }
 }
 

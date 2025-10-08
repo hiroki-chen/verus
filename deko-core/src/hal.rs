@@ -1,12 +1,13 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use deko_meta::{
-    HeaderRaw, Stage2LaunchInfo, LOWMEM_END, STAGE2_HEAP_END, STAGE2_HEAP_START, STAGE2_START,
-};
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
-use crate::cpu::idt::{stage2_generic_idt_handler, stage2_generic_idt_handler_no_ghcb, Idt};
+use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
+use crate::cpu::gdt::GlobalDescriptorTable;
+use crate::cpu::idt::{
+    create_early_idt, stage2_generic_idt_handler, stage2_generic_idt_handler_no_ghcb, Idt,
+};
 use crate::cpu::register_cpuid_table;
 use crate::mm::{init_frame_allocator, DEKO_MAPPING_SPACE};
 use crate::snp::{get_igvm_params, Snp};
@@ -221,19 +222,27 @@ pub trait PlatformApi: Sync + Send + WellFormed {
 
     /// Initializes the platform. This function should be called once at the
     /// beginning of the program to set up the platform-specific environment.
-    fn init_platform(&self, header: &Stage2LaunchInfo)
+    fn init_platform(&self, header: Stage2LaunchInfo)
         requires
             header.wf(),
             self.wf(),
     ;
 
-    fn validate_memory(&self, heap_start: u64, heap_end: u64) -> bool
+    fn validate_memory(
+        &self,
+        Tracked(ctx): Tracked<&mut DekoCtxPermission>,
+        heap_start: u64,
+        heap_end: u64,
+    ) -> (r: bool)
         requires
             self.wf(),
+            old(ctx).wf(),
             heap_end > heap_start,
             heap_start % 0x1000 == 0,
             heap_end % 0x1000 == 0,
             heap_end <= LOWMEM_END as u64,
+        ensures
+            ctx.wf(),
     {
         true
     }
@@ -263,59 +272,54 @@ fn init_early_idt_late(idt: &mut Idt)
 
 /// Sets up the environment for the platform which will setup the GDT, kernel mapping, paging,
 /// kernel loading, heaps, etc.
-pub fn setup_env(header: &Stage2LaunchInfo, idt: &mut Idt)
+#[verifier::exec_allows_no_decreases_clause]
+pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -> (__discard: !)
     requires
-        header.wf(),
-        old(idt).entries.wf(),
-    ensures
-        idt.wf(),
+        ctx_perm@.wf_with(ctx),
+        ctx_perm@.current_cpu_core.is_bsp(),
 {
+    let Tracked(mut ctx_perm) = ctx_perm;
+
+    // Extract the launch info from the context.
+    let header = ctx.borrow(Tracked(&ctx_perm.deko_ctx_ptr_perm)).stage2_launch_info.borrow(
+        Tracked(&ctx_perm.stage2_launch_info_perm),
+    ).clone();
+
     // Set up the GDT.
-    crate::cpu::gdt::init_gdt();
+    GlobalDescriptorTable::init_gdt(Tracked(&ctx_perm.current_cpu_core));
 
     let platform_type = PlatformType::from(header.platform_type);
     PLATFORM.init(platform_type.clone());
 
-    if PLATFORM.get().is_none() {
-        vstd::vpanic!("Failed to initialize platform type; this is fatal.");
-    }
+    let snp = Snp;
+
     // Initialize the IDT.
-    init_early_idt(idt);
-    idt.load();
+    let mut idt = Idt { entries: create_early_idt() };
+    init_early_idt(&mut idt);
 
     // Do some platform-specific stuff.
     dispatch_to_platform!(init_platform, header);
 
-    // Read the CPUID table.
+    // TODO: Register the CPUID table: so that we know cpuids of each core.
     unsafe {
         register_cpuid_table(header.cpuid_page);
     }
 
-    // Set up the kernel mapping.
-    // TODO: Make these addresses globally visible; seems we have to implement
+    // Set up the kernel mapping: now identity
     // an automatic invariant for OnceCell.
-    let virt_start = VirtAddr::from(u64::from(STAGE2_START));
-    let virt_end = VirtAddr::from(u64::from(header.stage2_end));
-    let phys_start = PhysAddr::from(u64::from(STAGE2_START));
-
-    proof {
-        assume(virt_start.wf());
-        assume(virt_end.wf());
-    }
-
+    let virt_start = VirtAddr(u64::from(STAGE2_START));
+    let virt_end = VirtAddr(u64::from(header.stage2_end));
+    let phys_start = PhysAddr(u64::from(STAGE2_START));
     let kernel_mapping = FixedAddressMappingRange::new(virt_start, virt_end, phys_start);
 
     // SVSM ref: Create a simple heap mapping using the lower memory region.
-    let zero = VirtAddr::from(0u64);
-    let lowmem = VirtAddr::from(LOWMEM_END as u64);
-    proof {
-        assume(zero.wf());
-        assume(lowmem.wf());
-    }
-
+    let zero = VirtAddr(0u64);
+    let lowmem = VirtAddr(LOWMEM_END as u64);
     let heap_mapping = FixedAddressMappingRange::new(zero, lowmem, PhysAddr::from(0u64));
 
-    dispatch_to_platform!(validate_memory, 0, LOWMEM_END as u64);
+    snp.validate_memory(Tracked(&mut ctx_perm), 0, LOWMEM_END as u64);
+
+    assert(ctx_perm.wf());
 
     let mapping_space = MappingSpace { kernel: kernel_mapping, physmap: heap_mapping };
     DEKO_MAPPING_SPACE.init(mapping_space);
@@ -330,21 +334,21 @@ pub fn setup_env(header: &Stage2LaunchInfo, idt: &mut Idt)
         crate::theories::stage2_heap_valid_params();
 
         let heap_start_val = heap_start@;
-
-        // assert((heap_start_val & 0x0000_FFFF_FFFF_F000u64) >> 9 == 0x80u64) by (bit_vector)
-        //     requires
-        //         (heap_start_val == 0x10000),
-        // ;
     }
 
     init_frame_allocator(&heap_start, &heap_end);
 
     // Initialize per-cpu-specific structures.
-    dispatch_to_platform!(init_each_cpu, );
+    let ctx_perm = Tracked(ctx_perm);
+    dispatch_to_platform!(init_each_cpu, ctx, ctx_perm);
 
-    init_early_idt_late(idt);
+    init_early_idt_late(&mut idt);
 
-    dispatch_to_platform!(init_platform_end, get_igvm_params(header));
+    dispatch_to_platform!(init_platform_end, get_igvm_params(&header));
+
+    // will not crash; good news.
+    loop {
+    }
 }
 
 } // verus!

@@ -41,7 +41,7 @@ const TRACE_COLOR: &'static str = "\x1B[36m";
 /// is just
 pub struct Console;
 
-pub exec static CONSOLE: RwLockNoPred<Console>
+exec static CONSOLE: RwLockNoPred<Console>
     ensures
         CONSOLE.wf(),
 {
@@ -75,6 +75,8 @@ impl Console {
                         Some(p) => p,
                         None => return ,
                     };
+
+                    ghcb_port.outb(*b);
                 },
                 _ => {
                     // Unsupported platform; do nothing
@@ -156,19 +158,29 @@ impl log::Log for Console {
 }
 
 #[verifier::external]
-pub fn __print(arg: core::fmt::Arguments) {
+fn __print(arg: core::fmt::Arguments) {
     let (mut console, write_handle) = CONSOLE.acquire_write();
     console.write_fmt(arg).unwrap();
     write_handle.release_write(console);
 }
 
 } // verus!
-#[macro_export]
-macro_rules! println {
-    ($($args:tt)*) => {
-        log::info!($($args)*);
-    };
-    () => {
-        log::info!("");
-    };
+#[cfg(feature = "logging")]
+verus! {
+
+#[verifier::external_body]
+#[inline]
+pub fn print_str(out: &str) {
+    __print(format_args!("{}", out));
 }
+
+} // verus!
+#[cfg(not(feature = "logging"))]
+verus! {
+
+#[verifier::external_body]
+#[inline]
+pub fn print_str(out: &str) {
+}
+
+} // verus!

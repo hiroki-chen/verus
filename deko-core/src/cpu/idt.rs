@@ -85,6 +85,8 @@ pub fn create_early_idt() -> (arr: Array<IdtEntry, 256>)
         forall|i: int|
             0 <= i && i < 256 ==> #[trigger] arr@[i as int].high == 0 && arr@[i as int].low == 0,
 {
+    broadcast use deko_std::array::lemma_sized_t_makes_sized_array;
+
     Array::fill(IdtEntry::no_handler())
 }
 

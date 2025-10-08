@@ -1,5 +1,6 @@
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::io::Write;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -212,6 +213,70 @@ impl Builder {
         }
     }
 
+    /// Execute a command and redirect output to a log file
+    fn execute_with_logging(&self, mut cmd: std::process::Command, log_file_name: &str) -> Result<()> {
+        let log_dir = self.config.root.join("logs");
+        std::fs::create_dir_all(&log_dir).context("Failed to create logs directory")?;
+        
+        let log_file_path = log_dir.join(log_file_name);
+        let log_file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&log_file_path)
+            .with_context(|| format!("Failed to create log file: {:?}", log_file_path))?;
+
+        println!("Executing command: {:?}", cmd);
+        println!("Logs will be written to: {:?}", log_file_path);
+
+        let output = cmd.output().context("Failed to execute command")?;
+
+        // Write both stdout and stderr to the log file
+        let mut log_file = log_file;
+        writeln!(log_file, "=== COMMAND ===")?;
+        writeln!(log_file, "{:?}", cmd)?;
+        writeln!(log_file, "\n=== STDOUT ===")?;
+        log_file.write_all(&output.stdout)?;
+        writeln!(log_file, "\n=== STDERR ===")?;
+        log_file.write_all(&output.stderr)?;
+        writeln!(log_file, "\n=== EXIT STATUS ===")?;
+        writeln!(log_file, "{}", output.status)?;
+
+        // Also print a summary to console
+        if !output.status.success() {
+            println!("Command failed with exit code: {}", output.status);
+            println!("Check log file for details: {:?}", log_file_path);
+            
+            // Print last few lines of stderr for immediate feedback
+            let stderr_str = String::from_utf8_lossy(&output.stderr);
+            let stderr_lines: Vec<&str> = stderr_str.lines().collect();
+            if !stderr_lines.is_empty() {
+                println!("Last few lines of stderr:");
+                for line in stderr_lines.iter().rev().take(5).rev() {
+                    println!("  {}", line);
+                }
+            }
+            
+            return Err(anyhow::anyhow!("Command failed"));
+        } else {
+            println!("Command completed successfully");
+            
+            // Print last few lines of stdout for immediate feedback
+            let stdout_str = String::from_utf8_lossy(&output.stdout);
+            let stdout_lines: Vec<&str> = stdout_str.lines().collect();
+            if !stdout_lines.is_empty() {
+                println!("Last few lines of output:");
+                for line in stdout_lines.iter().rev().take(3).rev() {
+                    if !line.trim().is_empty() {
+                        println!("  {}", line);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn build_deko(&self, release: bool) -> Result<()> {
         println!("--- Building stage2 bootloader ---");
 
@@ -234,10 +299,9 @@ impl Builder {
             cmd.arg("--release");
         }
 
-        println!("Building with command: {:?}", cmd);
-        if !cmd.status()?.success() {
-            bail!("Cannot build deko-stage2");
-        }
+        let profile = if release { "release" } else { "debug" };
+        let log_file = format!("deko-stage2-build-{}-{}.log", self.config.target_arch, profile);
+        self.execute_with_logging(cmd, &log_file)?;
 
         // Create flat image for SNP
         if self.config.target_arch == "snp" {
@@ -247,10 +311,8 @@ impl Builder {
                 .arg(self.config.stage2_path(release))
                 .arg(self.config.stage2_binary_path(release));
 
-            println!("Creating flat image with command: {:?}", cmd);
-            if !cmd.status()?.success() {
-                bail!("Cannot create flat image for deko-monitor");
-            }
+            let log_file = format!("deko-stage2-objcopy-{}-{}.log", self.config.target_arch, profile);
+            self.execute_with_logging(cmd, &log_file)?;
         }
 
         println!("--- Building Deko Monitor ---");
@@ -270,9 +332,8 @@ impl Builder {
             cmd.arg("--release");
         }
 
-        if !cmd.status()?.success() {
-            bail!("Cannot build deko-monitor");
-        }
+        let log_file = format!("deko-monitor-build-{}-{}.log", self.config.target_arch, profile);
+        self.execute_with_logging(cmd, &log_file)?;
 
         // Create ELF for SNP
         if self.config.target_arch == "snp" {
@@ -283,10 +344,8 @@ impl Builder {
                 .arg(self.config.deko_monitor_path(release))
                 .arg(self.config.deko_elf_path(release));
 
-            println!("Creating ELF image with command: {:?}", cmd);
-            if !cmd.status()?.success() {
-                bail!("Cannot create ELF image for deko-monitor");
-            }
+            let log_file = format!("deko-monitor-objcopy-{}-{}.log", self.config.target_arch, profile);
+            self.execute_with_logging(cmd, &log_file)?;
         }
 
         Ok(())
@@ -306,10 +365,9 @@ impl Builder {
             cmd.arg("--release");
         }
 
-        println!("Building Stage1 with command: {:?}", cmd);
-        if !cmd.status()?.success() {
-            bail!("Failed to build stage1");
-        }
+        let profile = if release { "release" } else { "debug" };
+        let log_file = format!("deko-stage1-build-{}-{}.log", self.config.target_arch, profile);
+        self.execute_with_logging(cmd, &log_file)?;
 
         Ok(())
     }
@@ -449,7 +507,7 @@ impl Builder {
         stage2_path: Option<PathBuf>,
     ) -> Result<()> {
         // Build everything first
-        self.build(BuildTarget::Deko, true)?;
+        // self.build(BuildTarget::Deko, true)?;
 
         let stage2_path = stage2_path.unwrap_or_else(|| self.config.stage2_binary_path(true));
         let boot_img_path = self.config.igvm_path();

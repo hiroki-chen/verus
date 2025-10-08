@@ -126,7 +126,7 @@ impl WellFormed for HeaderRaw {
     }
 }
 
-impl IsConstant for HeaderRaw {
+impl Constant for HeaderRaw {
     #[verifier::inline]
     open spec fn is_constant(&self) -> bool {
         // The Header is constant if the version is constant and the addresses are constant.
@@ -254,7 +254,7 @@ pub struct IgvmParamBlock {
 
 impl WellFormed for IgvmParamBlock {
     open spec fn wf(&self) -> bool {
-        true
+        &&& self.debug_serial_port + 8 <= u16::MAX
     }
 }
 
