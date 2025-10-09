@@ -1917,7 +1917,140 @@ impl PageTablePermission {
         ensures
             self.virt_to_frame_spec(vaddr) matches Some(_),
     {
-        admit();
+        let pte_path = PageTablePath::from_vaddr(pte_addr);
+        let vaddr_path = PageTablePath::from_vaddr(vaddr);
+        self.lemma_pte_of_vaddr_shares_prefix(vaddr, pte_addr);
+
+        assert(pte_path.wf() && vaddr_path.wf()) by {
+            PageTablePath::lemma_from_vaddr_at_level_makes_wf(pte_addr, 0);
+            PageTablePath::lemma_from_vaddr_at_level_makes_wf(vaddr, 0);
+        }
+
+        // Extract necessary indices:
+        // pte => [493, a, b, c] [d]
+        // vaddr => [a, b, c, d]
+        let pte_index_3 = pte_path@[3];
+        let pte_index_2 = pte_path@[2];
+        let pte_index_1 = pte_path@[1];
+        let vaddr_index_3 = vaddr_path@[3];
+        let vaddr_index_2 = vaddr_path@[2];
+        let vaddr_index_1 = vaddr_path@[1];
+        let vaddr_index_0 = vaddr_path@[0];
+
+        assert((pte_addr@ >> 3 & 0x1ff) == vaddr_index_3);
+        assert(pte_index_3 == vaddr_index_2);
+        assert(pte_index_2 == vaddr_index_1);
+        assert(pte_index_1 == vaddr_index_0);
+
+        assert(vaddr_path@.take(1) == path![vaddr_index_0]@);
+        assert(vaddr_path@.take(2) == path![vaddr_index_0, vaddr_index_1]@);
+        assert(vaddr_path@.take(3) == path![vaddr_index_0, vaddr_index_1, vaddr_index_2]@);
+        assert(vaddr_path@.take(4)
+            == path![vaddr_index_0, vaddr_index_1, vaddr_index_2, vaddr_index_3]@);
+        assert(pte_path@.take(1) == path![493]@);
+        assert(pte_path@.take(2) == path![493, vaddr_index_0]@);
+        assert(pte_path@.take(3) == path![493, vaddr_index_0, vaddr_index_1]@);
+        assert(pte_path@.take(4) == path![493, vaddr_index_0, vaddr_index_1, vaddr_index_2]@);
+
+        let vaddr_3 = self.storage[path![vaddr_index_0]].pte_perm.value();
+        let pte_2 = self.storage[path![493, vaddr_index_0]].pte_perm.value();
+
+        assert(vaddr_3 == pte_2) by {
+            assert(path![493, vaddr_index_0].drop_last()@ == path![493]@);
+
+            assert(pte_2 == self.storage[path![493]].this_page_perm.value().0@.index(
+                vaddr_index_0 as int,
+            ));  // by page table wellformedness
+            assert(vaddr_3 == self.storage[path![493]].this_page_perm.value().0@.index(
+                vaddr_index_0 as int,
+            ));  // by self-mapped.
+        }
+
+        assert(vaddr_3.is_present_pte_spec());
+
+        let vaddr_2 = self.storage[path![vaddr_index_0, vaddr_index_1]].pte_perm.value();
+        let pte_1 = self.storage[path![493, vaddr_index_0, vaddr_index_1]].pte_perm.value();
+
+        assert(vaddr_2 == pte_1) by {
+            assert(path![vaddr_index_0, vaddr_index_1].drop_last()@ == path![vaddr_index_0]@);
+            assert(path![493, vaddr_index_0, vaddr_index_1].drop_last()@
+                == path![493, vaddr_index_0]@);
+            assert(vaddr_2 == self.storage[path![vaddr_index_0]].this_page_perm.value().0@.index(
+                vaddr_index_1 as int,
+            ));
+            assert(pte_1 == self.storage[path![493, vaddr_index_0]].this_page_perm.value().0@.index(
+                vaddr_index_1 as int,
+            ));  // both by page table wellformedness
+            assert(path![493, vaddr_index_0]@ == seq![493] + path![vaddr_index_0]@);
+            self.lemma_493_prefix_same_this_page_perm(
+                path![vaddr_index_0],
+                path![493, vaddr_index_0],
+            );
+        }
+
+        assert(vaddr_2.is_present_pte_spec());
+
+        if vaddr_2.is_huge_pte_spec() {
+            // auto.
+        } else {
+            let vaddr_1 =
+                self.storage[path![vaddr_index_0, vaddr_index_1, vaddr_index_2]].pte_perm.value();
+            let pte_0 =
+                self.storage[path![493, vaddr_index_0, vaddr_index_1, vaddr_index_2]].pte_perm.value();
+
+            assert(vaddr_1 == pte_0) by {
+                assert(path![vaddr_index_0, vaddr_index_1, vaddr_index_2].drop_last()@
+                    == path![vaddr_index_0, vaddr_index_1]@);
+                assert(path![493, vaddr_index_0, vaddr_index_1, vaddr_index_2].drop_last()@
+                    == path![493, vaddr_index_0, vaddr_index_1]@);
+                assert(vaddr_1
+                    == self.storage[path![vaddr_index_0, vaddr_index_1]].this_page_perm.value().0@.index(
+                vaddr_index_2 as int));
+                assert(pte_0
+                    == self.storage[path![493, vaddr_index_0, vaddr_index_1]].this_page_perm.value().0@.index(
+                vaddr_index_2 as int));  // both by page table wellformedness
+                assert(path![493, vaddr_index_0, vaddr_index_1]@ == seq![493]
+                    + path![vaddr_index_0, vaddr_index_1]@);
+                self.lemma_493_prefix_same_this_page_perm(
+                    path![vaddr_index_0, vaddr_index_1],
+                    path![493, vaddr_index_0, vaddr_index_1],
+                );
+            }
+
+            assert(vaddr_1.is_present_pte_spec());
+
+            if vaddr_1.is_huge_pte_spec() {
+                // auto.
+            } else {
+                let vaddr_0 =
+                    self.storage[path![vaddr_index_0, vaddr_index_1, vaddr_index_2, vaddr_index_3]].pte_perm.value();
+                let pte_final =
+                    self.storage[path![493, vaddr_index_0, vaddr_index_1, vaddr_index_2]].this_page_perm.value().0@.index(
+                vaddr_index_3 as int);
+
+                assert(vaddr_0 == pte_final) by {
+                    assert(path![vaddr_index_0, vaddr_index_1, vaddr_index_2, vaddr_index_3].drop_last()@
+                        == path![vaddr_index_0, vaddr_index_1, vaddr_index_2]@);
+                    assert(vaddr_0
+                        == self.storage[path![vaddr_index_0, vaddr_index_1, vaddr_index_2]].this_page_perm.value().0@.index(
+                    vaddr_index_3 as int));  // by page table wellformedness
+                    assert(pte_final
+                        == self.storage[path![493, vaddr_index_0, vaddr_index_1, vaddr_index_2]].this_page_perm.value().0@.index(
+                    vaddr_index_3 as int));  // by page table wellformedness
+                    assert(path![493, vaddr_index_0, vaddr_index_1, vaddr_index_2]@ == seq![493]
+                        + path![vaddr_index_0, vaddr_index_1, vaddr_index_2]@);
+                    self.lemma_493_prefix_same_this_page_perm(
+                        path![vaddr_index_0, vaddr_index_1, vaddr_index_2],
+                        path![493, vaddr_index_0, vaddr_index_1, vaddr_index_2],
+                    );
+                }
+
+                assert(vaddr_0.is_present_pte_spec()) by {
+                    assert(pte_path@ == path![493, vaddr_index_0, vaddr_index_1, vaddr_index_2]@);
+                    assert(pte_final == PageTableEntry::read_pte_spec(pte_addr, self));
+                }
+            }
+        }
     }
 
     #[verifier::spinoff_prover]
@@ -2182,10 +2315,7 @@ impl PageTablePermission {
         assert(self.storage[path![493, 493, last_of_pdpe]].this_page_perm.value()
             == self.storage[pdpe_path].this_page_perm.value()) by {
             assert(pdpe_path@ == seq![493] + path![493, 493, last_of_pdpe]@);
-            self.lemma_493_prefix_same_this_page_perm(
-                path![493, 493, last_of_pdpe],
-                pdpe_path,
-            );
+            self.lemma_493_prefix_same_this_page_perm(path![493, 493, last_of_pdpe], pdpe_path);
             // Q.E.D.
         }
 
