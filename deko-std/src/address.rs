@@ -601,7 +601,16 @@ impl VirtAddr {
         ensures
             r % 0x1000 == 0,
     {
-        admit();
+        assert(vaddr_lower_bits(addr) == vaddr_lower_bits(r));
+        assert((addr & 0x0000_7FFF_FFFF_FFFFu64) % 0x1000 == 0) by (bit_vector)
+            requires
+                addr % 0x1000 == 0,
+        ;
+        assert(r % 0x1000 == 0) by (bit_vector)
+            requires
+                r & 0x0000_7FFF_FFFF_FFFFu64 == addr & 0x0000_7FFF_FFFF_FFFFu64,
+                (addr & 0x0000_7FFF_FFFF_FFFFu64) % 0x1000 == 0,
+        ;
     }
 
     /// Specification for canonical address creation.
@@ -635,7 +644,7 @@ impl VirtAddr {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let vaddr = VirtAddr::make_canonical(0x1234_5678_9ABC_DEF0);
     /// assert!(vaddr.wf()); // Always true
     /// ```
@@ -679,7 +688,7 @@ impl VirtAddr {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let vaddr = VirtAddr::new(0x1234_5678_9ABC_DEF0);
     /// assert!(vaddr.wf()); // Always true - automatically canonicalized
     ///
