@@ -35,6 +35,9 @@ use crate::prelude::*;
 
 verus! {
 
+#[verifier::inline]
+pub const PHYS_MAX_ADDR: u64 = 0x0000_FFFF_FFFF_FFFFu64;
+
 /// Maximum number of bits used in x86-64 virtual addresses.
 #[verifier::inline]
 pub spec const VADDR_MAX_BITS: nat = 48;

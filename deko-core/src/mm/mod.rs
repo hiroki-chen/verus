@@ -107,10 +107,12 @@ pub fn virt_to_phys(
     let private_bit = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).private_bit();
     let shared_bit = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).shared_bit();
 
-    PageTable::virt_to_frame(vaddr, private_bit, Tracked(&ctx_perm.pgtable_perm)).address(
-        private_bit,
-        shared_bit,
-    )
+    match PageTable::virt_to_frame(vaddr, private_bit, Tracked(&ctx_perm.pgtable_perm)) {
+        Some(v) => v.address(private_bit, shared_bit),
+        None => {
+            vstd::vpanic!("virt_to_phys: address not mapped");
+        },
+    }
 }
 
 #[inline(always)]
