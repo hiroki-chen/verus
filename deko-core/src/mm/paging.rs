@@ -1222,14 +1222,13 @@ impl Page {
     }
 
     /// Converts a virtual address to a page frame if it is mapped.
-    ///
-    /// TODO: Should we return Option<PageFrame> instead of panicking?
     #[verifier::spinoff_prover]
+    #[verifier::rlimit(50)]
     pub fn virt_to_frame(
         vaddr: VirtAddr,
         private_bit: u64,
         Tracked(pgtable_perm): Tracked<&PageTablePermission>,
-    ) -> (r: PageFrame)
+    ) -> (r: Option<PageFrame>)
         requires
             vaddr.wf(),
             pgtable_perm.wf_with_perm(),
@@ -1237,7 +1236,7 @@ impl Page {
             private_bit == pgtable_perm.private_bit,
         ensures
             r.wf(),
-            r == pgtable_perm.virt_to_frame_spec(vaddr).unwrap(),
+            r == pgtable_perm.virt_to_frame_spec(vaddr),
     {
         broadcast use PteFlags::lemma_each_bits_is_valid;
         broadcast use PteFlags::lemma_from_bits_single;
@@ -1252,6 +1251,7 @@ impl Page {
         let ghost pdpe_perm_path = PageTablePath::from_vaddr(pdpe_addr);
         let ghost pde_perm_path = PageTablePath::from_vaddr(pde_addr);
         let ghost pte_perm_path = PageTablePath::from_vaddr(pte_addr);
+        let ghost vaddr_path = PageTablePath::from_vaddr(vaddr);
 
         proof {
             Page::lemma_get_pte_address_align_qword(vaddr);
@@ -1259,65 +1259,83 @@ impl Page {
             Page::lemma_get_pte_address_align_qword(pde_addr);
             Page::lemma_get_pte_address_align_qword(pdpe_addr);
 
+            PageTablePath::lemma_from_vaddr_at_level_makes_wf(pml4e_addr, 0);
+            PageTablePath::lemma_from_vaddr_at_level_makes_wf(pdpe_addr, 0);
+            PageTablePath::lemma_from_vaddr_at_level_makes_wf(pde_addr, 0);
+            PageTablePath::lemma_from_vaddr_at_level_makes_wf(pte_addr, 0);
+            PageTablePath::lemma_from_vaddr_at_level_makes_wf(vaddr, 0);
+
             assert(pml4e_perm_path@ == path![493, 493, 493, 493]@) by {
                 pgtable_perm.lemma_pte_of_vaddr_cancels_with_self_mapping(vaddr);
             }
-            assert(pdpe_perm_path@.take(3) == path![493, 493, 493]@) by {
-                pgtable_perm.lemma_pte_of_vaddr_shares_prefix(pdpe_addr, pml4e_addr);
-            }
-
             pgtable_perm.lemma_pml4e_always_mapped(pml4e_addr);
-            assert(pml4e_perm_path.wf()) by {
-                PageTablePath::lemma_from_vaddr_at_level_makes_wf(pml4e_addr, 0);
-            }
-            assert(pgtable_perm.storage.contains_key(pml4e_perm_path));
+            pgtable_perm.lemma_pte_addr_same_as_vaddr_each_level(vaddr);
         }
 
         let (pml4e, Tracked(pml4e_perm)) = PageTableEntry::read_pte(
             pml4e_addr,
             Tracked(pgtable_perm),
         );
-        if !PageTableEntry::is_present_pte(pml4e, Tracked(pml4e_perm)) {
-            vstd::vpanic!("page not present");
-        }
-        // NO HUGE PAGE at PML4 level.
-
         proof {
-            // THIS COPY AND PASTES is annoying.
-            assert(pml4e_perm_path@ == path![493, 493, 493, 493]@) by {
-                pgtable_perm.lemma_pte_of_vaddr_cancels_with_self_mapping(vaddr);
-            }
-            assert(pdpe_perm_path@.take(3) == path![493, 493, 493]@) by {
-                pgtable_perm.lemma_pte_of_vaddr_shares_prefix(pdpe_addr, pml4e_addr);
-            }
+            assert(pml4e_perm.value() == pgtable_perm.storage[PageTablePath(
+                vaddr_path@.take(1),
+            )].pte_perm.value());
+        }
 
-            pgtable_perm.lemma_pml4e_reads_present_can_read_pdpe(pml4e_addr, pdpe_addr);
+        if !PageTableEntry::is_present_pte(pml4e, Tracked(pml4e_perm))
+            || PageTableEntry::is_huge_pte(pml4e, Tracked(pml4e_perm)) {
+            return None;
+        }
+        proof {
+            pgtable_perm.lemma_pte_reads_present_can_read_vaddr(pml4e_addr, pdpe_addr);
         }
 
         let (pdpe, Tracked(pdpe_perm)) = PageTableEntry::read_pte(pdpe_addr, Tracked(pgtable_perm));
+        proof {
+            assert(pdpe_perm.value() == pgtable_perm.storage[PageTablePath(
+                vaddr_path@.take(2),
+            )].pte_perm.value());
+        }
         if !PageTableEntry::is_present_pte(pdpe, Tracked(pdpe_perm)) {
-            vstd::vpanic!("page not present");
+            return None;
         }
         if PageTableEntry::is_huge_pte(pdpe, Tracked(pdpe_perm)) {
+            // todo.
+            vstd::vpanic!("unimplemented: walk to level 2 for 1GB page");
         }
         proof {
-            // THIS COPY AND PASTES is annoying.
-            assert(pdpe_perm_path@.take(3) == path![493, 493, 493]@) by {
-                pgtable_perm.lemma_pte_of_vaddr_shares_prefix(pdpe_addr, pml4e_addr);
-            }
-            assert(pde_perm_path@.take(2) == path![493, 493]@) by {
-                pgtable_perm.lemma_pte_of_vaddr_shares_prefix(pde_addr, pdpe_addr);
-            }
-            pgtable_perm.lemma_pdpe_reads_present_can_read_pde(pdpe_addr, pde_addr);
+            pgtable_perm.lemma_pte_reads_present_can_read_vaddr(pdpe_addr, pde_addr);
         }
 
         let (pde, Tracked(pde_perm)) = PageTableEntry::read_pte(pde_addr, Tracked(pgtable_perm));
+        proof {
+            assert(pde_perm.value() == pgtable_perm.storage[PageTablePath(
+                vaddr_path@.take(3),
+            )].pte_perm.value());
+        }
+
         if !PageTableEntry::is_present_pte(pde, Tracked(pde_perm)) {
-            vstd::vpanic!("page not present");
+            return None;
         }
         if PageTableEntry::is_huge_pte(pde, Tracked(pde_perm)) {
+            // todo.
+            vstd::vpanic!("unimplemented: walk to level 2 for 1GB page");
         }
-        vstd::vpanic!("unimplemented: walk to level 1 and 0 for 4K page");
+        proof {
+            pgtable_perm.lemma_pte_reads_present_can_read_vaddr(pde_addr, pte_addr);
+        }
+        let (pte, Tracked(pte_perm)) = PageTableEntry::read_pte(pte_addr, Tracked(pgtable_perm));
+        proof {
+            assert(pte_perm.value() == pgtable_perm.storage[PageTablePath(
+                vaddr_path@.take(4),
+            )].pte_perm.value());
+        }
+        if !PageTableEntry::is_present_pte(pte, Tracked(pte_perm)) {
+            return None;
+        }
+
+        vstd::vpanic!("unimplemented: return the page frame");
+        // Some(PageFrame(pte.page_frame(private_bit)))
     }
 
     /// Walks the page table to find the last valid page table entry for a given virtual address.
@@ -1518,6 +1536,7 @@ impl PageTableEntry {
     ///
     /// Thus we can just read the PTE directly from the virtual address as long as we have
     /// verified that the virtual address is indeed mapped to some physical frame.
+    #[verifier::inline]
     pub open spec fn read_pte_spec(
         vaddr: VirtAddr,
         pgtable_perm: &PageTablePermission,
@@ -1525,10 +1544,7 @@ impl PageTableEntry {
         let path = PageTablePath::from_vaddr(vaddr);
         let idx = (vaddr@ >> 3) & 0x1ff;  // the index inside the page.
 
-        match pgtable_perm.virt_to_frame_spec(vaddr) {
-            Some(_) => { pgtable_perm.storage[path].this_page_perm.value().0@.index(idx as int) },
-            None => { arbitrary() },
-        }
+        pgtable_perm.storage[path].this_page_perm.value().0@.index(idx as int)
     }
 
     /// This is getting a little bit tricky here because the translation of the virtual address
@@ -1606,7 +1622,7 @@ impl PageTablePermission {
 
         // No more contains_key checks or Option unwrapping!
         let pml4e = self.get_pte(path, 3);
-        if !pml4e.is_present_pte_spec() {
+        if !pml4e.is_present_pte_spec() || pml4e.is_huge_pte_spec() {
             None
         } else {
             let pdpe = self.get_pte(path, 2);
@@ -1910,7 +1926,6 @@ impl PageTablePermission {
             self.wf_with_perm(),
             pte_addr.wf(),
             vaddr.wf(),
-            PageTablePath::from_vaddr(vaddr)@.take(1) == path![493]@,
             Page::get_pte_address_spec(vaddr) == pte_addr,
             self.virt_to_frame_spec(pte_addr) matches Some(_),
             PageTableEntry::read_pte_spec(pte_addr, self).is_present_pte_spec(),
@@ -2574,6 +2589,249 @@ impl PageTablePermission {
             a.value() == b.value(),
     ;
 
+    pub open spec fn pte_addr_same_as_vaddr_each_level_spec(&self, vaddr: VirtAddr) -> bool
+        recommends
+            self.wf_with_perm(),
+            vaddr.wf(),
+    {
+        let pte_addr = Page::get_pte_address_spec(vaddr);
+        let pde_addr = Page::get_pte_address_spec(pte_addr);
+        let pdpe_addr = Page::get_pte_address_spec(pde_addr);
+        let pml4_addr = Page::get_pte_address_spec(pdpe_addr);
+
+        let pte_path = PageTablePath::from_vaddr(pte_addr);
+        let pde_path = PageTablePath::from_vaddr(pde_addr);
+        let pdpe_path = PageTablePath::from_vaddr(pml4_addr);
+        let pml4_path = PageTablePath::from_vaddr(pdpe_addr);
+        let vaddr_path = PageTablePath::from_vaddr(vaddr);
+
+        let pte_val = PageTableEntry::read_pte_spec(pte_addr, self);
+        let pde_val = PageTableEntry::read_pte_spec(pde_addr, self);
+        let pdpe_val = PageTableEntry::read_pte_spec(pdpe_addr, self);
+        let pml4e_val = PageTableEntry::read_pte_spec(pml4_addr, self);
+
+        let pml4_vaddr_path = vaddr_path@.take(1);
+        let pdpe_vaddr_path = vaddr_path@.take(2);
+        let pde_vaddr_path = vaddr_path@.take(3);
+        let pte_vaddr_path = vaddr_path@.take(4);
+
+        let pml4_vaddr_val = self.storage[PageTablePath(pml4_vaddr_path)].pte_perm.value();
+        let pdpe_vaddr_val = self.storage[PageTablePath(pdpe_vaddr_path)].pte_perm.value();
+        let pde_vaddr_val = self.storage[PageTablePath(pde_vaddr_path)].pte_perm.value();
+        let pte_vaddr_val = self.storage[PageTablePath(pte_vaddr_path)].pte_perm.value();
+
+        &&& pml4_vaddr_val == pml4e_val
+        &&& pdpe_vaddr_val == pdpe_val
+        &&& pde_vaddr_val == pde_val
+        &&& pte_vaddr_val == pte_val
+    }
+
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(50)]
+    pub proof fn lemma_pte_addr_same_as_vaddr_each_level(&self, vaddr: VirtAddr)
+        requires
+            self.wf_with_perm(),
+            vaddr.wf(),
+        ensures
+            self.pte_addr_same_as_vaddr_each_level_spec(vaddr),
+    {
+        let pte_addr = Page::get_pte_address_spec(vaddr);
+        let pde_addr = Page::get_pte_address_spec(pte_addr);
+        let pdpe_addr = Page::get_pte_address_spec(pde_addr);
+        let pml4_addr = Page::get_pte_address_spec(pdpe_addr);
+
+        Page::lemma_get_pte_address_wf(vaddr);
+        Page::lemma_get_pte_address_wf(pte_addr);
+        Page::lemma_get_pte_address_wf(pde_addr);
+        Page::lemma_get_pte_address_wf(pdpe_addr);
+        Page::lemma_get_pte_address_wf(pml4_addr);
+
+        let vaddr_path = PageTablePath::from_vaddr(vaddr);
+        let pte_path = PageTablePath::from_vaddr(pte_addr);
+        let pde_path = PageTablePath::from_vaddr(pde_addr);
+        let pdpe_path = PageTablePath::from_vaddr(pdpe_addr);
+        let pml4_path = PageTablePath::from_vaddr(pml4_addr);
+
+        assert(vaddr_path.wf() && pte_path.wf() && pde_path.wf() && pdpe_path.wf()
+            && pml4_path.wf()) by {
+            PageTablePath::lemma_from_vaddr_at_level_makes_wf(vaddr, 0);
+            PageTablePath::lemma_from_vaddr_at_level_makes_wf(pte_addr, 0);
+            PageTablePath::lemma_from_vaddr_at_level_makes_wf(pde_addr, 0);
+            PageTablePath::lemma_from_vaddr_at_level_makes_wf(pdpe_addr, 0);
+            PageTablePath::lemma_from_vaddr_at_level_makes_wf(pml4_addr, 0);
+        }
+
+        let vaddr_path_index_0 = vaddr_path@[0];
+        let vaddr_path_index_1 = vaddr_path@[1];
+        let vaddr_path_index_2 = vaddr_path@[2];
+        let vaddr_path_index_3 = vaddr_path@[3];
+
+        let pte_val = PageTableEntry::read_pte_spec(pte_addr, self);
+        let pde_val = PageTableEntry::read_pte_spec(pde_addr, self);
+        let pdpe_val = PageTableEntry::read_pte_spec(pdpe_addr, self);
+        let pml4e_val = PageTableEntry::read_pte_spec(pml4_addr, self);
+
+        self.lemma_pte_of_vaddr_shares_prefix(vaddr, pte_addr);
+        self.lemma_pte_of_vaddr_shares_prefix(pte_addr, pde_addr);
+        self.lemma_pte_of_vaddr_shares_prefix(pde_addr, pdpe_addr);
+        self.lemma_pte_of_vaddr_shares_prefix(pdpe_addr, pml4_addr);
+
+        assert(pte_val == self.storage[PageTablePath(vaddr_path@.take(4))].pte_perm.value()) by {
+            let pte_path_index_3 = pte_path@[3];
+            let pte_path_index_2 = pte_path@[2];
+            let pte_path_index_1 = pte_path@[1];
+            let pte_path_index_0 = pte_path@[0];
+
+            assert(pte_path_index_0 == 493);
+            assert(vaddr_path_index_0 == pte_path_index_1);
+            assert(vaddr_path_index_1 == pte_path_index_2);
+            assert(vaddr_path_index_2 == pte_path_index_3);
+            assert(vaddr_path_index_3 == pte_addr@ >> 3 & 0x1ff);
+
+            assert(pte_path@
+                == path![493, vaddr_path_index_0, vaddr_path_index_1, vaddr_path_index_2]@);
+            assert(PageTablePath(vaddr_path@.take(4))@
+                == path![vaddr_path_index_0, vaddr_path_index_1, vaddr_path_index_2, vaddr_path_index_3]@);
+            assert(PageTablePath(vaddr_path@.take(4))@.drop_last()
+                == path![vaddr_path_index_0, vaddr_path_index_1, vaddr_path_index_2]@);
+
+            assert(pte_val == self.storage[pte_path].this_page_perm.value().0@.index(
+                vaddr_path_index_3 as int,
+            ));
+
+            assert(self.storage[PageTablePath(vaddr_path@.take(4))].pte_perm.value()
+                == self.storage[path![vaddr_path_index_0, vaddr_path_index_1, vaddr_path_index_2, vaddr_path_index_3]].pte_perm.value());
+            assert(self.storage[PageTablePath(vaddr_path@.take(4))].pte_perm.value()
+                == self.storage[path![vaddr_path_index_0, vaddr_path_index_1, vaddr_path_index_2]].this_page_perm.value().0@.index(
+            vaddr_path_index_3 as int));
+
+            assert(path![493, vaddr_path_index_0, vaddr_path_index_1, vaddr_path_index_2]@ == seq![493] + path![vaddr_path_index_0, vaddr_path_index_1, vaddr_path_index_2]@);
+            self.lemma_493_prefix_same_this_page_perm(
+                path![vaddr_path_index_0, vaddr_path_index_1, vaddr_path_index_2],
+                path![493, vaddr_path_index_0, vaddr_path_index_1, vaddr_path_index_2],
+            );
+        }
+
+        assert(pde_val == self.storage[PageTablePath(vaddr_path@.take(3))].pte_perm.value()) by {
+            let pde_path_index_3 = pde_path@[3];
+            let pde_path_index_2 = pde_path@[2];
+            let pde_path_index_1 = pde_path@[1];
+            let pde_path_index_0 = pde_path@[0];
+
+            assert(pde_path_index_0 == 493);
+            assert(pde_path_index_1 == 493);
+            assert(vaddr_path_index_0 == pde_path_index_2);
+            assert(vaddr_path_index_1 == pde_path_index_3);
+            assert(vaddr_path_index_2 == pde_addr@ >> 3 & 0x1ff);
+
+            assert(pde_path@ == path![493, 493, vaddr_path_index_0, vaddr_path_index_1]@);
+            assert(PageTablePath(vaddr_path@.take(3))@
+                == path![vaddr_path_index_0, vaddr_path_index_1, vaddr_path_index_2]@);
+            assert(PageTablePath(vaddr_path@.take(3))@.drop_last()
+                == path![vaddr_path_index_0, vaddr_path_index_1]@);
+
+            assert(pde_val
+                == self.storage[path![493, 493, vaddr_path_index_0, vaddr_path_index_1]].this_page_perm.value().0@.index(
+            vaddr_path_index_2 as int));
+            assert(self.storage[PageTablePath(vaddr_path@.take(3))].pte_perm.value()
+                == self.storage[path![vaddr_path_index_0, vaddr_path_index_1, vaddr_path_index_2]].pte_perm.value());
+            assert(self.storage[PageTablePath(vaddr_path@.take(3))].pte_perm.value()
+                == self.storage[path![vaddr_path_index_0, vaddr_path_index_1]].this_page_perm.value().0@.index(
+            vaddr_path_index_2 as int));
+            assert(path![493, 493, vaddr_path_index_0, vaddr_path_index_1]@ == seq![493]
+                + path![493, vaddr_path_index_0, vaddr_path_index_1]@);
+            self.lemma_493_prefix_same_this_page_perm(
+                path![493, vaddr_path_index_0, vaddr_path_index_1],
+                path![493, 493, vaddr_path_index_0, vaddr_path_index_1],
+            );
+            assert(path![493, vaddr_path_index_0, vaddr_path_index_1]@ == seq![493]
+                + path![vaddr_path_index_0, vaddr_path_index_1]@);
+            self.lemma_493_prefix_same_this_page_perm(
+                path![vaddr_path_index_0, vaddr_path_index_1],
+                path![493, vaddr_path_index_0, vaddr_path_index_1],
+            );
+        }
+
+        assert(pdpe_val == self.storage[PageTablePath(vaddr_path@.take(2))].pte_perm.value()) by {
+            let pdpe_path_index_3 = pdpe_path@[3];
+            let pdpe_path_index_2 = pdpe_path@[2];
+            let pdpe_path_index_1 = pdpe_path@[1];
+            let pdpe_path_index_0 = pdpe_path@[0];
+
+            assert(pdpe_path_index_0 == 493);
+            assert(pdpe_path_index_1 == 493);
+            assert(pdpe_path_index_2 == 493);
+            assert(vaddr_path_index_0 == pdpe_path_index_3);
+            assert(vaddr_path_index_1 == pdpe_addr@ >> 3 & 0x1ff);
+
+            assert(pdpe_path@ == path![493, 493, 493, vaddr_path_index_0]@);
+            assert(PageTablePath(vaddr_path@.take(2))@
+                == path![vaddr_path_index_0, vaddr_path_index_1]@);
+            assert(PageTablePath(vaddr_path@.take(2))@.drop_last() == path![vaddr_path_index_0]@);
+
+            assert(pdpe_val
+                == self.storage[path![493, 493, 493, vaddr_path_index_0]].this_page_perm.value().0@.index(
+            vaddr_path_index_1 as int));
+            assert(self.storage[PageTablePath(vaddr_path@.take(2))].pte_perm.value()
+                == self.storage[path![vaddr_path_index_0, vaddr_path_index_1]].pte_perm.value());
+            assert(self.storage[PageTablePath(vaddr_path@.take(2))].pte_perm.value()
+                == self.storage[path![vaddr_path_index_0]].this_page_perm.value().0@.index(
+                vaddr_path_index_1 as int,
+            ));
+            assert(path![493, 493, 493, vaddr_path_index_0]@ == seq![493]
+                + path![493, 493, vaddr_path_index_0]@);
+            self.lemma_493_prefix_same_this_page_perm(
+                path![493, 493, vaddr_path_index_0],
+                path![493, 493, 493, vaddr_path_index_0],
+            );
+            assert(path![493, 493, vaddr_path_index_0]@ == seq![493]
+                + path![493, vaddr_path_index_0]@);
+            self.lemma_493_prefix_same_this_page_perm(
+                path![493, vaddr_path_index_0],
+                path![493, 493, vaddr_path_index_0],
+            );
+            assert(path![493, vaddr_path_index_0]@ == seq![493] + path![vaddr_path_index_0]@);
+            self.lemma_493_prefix_same_this_page_perm(
+                path![vaddr_path_index_0],
+                path![493, vaddr_path_index_0],
+            );
+
+        }
+
+        assert(pml4e_val == self.storage[PageTablePath(vaddr_path@.take(1))].pte_perm.value()) by {
+            let pml4_path_index_3 = pml4_path@[3];
+            let pml4_path_index_2 = pml4_path@[2];
+            let pml4_path_index_1 = pml4_path@[1];
+            let pml4_path_index_0 = pml4_path@[0];
+
+            assert(pml4_path_index_0 == 493);
+            assert(pml4_path_index_1 == 493);
+            assert(pml4_path_index_2 == 493);
+            assert(pml4_path_index_3 == 493);
+            assert(vaddr_path_index_0 == pml4_addr@ >> 3 & 0x1ff);
+
+            assert(pml4_path@ == path![493, 493, 493, 493]@);
+            assert(PageTablePath(vaddr_path@.take(1))@ == path![vaddr_path_index_0]@);
+
+            assert(pml4e_val
+                == self.storage[path![493, 493, 493, 493]].this_page_perm.value().0@.index(
+                vaddr_path_index_0 as int,
+            ));
+            assert(self.storage[PageTablePath(vaddr_path@.take(1))].pte_perm.value()
+                == self.storage[path![vaddr_path_index_0]].pte_perm.value());
+
+            assert(path![493, 493, 493, 493]@ == seq![493] + path![493, 493, 493]@);
+            self.lemma_493_prefix_same_this_page_perm(
+                path![493, 493, 493],
+                path![493, 493, 493, 493],
+            );
+            assert(path![493, 493, 493]@ == seq![493] + path![493, 493]@);
+            self.lemma_493_prefix_same_this_page_perm(path![493, 493], path![493, 493, 493]);
+            assert(path![493, 493]@ == seq![493] + path![493]@);
+            self.lemma_493_prefix_same_this_page_perm(path![493], path![493, 493]);
+        }
+    }
+
     /// **PROOF**: Proves that all self-mapped page table entries share the same "page"
     ///
     /// This proof comes from two parts:
@@ -2976,6 +3234,8 @@ impl PageTablePermission {
         &&& forall|path: PageTablePath|
             #![trigger self.storage.contains_key(path)]
             path.wf() ==> {
+                // Root cannot be huge pages: we don't support this.
+                &&& path.len() == 1 ==> { !self.storage[path].pte_perm.value().is_huge_pte_spec() }
                 &&& self.storage.contains_key(
                     path,
                 )
