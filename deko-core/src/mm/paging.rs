@@ -1300,8 +1300,19 @@ impl Page {
             return None;
         }
         if PageTableEntry::is_huge_pte(pdpe, Tracked(pdpe_perm)) {
-            // todo.
-            vstd::vpanic!("unimplemented: walk to level 2 for 1GB page");
+            proof {
+                assert(pdpe_perm.value().page_frame_spec(private_bit)@ + (vaddr@ & 0x3FFF_FFFF) <= (
+                0x000F_FFFF_FFFF_FFFF + 0x3FFF_FFFF)) by {
+                    pdpe_perm.value().lemma_page_frame_spec_no_overflow(private_bit);
+                    let vaddr = vaddr@;
+                    assert(vaddr & 0x3FFF_FFFF <= 0x3FFF_FFFF) by (bit_vector);
+                }
+                pdpe_perm.value().lemma_page_frame_spec_no_overflow(private_bit);
+            }
+
+            let pa = pdpe.borrow(Tracked(&pdpe_perm)).page_frame(private_bit).0 + (vaddr.0
+                & 0x3FFF_FFFF);
+            return Some(PageFrame::Frame1G(PhysAddr(pa)));
         }
         proof {
             pgtable_perm.lemma_pte_reads_present_can_read_vaddr(pdpe_addr, pde_addr);
@@ -1318,8 +1329,19 @@ impl Page {
             return None;
         }
         if PageTableEntry::is_huge_pte(pde, Tracked(pde_perm)) {
-            // todo.
-            vstd::vpanic!("unimplemented: walk to level 2 for 1GB page");
+            proof {
+                assert(pde_perm.value().page_frame_spec(private_bit)@ + (vaddr@ & 0x1FFFFF) <= (
+                0x000F_FFFF_FFFF_FFFF + 0x1FFFFF)) by {
+                    pde_perm.value().lemma_page_frame_spec_no_overflow(private_bit);
+                    let vaddr = vaddr@;
+                    assert(vaddr & 0x1FFFFF <= 0x1FFFFF) by (bit_vector);
+                }
+                pde_perm.value().lemma_page_frame_spec_no_overflow(private_bit);
+            }
+
+            let pa = pde.borrow(Tracked(&pde_perm)).page_frame(private_bit).0 + (vaddr.0
+                & 0x1FFFFF);
+            return Some(PageFrame::Frame2M(PhysAddr(pa)));
         }
         proof {
             pgtable_perm.lemma_pte_reads_present_can_read_vaddr(pde_addr, pte_addr);
@@ -1334,8 +1356,17 @@ impl Page {
             return None;
         }
 
-        vstd::vpanic!("unimplemented: return the page frame");
-        // Some(PageFrame(pte.page_frame(private_bit)))
+        proof {
+            assert(pte_perm.value().page_frame_spec(private_bit)@ + (vaddr@ & 0xFFF) <= (
+            0x000F_FFFF_FFFF_FFFF + 0xFFF)) by {
+                pte_perm.value().lemma_page_frame_spec_no_overflow(private_bit);
+                let vaddr = vaddr@;
+                assert(vaddr & 0xFFF <= 0xFFF) by (bit_vector);
+            }
+            pte_perm.value().lemma_page_frame_spec_no_overflow(private_bit);
+        }
+        let pa = pte.borrow(Tracked(&pte_perm)).page_frame(private_bit).0 + (vaddr.0 & 0xFFF);
+        Some(PageFrame::Frame4K(PhysAddr(pa)))
     }
 
     /// Walks the page table to find the last valid page table entry for a given virtual address.
@@ -1423,6 +1454,23 @@ impl Page {
 }
 
 impl PageTableEntry {
+    pub proof fn lemma_page_frame_spec_no_overflow(&self, private_bit: u64)
+        requires
+            self.wf(),
+        ensures
+            self.page_frame_spec(private_bit)@ <= 0x000f_ffff_ffff_f000,
+    {
+        let inner = self.0.0;
+        assert(inner & 0x000f_ffff_ffff_f000 <= 0x000f_ffff_ffff_f000) by (bit_vector);
+
+        let stripped = (inner & 0x000f_ffff_ffff_f000) & !private_bit;
+        assert(stripped <= 0x000f_ffff_ffff_f000) by (bit_vector)
+            requires
+                stripped == (inner & 0x000f_ffff_ffff_f000) & !private_bit,
+                inner & 0x000f_ffff_ffff_f000 <= 0x000f_ffff_ffff_f000,
+
+    }
+
     /// Specification functions for PageTableEntry behavior
     pub open spec fn address_spec(&self, private_bit: u64, shared_bit: u64) -> PhysAddr {
         PhysAddr(
@@ -1663,19 +1711,19 @@ impl PageTablePermission {
 
     // Helper functions
     pub open spec fn make_1gb_frame(&self, pte: PageTableEntry, vaddr: VirtAddr) -> PageFrame {
-        let base = pte.address_spec(self.private_bit, self.shared_bit)@;
+        let base = pte.page_frame_spec(self.private_bit)@;
         let offset = vaddr.0 & 0x3FFF_FFFF;
         PageFrame::Frame1G(PhysAddr((base + offset) as u64))
     }
 
     pub open spec fn make_2mb_frame(&self, pte: PageTableEntry, vaddr: VirtAddr) -> PageFrame {
-        let base = pte.address_spec(self.private_bit, self.shared_bit)@;
+        let base = pte.page_frame_spec(self.private_bit)@;
         let offset = vaddr.0 & 0x1F_FFFF;
         PageFrame::Frame2M(PhysAddr((base + offset) as u64))
     }
 
     pub open spec fn make_4kb_frame(&self, pte: PageTableEntry, vaddr: VirtAddr) -> PageFrame {
-        let base = pte.address_spec(self.private_bit, self.shared_bit)@;
+        let base = pte.page_frame_spec(self.private_bit)@;
         let offset = vaddr.0 & 0xFFF;
         PageFrame::Frame4K(PhysAddr((base + offset) as u64))
     }
