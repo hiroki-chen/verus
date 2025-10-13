@@ -23,6 +23,7 @@ impl<T: WellFormed> Box<T> {
             s.1@@.is_init(),
             s.1@@.value() == x,
             s.1@@.mem_wf(),
+            s.1@@.wf(),
     {
         Self::new_with_f(x, allocator, Ghost(()))
     }
@@ -33,6 +34,7 @@ impl<T: WellFormed> Box<T> {
             allocator.wf(),
         ensures
             s.0.wf(),
+            s.1@@.wf(),
             s.1@@.pptr() === s.0@@,
             s.1@@.is_uninit(),
     {
@@ -136,6 +138,7 @@ impl<V: WellFormed, F: Predicate<V>> BoxInner<V, F> {
             s.0.wf(),
             s.1@@.pptr() === s.0@@,
             s.1@@.is_uninit(),
+            s.1@@.wf(),
     {
         let (pptr, Tracked(mut pptr_perm)) = DekoPPtr::empty(allocator);
 
@@ -170,6 +173,7 @@ impl<V: WellFormed, F: Predicate<V>> BoxInner<V, F> {
             s.1@@.is_init(),
             s.1@@.value() == x,
             s.1@@.mem_wf(),
+            s.1@@.wf(),
     {
         let (b, Tracked(perm)) = Self::new_zeroed_with_f(allocator, Ghost(f));
         b.write(Tracked(&mut perm), x);
@@ -196,9 +200,11 @@ impl<V: WellFormed, F: Predicate<V>> BoxInner<V, F> {
         requires
             self.wf(),
             perm@.pptr() === self@@,
+            perm@.wf(),
         ensures
             r.0 == self@,
             r.1@ == perm@,
+            r.1.wf(),
     {
         (self.ptr, Tracked(perm.points_to))
     }

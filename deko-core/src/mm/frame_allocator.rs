@@ -1,6 +1,7 @@
 //! Implements a simple page frame allocator.
 use deko_std::prelude::*;
 use vstd::prelude::*;
+use vstd::raw_ptr::PointsToRaw;
 
 verus! {
 
@@ -18,6 +19,8 @@ impl DekoPageFrameAllocator {
             self.wf(),
             size > 0,
             valid_heap_param(phys_start, size, HEAP_SIZE as u64),
+            phys_start == (STAGE2_HEAP_START as u64),
+            size == (STAGE2_HEAP_END - STAGE2_HEAP_START) as u64,
     {
         self.0.init(phys_start, size);
     }
@@ -40,7 +43,7 @@ impl WellFormed for DekoPageFrameAllocator {
 }
 
 impl FrameAllocator for DekoPageFrameAllocator {
-    fn allocate_frame(&self) -> (r: PhysAddr) {
+    fn allocate_frame_single(&self) -> (r: PhysAddr) {
         proof {
             assert(vstd::layout::is_power_2(0x8)) by (compute);
         }

@@ -353,6 +353,10 @@ impl WellFormed for MappingSpace {
     open spec fn wf(&self) -> bool {
         &&& self.kernel.wf()
         &&& self.physmap.wf()
+
+        &&& self.kernel.virt_start == VirtAddr::new_spec(STAGE2_START as u64)
+        &&& self.physmap.virt_start == VirtAddr::new_spec(0 as u64)
+        &&& self.physmap.virt_end == VirtAddr::new_spec(LOWMEM_END as u64)
     }
 }
 
@@ -403,6 +407,9 @@ impl FixedAddressMappingRange {
             Self::valid_mapping_range(virt_start, virt_end, phys_start),
         ensures
             r.wf(),
+            r.virt_start == virt_start,
+            r.virt_end == virt_end,
+            r.phys_start == phys_start,
     {
         Self { virt_start, virt_end, phys_start }
     }
@@ -761,7 +768,12 @@ impl From<u64> for VirtAddr {
     /// Creates a canonical virtual address from a 64-bit value.
     ///
     /// The input value is automatically canonicalized to ensure x86-64 compatibility.
-    fn from(value: u64) -> (r: Self) {
+    fn from(value: u64) -> (r: Self)
+        ensures
+            r.wf(),
+            r == Self::new_spec(value),
+            sign_extend_ensures(value, r@),
+    {
         VirtAddr::new(value)
     }
 }
@@ -821,7 +833,12 @@ impl<T> From<*mut T> for VirtAddr {
     /// Creates a canonical virtual address from a mutable pointer.
     ///
     /// The pointer is cast to u64 and then canonicalized for x86-64 compatibility.
-    fn from(value: *mut T) -> Self {
+    fn from(value: *mut T) -> (r: Self)
+        ensures
+            r.wf(),
+            r == Self::new_spec(value as u64),
+            sign_extend_ensures(value as u64, r@),
+    {
         VirtAddr::new(value as u64)
     }
 }
@@ -830,7 +847,10 @@ impl<T> From<*mut T> for PhysAddr {
     /// Creates a physical address from a mutable pointer.
     ///
     /// The pointer is cast directly to u64 without canonicalization.
-    fn from(value: *mut T) -> Self {
+    fn from(value: *mut T) -> (r: Self)
+        ensures
+            r@ === value as u64,
+    {
         PhysAddr(value as u64)
     }
 }

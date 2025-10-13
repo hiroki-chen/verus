@@ -57,7 +57,6 @@ impl Snp {
         crate::logging::print_str("testtesttest");
     }
 
-    #[verifier::external_body]
     pub fn init_each_cpu(
         &self,
         ctx: DekoPPtr<DekoCtx>,
@@ -134,9 +133,7 @@ impl Snp {
             PteFlags::data(),
         );
 
-        // DEBUG
-        // Self::cpu_self_map_sanity_check(bsp_percpu_ptr.addr() as u64, ghcb.addr() as u64);
-        // Self::ghcb_map_sanity_check(ghcb.addr() as u64);
+        early_dbg(); // remove this ONLY after previous functions are implemented and verified.
     }
 
     // #[verifier::external_body]

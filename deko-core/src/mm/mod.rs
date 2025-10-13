@@ -76,16 +76,16 @@ pub struct PageEncryptionMasks {
 
 /// This function initializes the global `DEKO_FRAME_ALLOCATOR` with the given
 /// physical memory region for physical memory allocation.
-#[verifier::external_body]  // todo: will fix later.
 pub fn init_frame_allocator(heap_start: &VirtAddr, heap_end: &VirtAddr)
     requires
-// heap_start.wf(),
-// heap_end.wf(),
-// heap_start@ % 0x1000 == 0,
-// heap_end@ % 0x1000 == 0,
-// heap_end@ > heap_start@,
-// valid_heap_param(heap_start.0, (heap_end.0 - heap_start.0) as u64, HEAP_SIZE as u64),
-
+        heap_start.wf(),
+        heap_end.wf(),
+        heap_start@ % 0x1000 == 0,
+        heap_end@ % 0x1000 == 0,
+        heap_end@ > heap_start@,
+        valid_heap_param(heap_start.0, (heap_end.0 - heap_start.0) as u64, HEAP_SIZE as u64),
+        heap_start == VirtAddr::new_spec(STAGE2_HEAP_START as u64),
+        heap_end == VirtAddr::new_spec(STAGE2_HEAP_END as u64),
 {
     let phys_start = PhysAddr(heap_start.0);
 

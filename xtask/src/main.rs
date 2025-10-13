@@ -49,9 +49,9 @@ impl ProjectConfig {
 
     fn deko_elf_path(&self, release: bool) -> PathBuf { self.target_dir(release).join("deko.elf") }
 
-    fn boot_image_path(&self) -> PathBuf { self.target_dir(true).join("boot.img") }
+    fn boot_image_path(&self) -> PathBuf { self.target_dir(false).join("boot.img") }
 
-    fn igvm_path(&self) -> PathBuf { self.target_dir(true).join("igvm.igvm") }
+    fn igvm_path(&self) -> PathBuf { self.target_dir(false).join("igvm.igvm") }
 
     fn custom_target_json(&self) -> PathBuf {
         self.root.join(".cargo").join(format!("{}.json", self.target_triple))
@@ -512,7 +512,7 @@ impl Builder {
         let stage2_path = stage2_path.unwrap_or_else(|| self.config.stage2_binary_path(true));
         let boot_img_path = self.config.igvm_path();
         let ovmf_path = ovmf_path.unwrap_or_else(ProjectConfig::default_ovmf_path);
-        let kernel_path = self.config.deko_monitor_path(true);
+        let kernel_path = self.config.deko_monitor_path(false);
 
         println!("✓ Creating IGVM image with:");
         println!("  Stage2 Path: {:?}", stage2_path);

@@ -17,7 +17,7 @@ pub const PAGE_MASK: u64 = !(PAGE_SIZE - 1);
 /// may result from two callers modifying or deallocating the same frame.
 pub trait FrameAllocator: WellFormed {
     /// Allocates single physical frame and returns its physical address.
-    fn allocate_frame(&self) -> (r: PhysAddr)
+    fn allocate_frame_single(&self) -> (r: PhysAddr)
         requires
             self.wf(),
         ensures
@@ -237,7 +237,7 @@ impl<V: WellFormed + Heap> DekoBuddyAllocator<V> {
         self.dealloc_impl(ptr, size, align);
     }
 
-    fn alloc_impl(&self, size: usize, align: usize) -> u64
+    fn alloc_impl(&self, size: usize, align: usize) -> (r: u64)
         requires
             self.wf(),
     {
@@ -255,7 +255,13 @@ impl<V: WellFormed + Heap> DekoBuddyAllocator<V> {
         }
     }
 
-    fn dealloc_impl(&self, ptr: *mut u8, size: usize, align: usize) {
+    fn dealloc_impl(&self, ptr: *mut u8, size: usize, align: usize)
+        requires
+            self.wf(),
+    {
+        let (mut allocator, write_handle) = self.allocator.acquire_write();
+
+        vstd::vpanic!("todo: implement dealloc")
     }
 }
 

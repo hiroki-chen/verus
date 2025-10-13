@@ -129,6 +129,7 @@ impl PlatformApi for Snp {
         FEATURE_MASK.init(feature_mask);
     }
 
+    #[verifier::spinoff_prover]
     fn validate_memory(
         &self,
         Tracked(ctx_perm): Tracked<&mut DekoCtxPermission>,

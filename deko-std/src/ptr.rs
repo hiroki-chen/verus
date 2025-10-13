@@ -608,6 +608,9 @@ verus! {
 
 impl<V: WellFormed> DekoPPtr<V> {
     /// Constructs a possibly uninitialized `DekoPPtr<V>`.
+    /// 
+    /// Please be extra careful that this function returns a pointer
+    /// (physical address).
     pub fn empty(allocator: &DefaultDekoHeapAllocator) -> (pt: (Self, Tracked<DekoPointsTo<V>>))
         requires
             allocator.wf(),

@@ -307,14 +307,14 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
 
     // Set up the kernel mapping: now identity
     // an automatic invariant for OnceCell.
-    let virt_start = VirtAddr(u64::from(STAGE2_START));
-    let virt_end = VirtAddr(u64::from(header.stage2_end));
-    let phys_start = PhysAddr(u64::from(STAGE2_START));
+    let virt_start = VirtAddr::from(STAGE2_START as u64);
+    let virt_end = VirtAddr::from(header.stage2_end as u64);
+    let phys_start = PhysAddr::from(STAGE2_START as u64);
     let kernel_mapping = FixedAddressMappingRange::new(virt_start, virt_end, phys_start);
 
     // SVSM ref: Create a simple heap mapping using the lower memory region.
-    let zero = VirtAddr(0u64);
-    let lowmem = VirtAddr(LOWMEM_END as u64);
+    let zero = VirtAddr::from(0u64);
+    let lowmem = VirtAddr::from(LOWMEM_END as u64);
     let heap_mapping = FixedAddressMappingRange::new(zero, lowmem, PhysAddr::from(0u64));
 
     snp.validate_memory(Tracked(&mut ctx_perm), 0, LOWMEM_END as u64);
@@ -332,6 +332,9 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
     let heap_end = VirtAddr::from(STAGE2_HEAP_END as u64);
     proof {
         crate::theories::stage2_heap_valid_params();
+
+        assert(heap_start.wf());
+        assert(heap_end.wf());
 
         let heap_start_val = heap_start@;
     }
