@@ -1,6 +1,7 @@
 use vstd::prelude::*;
 
 use crate::prelude::*;
+
 verus! {
 
 /// A fixed-size array wrapper over Rust's raw array type `[T; N]`.
