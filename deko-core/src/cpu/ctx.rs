@@ -184,6 +184,7 @@ impl WellFormed for DekoCtxPermission {
         &&& self.mem_range_wf()
         &&& self.pgtable_perm.pte_within_range(heap_phys_start as u64, heap_phys_end as u64)
         &&& self.pgtable_perm.region_mapped(heap_mapping)
+        &&& self.pgtable_perm.identity_mapped(heap_mapping)
     }
 }
 

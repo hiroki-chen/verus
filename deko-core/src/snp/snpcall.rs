@@ -133,7 +133,7 @@ impl Snp {
             PteFlags::data(),
         );
 
-        early_dbg(); // remove this ONLY after previous functions are implemented and verified.
+        early_dbg();  // remove this ONLY after previous functions are implemented and verified.
     }
 
     // #[verifier::external_body]
