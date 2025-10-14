@@ -171,20 +171,16 @@ impl<T: WellFormed, const N: usize> Array<T, N> {
     /// the data while we have the pointer.
     #[verifier::external_body]
     #[inline(always)]
-    pub fn index_as_ptr(&self, i: usize) -> (t: (DekoPPtr<T>, Tracked<&DekoPointsTo<T>>))
+    pub fn index_as_ptr(&self, i: usize) -> (t: DekoPPtr<T>)
         requires
             0 <= i < self.spec_len() as usize,
             self.wf(),
         ensures
-            t.1@.is_init() && t.1@.wf() && t.1@.value() == self@.index(i as int),
-            t.0@ === t.1@.pptr(),
-            self.idx_ptr(i as int)@ == t.0@,
-            self.idx_perms(i as int) == t.1@,
+            self.idx_ptr(i as int) == t,
     {
-        let (ptr, Tracked(perm)) = unsafe { DekoPPtr::from_raw_uninit(&self.0[i] as *const T as u64)
-        };
+        let ptr = &self.0[i] as *const T;
 
-        (ptr, Tracked(&perm))
+        DekoPPtr(vstd::simple_pptr::PPtr(ptr as usize, core::marker::PhantomData))
     }
 
     #[verifier::external_body]
