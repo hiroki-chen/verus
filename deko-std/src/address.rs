@@ -353,7 +353,6 @@ impl WellFormed for MappingSpace {
     open spec fn wf(&self) -> bool {
         &&& self.kernel.wf()
         &&& self.physmap.wf()
-
         &&& self.kernel.virt_start == VirtAddr::new_spec(STAGE2_START as u64)
         &&& self.physmap.virt_start == VirtAddr::new_spec(0 as u64)
         &&& self.physmap.virt_end == VirtAddr::new_spec(LOWMEM_END as u64)

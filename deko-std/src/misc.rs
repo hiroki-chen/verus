@@ -167,7 +167,22 @@ macro_rules! impl_wf_for_atomics {
 #[macro_export]
 #[verusfmt::skip]
 macro_rules! with_permission {
-    // Pattern 1: With attributes and generic type parameters with trait bounds
+    // Pattern 1: With attributes, lifetimes, and generic type parameters with trait bounds
+    (
+        $(#[$attr:meta])+
+        $name:ident<$($lifetime:lifetime),* $(,)? $($generic:ident $(: $bound:path)?),*>, $($field:ident : $T:ty ),* $(,)?
+    ) => {
+        paste::paste! {
+                                                                                            verus! {
+                $(#[$attr])+
+                pub tracked struct [<$name Permission>]<$($lifetime,)* $($generic $(: $bound)?),*> {
+                    $($field: $T,)*
+                }
+            }
+                                                                                        }
+    };
+
+    // Pattern 2: With attributes and generic type parameters with trait bounds (no lifetimes)
     (
         $(#[$attr:meta])+
         $name:ident<$($generic:ident $(: $bound:path)?),*>, $($field:ident : $T:ty ),* $(,)?
@@ -182,7 +197,7 @@ macro_rules! with_permission {
                                                                                         }
     };
 
-    // Pattern 2: With attributes and simple identifier (no generics)
+    // Pattern 3: With attributes and simple identifier (no generics, no lifetimes)
     (
         $(#[$attr:meta])+
         $name:ident, $($field:ident : $T:ty ),* $(,)?
@@ -197,7 +212,32 @@ macro_rules! with_permission {
                                                                                         }
     };
 
-    // Pattern 3: Generic type parameters with trait bounds (no attributes)
+    // Pattern 4: Lifetimes and generic type parameters with trait bounds (no attributes)
+    (
+        $name:ident<$($lifetime:lifetime),* $(,)? $($generic:ident $(: $bound:path)?),*>, $($field:ident : $T:ty ),* $(,)?
+    ) => {
+        paste::paste! {
+                                                                                            verus! {
+                pub tracked struct [<$name Permission>]<$($lifetime,)* $($generic $(: $bound)?),*> {
+                    $(pub $field: $T,)*
+                }
+
+                impl<$($lifetime,)* $($generic $(: $bound)?),*> [<$name Permission>]<$($lifetime,)* $($generic),*> {
+                    /// The id of this permission.
+                    pub uninterp spec fn id(&self) -> int;
+
+                    // Auto getter.
+                    $(
+                        pub open spec fn [< $field >](&self) -> $T {
+                            self.$field
+                        }
+                    )*
+                }
+            }
+                                                                                        }
+    };
+
+    // Pattern 5: Generic type parameters with trait bounds (no attributes, no lifetimes)
     (
         $name:ident<$($generic:ident $(: $bound:path)?),*>, $($field:ident : $T:ty ),* $(,)?
     ) => {
@@ -222,7 +262,7 @@ macro_rules! with_permission {
                                                                                         }
     };
 
-    // Pattern 4: Simple identifier (no generics, no attributes)
+    // Pattern 6: Simple identifier (no generics, no attributes, no lifetimes)
     (
         $name:ident, $($field:ident : $T:ty ),* $(,)?
     ) => {
