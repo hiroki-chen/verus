@@ -70,7 +70,7 @@ impl Snp {
             let read_handle = PERCPU_AREAS.acquire_read();
             // The permission is discarded; you can only obtain this permission
             // if you own this.
-            let ptr = read_handle.borrow().0.index_as_ptr(0);
+            let (ptr, _) = read_handle.borrow().0.index_as_ptr(0);
 
             read_handle.release_read();
 
