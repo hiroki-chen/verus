@@ -11,12 +11,10 @@ verus! {
 pub struct Array<T: WellFormed, const N: usize>(pub [T; N]);
 
 // Prove it later.
-pub broadcast proof fn lemma_sized_t_makes_sized_array<T: Sized + WellFormed, const N: usize>()
+pub broadcast axiom fn lemma_sized_t_makes_sized_array<T: Sized + WellFormed, const N: usize>()
     ensures
         #[trigger] Array::<T, N>::size_wf(),
-{
-    admit();
-}
+;
 
 impl<T: WellFormed, const N: usize> WellFormed for Array<T, N> {
     open spec fn wf(&self) -> bool {
@@ -145,8 +143,6 @@ impl<T: WellFormed, const N: usize> Array<T, N> {
     pub uninterp spec fn idx(&self, i: int) -> T;
 
     pub uninterp spec fn idx_ptr(&self, i: int) -> DekoPPtr<T>;
-
-    pub uninterp spec fn idx_perms(&self, i: int) -> DekoPointsTo<T>;
 
     #[verifier::inline]
     pub open spec fn to_seq(&self) -> Seq<T> {

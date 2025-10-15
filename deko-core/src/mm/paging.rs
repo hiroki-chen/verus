@@ -1,7 +1,7 @@
 use core::borrow::BorrowMut;
 
 // Re-export PTE_BASE from deko-std for backward compatibility
-use vstd::prelude::*;
+use vstd::{assert_by_contradiction, prelude::*};
 
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
@@ -516,19 +516,6 @@ impl View for Page {
     uninterp spec fn view(&self) -> Self::V;
 }
 
-impl Page {
-    pub axiom fn array_ptr_offset_matches(array_perm: DekoPointsTo<Self>, index: usize)
-        requires
-            index < PAGE_TABLE_ENTRY as usize,
-            Array::<PageTableEntry, PAGE_TABLE_ENTRY>::size_wf(),
-            array_perm.wf(),
-            array_perm.is_init(),
-        ensures
-            array_perm.pptr().addr() + (index * core::mem::size_of::<PageTableEntry>())
-                == array_perm.value().0.idx_ptr(index as int).addr(),
-    ;
-}
-
 impl WellFormed for PageFrame {
     #[verifier::inline]
     open spec fn wf(&self) -> bool {
@@ -743,103 +730,98 @@ impl Page {
         broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
 
         let req_mapping = Self::walk(page, Tracked(perm), vaddr, ms, private_bit, shared_bit);
-        match req_mapping {
-            Mapping::Level0(_) => req_mapping,
-            Mapping::Level3(pte) => {
-                Self::allocate_pte_lvl3(
-                    pte,
-                    Tracked(perm),
-                    vaddr,
-                    ms,
-                    private_bit,
-                    shared_bit,
-                    false,
-                )
-            },
-            _ => vstd::vpanic!("todo"),
-        }
-    }
+        // match req_mapping {
+        //     Mapping::Level0(_) => req_mapping,
+        //     Mapping::Level3(pte) => {
+        //         Self::allocate_pte_lvl3(
+        //             pte,
+        //             Tracked(perm),
+        //             vaddr,
+        //             ms,
+        //             private_bit,
+        //             shared_bit,
+        //             false,
+        //         )
+        //     },
+        //     _ => vstd::vpanic!("todo"),
+        // }
 
-    #[verifier::spinoff_prover]
-    pub fn allocate_pte_lvl2(
-        pte: DekoPPtr<PageTableEntry>,
-        Tracked(perm): Tracked<&mut PageTablePermission>,
-        vaddr: VirtAddr,
-        ms: &MappingSpace,
-        private_bit: u64,
-        shared_bit: u64,
-        huge: bool,
-    ) -> (r: Mapping)
-        requires
-            old(perm).allocate_pte_lvl2_requires(pte, vaddr, ms, private_bit, shared_bit, huge),
-    {
         vstd::vpanic!("todo");
     }
 
+    // #[verifier::spinoff_prover]
+    // pub fn allocate_pte_lvl3(
+    //     pte: DekoPPtr<PageTableEntry>,
+    //     Tracked(perm): Tracked<&mut PageTablePermission>,
+    //     vaddr: VirtAddr,
+    //     ms: &MappingSpace,
+    //     private_bit: u64,
+    //     shared_bit: u64,
+    //     huge: bool,
+    // ) -> (r: Mapping)
+    //     requires
+    //         old(perm).allocate_pte_lvl3_requires(pte, vaddr, ms, private_bit, shared_bit, huge),
+    //     ensures
+    //         old(perm).allocate_pte_lvl3_ensures(pte, vaddr, private_bit, shared_bit, huge, r, perm),
+    // {
+    //     broadcast use PteFlags::lemma_each_bits_is_valid;
+    //     broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
+
+    //     let idx = index_at_level::<3>(vaddr);
+    //     let tracked this_pte_perm = perm.storage.tracked_borrow(
+    //         path![493],
+    //     ).this_page.tracked_borrow(idx as int);
+
+    //     if PageTableEntry::is_present_pte(pte, Tracked(&this_pte_perm)) {
+    //         return Mapping::Level3(pte);
+    //     }
+    //     // Request a new page frame from the allocator.
+
+    //     let (new_page, Tracked(new_page_perm), Tracked(new_this_page), paddr) = Page::alloc_new(ms);
+    //     if new_page.addr() == 0 || paddr.0 == 0 {
+    //         // Heap does not start with 0 so use 0 to indicate OOM
+    //         // is fine; but should we indicate something else here
+    //         // or just die?
+    //         vstd::vpanic!("Out of memory");
+    //     }
+    //     let flags = PteFlags::writeable();
+    //     let tracked mut page_perm = perm.storage.tracked_remove(path![493]);  // we remove and then re-insert later.
+    //     let tracked mut pte_perm = page_perm.this_page.tracked_remove(idx as int);  // remove and re-insert later.
+    //     let new_entry_value = PageTableEntry(
+    //         PhysAddr(make_private_address(paddr.0, private_bit, shared_bit) | flags.bits() as u64),
+    //     );
+
+    //     pte.write(Tracked(&mut pte_perm), new_entry_value);
+    //     let next_pte_idx = index_at_level::<2>(vaddr);
+    //     let next_pte = new_page.borrow(Tracked(&new_page_perm)).0.index_as_ptr(next_pte_idx);
+
+    //     // Now we have written the new entry, we need to update the permission map.
+    //     proof {
+    //         page_perm.this_page.tracked_insert(idx as int, pte_perm);
+    //         perm.storage.tracked_insert(path![493], page_perm);
+    //         perm.storage.tracked_insert(
+    //             path![idx as int],
+    //             PagePermission {
+    //                 pte_perm: new_entry_value,
+    //                 this_page_perm: new_page_perm,
+    //                 this_page: new_this_page,
+    //             },
+    //         );
+
+    //         assert(perm.self_mapped()) by {
+    //             let root_old = old(perm).storage[path![493]];
+    //             let root_now = perm.storage[path![493]];
+    //             let inserted_new = perm.storage[path![idx as int]];
+
+    //         }
+    //         assert(perm.wf_with_perm());
+    //     }
+
+    //     Self::allocate_pte_lvl2(next_pte, Tracked(perm), vaddr, ms, private_bit, shared_bit, huge)
+    // }
+
     #[verifier::spinoff_prover]
-    pub fn allocate_pte_lvl3(
-        pte: DekoPPtr<PageTableEntry>,
-        Tracked(perm): Tracked<&mut PageTablePermission>,
-        vaddr: VirtAddr,
-        ms: &MappingSpace,
-        private_bit: u64,
-        shared_bit: u64,
-        huge: bool,
-    ) -> (r: Mapping)
-        requires
-            old(perm).allocate_pte_lvl3_requires(pte, vaddr, ms, private_bit, shared_bit, huge),
-        ensures
-            old(perm).allocate_pte_lvl3_ensures(pte, vaddr, private_bit, shared_bit, huge, r, perm),
-    {
-        broadcast use PteFlags::lemma_each_bits_is_valid;
-        broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
-
-        let idx = index_at_level::<3>(vaddr);
-        let tracked pte_perm = perm.storage.tracked_borrow(path![493]).this_page.tracked_borrow(
-            idx as int,
-        );
-
-        if !PageTableEntry::is_present_pte(pte, Tracked(&pte_perm)) {
-            return Mapping::Level3(pte);
-        }
-        // Request a new page frame from the allocator.
-
-        let (new_page, Tracked(new_page_perm), Tracked(new_this_page), paddr) = Page::alloc_new(ms);
-        if new_page.addr() == 0 || paddr.0 == 0 {
-            // Heap does not start with 0 so use 0 to indicate OOM
-            // is fine; but should we indicate something else here
-            // or just die?
-            vstd::vpanic!("Out of memory");
-        }
-        let flags = PteFlags::writeable();
-        let tracked mut page_perm = perm.storage.tracked_remove(path![493]);  // we remove and then re-insert later.
-        let tracked mut pte_perm = page_perm.this_page.tracked_remove(idx as int);  // remove and re-insert later.
-        let new_entry_value = PageTableEntry(
-            PhysAddr(make_private_address(paddr.0, private_bit, shared_bit) | flags.bits() as u64),
-        );
-
-        pte.write(Tracked(&mut pte_perm), new_entry_value);
-        let next_pte_idx = index_at_level::<2>(vaddr);
-        let next_pte = new_page.borrow(Tracked(&new_page_perm)).0.index_as_ptr(next_pte_idx);
-
-        // Now we have written the new entry, we need to update the permission map.
-        proof {
-            page_perm.this_page.tracked_insert(idx as int, pte_perm);
-            perm.storage.tracked_insert(path![493], page_perm);
-            perm.storage.tracked_insert(path![idx as int], PagePermission {
-                pte_perm: new_entry_value,
-                this_page_perm: new_page_perm,
-                this_page: new_this_page,
-            });
-
-            // TODO: need to prove this.
-            assume(perm.wf_with_perm());
-        }
-
-        Self::allocate_pte_lvl2(next_pte, Tracked(perm), vaddr, ms, private_bit, shared_bit, huge)
-    }
-
-    #[verifier::spinoff_prover]
+    #[inline]
     pub fn walk_addr_lvl0(
         page: DekoPPtr<Page>,
         Tracked(perm): Tracked<&PageTablePermission>,
@@ -866,10 +848,7 @@ impl Page {
             assert(parent_path@ == PageTablePath::from_vaddr_at_level(vaddr, 1)@);
         }
 
-        let tracked page_perm = &perm.storage.tracked_borrow(parent_path).this_page_perm;
-        let entry = page.borrow(Tracked(page_perm)).0.index_as_ptr(idx);
-
-        Mapping::Level0(entry)
+        Mapping::Level0(page, idx)
     }
 
     #[verifier::spinoff_prover]
@@ -906,7 +885,7 @@ impl Page {
             idx as int,
         );
         if !PageTableEntry::is_valid_pte(entry, Tracked(entry_perm)) {
-            Mapping::Level1(entry)
+            Mapping::Level1(page, idx)
         } else {
             let ghost paddr = entry_perm.value().address_spec(private_bit, shared_bit);
 
@@ -963,7 +942,7 @@ impl Page {
         );
 
         if !PageTableEntry::is_valid_pte(entry, Tracked(entry_perm)) {
-            Mapping::Level2(entry)
+            Mapping::Level2(page, idx)
         } else {
             let ghost paddr = entry_perm.value().address_spec(private_bit, shared_bit);
 
@@ -1008,7 +987,9 @@ impl Page {
             idx as int,
         );
         if !PageTableEntry::is_valid_pte(entry, Tracked(entry_perm)) {
-            Mapping::Level3(entry)
+            // We hit the last level and the entry is not valid, so we return
+            // the Level3 mapping.
+            Mapping::Level3(page, idx)
         } else {
             let ghost paddr = entry_perm.value().address_spec(private_bit, shared_bit);
 
@@ -1100,7 +1081,6 @@ impl Page {
         requires
             vaddr.wf(),
             pgtable_perm.wf_with_perm(),
-            pgtable_perm.self_mapped(),
             private_bit == pgtable_perm.private_bit,
         ensures
             r.wf(),
@@ -1545,22 +1525,7 @@ impl PageTablePermission {
     ) -> bool {
         let req_mapping = self.walk_spec(vaddr);
 
-        match req_mapping {
-            Mapping::Level0(_) => {
-                &&& req_mapping == res_mapping
-                &&& new_pgtable_perm == self
-            },
-            Mapping::Level3(pte) => self.allocate_pte_lvl3_ensures(
-                pte,
-                vaddr,
-                private_bit,
-                shared_bit,
-                false,
-                res_mapping,
-                new_pgtable_perm,
-            ),
-            _ => true,
-        }
+        true
     }
 
     pub open spec fn allocate_pte_lvl3_requires(
@@ -1584,7 +1549,7 @@ impl PageTablePermission {
             &&& self.storage.contains_key(path![493])
             &&& self.storage[path![493]].pte_perm.is_present_pte_spec()
             &&& self.storage[path![493]].wf_level()
-            &&& self.storage[path![493]].this_page.index(idx).pptr().addr() == pte.addr()
+            &&& self.storage[path![493]].this_page.index(idx).pptr() == pte@
         }
     }
 
@@ -1735,9 +1700,9 @@ impl PageTablePermission {
 
         let parent_path = PageTablePath(seq![path@[0], path@[1], path@[2]]);
         let idx = path@[3];
-        let pte_ptr = self.storage[parent_path].this_page_perm.value().0.idx_ptr(idx);
+        let parent = self.storage[parent_path].this_page_perm;
 
-        Mapping::Level0(pte_ptr)
+        Mapping::Level0(parent.dptr(), idx as usize)
     }
 
     pub open spec fn walk_addr_lvl1_requires(
@@ -1772,10 +1737,10 @@ impl PageTablePermission {
         let parent_path = PageTablePath(seq![path@[0], path@[1]]);
         let idx = path@[2];
 
-        let pte = self.storage[parent_path].this_page_perm.value().0@.index(idx);
-        let pte_ptr = self.storage[parent_path].this_page_perm.value().0.idx_ptr(idx);
+        let parent = self.storage[parent_path].this_page_perm;
+        let pte = parent.value().0@.index(idx);
         if !pte.is_valid_pte_spec() {
-            Mapping::Level1(pte_ptr)
+            Mapping::Level1(parent.dptr(), idx as usize)
         } else {
             self.walk_addr_lvl0_spec(vaddr)
         }
@@ -1812,10 +1777,10 @@ impl PageTablePermission {
         let idx = path@[1];
         let parent_path = PageTablePath(seq![path@[0]]);
 
-        let pte = self.storage[parent_path].this_page_perm.value().0@.index(idx);
-        let pte_ptr = self.storage[parent_path].this_page_perm.value().0.idx_ptr(idx);
+        let parent = self.storage[parent_path].this_page_perm;
+        let pte = parent.value().0@.index(idx);
         if !pte.is_valid_pte_spec() {
-            Mapping::Level2(pte_ptr)
+            Mapping::Level2(parent.dptr(), idx as usize)
         } else {
             self.walk_addr_lvl1_spec(vaddr)
         }
@@ -1847,10 +1812,10 @@ impl PageTablePermission {
         let path = PageTablePath::from_vaddr(vaddr);
         let idx = path@[0];
 
-        let pte = self.storage[path![493]].this_page_perm.value().0@.index(idx);
-        let pte_ptr = self.storage[path![493]].this_page_perm.value().0.idx_ptr(idx);
+        let pml4e = self.storage[path![493]].this_page_perm;
+        let pte = pml4e.value().0@.index(idx);
         if !pte.is_valid_pte_spec() {
-            Mapping::Level3(pte_ptr)
+            Mapping::Level3(pml4e.dptr(), idx as usize)
         } else {
             self.walk_addr_lvl2_spec(vaddr)
         }
@@ -3105,7 +3070,7 @@ impl PageTablePermission {
             &&& entry.this_page_perm.pptr().addr() == self.mapping_space.phys_to_virt_spec(
                 paddr,
             )@ as usize
-            // This entry really points to itself
+            // &&& entry.pte_perm == entry.this_page_perm.value().0@.index(493)
 
         }&&& forall|path: PageTablePath|
             path.wf() && path.len() == 1 ==> {
@@ -3300,18 +3265,41 @@ pub enum PageFrame {
     Frame1G(PhysAddr),
 }
 
-/// A mapping at a specific level in the page table hierarchy.
-///
-/// Please note that the _wrapper_ pointer is the _virtual_address_ of the
-/// corresponding PTEs at that level.
-///
-/// We don't define specs or proofs on this type because eventually
-/// the reasoning is based on `PageTableEntry` and `PagePermissionIndex`.
+/// A mapping at a specific level in the page table hierarchy, along with its index.
+/// It stores a pointer to the page table itself at that level and the index gives
+/// the caller to index into the table to get the PTE.
+/// 
+/// Curious folk might wonder why don't we just return a pointer to the PTE directly?
+/// This is because the pointer we return can be `mut` and we want to allow Verus
+/// to reason about the _side effect_ of such a modification but unfortunately using
+/// a pointer is impossible to to do so as we cannot obtain a mutable permission to
+/// call [`DekoPPtr::write`]:
+/// 
+/// - Obtain it through an abstract [`vstd::seq::Seq`] that stores permissions? This
+///   requires us to add more synchronization properties and unfortunately there is 
+///   no way to associate a [`DekoPointsTo<PageTableEntry>`] with [`Page`]'s entry.
+/// - Using `external_body` to lift this restriction? This is treating and has no
+///   verification value.
+/// 
+/// Verus is unfortunately not so smart to reason about pointers that might belong to
+/// large arrays when treated as pointers too. For example, we cannot reason about
+/// 
+/// ```rust,ignore
+/// let mut r = Array：：<u64, 512>::fill(0);
+/// 
+/// let r = r.idx_ptr(0). // It is possible to modify r[0] through r,
+/// ```
+/// 
+/// TODO
+/// 
+/// - [ ] Fix mapping's definition.
+/// - [ ] Make walk and allocate take input as Mapping.
+/// - [ ] remove `this_page` as no longer needed.
 pub enum Mapping {
-    Level3(DekoPPtr<PageTableEntry>),
-    Level2(DekoPPtr<PageTableEntry>),
-    Level1(DekoPPtr<PageTableEntry>),
-    Level0(DekoPPtr<PageTableEntry>),
+    Level3(DekoPPtr<Page>, usize),
+    Level2(DekoPPtr<Page>, usize),
+    Level1(DekoPPtr<Page>, usize),
+    Level0(DekoPPtr<Page>, usize),
 }
 
 // PageTableEntry can be safely cast into a Page when it represents a valid, present,
@@ -3332,46 +3320,25 @@ impl SafeCastInto<Page> for PageTableEntry {
 impl WellFormed for Mapping {
     #[verifier::inline]
     open spec fn wf(&self) -> bool {
-        true
-    }
-}
+        let idx = match self {
+            Mapping::Level3(_, idx) => *idx,
+            Mapping::Level2(_, idx) => *idx,
+            Mapping::Level1(_, idx) => *idx,
+            Mapping::Level0(_, idx) => *idx,
+        };
 
-impl View for Mapping {
-    type V = DekoPPtr<PageTableEntry>;
-
-    #[verifier::inline]
-    open spec fn view(&self) -> Self::V {
-        self.into_inner_spec()
+        &&& idx < PAGE_TABLE_ENTRY
     }
 }
 
 impl Mapping {
-    pub open spec fn into_inner_spec(&self) -> DekoPPtr<PageTableEntry> {
-        match self {
-            Mapping::Level3(pte) => *pte,
-            Mapping::Level2(pte) => *pte,
-            Mapping::Level1(pte) => *pte,
-            Mapping::Level0(pte) => *pte,
-        }
-    }
-
-    pub open spec fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Mapping::Level3(pte1), Mapping::Level3(pte2)) => pte1@ === pte2@,
-            (Mapping::Level2(pte1), Mapping::Level2(pte2)) => pte1@ === pte2@,
-            (Mapping::Level1(pte1), Mapping::Level1(pte2)) => pte1@ === pte2@,
-            (Mapping::Level0(pte1), Mapping::Level0(pte2)) => pte1@ === pte2@,
-            _ => false,
-        }
-    }
-
     #[verifier::inline]
     pub open spec fn level_spec(&self) -> usize {
         match self {
-            Mapping::Level3(_) => 3,
-            Mapping::Level2(_) => 2,
-            Mapping::Level1(_) => 1,
-            Mapping::Level0(_) => 0,
+            Mapping::Level3(_, _) => 3,
+            Mapping::Level2(_, _) => 2,
+            Mapping::Level1(_, _) => 1,
+            Mapping::Level0(_, _) => 0,
         }
     }
 
@@ -3383,19 +3350,11 @@ impl Mapping {
             r == self.level_spec(),
     {
         match self {
-            Mapping::Level3(_) => 3,
-            Mapping::Level2(_) => 2,
-            Mapping::Level1(_) => 1,
-            Mapping::Level0(_) => 0,
+            Mapping::Level3(_, _) => 3,
+            Mapping::Level2(_, _) => 2,
+            Mapping::Level1(_, _) => 1,
+            Mapping::Level0(_, _) => 0,
         }
-    }
-}
-
-impl View for DekoPagePtr {
-    type V = DekoPPtr<Page>;
-
-    open spec fn view(&self) -> DekoPPtr<Page> {
-        self.0
     }
 }
 

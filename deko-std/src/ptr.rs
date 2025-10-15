@@ -547,6 +547,11 @@ impl<V: WellFormed> DekoPointsTo<V> {
         PPtr(self.addr(), PhantomData)
     }
 
+    #[verifier::inline]
+    pub open spec fn dptr(&self) -> DekoPPtr<V> {
+        DekoPPtr(self.pptr())
+    }
+
     pub closed spec fn ptr(&self) -> *mut V {
         self.points_to.ptr()
     }
