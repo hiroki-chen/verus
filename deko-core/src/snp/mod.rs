@@ -139,6 +139,8 @@ impl PlatformApi for Snp {
         ensures
             ctx_perm.wf(),
             old(ctx_perm).deko_ctx_ptr_perm.pptr() === ctx_perm.deko_ctx_ptr_perm.pptr(),
+            old(ctx_perm).private_bit() == ctx_perm.private_bit(),
+            old(ctx_perm).shared_bit() == ctx_perm.shared_bit(),
     {
         let mut cur = heap_start;
 
@@ -152,6 +154,8 @@ impl PlatformApi for Snp {
                 heap_end % 0x1000 == 0,
                 heap_end <= LOWMEM_END as u64,
                 old(ctx_perm).deko_ctx_ptr_perm.pptr() === ctx_perm.deko_ctx_ptr_perm.pptr(),
+                old(ctx_perm).private_bit() == ctx_perm.private_bit(),
+                old(ctx_perm).shared_bit() == ctx_perm.shared_bit(),
             decreases heap_end - cur,
         {
             // check if this address is aligned with 2MB page?

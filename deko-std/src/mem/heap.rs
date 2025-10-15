@@ -662,8 +662,6 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
     #[verifier::external_body]
     pub const fn new(Ghost(f): Ghost<DekoHeapPredicate>) -> (s: Self)
         requires
-    // We need ORDER > 0 to have at least one block size.
-
             0 < ORDER <= 32,
         ensures
             s.wf(),

@@ -1,7 +1,7 @@
 use vstd::prelude::*;
 
 use crate::cpu::gdt::GlobalDescriptorTable;
-use crate::mm::paging::{PageTable, PageTablePermission};
+use crate::mm::paging::{bit_not_overlapping_with_pte_flags, PageTable, PageTablePermission};
 use crate::prelude::*;
 
 verus! {
@@ -192,6 +192,8 @@ impl DekoCtxPermission {
     pub open spec fn wf_with(&self, ctx: DekoPPtr<DekoCtx>) -> bool {
         &&& self.wf()
         &&& ctx@ === self.deko_ctx_ptr_perm.pptr()
+        &&& bit_not_overlapping_with_pte_flags(self.shared_bit())
+        &&& bit_not_overlapping_with_pte_flags(self.private_bit())
     }
 
     /// Get the shared bit mask for this context.

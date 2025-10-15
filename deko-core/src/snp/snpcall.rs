@@ -247,6 +247,8 @@ impl Snp {
         ensures
             perm.wf(),
             old(perm).deko_ctx_ptr_perm.pptr() === perm.deko_ctx_ptr_perm.pptr(),
+            old(perm).private_bit() == perm.private_bit(),
+            old(perm).shared_bit() == perm.shared_bit(),
     {
         let rax = vaddr;
         let ret: u64;

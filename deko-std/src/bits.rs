@@ -368,6 +368,7 @@ macro_rules! deko_bitflags_quick {
                         pub fn $bit_name() -> (r: Self)
                             ensures
                                 r.inv(),
+                                r@ == from_bits(($($bits)|*) & [<$name _ALL_BITS>]),
                         {
                             Self::from_bits_truncate($($bits)|*)
                         }
