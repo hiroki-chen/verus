@@ -549,11 +549,13 @@ impl DekoCpuCtx {
         ptr: DekoPPtr<Self>,
         Tracked(perm): Tracked<&mut DekoCpuCtxPermission>,
         vaddr: VirtAddr,
+        ms: &MappingSpace,
     )
         requires
             vaddr.wf(),
             vaddr@ % 0x1000 == 0,
             old(perm).wf_with(ptr),
+            ms == old(perm).pgtable_perm.mapping_space,
         ensures
             perm.wf_with(ptr),
     {
@@ -565,6 +567,7 @@ impl DekoCpuCtx {
             pgtable,
             Tracked(&mut perm.pgtable_perm),
             vaddr,
+            ms,
             private_bit,
             shared_bit,
         );

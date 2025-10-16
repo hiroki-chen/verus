@@ -19,7 +19,11 @@ pub mod hal;
 pub mod logging;
 pub mod mm;
 pub mod policy;
-pub(crate) mod theories;
+
+// TODO: Split our crate into three parts.
+pub mod exec;
+pub mod proof;
+pub mod spec;
 
 #[cfg(feature = "snp")]
 pub mod snp;

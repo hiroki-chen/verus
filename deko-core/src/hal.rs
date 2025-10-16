@@ -331,7 +331,7 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
     let heap_start = VirtAddr::from(STAGE2_HEAP_START as u64);
     let heap_end = VirtAddr::from(STAGE2_HEAP_END as u64);
     proof {
-        crate::theories::stage2_heap_valid_params();
+        crate::proof::stage2_heap_valid_params();
 
         assert(heap_start.wf());
         assert(heap_end.wf());

@@ -439,38 +439,15 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         block_size(order + log(2, self.min_block_size as int) as nat)
     }
 
-    /// A helper axiom to unfold the order_size function.
-    ///
-    /// `compute` does not automatically prove this because of data type
-    /// converion confusion but by definition of the `order_size` function
-    /// we can easily do this. Proving is also feasible but we don't bother
-    /// to do so.
-    axiom fn order_size_unfold(&self, order: nat)
+    /// Explicitly states this fact.
+    proof fn order_size_unfold(&self, order: nat)
         ensures
             self.order_size(order) == pow(2, order + log(2, self.min_block_size as int) as nat),
-    ;
+    {
+        broadcast use vstd::arithmetic::power::lemma_pow_positive;
 
-    // axiom fn list_extensionality(a: &Self, b: &Self, order: nat, list: &LinkedList<()>)
-    //     requires
-    //         a.wf(),
-    //         a.is_init(),
-    //         a.heap_size == b.heap_size,
-    //         a.heap_base == b.heap_base,
-    //         a.min_block_size == b.min_block_size,
-    //         a.free_list@.len() == b.free_list@.len(),
-    //         0 <= order < a.free_list@.len(),
-    //     ensures
-    //         a.blocks_no_overlapping_at(list, a.order_size(order)) && a.blocks_are_aligned(
-    //             list,
-    //             a.order_size(order),
-    //         ) && a.blocks_in_heap_range(list, a.order_size(order)) ==> b.blocks_no_overlapping_at(
-    //             list,
-    //             a.order_size(order),
-    //         ) && b.blocks_are_aligned(list, a.order_size(order)) && b.blocks_in_heap_range(
-    //             list,
-    //             a.order_size(order),
-    //         ),
-    // ;
+    }
+
     pub closed spec fn blocks_are_aligned(&self, list: &LinkedList<()>, block_size: nat) -> bool {
         forall|i: int|
             0 <= i < list.inner@.ptrs.len() ==> #[trigger] list.inner@.ptrs.index(i).addr() % (
@@ -570,13 +547,15 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         self.order_size_unfold(order);
     }
 
-    #[verifier::external_body]
     proof fn lemma_order_size_increases(&self, e1: nat, e2: nat)
         requires
             e1 <= e2 <= ORDER as nat,
         ensures
             self.order_size(e1) <= self.order_size(e2),
     {
+        broadcast use vstd::arithmetic::power::lemma_pow_positive;
+        broadcast use vstd::arithmetic::power::lemma_pow_increases;
+
     }
 
     /// This lemma ensures that the order plus the minimum block size does not overflow

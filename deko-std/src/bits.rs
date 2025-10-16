@@ -382,7 +382,7 @@ macro_rules! deko_bitflags_quick {
 verus! {
 
 #[verifier::bit_vector]
-pub const proof fn bit_u64_and_auto()
+pub proof fn bit_u64_and_auto()
     ensures
         forall|a: u64, b: u64| #[trigger] (a & b) == b & a,
         forall|a: u64, b: u64, c: u64| #[trigger] ((a & b) & c) == a & (b & c),
@@ -397,7 +397,7 @@ pub const proof fn bit_u64_and_auto()
 }
 
 #[verifier::bit_vector]
-pub const proof fn bit_u32_and_auto()
+pub proof fn bit_u32_and_auto()
     ensures
         forall|a: u32, b: u32| #[trigger] (a & b) == b & a,
         forall|a: u32, b: u32, c: u32| #[trigger] ((a & b) & c) == a & (b & c),
@@ -480,7 +480,7 @@ pub proof fn lemma_lt_is_power_of_two_bitor(p: u64, x: u64, y: u64, n: u64)
         assert((x | y) < p) by (bit_vector)
             requires
                 p == (1u64 << n) && x < p && y < p,
-
+        ;
     }
 }
 
