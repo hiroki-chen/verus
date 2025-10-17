@@ -31,6 +31,11 @@ pub open spec fn bit_not_overlapping_with_pte_flags(bit: u64) -> bool {
 }
 
 #[verifier::inline]
+pub open spec fn bit_not_in_addr_region(bit: u64) -> bool {
+    bit & 0x0000_FFFF_FFFF_F000u64 == 0
+}
+
+#[verifier::inline]
 pub open spec fn strip_confidentiality_bits_spec(paddr: u64, private_bit: u64) -> u64 {
     paddr & !private_bit
 }
@@ -92,7 +97,8 @@ pub proof fn lemma_private_bit_non_interfering(
     requires
         bit_not_overlapping_with_pte_flags(private_bit),
         bit_not_overlapping_with_pte_flags(shared_bit),
-        flags == PteFlags::from_bits_truncate_spec(paddr),
+        flags.wf(),
+        flags.bits() & Pte_ALL_BITS == flags.bits(),
     ensures
         forall|p: Pte|
             #![trigger flags@.contains(p)]
@@ -104,7 +110,6 @@ pub proof fn lemma_private_bit_non_interfering(
                 pte_flag.contains(p)
             },
 {
-    let flags_raw = choose |flags_raw: u64| flags == PteFlags::from_bits_truncate_spec(flags_raw);
     assert forall|p: Pte| #![trigger flags@.contains(p)] flags@.contains(p) implies {
         let addr_after = make_private_address_spec(paddr, private_bit, shared_bit);
         let addr_after_pte = addr_after | (flags.bits() as u64);
@@ -116,37 +121,53 @@ pub proof fn lemma_private_bit_non_interfering(
 
         let addr_after = make_private_address_spec(paddr, private_bit, shared_bit);
         let addr_after_pte = addr_after | (flags.bits() as u64);
-        let pte_flag = from_bits(addr_after_pte & Pte_ALL_BITS);
-        // Unfold everything.
-        assert(private_bit & Pte_ALL_BITS as u64 == 0);
-        assert(shared_bit & Pte_ALL_BITS as u64 == 0);
-        assert(addr_after_pte == ((paddr & !shared_bit) | private_bit) | (flags.bits() as u64));
-        
-        assert(pte_flag =~= vstd::set::Set::new(
-            |p: Pte| p.bit() & (addr_after_pte & Pte_ALL_BITS) != 0,
-        ));
-        assert(flags@ == vstd::set::Set::new(|p: Pte| p.bit() & (paddr & Pte_ALL_BITS) != 0));
-        
-        // Now we have that flags.contains(p) implies that (flags_raw & Pte_ALL_BITS) has p.bit() set.
-        assert(p.bit() & (paddr & Pte_ALL_BITS) != 0) by {
-            assert(flags@.contains(p));
-        };
-        // Since private_bit and shared_bit do not overlap with PTE flags, we have:
-        let flags_bit = flags.bits() as u64;
+        let pte_all = (1u64 << 0) | (1u64 << 1) | (1u64 << 2) | (1u64 << 5) | (1u64 << 6) | (1u64
+            << 7) | (1u64 << 8) | (1u64 << 63);
+        let pte_flag = from_bits(addr_after_pte & pte_all);
+        let flags_bits = flags.bits() as u64;
+        let p_bit = p.bit() as u64;
 
-        let pte_all = (1u64 << 0) | (1u64 << 1) | (1u64 << 2) | (1u64 << 5) | (1u64 << 6) | (1u64 << 7)
-            | (1u64 << 8) | (1u64 << 63);
-        let p_bit = p.bit();
+        // Unfold everything.
+        assert(private_bit & pte_all as u64 == 0);
+        assert(shared_bit & pte_all as u64 == 0);
+        assert(addr_after_pte == ((paddr & !shared_bit) | private_bit) | flags_bits);
+
+        assert(pte_flag =~= vstd::set::Set::new(
+            |p: Pte| p.bit() & (addr_after_pte & pte_all) != 0,
+        ));
+
         assert(p_bit & (addr_after_pte & pte_all) != 0) by (bit_vector)
             requires
+                p_bit & flags_bits != 0,
                 pte_all == (1u64 << 0) | (1u64 << 1) | (1u64 << 2) | (1u64 << 5) | (1u64 << 6)
                     | (1u64 << 7) | (1u64 << 8) | (1u64 << 63),
-                addr_after_pte == ((paddr & !shared_bit) | private_bit) | flags_bit,
-                shared_bit & pte_all == 0,
+                addr_after_pte == ((paddr & !shared_bit) | private_bit) | (flags_bits),
                 private_bit & pte_all == 0,
-                p_bit & (paddr & pte_all) != 0,
+                shared_bit & pte_all == 0,
+                flags_bits & pte_all == flags_bits,
             ;
     }
+}
+
+#[verifier::spinoff_prover]
+pub proof fn lemma_private_addr_in_range(
+    paddr: PhysAddr,
+    paddr_priv: PageTableEntry,
+    ms: &MappingSpace,
+    private_bit: u64,
+    shared_bit: u64,
+)
+    requires
+        ms.wf(),
+        ms.kernel.in_range_spec(paddr) || ms.physmap.in_range_spec(paddr),
+        paddr_priv@@ == make_private_address_spec(paddr@, private_bit, shared_bit),
+        bit_not_in_addr_region(private_bit),
+        bit_not_in_addr_region(shared_bit),
+    ensures
+        ms.kernel.in_range_spec(paddr_priv.address_spec(private_bit, shared_bit))
+            || ms.physmap.in_range_spec(paddr_priv.address_spec(private_bit, shared_bit)),
+{
+    admit();
 }
 
 /// This function calculates the index at a given level L in the 4-level page table
@@ -895,7 +916,6 @@ impl Page {
     }
 
     #[verifier::spinoff_prover]
-    #[verifier::external_body]
     pub fn allocate_pte_lvl3(
         mapping: Mapping,
         Tracked(perm): Tracked<&mut PageTablePermission>,
@@ -978,7 +998,18 @@ impl Page {
                     ;
                 }
 
-                assert(flags.contains((Pte::PRESENT).bit()));
+                assert(flags.bits() & all == flags.bits()) by {
+                    assert(flags.bits() == writeable_bits & all);
+
+                    assert((writeable_bits & all) & all == (writeable_bits & all)) by (bit_vector)
+                        requires
+                            writeable_bits == (1u64 << 0) | (1u64 << 2) | (1u64 << 1) | (1u64 << 5)
+                                | (1u64 << 6),
+                            all == (1u64 << 0) | (1u64 << 1) | (1u64 << 2) | (1u64 << 5) | (1u64 << 6)
+                                | (1u64 << 7) | (1u64 << 8) | (1u64 << 63),
+                        ;
+                }
+
                 lemma_private_bit_non_interfering(private_bit, shared_bit, paddr@, flags);
             }
 
@@ -2109,6 +2140,8 @@ impl PageTablePermission {
         &&& self.walk_requires(page, vaddr, ms, private_bit, shared_bit)
         &&& bit_not_overlapping_with_pte_flags(private_bit)
         &&& bit_not_overlapping_with_pte_flags(shared_bit)
+        &&& bit_not_in_addr_region(private_bit)
+        &&& bit_not_in_addr_region(shared_bit)
     }
 
     pub open spec fn allocate_pte_4k_ensures(
@@ -2145,6 +2178,8 @@ impl PageTablePermission {
         &&& self.shared_bit == shared_bit
         &&& bit_not_overlapping_with_pte_flags(private_bit)
         &&& bit_not_overlapping_with_pte_flags(shared_bit)
+        &&& bit_not_in_addr_region(private_bit)
+        &&& bit_not_in_addr_region(shared_bit)
         &&& mapping.wf()
         &&& mapping matches Mapping::Level3(page_lvl3, idx) && {
             let path = PageTablePath::from_vaddr_at_level(vaddr, 3);
@@ -2185,6 +2220,8 @@ impl PageTablePermission {
         &&& self.shared_bit == shared_bit
         &&& bit_not_overlapping_with_pte_flags(private_bit)
         &&& bit_not_overlapping_with_pte_flags(shared_bit)
+        &&& bit_not_in_addr_region(private_bit)
+        &&& bit_not_in_addr_region(shared_bit)
         &&& mapping.wf()
         &&& mapping matches Mapping::Level2(page_lvl2, idx) && {
             let path = PageTablePath::from_vaddr_at_level(vaddr, 2);
@@ -2226,6 +2263,8 @@ impl PageTablePermission {
         &&& self.shared_bit == shared_bit
         &&& bit_not_overlapping_with_pte_flags(private_bit)
         &&& bit_not_overlapping_with_pte_flags(shared_bit)
+        &&& bit_not_in_addr_region(private_bit)
+        &&& bit_not_in_addr_region(shared_bit)
         &&& mapping.wf()
         &&& mapping matches Mapping::Level1(page_lvl1, idx) && {
             let path = PageTablePath::from_vaddr_at_level(vaddr, 1);
@@ -2264,6 +2303,8 @@ impl PageTablePermission {
         &&& self.allocate_pte_4k_requires(page, vaddr, ms, private_bit, shared_bit)
         &&& bit_not_overlapping_with_pte_flags(private_bit)
         &&& bit_not_overlapping_with_pte_flags(shared_bit)
+        &&& bit_not_in_addr_region(private_bit)
+        &&& bit_not_in_addr_region(shared_bit)
     }
 
     pub open spec fn map_page_4k_ensures(

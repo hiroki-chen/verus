@@ -73,9 +73,9 @@ macro_rules! deko_bitflags {
 
             $vis struct [<$name Flags>] {
                 /// Store the bitflags as a value of type T.
-                bits: $T,
+                pub bits: $T,
                 /// For verification only.
-                flags: vstd::prelude::Ghost<vstd::set::Set<$name>>,
+                pub flags: vstd::prelude::Ghost<vstd::set::Set<$name>>,
             }
 
             pub open spec fn from_bits(bits: $T) -> Set<$name> {
@@ -85,7 +85,7 @@ macro_rules! deko_bitflags {
             impl vstd::view::View for [<$name Flags>] {
                 type V = vstd::set::Set<$name>;
 
-                closed spec fn view(&self) -> Self::V {
+                open spec fn view(&self) -> Self::V {
                     self.flags@
                 }
             }
@@ -133,7 +133,7 @@ macro_rules! deko_bitflags {
                     &&& self@ =~= from_bits(self.bits())
                 }
 
-                pub closed spec fn bits_spec(&self) -> $T {
+                pub open spec fn bits_spec(&self) -> $T {
                     self.bits
                 }
 
@@ -148,10 +148,18 @@ macro_rules! deko_bitflags {
                     self.bits
                 }
 
+                pub open spec fn from_bits_truncate_spec(bits: $T) -> [<$name Flags>] {
+                    [<$name Flags>] {
+                        bits: bits & [<$name _ALL_BITS>],
+                        flags: Ghost(from_bits(bits & [<$name _ALL_BITS>])),
+                    }
+                }
+
+                #[verifier::when_used_as_spec(from_bits_truncate_spec)]
                 pub fn from_bits_truncate(bits: $T) -> (r: [<$name Flags>])
                     ensures
                         r.inv(),
-                        r@ == from_bits(bits & [<$name _ALL_BITS>]),
+                        r == Self::from_bits_truncate_spec(bits),
                 {
                     let bits = bits & [<$name _ALL_BITS>]; // strip off invalid bits
                     let ghost set = vstd::set::Set::new(|flag: $name| flag.bit() & bits != 0);
@@ -364,11 +372,17 @@ macro_rules! deko_bitflags_quick {
                                                                                             verus! {
                 impl [<$name Flags>] {
                     $(
+                        #[verifier::inline]
+                        pub open spec fn [<$bit_name _spec>] () -> Set<$name> {
+                            from_bits( ($($bits)|*) & [<$name _ALL_BITS>] )
+                        }
+
                         #[inline(always)]
                         pub fn $bit_name() -> (r: Self)
                             ensures
                                 r.inv(),
-                                r@ == from_bits(($($bits)|*) & [<$name _ALL_BITS>]),
+                                r@ == Self::[<$bit_name _spec>](),
+                                r.bits() == ($($bits)|* ) & [<$name _ALL_BITS>],
                         {
                             Self::from_bits_truncate($($bits)|*)
                         }
