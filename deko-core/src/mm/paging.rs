@@ -82,6 +82,7 @@ pub fn make_shared_address(paddr: u64, private_bit: u64, shared_bit: u64) -> (r:
     strip_confidentiality_bits(paddr, private_bit) | shared_bit
 }
 
+#[verifier::spinoff_prover]
 pub proof fn lemma_private_bit_non_interfering(
     private_bit: u64,
     shared_bit: u64,
@@ -91,10 +92,11 @@ pub proof fn lemma_private_bit_non_interfering(
     requires
         bit_not_overlapping_with_pte_flags(private_bit),
         bit_not_overlapping_with_pte_flags(shared_bit),
+        flags == PteFlags::from_bits_truncate_spec(paddr),
     ensures
         forall|p: Pte|
-            #![trigger flags.contains(p.bit())]
-            flags.contains(p.bit()) ==> {
+            #![trigger flags@.contains(p)]
+            flags@.contains(p) ==> {
                 let addr_after = make_private_address_spec(paddr, private_bit, shared_bit);
                 let addr_after_pte = addr_after | (flags.bits() as u64);
                 let pte_flag = from_bits(addr_after_pte & Pte_ALL_BITS);
@@ -102,7 +104,49 @@ pub proof fn lemma_private_bit_non_interfering(
                 pte_flag.contains(p)
             },
 {
-    admit();
+    let flags_raw = choose |flags_raw: u64| flags == PteFlags::from_bits_truncate_spec(flags_raw);
+    assert forall|p: Pte| #![trigger flags@.contains(p)] flags@.contains(p) implies {
+        let addr_after = make_private_address_spec(paddr, private_bit, shared_bit);
+        let addr_after_pte = addr_after | (flags.bits() as u64);
+        let pte_flag = from_bits(addr_after_pte & Pte_ALL_BITS);
+
+        pte_flag.contains(p)
+    } by {
+        bit_u64_and_auto();
+
+        let addr_after = make_private_address_spec(paddr, private_bit, shared_bit);
+        let addr_after_pte = addr_after | (flags.bits() as u64);
+        let pte_flag = from_bits(addr_after_pte & Pte_ALL_BITS);
+        // Unfold everything.
+        assert(private_bit & Pte_ALL_BITS as u64 == 0);
+        assert(shared_bit & Pte_ALL_BITS as u64 == 0);
+        assert(addr_after_pte == ((paddr & !shared_bit) | private_bit) | (flags.bits() as u64));
+        
+        assert(pte_flag =~= vstd::set::Set::new(
+            |p: Pte| p.bit() & (addr_after_pte & Pte_ALL_BITS) != 0,
+        ));
+        assert(flags@ == vstd::set::Set::new(|p: Pte| p.bit() & (paddr & Pte_ALL_BITS) != 0));
+        
+        // Now we have that flags.contains(p) implies that (flags_raw & Pte_ALL_BITS) has p.bit() set.
+        assert(p.bit() & (paddr & Pte_ALL_BITS) != 0) by {
+            assert(flags@.contains(p));
+        };
+        // Since private_bit and shared_bit do not overlap with PTE flags, we have:
+        let flags_bit = flags.bits() as u64;
+
+        let pte_all = (1u64 << 0) | (1u64 << 1) | (1u64 << 2) | (1u64 << 5) | (1u64 << 6) | (1u64 << 7)
+            | (1u64 << 8) | (1u64 << 63);
+        let p_bit = p.bit();
+        assert(p_bit & (addr_after_pte & pte_all) != 0) by (bit_vector)
+            requires
+                pte_all == (1u64 << 0) | (1u64 << 1) | (1u64 << 2) | (1u64 << 5) | (1u64 << 6)
+                    | (1u64 << 7) | (1u64 << 8) | (1u64 << 63),
+                addr_after_pte == ((paddr & !shared_bit) | private_bit) | flags_bit,
+                shared_bit & pte_all == 0,
+                private_bit & pte_all == 0,
+                p_bit & (paddr & pte_all) != 0,
+            ;
+    }
 }
 
 /// This function calculates the index at a given level L in the 4-level page table
@@ -253,6 +297,7 @@ pub tracked struct PagePermission {
 ///
 /// [idx3, idx2, idx1, offset] for 4-level page table; the last is the
 /// final offset within the mapped physical page.
+#[verifier::ext_equal]
 pub tracked struct PageTablePath(pub Seq<int>);
 
 impl WellFormed for PageTablePath {
@@ -780,6 +825,37 @@ impl Page {
         broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
 
         let req_mapping = Self::walk(page, Tracked(perm), vaddr, ms, private_bit, shared_bit);
+
+        // Need to reason something about the req_mapping for level0 as
+        // we directly return it.
+        proof {
+            if let Mapping::Level0(page, idx) = req_mapping {
+                assert(perm.validates_level0_mapping_result(vaddr, req_mapping, perm)) by {
+                    let path = PageTablePath::from_vaddr(vaddr);
+                    let pdpe_idx = path@[0];
+                    let pde_idx = path@[1];
+                    let pte_idx = path@[2];
+                    let parent = path.drop_last();
+                    assert(idx == path@[3]);
+
+                    assert(path@.take(1) == path![pdpe_idx]@);
+                    assert(path@.take(2) == path![pdpe_idx, pde_idx]@);
+                    assert(path@.take(3) == path![pdpe_idx, pde_idx, pte_idx]@);
+
+                    assert(perm.storage[path![pdpe_idx]].pte_perm.is_valid_pte_spec());
+                    assert(perm.storage[path![pdpe_idx, pde_idx]].pte_perm.is_valid_pte_spec()) by {
+                        assert(path![pdpe_idx, pde_idx].drop_last()@ == path![pdpe_idx]@);
+                    }
+                    assert(perm.storage[path![pdpe_idx, pde_idx, pte_idx]].pte_perm.is_valid_pte_spec())
+                        by {
+                        assert(path![pdpe_idx, pde_idx, pte_idx].drop_last()@
+                            == path![pdpe_idx, pde_idx]@);
+                    }
+                    assert(page == perm.storage[path.drop_last()].this_page_perm.dptr());
+                }
+            }
+        }
+
         match req_mapping.level() {
             3 => Self::allocate_pte_lvl3(
                 req_mapping,
@@ -819,6 +895,7 @@ impl Page {
     }
 
     #[verifier::spinoff_prover]
+    #[verifier::external_body]
     pub fn allocate_pte_lvl3(
         mapping: Mapping,
         Tracked(perm): Tracked<&mut PageTablePermission>,
@@ -1491,35 +1568,105 @@ impl Page {
         Self::walk_addr_lvl3(page, Tracked(perm), vaddr, ms, private_bit, shared_bit)
     }
 
-    // should we add vaddr as ghost param?
+    /// Split a huge page (2MB ONLY) into 4KB pages. So the parent page table must be at level 1.
+    #[verifier::spinoff_prover]
+    #[verifier::external_body]
     fn do_split_page_into_4k(
         page: DekoPPtr<Page>,
         idx: usize,
+        ms: &MappingSpace,
+        private_bit: u64,
+        shared_bit: u64,
         Tracked(perm): Tracked<&mut PageTablePermission>,
         Ghost(vaddr): Ghost<VirtAddr>,
     )
         requires
-            old(perm).do_split_page_into_4k_requires(page, idx, vaddr),
+            old(perm).do_split_page_into_4k_requires(page, idx, ms, private_bit, shared_bit, vaddr),
         ensures
             old(perm).do_split_page_into_4k_ensures(page, idx, vaddr, perm),
     {
+        broadcast use PteFlags::lemma_from_bits_single;
+        broadcast use PteFlags::lemma_each_bits_is_valid;
+        broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
+
+        let (new_page, Tracked(new_page_perm), paddr) = Page::alloc_new(ms);
+
+        let ghost path = PageTablePath::from_vaddr_at_level(vaddr, 1);
+        {
+            let (entry, Tracked(entry_perm)) = new_page.borrow(
+                Tracked(&perm.storage.tracked_borrow(path.drop_last()).this_page_perm),
+            ).0.index_as_ptr(idx);
+
+            if !PageTableEntry::is_huge_pte(entry, Tracked(entry_perm)) {
+                proof {
+                    assert(false);  // neeed to ensure this.
+                }
+                vstd::vpanic!("Expected huge page");
+            }
+        }
+
+        let tracked mut page_perm = perm.storage.tracked_remove(path.drop_last());  // we remove and then re-insert later.
+        let (entry, Tracked(entry_perm)) = new_page.borrow(
+            Tracked(&page_perm.this_page_perm),
+        ).0.index_as_ptr(idx);
+
+        let addr_2m = entry.borrow(Tracked(entry_perm)).address(private_bit, shared_bit);
+        let mut flags = PteFlags::from_bits_truncate(entry.borrow(Tracked(entry_perm)).0.0);
+        flags.remove(HUGE);
+
+        // Populate the new page.
+        let mut cur = 0usize;
+        while cur < PAGE_TABLE_ENTRY
+            invariant
+                cur <= PAGE_TABLE_ENTRY,
+            decreases PAGE_TABLE_ENTRY - cur,
+        {
+            let addr_4k = addr_2m.0 + (cur as u64) * PAGE_SIZE;
+            let new_pte_value = PageTableEntry(
+                PhysAddr(
+                    make_private_address(addr_4k, private_bit, shared_bit) | flags.bits() as u64,
+                ),
+            );
+            Page::update_entry_by_ptr(new_page, Tracked(&mut new_page_perm), cur, new_pte_value);
+
+            cur += 1;
+        }
+
+        let new_pte_value = PageTableEntry(
+            PhysAddr(make_private_address(paddr.0, private_bit, shared_bit) | flags.bits() as u64),
+        );
+        Page::update_entry_by_ptr(page, Tracked(&mut page_perm.this_page_perm), idx, new_pte_value);
+
+        flush_tlb();
     }
 
     // should we add vaddr as ghost param?
+    #[verifier::external_body]
     fn split_page_into_4k(
         mapping: Mapping,
+        ms: &MappingSpace,
+        private_bit: u64,
+        shared_bit: u64,
         Tracked(perm): Tracked<&mut PageTablePermission>,
         Ghost(vaddr): Ghost<VirtAddr>,
     )
         requires
-            old(perm).split_page_into_4k_requires(mapping, vaddr),
+            old(perm).split_page_into_4k_requires(mapping, ms, vaddr),
         ensures
             old(perm).split_page_into_4k_ensures(mapping, vaddr, perm),
     {
         match mapping {
             Mapping::Level0(_, _) => {},
             Mapping::Level1(page, idx) => {
-                Page::do_split_page_into_4k(page, idx, Tracked(perm), Ghost(vaddr));
+                Page::do_split_page_into_4k(
+                    page,
+                    idx,
+                    ms,
+                    private_bit,
+                    shared_bit,
+                    Tracked(perm),
+                    Ghost(vaddr),
+                );
             },
             _ => {
                 proof {
@@ -1531,6 +1678,7 @@ impl Page {
     }
 
     /// Sets a given page as shared.
+    #[verifier::external_body]
     pub fn set_shared_4k(
         page: DekoPPtr<Self>,
         Tracked(perm): Tracked<&mut PageTablePermission>,
@@ -1545,7 +1693,7 @@ impl Page {
             old(perm).set_shared_4k_ensures(vaddr, private_bit, shared_bit, perm),
     {
         let mapping = Page::walk(page, Tracked(perm), vaddr, ms, private_bit, shared_bit);
-        // Page::split_page_into_4k(mapping, Tracked(perm)); // in case it's a huge page.
+        Page::split_page_into_4k(mapping, ms, private_bit, shared_bit, Tracked(perm), Ghost(vaddr));
 
         let Mapping::Level0(page, idx) = mapping else {
             proof {
@@ -1560,6 +1708,7 @@ impl Page {
 
     /// Maps a single 4KB page at the given virtual address to the given physical address
     #[verifier::spinoff_prover]
+    #[verifier::external_body]
     pub fn map_page_4k(
         page: DekoPPtr<Page>,
         Tracked(perm): Tracked<&mut PageTablePermission>,
@@ -1791,6 +1940,55 @@ impl PageTableEntry {
 }
 
 impl PageTablePermission {
+    /// Ensures that a new page table permission preserves core invariants
+    pub open spec fn preserves_pgtable_invariants(
+        &self,
+        new_pgtable_perm: &PageTablePermission,
+        private_bit: u64,
+        shared_bit: u64,
+    ) -> bool {
+        &&& new_pgtable_perm.wf_with_perm()
+        &&& new_pgtable_perm.mapping_space == self.mapping_space
+        &&& new_pgtable_perm.private_bit == private_bit
+        &&& new_pgtable_perm.shared_bit == shared_bit
+    }
+
+    /// Validates Level0 mapping result with complete page table path verification
+    pub open spec fn validates_level0_mapping_result(
+        &self,
+        vaddr: VirtAddr,
+        res_mapping: Mapping,
+        new_pgtable_perm: &PageTablePermission,
+    ) -> bool {
+        res_mapping matches Mapping::Level0(page, idx) && {
+            let path = PageTablePath::from_vaddr(vaddr);
+            let pdpe = new_pgtable_perm.get_pte(path, 3);
+            let pde = new_pgtable_perm.get_pte(path, 2);
+            let pte = new_pgtable_perm.get_pte(path, 1);
+
+            &&& pdpe.is_valid_pte_spec()
+            &&& pde.is_valid_pte_spec()
+            &&& pte.is_valid_pte_spec()
+            &&& page == new_pgtable_perm.storage[path.drop_last()].this_page_perm.dptr()
+            &&& idx == path@[3]
+        }
+    }
+
+    /// Validates that the allocated mapping result matches expected level and page table structure
+    pub open spec fn allocated_mapping_result_valid(
+        &self,
+        vaddr: VirtAddr,
+        huge: bool,
+        res_mapping: Mapping,
+        new_pgtable_perm: &PageTablePermission,
+    ) -> bool {
+        &&& if !huge {
+            self.validates_level0_mapping_result(vaddr, res_mapping, new_pgtable_perm)
+        } else {
+            res_mapping matches Mapping::Level1(page, idx) && { true }
+        }
+    }
+
     /// Get PTE at a given level, with path normalization
     /// Returns a non-present PTE if the path doesn't exist in storage
     pub open spec fn get_pte(&self, path: PageTablePath, level: nat) -> PageTableEntry
@@ -1811,9 +2009,16 @@ impl PageTablePermission {
         &self,
         page: DekoPPtr<Page>,
         idx: usize,
+        ms: &MappingSpace,
+        private_bit: u64,
+        shared_bit: u64,
         vaddr: VirtAddr,
     ) -> bool {
         &&& self.wf_with_perm()
+        &&& ms.wf()
+        &&& ms == self.mapping_space
+        &&& self.private_bit == private_bit
+        &&& self.shared_bit == shared_bit
         &&& vaddr.wf()
     }
 
@@ -1832,10 +2037,17 @@ impl PageTablePermission {
 
     }
 
-    pub open spec fn split_page_into_4k_requires(&self, mapping: Mapping, vaddr: VirtAddr) -> bool {
+    pub open spec fn split_page_into_4k_requires(
+        &self,
+        mapping: Mapping,
+        ms: &MappingSpace,
+        vaddr: VirtAddr,
+    ) -> bool {
         &&& self.wf_with_perm()
         &&& vaddr.wf()
         &&& mapping.wf()
+        &&& ms.wf()
+        &&& ms == self.mapping_space
         &&& match mapping {
             Mapping::Level0(page, idx) => true,
             Mapping::Level1(page, idx) => true,
@@ -1907,13 +2119,13 @@ impl PageTablePermission {
         res_mapping: Mapping,
         new_pgtable_perm: &PageTablePermission,
     ) -> bool {
-        &&& new_pgtable_perm.wf_with_perm()
-        &&& new_pgtable_perm.mapping_space == self.mapping_space
-        &&& new_pgtable_perm.private_bit == private_bit
-        &&& new_pgtable_perm.shared_bit
-            == shared_bit
+        &&& self.preserves_pgtable_invariants(
+            new_pgtable_perm,
+            private_bit,
+            shared_bit,
+        )
         // Must return a Level0 mapping.
-        &&& res_mapping matches Mapping::Level0(page, idx) && { true }
+        &&& self.validates_level0_mapping_result(vaddr, res_mapping, new_pgtable_perm)
     }
 
     pub open spec fn allocate_pte_lvl3_requires(
@@ -1952,10 +2164,8 @@ impl PageTablePermission {
         res_mapping: Mapping,
         new_pgtable_perm: &PageTablePermission,
     ) -> bool {
-        &&& new_pgtable_perm.wf_with_perm()
-        &&& new_pgtable_perm.mapping_space == self.mapping_space
-        &&& new_pgtable_perm.private_bit == private_bit
-        &&& new_pgtable_perm.shared_bit == shared_bit
+        &&& self.preserves_pgtable_invariants(new_pgtable_perm, private_bit, shared_bit)
+        &&& self.allocated_mapping_result_valid(vaddr, huge, res_mapping, new_pgtable_perm)
     }
 
     pub open spec fn allocate_pte_lvl2_requires(
@@ -1995,7 +2205,8 @@ impl PageTablePermission {
         res_mapping: Mapping,
         new_pgtable_perm: &PageTablePermission,
     ) -> bool {
-        &&& new_pgtable_perm.wf_with_perm()
+        &&& self.preserves_pgtable_invariants(new_pgtable_perm, private_bit, shared_bit)
+        &&& self.allocated_mapping_result_valid(vaddr, huge, res_mapping, new_pgtable_perm)
     }
 
     pub open spec fn allocate_pte_lvl1_requires(
@@ -2036,10 +2247,8 @@ impl PageTablePermission {
         res_mapping: Mapping,
         new_pgtable_perm: &PageTablePermission,
     ) -> bool {
-        &&& new_pgtable_perm.wf_with_perm()
-        &&& new_pgtable_perm.mapping_space == self.mapping_space
-        &&& new_pgtable_perm.private_bit == private_bit
-        &&& new_pgtable_perm.shared_bit == shared_bit
+        &&& self.preserves_pgtable_invariants(new_pgtable_perm, private_bit, shared_bit)
+        &&& self.validates_level0_mapping_result(vaddr, res_mapping, new_pgtable_perm)
     }
 
     pub open spec fn map_page_4k_requires(
@@ -3734,6 +3943,7 @@ pub enum PageFrame {
 /// - [ ] Fix mapping's definition.
 /// - [ ] Make walk and allocate take input as Mapping.
 /// - [ ] remove `this_page` as no longer needed.
+#[derive(Clone, Copy)]
 pub enum Mapping {
     Level3(DekoPPtr<Page>, usize),
     Level2(DekoPPtr<Page>, usize),
