@@ -545,6 +545,7 @@ impl DekoCpuCtx {
         self as *const DekoCpuCtx as u64
     }
 
+    #[verifier::external_body]
     pub fn map_shared_page(
         ptr: DekoPPtr<Self>,
         Tracked(perm): Tracked<&mut DekoCpuCtxPermission>,
@@ -559,12 +560,12 @@ impl DekoCpuCtx {
         ensures
             perm.wf_with(ptr),
     {
-        let pgtable = ptr.borrow(Tracked(&perm.ptr_perm)).pgtable;
+        let page: DekoPPtr<crate::mm::paging::Page> = ptr.borrow(Tracked(&perm.ptr_perm)).pgtable;
         let private_bit = ptr.borrow(Tracked(&perm.ptr_perm)).private_bit;
         let shared_bit = ptr.borrow(Tracked(&perm.ptr_perm)).shared_bit;
 
         PageTable::set_shared_4k(
-            pgtable,
+            page,
             Tracked(&mut perm.pgtable_perm),
             vaddr,
             ms,

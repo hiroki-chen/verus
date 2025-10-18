@@ -343,8 +343,9 @@ pub struct FixedAddressMappingRange {
 }
 
 impl WellFormed for FixedAddressMappingRange {
-    closed spec fn wf(&self) -> bool {
-        Self::valid_mapping_range(self.virt_start, self.virt_end, self.phys_start)
+    #[verifier::inline]
+    open spec fn wf(&self) -> bool {
+        &&& Self::valid_mapping_range(self.virt_start, self.virt_end, self.phys_start)
     }
 }
 
@@ -375,9 +376,10 @@ impl FixedAddressMappingRange {
         &&& virt_start.wf()
         &&& virt_end.wf()
         &&& phys_start.wf()
+        &&& phys_start@ % PAGE_SIZE == 0 && virt_start@ % PAGE_SIZE == 0 && virt_end@ % PAGE_SIZE
+            == 0
         &&& virt_start@ < virt_end@
-        &&& virt_end@ - virt_start@ <= u64::MAX
-        &&& phys_start@ + (virt_end@ - virt_start@) <= u64::MAX
+        &&& phys_start@ + virt_end@ - virt_start@ <= 0x000f_ffff_ffff_f000
     }
 
     /// Creates a new fixed address mapping range.
