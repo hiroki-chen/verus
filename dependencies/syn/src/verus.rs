@@ -2437,24 +2437,34 @@ impl parse::Parse for WithSpecOnFn {
     fn parse(input: ParseStream) -> Result<Self> {
         let with = input.parse()?;
         let mut inputs = Punctuated::new();
-        while !input.peek(Token![->]) {
+        while !input.peek(Token![->]) && !input.is_empty() {
             let expr = input.parse()?;
             inputs.push(expr);
             if !input.peek(Token![,]) {
                 break;
             }
-            let _comma: Token![,] = input.parse()?;
+            let comma: Token![,] = input.parse()?;
+            inputs.push_punct(comma);
+            // Handle trailing comma - if the next token is '->' or we're at the end, break
+            if input.peek(Token![->]) || input.is_empty() {
+                break;
+            }
         }
         let outputs = if input.peek(Token![->]) {
             let token = input.parse()?;
             let mut outs = Punctuated::new();
-            loop {
+            while !input.is_empty() {
                 let expr = input.parse()?;
                 outs.push(expr);
                 if !input.peek(Token![,]) {
                     break;
                 }
-                let _comma: Token![,] = input.parse()?;
+                let comma: Token![,] = input.parse()?;
+                outs.push_punct(comma);
+                // Handle trailing comma - if we're at the end, break
+                if input.is_empty() {
+                    break;
+                }
             }
             Some((token, outs))
         } else {
@@ -2473,13 +2483,18 @@ impl parse::Parse for WithSpecOnExpr {
     fn parse(input: ParseStream) -> Result<Self> {
         let with = input.parse()?;
         let mut inputs = Punctuated::new();
-        while !input.peek(Token![=>]) && !input.peek(Token![|=]) {
+        while !input.peek(Token![=>]) && !input.peek(Token![|=]) && !input.is_empty() {
             let expr = input.parse()?;
             inputs.push(expr);
             if !input.peek(Token![,]) {
                 break;
             }
-            let _comma: Token![,] = input.parse()?;
+            let comma: Token![,] = input.parse()?;
+            inputs.push_punct(comma);
+            // Handle trailing comma - if the next token is '=>' or '|=' or we're at the end, break
+            if input.peek(Token![=>]) || input.peek(Token![|=]) || input.is_empty() {
+                break;
+            }
         }
         let outputs = if input.peek(Token![=>]) {
             let token = input.parse()?;
