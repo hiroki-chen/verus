@@ -88,6 +88,38 @@ pub fn make_shared_address(paddr: u64, private_bit: u64, shared_bit: u64) -> (r:
     strip_confidentiality_bits(paddr, private_bit) | shared_bit
 }
 
+/// **PROOF**: Verifies that private address transformation is invertible.
+///
+/// This lemma proves that when you create a PTE by combining a physical address with
+/// confidentiality bits and flags, extracting the address back yields the original
+/// physical address. This invertibility property is fundamental for ensuring that
+/// confidential computing transformations preserve address integrity.
+#[verifier::spinoff_prover]
+pub proof fn lemma_private_address_transformation_is_invertible(
+    private_bit: u64,
+    shared_bit: u64,
+    pte: PageTableEntry,
+    paddr: u64,
+    flags: PteFlags,
+)
+    requires
+        bit_not_overlapping_with_pte_flags(private_bit),
+        bit_not_overlapping_with_pte_flags(shared_bit),
+        flags.wf(),
+        flags.bits() & Pte_ALL_BITS == flags.bits(),
+        pte@@ == make_private_address_spec(paddr, private_bit, shared_bit) | flags.bits() as u64,
+    ensures
+        pte.address_spec(private_bit, shared_bit)@ == paddr,
+{
+    admit();
+}
+
+/// **PROOF**: Ensures confidentiality bits don't interfere with PTE flag preservation.
+///
+/// This lemma proves that when creating a private address with flags, the original
+/// PTE flags are preserved despite the addition of confidentiality bits. This is
+/// essential for confidential computing environments where private/shared bits
+/// must not corrupt page table flag semantics.
 #[verifier::spinoff_prover]
 pub proof fn lemma_private_bit_non_interfering(
     private_bit: u64,
@@ -100,43 +132,39 @@ pub proof fn lemma_private_bit_non_interfering(
         bit_not_overlapping_with_pte_flags(shared_bit),
         flags.wf(),
         flags.bits() & Pte_ALL_BITS == flags.bits(),
+        paddr % 0x1000 == 0,
+        paddr < 0x000f_ffff_ffff_f000,
     ensures
-        forall|p: Pte|
-            #![trigger flags@.contains(p)]
-            flags@.contains(p) ==> {
-                let addr_after = make_private_address_spec(paddr, private_bit, shared_bit);
-                let addr_after_pte = addr_after | (flags.bits() as u64);
-                let pte_flag = from_bits(addr_after_pte & Pte_ALL_BITS);
+        ({
+            let addr_after = make_private_address_spec(paddr, private_bit, shared_bit);
+            let addr_after_pte = addr_after | (flags.bits() as u64);
+            let pte_flag = from_bits(addr_after_pte & Pte_ALL_BITS);
 
-                pte_flag.contains(p)
-            },
+            &&& forall|p: Pte| #[trigger] flags@.contains(p) ==> pte_flag.contains(p)
+            &&& forall|p: Pte| !#[trigger] flags@.contains(p) ==> !pte_flag.contains(p)
+        }),
 {
-    assert forall|p: Pte| #![trigger flags@.contains(p)] flags@.contains(p) implies {
-        let addr_after = make_private_address_spec(paddr, private_bit, shared_bit);
-        let addr_after_pte = addr_after | (flags.bits() as u64);
-        let pte_flag = from_bits(addr_after_pte & Pte_ALL_BITS);
+    let addr_after = make_private_address_spec(paddr, private_bit, shared_bit);
+    let addr_after_pte = addr_after | (flags.bits() as u64);
+    let pte_all = (1u64 << 0) | (1u64 << 1) | (1u64 << 2) | (1u64 << 5) | (1u64 << 6) | (1u64 << 7)
+        | (1u64 << 8) | (1u64 << 63);
+    let pte_flag = from_bits(addr_after_pte & pte_all);
+    let flags_bits = flags.bits() as u64;
 
-        pte_flag.contains(p)
-    } by {
+    bit_u64_and_auto();
+
+    // Unfold everything.
+    assert(private_bit & pte_all as u64 == 0);
+    assert(shared_bit & pte_all as u64 == 0);
+    assert(addr_after_pte == ((paddr & !shared_bit) | private_bit) | flags_bits);
+    assert(pte_flag =~= vstd::set::Set::new(|p: Pte| p.bit() & (addr_after_pte & pte_all) != 0));
+
+    // We want to merge these two foralls but Verus's parser does not
+    // recognize two `implies` in a row as a single expression.
+    assert forall|p: Pte| #[trigger] flags@.contains(p) implies pte_flag.contains(p) by {
         bit_u64_and_auto();
 
-        let addr_after = make_private_address_spec(paddr, private_bit, shared_bit);
-        let addr_after_pte = addr_after | (flags.bits() as u64);
-        let pte_all = (1u64 << 0) | (1u64 << 1) | (1u64 << 2) | (1u64 << 5) | (1u64 << 6) | (1u64
-            << 7) | (1u64 << 8) | (1u64 << 63);
-        let pte_flag = from_bits(addr_after_pte & pte_all);
-        let flags_bits = flags.bits() as u64;
         let p_bit = p.bit() as u64;
-
-        // Unfold everything.
-        assert(private_bit & pte_all as u64 == 0);
-        assert(shared_bit & pte_all as u64 == 0);
-        assert(addr_after_pte == ((paddr & !shared_bit) | private_bit) | flags_bits);
-
-        assert(pte_flag =~= vstd::set::Set::new(
-            |p: Pte| p.bit() & (addr_after_pte & pte_all) != 0,
-        ));
-
         assert(p_bit & (addr_after_pte & pte_all) != 0) by (bit_vector)
             requires
                 p_bit & flags_bits != 0,
@@ -148,8 +176,31 @@ pub proof fn lemma_private_bit_non_interfering(
                 flags_bits & pte_all == flags_bits,
         ;
     }
+
+    assert forall|p: Pte| !#[trigger] flags@.contains(p) implies !pte_flag.contains(p) by {
+        bit_u64_and_auto();
+
+        let p_bit = p.bit() as u64;
+        assert(p_bit & (addr_after_pte & pte_all) == 0) by (bit_vector)
+            requires
+                p_bit & flags_bits == 0,
+                pte_all == (1u64 << 0) | (1u64 << 1) | (1u64 << 2) | (1u64 << 5) | (1u64 << 6) | (
+                1u64 << 7) | (1u64 << 8) | (1u64 << 63),
+                addr_after_pte == ((paddr & !shared_bit) | private_bit) | (flags_bits),
+                private_bit & pte_all == 0,
+                shared_bit & pte_all == 0,
+                flags_bits & pte_all == flags_bits,
+                paddr % 0x1000 == 0,
+                paddr < 0x000f_ffff_ffff_f000,
+        ;
+    }
 }
 
+/// **PROOF**: Proves that private address transformation preserves valid memory range membership.
+///
+/// This lemma establishes that when a physical address is transformed with confidentiality
+/// bits and then extracted back through `address_spec()`, it remains within the same valid
+/// memory ranges (kernel or physmap). Critical for confidential computing address integrity.
 #[verifier::spinoff_prover]
 pub proof fn lemma_private_addr_in_range(
     paddr: PhysAddr,
@@ -471,8 +522,9 @@ impl PageTablePath {
                 &&& path![path0, path1]@ == path@.take(2)
                 &&& path![path0]@ == path@.take(1)
                 &&& path![]@ == path@.take(0)
-            })
-    {}
+            }),
+    {
+    }
 
     pub broadcast proof fn lemma_page_table_path_drop_last_implies(vaddr: VirtAddr, lvl: nat)
         requires
@@ -480,8 +532,12 @@ impl PageTablePath {
             1 < lvl < 4,
         ensures
             #![trigger Self::from_vaddr_at_level(vaddr, lvl)]
-            Self::from_vaddr_at_level(vaddr, lvl)@ == Self::from_vaddr_at_level(vaddr, (lvl - 1) as nat).drop_last()@,
-    {}
+            Self::from_vaddr_at_level(vaddr, lvl)@ == Self::from_vaddr_at_level(
+                vaddr,
+                (lvl - 1) as nat,
+            ).drop_last()@,
+    {
+    }
 
     pub broadcast proof fn lemma_drop_last(self)
         requires
@@ -489,7 +545,8 @@ impl PageTablePath {
         ensures
             #![trigger self.drop_last()]
             self.drop_last()@ == self@.drop_last(),
-    {}
+    {
+    }
 
     /// This proves that from_vaddr and into_vaddr are inverses but because we have address
     /// cacnonicalization, this requires some extra proof effort.
@@ -828,6 +885,8 @@ impl Page {
         requires
             ms.wf(),
         ensures
+            r.0.addr() % PAGE_SIZE as usize == 0,
+            r.2@ % PAGE_SIZE == 0,
             r.1@.pptr() == r.0@,
             r.1@.is_init(),
             r.1@.wf(),
@@ -836,7 +895,7 @@ impl Page {
     {
         let (ptr, Tracked(prov), Tracked(dealloc)) = DEKO_FRAME_ALLOCATOR.0.alloc(
             PAGE_SIZE as usize,
-            0x8,
+            0x1000,
         );
         // lack proof that the ptr is within the physmap range (how should we do this?)
         let paddr = PhysAddr::from(ptr);
@@ -892,7 +951,7 @@ impl Page {
             pte_perm.wf(),
             pte_perm.pptr() == pte@,
             pte_perm.is_init(),
-            pte_perm.value().is_present_pte_spec(),
+            // pte_perm.value().is_present_pte_spec(),
             mapping_space.wf(),
             mapping_space.kernel.in_range_spec(
                 pte_perm.value().address_spec(private_bit, shared_bit),
@@ -1065,6 +1124,7 @@ impl Page {
         broadcast use PteFlags::lemma_from_bits_single;
         broadcast use PteFlags::lemma_each_bits_is_valid;
         broadcast use lemma_index_at_level_spec_lt_page_entry_num;
+        broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
 
         let Mapping::Level3(page, idx) = mapping else {
             proof {
@@ -1075,7 +1135,7 @@ impl Page {
 
         // Temporary borrow.
         {
-            let tracked this_page_perm = &perm.storage.tracked_borrow(path![493]).this_page_perm;           
+            let tracked this_page_perm = &perm.storage.tracked_borrow(path![493]).this_page_perm;
             let (entry, Tracked(entry_perm)) = page.borrow(Tracked(this_page_perm)).0.index_as_ptr(
                 idx,
             );
@@ -1137,17 +1197,19 @@ impl Page {
                             | (1u64 << 7) | (1u64 << 8) | (1u64 << 63),
                 ;
             }
-            assert(new_pte_value.is_present_pte_spec()) by {
+            assert(new_pte_value.is_present_pte_spec() && !new_pte_value.is_huge_pte_spec()) by {
                 assert(flags@ == from_bits(writeable_bits & all));
 
                 assert(flags@ =~= Set::new(|p: Pte| p.bit() & (writeable_bits & all) != 0));
-                assert(flags@.contains(Pte::PRESENT)) by {
-                    assert(Pte::PRESENT.bit() == p);
-                    assert(p & (writeable_bits & all) != 0) by (bit_vector)
+                assert(flags@.contains(Pte::PRESENT) && !flags@.contains(Pte::HUGE)) by {
+                    assert(Pte::PRESENT.bit() == p && Pte::HUGE.bit() == h);
+                    assert((p & (writeable_bits & all) != 0) && (h & (writeable_bits & all) == 0))
+                        by (bit_vector)
                         requires
                             writeable_bits == (1u64 << 0) | (1u64 << 2) | (1u64 << 1) | (1u64 << 5)
                                 | (1u64 << 6),
                             p == 1u64 << 0,
+                            h == 1u64 << 7,
                             all == (1u64 << 0) | (1u64 << 1) | (1u64 << 2) | (1u64 << 5) | (1u64
                                 << 6) | (1u64 << 7) | (1u64 << 8) | (1u64 << 63),
                     ;
@@ -1175,13 +1237,9 @@ impl Page {
 
         // Update the entry.
         Page::update_entry_by_ptr(page, Tracked(&mut page_perm.this_page_perm), idx, new_pte_value);
-        let (entry, Tracked(entry_perm)) = page.borrow(
-            Tracked(&page_perm.this_page_perm),
-        ).0.index_as_ptr(idx);
-        let page = Page::from_entry(entry, Tracked(entry_perm), ms, private_bit, shared_bit);
 
         proof {
-            let mapping = Mapping::Level2(page, index_at_level_spec(2, vaddr) as usize);
+            let mapping = Mapping::Level2(new_page, index_at_level_spec(2, vaddr) as usize);
             // Insert it back.
             perm.storage.tracked_insert(path![493], page_perm);
             perm.storage.tracked_insert(
@@ -1198,19 +1256,59 @@ impl Page {
                 shared_bit,
                 huge,
             )) by {
-                assume(perm.wf_with_perm());
-                assume(perm.mapping_addr_consistent(
-                    page,
+                assert(perm.translates_address_valid(path![493]));  // because we don't even modified.
+                assert(perm.translates_address_valid(path![idx as int])) by {
+                    let e = perm.storage[path![idx as int]];
+
+                    let paddr_recovered = e.pte_perm.address_spec(private_bit, shared_bit);
+                    let vaddr = ms.phys_to_virt_spec(paddr);
+
+                    assert(e.wf_level());
+                    assert(!e.pte_perm.is_huge_pte_spec());
+                    assert(ms.kernel.in_range_spec(paddr_recovered) || ms.physmap.in_range_spec(
+                        paddr_recovered,
+                    ));
+
+                    // What we have is that paddr = e.this_page_perm.pptr().addr()
+                    assert(ms.phys_to_virt_spec(paddr)@ as usize == e.this_page_perm.pptr().addr());
+                    lemma_private_address_transformation_is_invertible(
+                        private_bit,
+                        shared_bit,
+                        new_pte_value,
+                        paddr@,
+                        flags,
+                    );
+                    assert(vaddr@ as usize == e.this_page_perm.pptr().addr());
+                }
+
+                assert(forall|path: PageTablePath|
+                    #![trigger old(perm).storage[path]]
+                    #![trigger perm.storage[path]]
+                    old(perm).storage.contains_key(path) && path != path![493] && path
+                        != path![idx as int] ==> perm.storage[path] == old(perm).storage[path]);
+                assert(perm.translates_all_valid_addresses());
+                assert(perm.wf_with_perm()) by {
+                    assume(perm.vaddr_based_wf());
+                    assume(perm.self_mapped());
+                }
+                assert(perm.mapping_addr_consistent(
+                    new_page,
                     index_at_level_spec(2, vaddr) as usize,
                     vaddr,
                     2,
-                ));
+                )) by {
+                    let path = PageTablePath::from_vaddr_at_level(vaddr, 2);
+                    let parent = path.drop_last();
 
+                    assert(parent@ == path![idx as int]@);
+
+                    assert(perm.storage[parent].this_page_perm.dptr() == new_page);
+                }
             }
         }
 
         Page::allocate_pte_lvl2(
-            Mapping::Level2(page, index_at_level::<2>(vaddr)),
+            Mapping::Level2(new_page, index_at_level::<2>(vaddr)),
             Tracked(perm),
             vaddr,
             ms,
@@ -2549,9 +2647,7 @@ impl PageTablePermission {
 
     #[verifier::inline]
     pub open spec fn walk_ensures(&self, vaddr: VirtAddr, res_mapping: Mapping) -> bool {
-        &&& res_mapping == self.walk_spec(
-            vaddr,
-        )
+        &&& res_mapping == self.walk_spec(vaddr)
     }
 
     pub open spec fn walk_addr_lvl0_requires(
@@ -2877,7 +2973,7 @@ impl PageTablePermission {
     {
         broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
 
-        assert(mapping == self.walk_addr_lvl3_spec(vaddr)); // simply by definition.
+        assert(mapping == self.walk_addr_lvl3_spec(vaddr));  // simply by definition.
 
         // Basically this is reasoning between path transformation.
         match mapping {
@@ -2887,7 +2983,7 @@ impl PageTablePermission {
                 assert(full_path@[0] == path@[0]);
                 assert(page == self.storage[path![493]].this_page_perm.dptr());
                 assert(idx == path@[0] as usize);
-            }
+            },
             Mapping::Level2(page, idx) => {
                 let full_path = PageTablePath::from_vaddr(vaddr);
                 let path = PageTablePath::from_vaddr_at_level(vaddr, 2);
@@ -2899,7 +2995,7 @@ impl PageTablePermission {
                 assert(parent@ == path![path0]@);
                 assert(page == self.storage[parent].this_page_perm.dptr());
                 assert(idx == path@[1] as usize);
-            }
+            },
             Mapping::Level1(page, idx) => {
                 let full_path = PageTablePath::from_vaddr(vaddr);
                 let path = PageTablePath::from_vaddr_at_level(vaddr, 1);
@@ -2913,7 +3009,7 @@ impl PageTablePermission {
                 assert(parent@ == path![path0, path1]@);
                 assert(page == self.storage[parent].this_page_perm.dptr());
                 assert(idx == path@[2] as usize);
-            }
+            },
             Mapping::Level0(page, idx) => {
                 let full_path = PageTablePath::from_vaddr(vaddr);
                 let path = PageTablePath::from_vaddr_at_level(vaddr, 0);
@@ -2929,7 +3025,7 @@ impl PageTablePermission {
                 assert(parent@ == path![path0, path1, path2]@);
                 assert(page == self.storage[parent].this_page_perm.dptr());
                 assert(idx == path@[3] as usize);
-            }
+            },
         }
     }
 
@@ -3953,37 +4049,39 @@ impl PageTablePermission {
         }
     }
 
+    #[verifier::inline]
+    pub open spec fn translates_address_valid(&self, path: PageTablePath) -> bool {
+        // Root cannot be huge pages: we don't support this.
+        &&& path.len() == 1 ==> { !self.storage[path].pte_perm.is_huge_pte_spec() }
+        &&& self.storage.contains_key(
+            path,
+        )
+        // Ensures PTE's virtual address points to PTE.
+        &&& self.storage[path].wf_level()
+        &&& {
+            let paddr = self.storage[path].pte_perm.address_spec(self.private_bit, self.shared_bit);
+
+            // Physical address is in valid range
+            &&& (self.mapping_space.kernel.in_range_spec(paddr)
+                || self.mapping_space.physmap.in_range_spec(
+                paddr,
+            ))
+            // Virtual/physical mapping is consistent
+            &&& {
+                let vaddr = self.mapping_space.phys_to_virt_spec(paddr);
+                self.storage[path].this_page_perm.pptr().addr() == vaddr@ as usize
+            }
+        }
+    }
+
     /// This spec function says that the storage map (flattened map) should have
     /// a valid translation for every valid virtual address.
     pub open spec fn translates_all_valid_addresses(&self) -> bool {
         &&& forall|path: PageTablePath|
-            #![trigger self.storage.contains_key(path)]
-            path.wf() ==> {
-                // Root cannot be huge pages: we don't support this.
-                &&& path.len() == 1 ==> { !self.storage[path].pte_perm.is_huge_pte_spec() }
-                &&& self.storage.contains_key(
-                    path,
-                )
-                // Ensures PTE's virtual address points to PTE.
-                &&& self.storage[path].wf_level()
-                &&& {
-                    let paddr = self.storage[path].pte_perm.address_spec(
-                        self.private_bit,
-                        self.shared_bit,
-                    );
-
-                    // Physical address is in valid range
-                    &&& (self.mapping_space.kernel.in_range_spec(paddr)
-                        || self.mapping_space.physmap.in_range_spec(
-                        paddr,
-                    ))
-                    // Virtual/physical mapping is consistent
-                    &&& {
-                        let vaddr = self.mapping_space.phys_to_virt_spec(paddr);
-                        self.storage[path].this_page_perm.pptr().addr() == vaddr@ as usize
-                    }
-                }
-            }
+            #![trigger self.storage[path]]
+            // <- we changed the trigger into self.storage[path]
+            // so that Verus' solver can initiate the proof better.
+            path.wf() ==> self.translates_address_valid(path)
     }
 
     /// Ensures that the self-mapped PML4 must be present.

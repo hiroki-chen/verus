@@ -10,3 +10,6 @@
 
 [ ] Code refactoring: We may split specs, proofs, and execs into different Rust file for both better readability and maintainablity.
 [ ] How to lift a physical pointer into a virtual pointer with provenance and physical memory ranges properties?
+
+Use this_page_perm itself to reason about the finer-grained properties is no good choice. This does not automatically sync with the value modified.
+We need to change to `this_page` which is a verification-only struct. 
