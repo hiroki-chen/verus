@@ -41,18 +41,6 @@ impl<V: WellFormed> WellFormed for DekoPointsTo<V> {
     }
 }
 
-impl <V: WellFormed> DekoPointsTo<V> {
-    /// Creates a placeholder if needed.
-    pub uninterp spec fn null_placeholder() -> Self;
-
-    pub axiom fn null_placeholder_ok()
-        ensures
-            Self::null_placeholder().wf(),
-            Self::null_placeholder().is_init(),
-            Self::null_placeholder().pptr().addr() == 0,
-    ;
-}
-
 impl<V: WellFormed> Clone for DekoPPtr<V> {
     fn clone(&self) -> (res: Self)
         ensures

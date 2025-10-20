@@ -1303,9 +1303,7 @@ impl Page {
                 #![trigger old(perm).storage[path]]
                 #![trigger perm.storage[path]]
                 old(perm).storage.contains_key(path) && path.len() == 1 && path != path![493]
-                    && path != path![idx as int] ==> perm.storage[path] == old(
-                    perm,
-                ).storage[path]);
+                    && path != path![idx as int] ==> perm.storage[path] == old(perm).storage[path]);
             let entry_493_old = old(perm).storage[path![493]];
             let entry_493_new = perm.storage[path![493]];
 
@@ -1319,7 +1317,10 @@ impl Page {
 
             let perm_before_update = &*perm;
             perm.tracked_update_child_for_new_page(path![idx as int]);
-            perm_before_update.tracked_update_child_for_new_page_preserves_translation_valid(perm, path![idx as int]);
+            perm_before_update.tracked_update_child_for_new_page_preserves_translation_valid(
+                perm,
+                path![idx as int],
+            );
 
             // Now we prove that we can allocate level2.
             assert(perm.allocate_pte_lvl2_requires(
@@ -1383,7 +1384,13 @@ impl Page {
                         let child = perm.storage[child_path];
                         let parent = perm.storage[parent_path];
 
-                        admit(); // TODO: FIXME later.
+                        // TODO: Prove this.
+                        //
+                        // Proof for this is a little bit long as we have to reason about
+                        // - [493] and its children.
+                        // - [idx] and its children.
+                        // - [idx, child_index] and its children (as we updated it but verus cannot auto infer).
+                        admit();
                     }
                 }
 
@@ -3562,6 +3569,7 @@ impl PageTablePermission {
                         if p.len() > 1 && p.drop_last()@ == path@ {
                             PagePermission::null()
                             // creating a null is always safe as the parent is now non-present
+
                         } else {
                             v
                         }
@@ -3575,10 +3583,7 @@ impl PageTablePermission {
     }
 
     /// Lift [`update_child_for`] to tracked mode so we can use it in proofs about state updates.
-    pub axiom fn tracked_update_child_for_new_page(
-        tracked &mut self,
-        path: PageTablePath,
-    )
+    pub axiom fn tracked_update_child_for_new_page(tracked &mut self, path: PageTablePath)
         requires
             path.wf(),
             path.len() >= 1,
@@ -3587,7 +3592,7 @@ impl PageTablePermission {
     ;
 
     pub proof fn tracked_update_child_for_new_page_preserves_translation_valid(
-        & self,
+        &self,
         after: &Self,
         path: PageTablePath,
     )
@@ -3599,6 +3604,7 @@ impl PageTablePermission {
         ensures
             after.translates_all_valid_addresses(),
     {
+        // Proof is simple as we ensure that 0 -
         admit();
     }
 
@@ -4455,7 +4461,23 @@ impl PagePermission {
 
     }
 
+    /// Creates a null PagePermission with zeroed PTE and null `this_page_perm`
+    /// so that we can create empty page entries to make wf happy.
     pub uninterp spec fn null() -> Self;
+
+    pub axiom fn null_ensures()
+        ensures
+            ({
+                let p = PagePermission::null();
+
+                &&& p.wf_level()
+                &&& !p.pte_perm.is_present_pte_spec()
+                &&& forall|i: int|
+                    0 <= i < PAGE_TABLE_ENTRY ==> !(#[trigger] p.this_page_perm.value().0@.index(
+                        i,
+                    )).is_present_pte_spec()
+            }),
+    ;
 }
 
 impl View for PageTablePermission {
