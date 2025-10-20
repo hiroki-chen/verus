@@ -27,7 +27,7 @@ deko_bitflags! {
 verus! {
 
 #[verifier::inline]
-pub open spec fn bit_not_overlapping_with_pte_flags(bit: u64) -> bool {
+pub open spec fn bit_not_overlapping(bit: u64) -> bool {
     Pte_ALL_BITS as u64 & bit == 0
 }
 
@@ -103,15 +103,40 @@ pub proof fn lemma_private_address_transformation_is_invertible(
     flags: PteFlags,
 )
     requires
-        bit_not_overlapping_with_pte_flags(private_bit),
-        bit_not_overlapping_with_pte_flags(shared_bit),
+        bit_not_in_addr_region(private_bit),
+        bit_not_in_addr_region(shared_bit),
         flags.wf(),
         flags.bits() & Pte_ALL_BITS == flags.bits(),
         pte@@ == make_private_address_spec(paddr, private_bit, shared_bit) | flags.bits() as u64,
+        paddr % 0x1000 == 0,
+        paddr < 0x000f_ffff_ffff_f000,
     ensures
         pte.address_spec(private_bit, shared_bit)@ == paddr,
 {
-    admit();
+    bit_u64_and_auto();
+
+    let pte_addr = pte@@;
+    let flags_bits = flags.bits() as u64;
+    let addr_extracted = pte.address_spec(private_bit, shared_bit)@;
+    let pte_all = (1u64 << 0) | (1u64 << 1) | (1u64 << 2) | (1u64 << 5) | (1u64 << 6) | (1u64 << 7)
+        | (1u64 << 8) | (1u64 << 63);
+
+    // Unfold the definitions.
+    assert(pte_addr == (paddr & !shared_bit) | private_bit | flags_bits);
+    assert(addr_extracted == (pte_addr & 0x000f_ffff_ffff_f000) & !private_bit & !shared_bit);
+
+    assert(paddr == addr_extracted) by (bit_vector)
+        requires
+            pte_addr == paddr & !shared_bit | private_bit | flags_bits,
+            addr_extracted == (pte_addr & 0x000f_ffff_ffff_f000) & !private_bit & !shared_bit,
+            private_bit & 0x000f_ffff_ffff_f000 == 0,
+            shared_bit & 0x000f_ffff_ffff_f000 == 0,
+            pte_all == (1u64 << 0) | (1u64 << 1) | (1u64 << 2) | (1u64 << 5) | (1u64 << 6) | (1u64
+                << 7) | (1u64 << 8) | (1u64 << 63),
+            flags_bits & pte_all == flags_bits,
+            paddr % 0x1000 == 0,
+            paddr < 0x000f_ffff_ffff_f000,
+    ;
 }
 
 /// **PROOF**: Ensures confidentiality bits don't interfere with PTE flag preservation.
@@ -128,8 +153,8 @@ pub proof fn lemma_private_bit_non_interfering(
     flags: PteFlags,
 )
     requires
-        bit_not_overlapping_with_pte_flags(private_bit),
-        bit_not_overlapping_with_pte_flags(shared_bit),
+        bit_not_overlapping(private_bit),
+        bit_not_overlapping(shared_bit),
         flags.wf(),
         flags.bits() & Pte_ALL_BITS == flags.bits(),
         paddr % 0x1000 == 0,
@@ -892,6 +917,8 @@ impl Page {
             r.1@.wf(),
             ms.phys_to_virt_spec(r.2)@ as usize == r.0.addr(),
             ms.physmap.in_range_spec(r.2) || ms.kernel.in_range_spec(r.2),
+            forall|i: int|
+                0 <= i < PAGE_TABLE_ENTRY as int ==> #[trigger] r.1@.value().0@[i]@@ == 0,
     {
         let (ptr, Tracked(prov), Tracked(dealloc)) = DEKO_FRAME_ALLOCATOR.0.alloc(
             PAGE_SIZE as usize,
@@ -1247,6 +1274,53 @@ impl Page {
                 PagePermission { pte_perm: new_pte_value, this_page_perm: new_page_perm },
             );
 
+            assert(perm.translates_address_valid(path![493]));  // because we don't even modified.
+            assert(perm.translates_address_valid(path![idx as int])) by {
+                let e = perm.storage[path![idx as int]];
+
+                let paddr_recovered = e.pte_perm.address_spec(private_bit, shared_bit);
+                let vaddr = ms.phys_to_virt_spec(paddr);
+
+                assert(e.wf_level());
+                assert(!e.pte_perm.is_huge_pte_spec());
+                assert(ms.kernel.in_range_spec(paddr_recovered) || ms.physmap.in_range_spec(
+                    paddr_recovered,
+                ));
+
+                // What we have is that paddr = e.this_page_perm.pptr().addr()
+                assert(ms.phys_to_virt_spec(paddr)@ as usize == e.this_page_perm.pptr().addr());
+                lemma_private_address_transformation_is_invertible(
+                    private_bit,
+                    shared_bit,
+                    new_pte_value,
+                    paddr@,
+                    flags,
+                );
+                assert(vaddr@ as usize == e.this_page_perm.pptr().addr());
+            }
+
+            assert(forall|path: PageTablePath|
+                #![trigger old(perm).storage[path]]
+                #![trigger perm.storage[path]]
+                old(perm).storage.contains_key(path) && path.len() == 1 && path != path![493]
+                    && path != path![idx as int] ==> perm.storage[path] == old(
+                    perm,
+                ).storage[path]);
+            let entry_493_old = old(perm).storage[path![493]];
+            let entry_493_new = perm.storage[path![493]];
+
+            assert(forall|i: int|
+                0 <= i < PAGE_TABLE_ENTRY as int && i != idx as int
+                    ==> #[trigger] perm.storage[path![493]].this_page_perm.value().0@.index(i)@
+                    == #[trigger] old(perm).storage[path![493]].this_page_perm.value().0@.index(
+                    i,
+                )@);
+            assert(perm.translates_all_valid_addresses());
+
+            let perm_before_update = &*perm;
+            perm.tracked_update_child_for_new_page(path![idx as int]);
+            perm_before_update.tracked_update_child_for_new_page_preserves_translation_valid(perm, path![idx as int]);
+
             // Now we prove that we can allocate level2.
             assert(perm.allocate_pte_lvl2_requires(
                 mapping,
@@ -1256,41 +1330,64 @@ impl Page {
                 shared_bit,
                 huge,
             )) by {
-                assert(perm.translates_address_valid(path![493]));  // because we don't even modified.
-                assert(perm.translates_address_valid(path![idx as int])) by {
-                    let e = perm.storage[path![idx as int]];
+                assert(perm.self_mapped()) by {
+                    assert(entry_493_old.pte_perm == entry_493_new.pte_perm);
+                    assert(entry_493_old.this_page_perm.pptr().addr()
+                        == entry_493_new.this_page_perm.pptr().addr());
 
-                    let paddr_recovered = e.pte_perm.address_spec(private_bit, shared_bit);
-                    let vaddr = ms.phys_to_virt_spec(paddr);
-
-                    assert(e.wf_level());
-                    assert(!e.pte_perm.is_huge_pte_spec());
-                    assert(ms.kernel.in_range_spec(paddr_recovered) || ms.physmap.in_range_spec(
-                        paddr_recovered,
-                    ));
-
-                    // What we have is that paddr = e.this_page_perm.pptr().addr()
-                    assert(ms.phys_to_virt_spec(paddr)@ as usize == e.this_page_perm.pptr().addr());
-                    lemma_private_address_transformation_is_invertible(
-                        private_bit,
-                        shared_bit,
-                        new_pte_value,
-                        paddr@,
-                        flags,
-                    );
-                    assert(vaddr@ as usize == e.this_page_perm.pptr().addr());
+                    assert forall|path: PageTablePath| path.wf() && path.len() == 1 implies {
+                        let entry = #[trigger] perm.storage[path];
+                        // All other entries's PTE comes from 493.
+                        entry.pte_perm@ == perm.storage[path![493]].this_page_perm.value().0@.index(
+                            path@[0],
+                        )@
+                    } by {
+                        if path@ != path![idx as int]@ {
+                            assert(old(perm).storage[path].pte_perm == perm.storage[path].pte_perm);
+                            assert(path@[0] != idx as int) by {
+                                // This is kinda weird. Why do we need to prove by contradiction?
+                                // Seems Verus cannot automatically infer this.
+                                if path@[0] == idx as int {
+                                    assert(path@ == path![idx as int]@);
+                                }
+                            }
+                            assert(perm.storage[path].pte_perm@
+                                == perm.storage[path![493]].this_page_perm.value().0@.index(
+                                path@[0],
+                            )@);
+                        } else {
+                            // auto
+                        }
+                    }
                 }
 
-                assert(forall|path: PageTablePath|
-                    #![trigger old(perm).storage[path]]
-                    #![trigger perm.storage[path]]
-                    old(perm).storage.contains_key(path) && path != path![493] && path
-                        != path![idx as int] ==> perm.storage[path] == old(perm).storage[path]);
-                assert(perm.translates_all_valid_addresses());
-                assert(perm.wf_with_perm()) by {
-                    assume(perm.vaddr_based_wf());
-                    assume(perm.self_mapped());
+                assert(perm.vaddr_based_wf()) by {
+                    assert forall|child_path: PageTablePath|
+                        #![trigger perm.storage[child_path]]
+                        perm.storage.contains_key(child_path) && child_path.len() > 1 implies {
+                        let parent_path = child_path.drop_last();
+                        let child_index = child_path@[child_path.len() - 1];
+                        let child = perm.storage[child_path];
+                        let parent = perm.storage[parent_path];
+
+                        perm.parent_child_consistency_spec(
+                            child_path,
+                            parent_path,
+                            child_index,
+                            child,
+                            parent,
+                        )
+                    } by {
+                        let parent_path = child_path.drop_last();
+                        let child_index = child_path@[child_path.len() - 1];
+                        let child = perm.storage[child_path];
+                        let parent = perm.storage[parent_path];
+
+                        admit(); // TODO: FIXME later.
+                    }
                 }
+
+                assert(perm.wf_with_perm());
                 assert(perm.mapping_addr_consistent(
                     new_page,
                     index_at_level_spec(2, vaddr) as usize,
@@ -2438,8 +2535,8 @@ impl PageTablePermission {
         shared_bit: u64,
     ) -> bool {
         &&& self.walk_requires(page, vaddr, ms, private_bit, shared_bit)
-        &&& bit_not_overlapping_with_pte_flags(private_bit)
-        &&& bit_not_overlapping_with_pte_flags(shared_bit)
+        &&& bit_not_overlapping(private_bit)
+        &&& bit_not_overlapping(shared_bit)
         &&& bit_not_in_addr_region(private_bit)
         &&& bit_not_in_addr_region(shared_bit)
     }
@@ -2477,8 +2574,8 @@ impl PageTablePermission {
         &&& ms == self.mapping_space
         &&& self.private_bit == private_bit
         &&& self.shared_bit == shared_bit
-        &&& bit_not_overlapping_with_pte_flags(private_bit)
-        &&& bit_not_overlapping_with_pte_flags(shared_bit)
+        &&& bit_not_overlapping(private_bit)
+        &&& bit_not_overlapping(shared_bit)
         &&& bit_not_in_addr_region(private_bit)
         &&& bit_not_in_addr_region(shared_bit)
         &&& mapping.wf()
@@ -2523,8 +2620,8 @@ impl PageTablePermission {
         &&& ms == self.mapping_space
         &&& self.private_bit == private_bit
         &&& self.shared_bit == shared_bit
-        &&& bit_not_overlapping_with_pte_flags(private_bit)
-        &&& bit_not_overlapping_with_pte_flags(shared_bit)
+        &&& bit_not_overlapping(private_bit)
+        &&& bit_not_overlapping(shared_bit)
         &&& bit_not_in_addr_region(private_bit)
         &&& bit_not_in_addr_region(shared_bit)
         &&& mapping.wf()
@@ -2569,8 +2666,8 @@ impl PageTablePermission {
         &&& ms == self.mapping_space
         &&& self.private_bit == private_bit
         &&& self.shared_bit == shared_bit
-        &&& bit_not_overlapping_with_pte_flags(private_bit)
-        &&& bit_not_overlapping_with_pte_flags(shared_bit)
+        &&& bit_not_overlapping(private_bit)
+        &&& bit_not_overlapping(shared_bit)
         &&& bit_not_in_addr_region(private_bit)
         &&& bit_not_in_addr_region(shared_bit)
         &&& mapping.wf()
@@ -2605,8 +2702,8 @@ impl PageTablePermission {
         shared_bit: u64,
     ) -> bool {
         &&& self.allocate_pte_4k_requires(page, vaddr, ms, private_bit, shared_bit)
-        &&& bit_not_overlapping_with_pte_flags(private_bit)
-        &&& bit_not_overlapping_with_pte_flags(shared_bit)
+        &&& bit_not_overlapping(private_bit)
+        &&& bit_not_overlapping(shared_bit)
         &&& bit_not_in_addr_region(private_bit)
         &&& bit_not_in_addr_region(shared_bit)
     }
@@ -2669,6 +2766,7 @@ impl PageTablePermission {
 
             &&& self.storage.contains_key(path)
             &&& page.addr() == self.storage[path].this_page_perm.pptr().addr()
+            &&& self.storage[path].pte_perm.is_present_pte_spec()
         }
     }
 
@@ -2706,6 +2804,7 @@ impl PageTablePermission {
 
             &&& self.storage.contains_key(path)
             &&& page.addr() == self.storage[path].this_page_perm.pptr().addr()
+            &&& self.storage[path].pte_perm.is_present_pte_spec()
         }
     }
 
@@ -2747,6 +2846,7 @@ impl PageTablePermission {
 
             &&& self.storage.contains_key(path)
             &&& page.addr() == self.storage[path].this_page_perm.pptr().addr()
+            &&& self.storage[path].pte_perm.is_present_pte_spec()
         }
     }
 
@@ -3453,8 +3553,57 @@ impl PageTablePermission {
         &&& pte_vaddr_val == pte_val
     }
 
+    /// Returns a new [`PageTablePermission`] with updated child PTE permissions
+    pub open spec fn update_child_for_new_page(&self, path: PageTablePath) -> Self {
+        Self {
+            storage: self.storage.map_entries(
+                |p: PageTablePath, v: PagePermission|
+                    {
+                        if p.len() > 1 && p.drop_last()@ == path@ {
+                            PagePermission::null()
+                            // creating a null is always safe as the parent is now non-present
+                        } else {
+                            v
+                        }
+                    },
+            ),
+            pgtable_perm: self.pgtable_perm,
+            mapping_space: self.mapping_space,
+            private_bit: self.private_bit,
+            shared_bit: self.shared_bit,
+        }
+    }
+
+    /// Lift [`update_child_for`] to tracked mode so we can use it in proofs about state updates.
+    pub axiom fn tracked_update_child_for_new_page(
+        tracked &mut self,
+        path: PageTablePath,
+    )
+        requires
+            path.wf(),
+            path.len() >= 1,
+        ensures
+            *self == old(self).update_child_for_new_page(path),
+    ;
+
+    pub proof fn tracked_update_child_for_new_page_preserves_translation_valid(
+        & self,
+        after: &Self,
+        path: PageTablePath,
+    )
+        requires
+            self.translates_all_valid_addresses(),
+            path.wf(),
+            path.len() >= 1,
+            *after == self.update_child_for_new_page(path),
+        ensures
+            after.translates_all_valid_addresses(),
+    {
+        admit();
+    }
+
     #[verifier::spinoff_prover]
-    #[verifier::rlimit(50)]
+    #[verifier::rlimit(60)]
     pub proof fn lemma_pte_addr_same_as_vaddr_each_level(&self, vaddr: VirtAddr)
         requires
             self.wf_with_perm(),
@@ -4079,8 +4228,9 @@ impl PageTablePermission {
     pub open spec fn translates_all_valid_addresses(&self) -> bool {
         &&& forall|path: PageTablePath|
             #![trigger self.storage[path]]
-            // <- we changed the trigger into self.storage[path]
-            // so that Verus' solver can initiate the proof better.
+        // <- we changed the trigger into self.storage[path]
+        // so that Verus' solver can initiate the proof better.
+
             path.wf() ==> self.translates_address_valid(path)
     }
 
@@ -4129,12 +4279,56 @@ impl PageTablePermission {
 
         }&&& forall|path: PageTablePath|
             path.wf() && path.len() == 1 ==> {
-                let entry = self.storage[path];
+                let entry = #[trigger] self.storage[path];
                 // All other entries's PTE comes from 493.
                 entry.pte_perm@ == self.storage[path![493]].this_page_perm.value().0@.index(
                     path@[0],
                 )@
             }
+    }
+
+    /// Validates parent-child consistency in page table hierarchy.
+    ///
+    /// This specification function ensures that:
+    /// 1. Parent page table entries exist
+    /// 2. Child PTEs match what's stored in the parent page
+    /// 3. Physical addresses are within valid ranges
+    /// 4. Virtual/physical address mappings are consistent
+    pub open spec fn parent_child_consistency_spec(
+        &self,
+        child_path: PageTablePath,
+        parent_path: PageTablePath,
+        child_index: int,
+        child: PagePermission,
+        parent: PagePermission,
+    ) -> bool {
+        // 1. Parent exists
+        &&& self.storage.contains_key(
+            parent_path,
+        )
+        // 2. PTE consistency: parent's page contains the child's PTE
+        //
+        // Special note on the huge pages:
+        // We still keep the property even if the parent is huge. This is because
+        // the property is reversed: if the parent is huge, then the child must not exist.
+        //
+        // It must follow the standard page translation rules if we hit huge pages then we
+        // just stop.
+        &&& child.pte_perm == parent.this_page_perm.value().0@.index(child_index)
+        &&& parent.this_page_perm.value().0@.index(child_index).is_present_pte_spec() ==> {
+            let pte_phys_addr = child.pte_perm.address_spec(self.private_bit, self.shared_bit);
+
+            // Physical address is in valid range
+            &&& (self.mapping_space.kernel.in_range_spec(pte_phys_addr)
+                || self.mapping_space.physmap.in_range_spec(
+                pte_phys_addr,
+            ))
+            // Virtual/physical mapping is consistent
+            &&& {
+                let vaddr = self.mapping_space.phys_to_virt_spec(pte_phys_addr);
+                child.this_page_perm.pptr().addr() == vaddr@ as usize
+            }
+        }
     }
 
     /// **Unified VAddr-based Well-formedness**: Validates the entire page table through virtual address reasoning.
@@ -4158,36 +4352,13 @@ impl PageTablePermission {
                 let child = self.storage[child_path];
                 let parent = self.storage[parent_path];
 
-                // 1. Parent exists
-                &&& self.storage.contains_key(
+                self.parent_child_consistency_spec(
+                    child_path,
                     parent_path,
+                    child_index,
+                    child,
+                    parent,
                 )
-                // 2. PTE consistency: parent's page contains the child's PTE
-                //
-                // Special note on the huge pages:
-                // We still keep the property even if the parent is huge. This is because
-                // the property is reversed: if the parent is huge, then the child must not exist.
-                //
-                // It must follow the standard page translation rules if we hit huge pages then we
-                // just stop.
-                &&& child.pte_perm == parent.this_page_perm.value().0@.index(child_index)
-                &&& parent.this_page_perm.value().0@.index(child_index).is_present_pte_spec() ==> {
-                    let pte_phys_addr = child.pte_perm.address_spec(
-                        self.private_bit,
-                        self.shared_bit,
-                    );
-
-                    // Physical address is in valid range
-                    &&& (self.mapping_space.kernel.in_range_spec(pte_phys_addr)
-                        || self.mapping_space.physmap.in_range_spec(
-                        pte_phys_addr,
-                    ))
-                    // Virtual/physical mapping is consistent
-                    &&& {
-                        let vaddr = self.mapping_space.phys_to_virt_spec(pte_phys_addr);
-                        child.this_page_perm.pptr().addr() == vaddr@ as usize
-                    }
-                }
             }
     }
 
@@ -4283,6 +4454,8 @@ impl PagePermission {
             == 0  // Page must be page-aligned
 
     }
+
+    pub uninterp spec fn null() -> Self;
 }
 
 impl View for PageTablePermission {
