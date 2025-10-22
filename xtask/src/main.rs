@@ -1,11 +1,178 @@
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::io::Write;
+use std::io::{Write, BufRead, BufReader};
+use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use colored::Colorize;
 use git2::Repository;
 use serde::Deserialize;
+use serde_json;
+
+// Cargo JSON message structures for parsing build output
+#[derive(Deserialize, Debug)]
+#[serde(tag = "reason")]
+enum CargoMessage {
+    #[serde(rename = "compiler-message")]
+    CompilerMessage { message: CompilerMessage },
+    #[serde(rename = "build-finished")]
+    BuildFinished { success: bool },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Deserialize, Debug)]
+struct CompilerMessage {
+    message: String,
+    level: String,
+    spans: Vec<Span>,
+    children: Vec<ChildMessage>,
+}
+
+#[derive(Deserialize, Debug)]
+struct Span {
+    file_name: String,
+    line_start: u32,
+    column_start: u32,
+    is_primary: bool,
+    text: Vec<SpanText>,
+    label: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct SpanText {
+    text: String,
+    highlight_start: u32,
+    highlight_end: u32,
+}
+
+#[derive(Deserialize, Debug)]
+struct ChildMessage {
+    message: String,
+    level: String,
+    spans: Vec<Span>,
+}
+
+// Build summary for tracking compilation results
+#[derive(Debug, Default)]
+struct BuildSummary {
+    errors: Vec<CompilerMessage>,
+    warnings: Vec<CompilerMessage>,
+    notes: Vec<CompilerMessage>,
+    successful: bool,
+}
+
+impl BuildSummary {
+    fn add_message(&mut self, msg: CompilerMessage) {
+        match msg.level.as_str() {
+            "error" => self.errors.push(msg),
+            "warning" => self.warnings.push(msg),
+            "note" | "help" => self.notes.push(msg),
+            _ => {}
+        }
+    }
+
+    fn print_summary(&self) {
+        println!("\n{}", "=== BUILD SUMMARY ===".bright_cyan().bold());
+        
+        if self.successful {
+            println!("{} {}", "✓".green().bold(), "Build completed successfully".green());
+        } else {
+            println!("{} {}", "✗".red().bold(), "Build failed".red());
+        }
+
+        if !self.errors.is_empty() {
+            println!("{} {} errors", "●".red(), self.errors.len().to_string().red().bold());
+        }
+        
+        if !self.warnings.is_empty() {
+            println!("{} {} warnings", "●".yellow(), self.warnings.len().to_string().yellow().bold());
+        }
+        
+        if !self.notes.is_empty() {
+            println!("{} {} notes/help messages", "●".blue(), self.notes.len().to_string().blue().bold());
+        }
+
+        // Print detailed error information
+        if !self.errors.is_empty() {
+            println!("\n{}", "DETAILED ERRORS:".red().bold());
+            for (i, error) in self.errors.iter().enumerate() {
+                self.print_formatted_message(error, i + 1);
+            }
+        }
+
+        // Print some warnings if they exist
+        if !self.warnings.is_empty() && self.warnings.len() <= 5 {
+            println!("\n{}", "WARNINGS:".yellow().bold());
+            for (i, warning) in self.warnings.iter().enumerate() {
+                self.print_formatted_message(warning, i + 1);
+            }
+        } else if self.warnings.len() > 5 {
+            println!("\n{} (showing first 3 of {} total)", "WARNINGS:".yellow().bold(), self.warnings.len());
+            for (i, warning) in self.warnings.iter().take(3).enumerate() {
+                self.print_formatted_message(warning, i + 1);
+            }
+        }
+    }
+
+    fn print_formatted_message(&self, msg: &CompilerMessage, index: usize) {
+        let level_color = match msg.level.as_str() {
+            "error" => "red",
+            "warning" => "yellow", 
+            "note" => "blue",
+            "help" => "cyan",
+            _ => "white",
+        };
+
+        println!("\n{}. {}: {}", 
+            index.to_string().bright_white().bold(),
+            msg.level.to_uppercase().color(level_color).bold(),
+            msg.message.color(level_color)
+        );
+
+        // Print primary spans with file information
+        for span in &msg.spans {
+            if span.is_primary {
+                println!("   {} {}:{}:{}", 
+                    "→".bright_blue(), 
+                    span.file_name.bright_white(),
+                    span.line_start.to_string().bright_white(),
+                    span.column_start.to_string().bright_white()
+                );
+                
+                // Print the code snippet if available
+                if !span.text.is_empty() {
+                    for text in &span.text {
+                        let line = &text.text;
+                        if !line.trim().is_empty() {
+                            println!("     {}", line.dimmed());
+                            
+                            // Show highlight if available
+                            if text.highlight_start < text.highlight_end && text.highlight_start > 0 {
+                                let highlight_len = text.highlight_end - text.highlight_start;
+                                let spaces = " ".repeat(5 + text.highlight_start as usize);
+                                let carets = "^".repeat(highlight_len as usize);
+                                println!("{}{}", spaces, carets.color(level_color).bold());
+                            }
+                        }
+                    }
+                }
+
+                if let Some(label) = &span.label {
+                    println!("     {}: {}", "help".cyan(), label.cyan());
+                }
+            }
+        }
+
+        // Print children messages (help/note)
+        for child in &msg.children {
+            if child.level == "help" || child.level == "note" {
+                println!("   {} {}", child.level.cyan(), child.message.cyan());
+            }
+        }
+    }
+}
 
 // Configuration constants - no user-specific paths
 const DEFAULT_VERUS_REPO: &str = "https://github.com/hiroki-chen/verus.git";
@@ -213,8 +380,95 @@ impl Builder {
         }
     }
 
-    /// Execute a command and redirect output to a log file
-    fn execute_with_logging(&self, mut cmd: std::process::Command, log_file_name: &str) -> Result<()> {
+    /// Execute a cargo command with JSON message parsing for better error display
+    fn execute_cargo_with_json(&self, mut cmd: Command, log_file_name: &str) -> Result<()> {
+        // Enable JSON output for cargo commands
+        cmd.args(["--message-format", "json"]);
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        let log_dir = self.config.root.join("logs");
+        std::fs::create_dir_all(&log_dir).context("Failed to create logs directory")?;
+        
+        let log_file_path = log_dir.join(log_file_name);
+        let mut log_file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&log_file_path)
+            .with_context(|| format!("Failed to create log file: {:?}", log_file_path))?;
+
+        println!("{} Executing command: {:?}", "→".bright_blue(), cmd);
+        println!("{} Logs will be written to: {:?}", "📝".bright_cyan(), log_file_path);
+
+        writeln!(log_file, "=== COMMAND ===")?;
+        writeln!(log_file, "{:?}", cmd)?;
+        writeln!(log_file, "\n=== OUTPUT ===")?;
+
+        let mut child = cmd.spawn().context("Failed to spawn command")?;
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+
+        let mut summary = BuildSummary::default();
+        let mut progress_count = 0;
+
+        // Parse stdout for JSON messages
+        let stdout_reader = BufReader::new(stdout);
+        for line in stdout_reader.lines() {
+            let line = line.context("Failed to read stdout line")?;
+            writeln!(log_file, "{}", line)?;
+
+            // Try to parse as JSON cargo message
+            if let Ok(msg) = serde_json::from_str::<CargoMessage>(&line) {
+                match msg {
+                    CargoMessage::CompilerMessage { message } => {
+                        summary.add_message(message);
+                    }
+                    CargoMessage::BuildFinished { success } => {
+                        summary.successful = success;
+                    }
+                    CargoMessage::Other => {
+                        // Could be a progress message, show some progress
+                        progress_count += 1;
+                        if progress_count % 10 == 0 {
+                            print!(".");
+                            std::io::stdout().flush().unwrap_or(());
+                        }
+                    }
+                }
+            } else {
+                // Non-JSON output, just show it
+                if !line.trim().is_empty() {
+                    println!("{}", line);
+                }
+            }
+        }
+
+        // Read stderr
+        let stderr_reader = BufReader::new(stderr);
+        for line in stderr_reader.lines() {
+            let line = line.context("Failed to read stderr line")?;
+            writeln!(log_file, "STDERR: {}", line)?;
+            if !line.trim().is_empty() {
+                println!("{} {}", "stderr:".red(), line);
+            }
+        }
+
+        let status = child.wait().context("Failed to wait for command")?;
+        writeln!(log_file, "\n=== EXIT STATUS ===")?;
+        writeln!(log_file, "{}", status)?;
+
+        // Print summary
+        summary.print_summary();
+
+        if !status.success() {
+            return Err(anyhow::anyhow!("Command failed with exit code: {}", status));
+        }
+
+        Ok(())
+    }
+
+    /// Execute a regular command (non-cargo) with logging
+    fn execute_with_logging(&self, mut cmd: Command, log_file_name: &str) -> Result<()> {
         let log_dir = self.config.root.join("logs");
         std::fs::create_dir_all(&log_dir).context("Failed to create logs directory")?;
         
@@ -226,8 +480,8 @@ impl Builder {
             .open(&log_file_path)
             .with_context(|| format!("Failed to create log file: {:?}", log_file_path))?;
 
-        println!("Executing command: {:?}", cmd);
-        println!("Logs will be written to: {:?}", log_file_path);
+        println!("{} Executing command: {:?}", "→".bright_blue(), cmd);
+        println!("{} Logs will be written to: {:?}", "📝".bright_cyan(), log_file_path);
 
         let output = cmd.output().context("Failed to execute command")?;
 
@@ -244,14 +498,14 @@ impl Builder {
 
         // Also print a summary to console
         if !output.status.success() {
-            println!("Command failed with exit code: {}", output.status);
-            println!("Check log file for details: {:?}", log_file_path);
+            println!("{} Command failed with exit code: {}", "✗".red(), output.status);
+            println!("{} Check log file for details: {:?}", "📄".yellow(), log_file_path);
             
             // Print last few lines of stderr for immediate feedback
             let stderr_str = String::from_utf8_lossy(&output.stderr);
             let stderr_lines: Vec<&str> = stderr_str.lines().collect();
             if !stderr_lines.is_empty() {
-                println!("Last few lines of stderr:");
+                println!("{}", "Last few lines of stderr:".yellow());
                 for line in stderr_lines.iter().rev().take(5).rev() {
                     println!("  {}", line);
                 }
@@ -259,13 +513,13 @@ impl Builder {
             
             return Err(anyhow::anyhow!("Command failed"));
         } else {
-            println!("Command completed successfully");
+            println!("{} Command completed successfully", "✓".green());
             
             // Print last few lines of stdout for immediate feedback
             let stdout_str = String::from_utf8_lossy(&output.stdout);
             let stdout_lines: Vec<&str> = stdout_str.lines().collect();
             if !stdout_lines.is_empty() {
-                println!("Last few lines of output:");
+                println!("{}", "Last few lines of output:".cyan());
                 for line in stdout_lines.iter().rev().take(3).rev() {
                     if !line.trim().is_empty() {
                         println!("  {}", line);
@@ -278,14 +532,14 @@ impl Builder {
     }
 
     fn build_deko(&self, release: bool) -> Result<()> {
-        println!("--- Building stage2 bootloader ---");
+        println!("{}", "--- Building stage2 bootloader ---".bright_cyan().bold());
 
         let deko_stage2 = self.config.root.join("deko-core");
         std::env::set_current_dir(&deko_stage2)
             .context("Failed to change directory to deko-core")?;
 
         // Build stage2
-        let mut cmd = std::process::Command::new("cargo");
+        let mut cmd = Command::new("cargo");
         cmd.arg("verus")
             .arg("build")
             .arg("--target")
@@ -301,11 +555,11 @@ impl Builder {
 
         let profile = if release { "release" } else { "debug" };
         let log_file = format!("deko-stage2-build-{}-{}.log", self.config.target_arch, profile);
-        self.execute_with_logging(cmd, &log_file)?;
+        self.execute_cargo_with_json(cmd, &log_file)?;
 
         // Create flat image for SNP
         if self.config.target_arch == "snp" {
-            let mut cmd = std::process::Command::new("objcopy");
+            let mut cmd = Command::new("objcopy");
             cmd.arg("-O")
                 .arg("binary")
                 .arg(self.config.stage2_path(release))
@@ -315,10 +569,10 @@ impl Builder {
             self.execute_with_logging(cmd, &log_file)?;
         }
 
-        println!("--- Building Deko Monitor ---");
+        println!("{}", "--- Building Deko Monitor ---".bright_cyan().bold());
 
         // Build monitor
-        let mut cmd = std::process::Command::new("cargo");
+        let mut cmd = Command::new("cargo");
         cmd.arg("verus")
             .arg("build")
             .arg("--target")
@@ -333,11 +587,11 @@ impl Builder {
         }
 
         let log_file = format!("deko-monitor-build-{}-{}.log", self.config.target_arch, profile);
-        self.execute_with_logging(cmd, &log_file)?;
+        self.execute_cargo_with_json(cmd, &log_file)?;
 
         // Create ELF for SNP
         if self.config.target_arch == "snp" {
-            let mut cmd = std::process::Command::new("objcopy");
+            let mut cmd = Command::new("objcopy");
             cmd.arg("-O")
                 .arg("elf64-x86-64")
                 .arg("--strip-unneeded")
@@ -352,7 +606,9 @@ impl Builder {
     }
 
     fn build_stage1(&self, release: bool) -> Result<()> {
-        let mut cmd = std::process::Command::new("cargo");
+        println!("{}", "--- Building stage1 bootloader ---".bright_cyan().bold());
+        
+        let mut cmd = Command::new("cargo");
         cmd.arg("build")
             .arg("--package")
             .arg("deko-stage1")
@@ -367,7 +623,7 @@ impl Builder {
 
         let profile = if release { "release" } else { "debug" };
         let log_file = format!("deko-stage1-build-{}-{}.log", self.config.target_arch, profile);
-        self.execute_with_logging(cmd, &log_file)?;
+        self.execute_cargo_with_json(cmd, &log_file)?;
 
         Ok(())
     }

@@ -102,7 +102,9 @@ impl<T: WellFormed, const N: usize> Array<T, N> {
             0 <= i < self.spec_len() as usize,
             self.wf(),
         ensures
-            t.1@.is_init() && t.1@.wf() && t.1@.value() == self@.index(i as int),
+            t.1@.is_init(),
+            t.1@.wf(),
+            t.1@.value() == self@.index(i as int),
             t.0@ === t.1@.pptr(),
             self.idx_ptr(i as int)@ == t.0@,
     {
