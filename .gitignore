@@ -11,3 +11,5 @@ build
 
 .gdb_history
 .verus-*
+
+tools

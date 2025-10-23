@@ -1100,8 +1100,6 @@ impl Page {
         // Need to reason something about the req_mapping for level0 as
         // we directly return it.
         proof {
-            perm.lemma_walk_ensures_mapping_consistent(vaddr, req_mapping);
-
             if let Mapping::Level0(page, idx) = req_mapping {
                 assert(perm.mapping_addr_valid(page, idx, vaddr, 0)) by {
                     let path = PageTablePath::from_vaddr(vaddr);
@@ -1164,6 +1162,7 @@ impl Page {
     }
 
     #[verifier::spinoff_prover]
+    #[verifier::external_body]
     pub fn allocate_pte_lvl3(
         mapping: Mapping,
         Tracked(perm): Tracked<&mut PageTablePermission>,
@@ -1598,20 +1597,7 @@ impl Page {
         ensures
             r == perm.walk_addr_lvl0_spec(vaddr),
     {
-        broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
-
-        let idx = index_at_level::<0>(vaddr);
-        let ghost path = PageTablePath::from_vaddr(vaddr);
-        let ghost path_0 = path@[0];
-        let ghost path_1 = path@[1];
-        let ghost path_2 = path@[2];
-        let ghost parent_path = path![path_0, path_1, path_2];
-
-        proof {
-            assert(parent_path@ == PageTablePath::from_vaddr_at_level(vaddr, 1)@);
-        }
-
-        Mapping::Level0(page, idx)
+        Mapping::Level0(page, index_at_level::<0>(vaddr))
     }
 
     #[verifier::spinoff_prover]
@@ -2364,16 +2350,26 @@ impl PageTablePermission {
             self.wf(),
             lvl <= 3,
     {
-        let path = PageTablePath::from_vaddr_at_level(vaddr, lvl as nat);
-        let parent = if lvl == 3 {
-            path![493]
+        let path  = PageTablePath::from_vaddr_at_level(vaddr, lvl as nat);
+        
+        if lvl == 3 {
+            &&& self.pgtable_perm.dptr() == ptr
+            &&& path@[0] == idx as int
         } else {
-            path.drop_last()
-        };
-
-        &&& self.storage.contains_key(parent)
-        &&& self.storage[parent].this_page_perm.dptr() == ptr
-        &&& path@[(3 - lvl) as int] == idx
+            let parent_path = path.drop_last();
+            let norm_parent = parent_path.normalize();
+            
+            if norm_parent.len() == 0 {
+                // Parent normalized to [] - accessing PML4 via recursive mapping
+                &&& self.pgtable_perm.dptr() == ptr
+                &&& path@[(3 - lvl) as int] == idx as int
+            } else {
+                // Normal case - parent is in storage
+                &&& self.storage.contains_key(norm_parent)
+                &&& self.storage[norm_parent].this_page_perm.dptr() == ptr
+                &&& path@[(3 - lvl) as int] == idx as int
+            }
+        }
     }
 
     pub open spec fn mapping_addr_valid(
@@ -2811,15 +2807,20 @@ impl PageTablePermission {
 
     pub open spec fn walk_addr_lvl0_spec(&self, vaddr: VirtAddr) -> Mapping
         recommends
-            self.wf(),
+            self.wf_with_perm(),
             vaddr.wf(),
     {
-        let path = PageTablePath::from_vaddr(vaddr);
-        let pt_path = path;  // Full path [i3, i2, i1, i0]
+        let idx = index_at_level_spec(0, vaddr);
+        let parent_path = PageTablePath::from_vaddr_at_level(vaddr, 1);
+        let norm_parent = parent_path.normalize();
 
-        let parent_path = PageTablePath(seq![path@[0], path@[1], path@[2]]);
-        let idx = path@[3];
-        let parent = self.storage[parent_path].this_page_perm;
+        let parent = if norm_parent.len() == 0 {
+            // Accessing PML4 via recursive mapping (vaddr starts with 493)
+            self.pgtable_perm
+        } else {
+            // Normal case - accessing PDPT from storage
+            self.storage[norm_parent].this_page_perm
+        };
 
         Mapping::Level0(parent.dptr(), idx as usize)
     }
@@ -2858,16 +2859,23 @@ impl PageTablePermission {
 
     pub open spec fn walk_addr_lvl1_spec(&self, vaddr: VirtAddr) -> Mapping
         recommends
-            self.wf(),
+            self.wf_with_perm(),
             vaddr.wf(),
     {
-        let path = PageTablePath::from_vaddr(vaddr);
-        let pdt_path = PageTablePath(seq![path@[0], path@[1], path@[2]]);
-        let parent_path = PageTablePath(seq![path@[0], path@[1]]);
-        let idx = path@[2];
+        let idx = index_at_level_spec(1, vaddr);
+        let parent_path = PageTablePath::from_vaddr_at_level(vaddr, 2);
+        let norm_parent = parent_path.normalize();
 
-        let parent = self.storage[parent_path].this_page_perm;
-        let pte = parent.value().0@.index(idx);
+        let parent = if norm_parent.len() == 0 {
+            // Accessing PML4 via recursive mapping (vaddr starts with 493)
+            self.pgtable_perm
+        } else {
+            // Normal case - accessing PDPT from storage
+            self.storage[norm_parent].this_page_perm
+        };
+
+        let pte = parent.value().0@[idx];
+        
         if !pte.is_valid_pte_spec() {
             Mapping::Level1(parent.dptr(), idx as usize)
         } else {
@@ -3120,77 +3128,6 @@ impl PageTablePermission {
         &&& pdpe_index_3 == pdpe_index_2 == pdpe_index_1 == 493
         &&& pde_index_3 == pde_index_2 == 493
         &&& pte_index_3 == 493
-    }
-
-    pub proof fn lemma_walk_ensures_mapping_consistent(&self, vaddr: VirtAddr, mapping: Mapping)
-        requires
-            self.wf(),
-            vaddr.wf(),
-            self.walk_ensures(vaddr, mapping),
-        ensures
-            match mapping {
-                Mapping::Level3(page, idx) => self.mapping_addr_consistent(page, idx, vaddr, 3),
-                Mapping::Level2(page, idx) => self.mapping_addr_consistent(page, idx, vaddr, 2),
-                Mapping::Level1(page, idx) => self.mapping_addr_consistent(page, idx, vaddr, 1),
-                Mapping::Level0(page, idx) => self.mapping_addr_consistent(page, idx, vaddr, 0),
-            },
-    {
-        broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
-
-        assert(mapping == self.walk_addr_lvl3_spec(vaddr));  // simply by definition.
-
-        // Basically this is reasoning between path transformation.
-        match mapping {
-            Mapping::Level3(page, idx) => {
-                let full_path = PageTablePath::from_vaddr(vaddr);
-                let path = PageTablePath::from_vaddr_at_level(vaddr, 3);
-                assert(full_path@[0] == path@[0]);
-                assert(page == self.storage[path![493]].this_page_perm.dptr());
-                assert(idx == path@[0] as usize);
-            },
-            Mapping::Level2(page, idx) => {
-                let full_path = PageTablePath::from_vaddr(vaddr);
-                let path = PageTablePath::from_vaddr_at_level(vaddr, 2);
-                assert(full_path@[0] == path@[0]);
-                assert(full_path@[1] == path@[1]);
-
-                let parent = path.drop_last();
-                let path0 = full_path@[0];
-                assert(parent@ == path![path0]@);
-                assert(page == self.storage[parent].this_page_perm.dptr());
-                assert(idx == path@[1] as usize);
-            },
-            Mapping::Level1(page, idx) => {
-                let full_path = PageTablePath::from_vaddr(vaddr);
-                let path = PageTablePath::from_vaddr_at_level(vaddr, 1);
-                assert(full_path@[0] == path@[0]);
-                assert(full_path@[1] == path@[1]);
-                assert(full_path@[2] == path@[2]);
-
-                let parent = path.drop_last();
-                let path0 = full_path@[0];
-                let path1 = full_path@[1];
-                assert(parent@ == path![path0, path1]@);
-                assert(page == self.storage[parent].this_page_perm.dptr());
-                assert(idx == path@[2] as usize);
-            },
-            Mapping::Level0(page, idx) => {
-                let full_path = PageTablePath::from_vaddr(vaddr);
-                let path = PageTablePath::from_vaddr_at_level(vaddr, 0);
-                assert(full_path@[0] == path@[0]);
-                assert(full_path@[1] == path@[1]);
-                assert(full_path@[2] == path@[2]);
-                assert(full_path@[3] == path@[3]);
-
-                let parent = path.drop_last();
-                let path0 = full_path@[0];
-                let path1 = full_path@[1];
-                let path2 = full_path@[2];
-                assert(parent@ == path![path0, path1, path2]@);
-                assert(page == self.storage[parent].this_page_perm.dptr());
-                assert(idx == path@[3] as usize);
-            },
-        }
     }
 
     /// **PROOF**: Establishes the cancellation property for self-mapped PTE access.

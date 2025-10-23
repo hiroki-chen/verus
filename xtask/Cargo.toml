@@ -11,6 +11,7 @@ fatfs = "0.3.6"
 fscommon = "0.1.1"
 git2 = "0.20.2"
 igvm = "0.3.4"
+reqwest = { version = "0.11", features = ["json", "blocking"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0"
 shellexpand = "3.1.1"
@@ -18,3 +19,4 @@ toml = "0.8.23"
 walkdir = "2.5.0"
 xshell = "0.2.7"
 colored = "2.0"
+zip = "0.6"

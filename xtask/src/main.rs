@@ -1,14 +1,17 @@
 use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader, Cursor, Write};
 use std::path::{Path, PathBuf};
-use std::io::{Write, BufRead, BufReader};
 use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use git2::Repository;
+use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json;
+use walkdir::WalkDir;
+use zip::ZipArchive;
 
 // Cargo JSON message structures for parsing build output
 #[derive(Deserialize, Debug)]
@@ -28,6 +31,7 @@ struct CompilerMessage {
     level: String,
     spans: Vec<Span>,
     children: Vec<ChildMessage>,
+    rendered: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -51,7 +55,6 @@ struct SpanText {
 struct ChildMessage {
     message: String,
     level: String,
-    spans: Vec<Span>,
 }
 
 // Build summary for tracking compilation results
@@ -75,9 +78,18 @@ impl BuildSummary {
 
     fn print_summary(&self) {
         println!("\n{}", "=== BUILD SUMMARY ===".bright_cyan().bold());
-        
+
         if self.successful {
             println!("{} {}", "✓".green().bold(), "Build completed successfully".green());
+
+            // Only show warning count if there are errors, to keep output clean
+            if !self.warnings.is_empty() && !self.errors.is_empty() {
+                println!(
+                    "{} {} warnings (suppressed)",
+                    "ℹ".blue(),
+                    self.warnings.len().to_string().blue()
+                );
+            }
         } else {
             println!("{} {}", "✗".red().bold(), "Build failed".red());
         }
@@ -85,16 +97,8 @@ impl BuildSummary {
         if !self.errors.is_empty() {
             println!("{} {} errors", "●".red(), self.errors.len().to_string().red().bold());
         }
-        
-        if !self.warnings.is_empty() {
-            println!("{} {} warnings", "●".yellow(), self.warnings.len().to_string().yellow().bold());
-        }
-        
-        if !self.notes.is_empty() {
-            println!("{} {} notes/help messages", "●".blue(), self.notes.len().to_string().blue().bold());
-        }
 
-        // Print detailed error information
+        // Only print detailed error information
         if !self.errors.is_empty() {
             println!("\n{}", "DETAILED ERRORS:".red().bold());
             for (i, error) in self.errors.iter().enumerate() {
@@ -102,80 +106,278 @@ impl BuildSummary {
             }
         }
 
-        // Print some warnings if they exist
-        if !self.warnings.is_empty() && self.warnings.len() <= 5 {
-            println!("\n{}", "WARNINGS:".yellow().bold());
-            for (i, warning) in self.warnings.iter().enumerate() {
-                self.print_formatted_message(warning, i + 1);
-            }
-        } else if self.warnings.len() > 5 {
-            println!("\n{} (showing first 3 of {} total)", "WARNINGS:".yellow().bold(), self.warnings.len());
-            for (i, warning) in self.warnings.iter().take(3).enumerate() {
-                self.print_formatted_message(warning, i + 1);
-            }
-        }
+        // Suppress warnings unless there are errors - keep output clean
+        // Users can check logs if they want to see warnings
     }
 
     fn print_formatted_message(&self, msg: &CompilerMessage, index: usize) {
         let level_color = match msg.level.as_str() {
             "error" => "red",
-            "warning" => "yellow", 
+            "warning" => "yellow",
             "note" => "blue",
             "help" => "cyan",
             _ => "white",
         };
 
-        println!("\n{}. {}: {}", 
+        println!(
+            "\n{}. {}: {}",
             index.to_string().bright_white().bold(),
             msg.level.to_uppercase().color(level_color).bold(),
             msg.message.color(level_color)
         );
 
+        if let Some(rendered) = &msg.rendered {
+            self.print_verification_failure_details(rendered);
+        } else if let Some(rendered) = &msg.rendered {
+            // For other errors, show key information
+            self.print_error_summary(rendered, level_color);
+        } else {
+            // Fallback to manual formatting if no rendered field
+            self.print_manual_formatting(msg, level_color);
+        }
+    }
+
+    fn print_verification_failure_details(&self, rendered: &str) {
+        let lines: Vec<&str> = rendered.lines().collect();
+        let mut file_location = String::new();
+
+        // Extract file location
+        for line in &lines {
+            if line.contains("-->") {
+                file_location = line.trim().to_string();
+                break;
+            }
+        }
+
+        println!("   {} {}", "Location:".bright_blue(), file_location.bright_white());
+        println!("   {}", "Details:".red().bold());
+
+        // Simply output the full rendered message with proper formatting
+        for line in lines {
+            if line.trim().is_empty() {
+                println!();
+            } else if line.starts_with("error:") {
+                println!("   {}", line.red().bold());
+            } else if line.contains("-->") {
+                println!("   {}", line.bright_blue());
+            } else if line.contains("failed precondition")
+                || line.contains("failed this postcondition")
+                || line.contains("assertion failed")
+            {
+                println!("   {}", line.red().bold());
+            } else if line.trim_start().starts_with("|") {
+                // Code lines - highlight important ones
+                if line.contains("^") || line.contains("~") {
+                    println!("   {}", line.red().bold());
+                } else {
+                    println!("   {}", line.dimmed());
+                }
+            } else {
+                println!("   {}", line);
+            }
+        }
+    }
+
+    fn analyze_precondition_failure(&self, rendered: &str) -> String {
+        let lines: Vec<&str> = rendered.lines().collect();
+
+        // Look for the precondition block that ends with "- failed precondition"
+        let mut precondition_content = Vec::new();
+        let mut collecting_precondition = false;
+
+        for line in &lines {
+            // Start collecting when we find a line with code content
+            if line.contains(" | ") && !line.contains("failed precondition") {
+                // Extract the code part after the line number and |
+                if let Some(pipe_pos) = line.find(" | ") {
+                    let code_part = &line[pipe_pos + 3..]; // Skip " | "
+
+                    // Look for the start of a logical condition
+                    if code_part.trim_start().starts_with('/')
+                        || code_part.contains("in_range_spec")
+                        || code_part.contains("||")
+                        || code_part.contains("&&")
+                        || collecting_precondition
+                    {
+                        collecting_precondition = true;
+
+                        // Clean up the code content
+                        let cleaned = code_part
+                            .trim_start()
+                            .trim_start_matches('/')
+                            .trim_start_matches('|')
+                            .trim();
+
+                        if !cleaned.is_empty()
+                            && !cleaned.starts_with("...")
+                            && !cleaned.chars().all(|c| c == '-' || c == ' ' || c == '_')
+                        {
+                            precondition_content.push(cleaned);
+                        }
+                    }
+                }
+            }
+
+            // Stop collecting when we hit the "failed precondition" line
+            if line.contains("failed precondition") {
+                collecting_precondition = false;
+            }
+        }
+
+        // If we didn't find content, try a different approach - look for the specific condition
+        if precondition_content.is_empty() {
+            for line in &lines {
+                if line.contains("mapping_space") || line.contains("in_range_spec") {
+                    // Extract just the meaningful parts
+                    if let Some(pipe_pos) = line.find(" | ") {
+                        let code_part = &line[pipe_pos + 3..].trim();
+                        precondition_content.push(code_part);
+                    }
+                }
+            }
+        }
+
+        // Analyze the precondition content to generate a meaningful explanation
+        if precondition_content.is_empty() {
+            return "Failed precondition (details not available)".to_string();
+        }
+
+        let full_condition = precondition_content.join(" ");
+
+        // Pattern matching for common failure types
+        if full_condition.contains("in_range_spec") {
+            if full_condition.contains("mapping_space.kernel.in_range_spec")
+                && full_condition.contains("mapping_space.physmap.in_range_spec")
+            {
+                return "Failed precondition because address validation failed - the address is not within either the kernel mapping space or the physical mapping space range. The memory address being accessed is outside the allowed memory regions.".to_string();
+            } else if full_condition.contains("mapping_space")
+                && full_condition.contains("in_range_spec")
+            {
+                return "Failed precondition because the address is not within the valid mapping space range. The memory address doesn't fall within the expected address space boundaries.".to_string();
+            } else if full_condition.contains("in_range_spec") {
+                return "Failed precondition because range validation failed - the value is outside the expected valid range.".to_string();
+            }
+        }
+
+        if full_condition.contains("address_spec") {
+            return "Failed precondition because the memory address specification is invalid. The address doesn't meet the required specification constraints.".to_string();
+        }
+
+        if full_condition.contains("pte_perm") || full_condition.contains("permission") {
+            return "Failed precondition because page table entry permissions are invalid. The memory access permissions don't match the required constraints.".to_string();
+        }
+
+        if full_condition.contains("private_bit") || full_condition.contains("shared_bit") {
+            return "Failed precondition because memory privacy/sharing bit validation failed. The memory page privacy settings don't meet the requirements.".to_string();
+        }
+
+        // Generic analysis based on logical structure
+        if full_condition.contains("||") {
+            return format!(
+                "Failed precondition because none of the alternative conditions were satisfied: {}",
+                self.simplify_condition(&full_condition)
+            );
+        } else if full_condition.contains("&&") {
+            return format!(
+                "Failed precondition because one or more required conditions were not met: {}",
+                self.simplify_condition(&full_condition)
+            );
+        }
+
+        // Fallback with the actual condition
+        return format!("Failed precondition: {}", self.simplify_condition(&full_condition));
+    }
+
+    fn simplify_condition(&self, condition: &str) -> String {
+        // Simplify complex expressions for better readability
+        let simplified = condition
+            .replace("mapping_space.kernel.in_range_spec", "kernel_range_check")
+            .replace("mapping_space.physmap.in_range_spec", "physmap_range_check")
+            .replace("pte_perm.value().address_spec", "address_validation")
+            .replace("private_bit", "privacy_bit")
+            .replace("shared_bit", "sharing_bit");
+
+        // Truncate if too long
+        if simplified.len() > 100 {
+            format!("{}...", &simplified[..97])
+        } else {
+            simplified
+        }
+    }
+
+    fn print_error_summary(&self, rendered: &str, level_color: &str) {
+        let lines: Vec<&str> = rendered.lines().collect();
+
+        // Show key lines only
+        for line in lines.iter().take(10) {
+            if line.contains("-->") {
+                println!("   {}", line.bright_blue());
+            } else if line.contains("^") || line.contains("~") {
+                println!("   {}", line.color(level_color).bold());
+            } else if line.starts_with("help:") || line.starts_with("note:") {
+                println!("   {}", line.cyan());
+                break; // Show first help/note and stop
+            }
+        }
+    }
+
+    fn print_manual_formatting(&self, msg: &CompilerMessage, level_color: &str) {
         // Print primary spans with file information
         for span in &msg.spans {
             if span.is_primary {
-                println!("   {} {}:{}:{}", 
-                    "→".bright_blue(), 
+                println!(
+                    "   {} {}:{}:{}",
+                    "→".bright_blue(),
                     span.file_name.bright_white(),
                     span.line_start.to_string().bright_white(),
                     span.column_start.to_string().bright_white()
                 );
-                
-                // Print the code snippet if available
-                if !span.text.is_empty() {
-                    for text in &span.text {
-                        let line = &text.text;
-                        if !line.trim().is_empty() {
-                            println!("     {}", line.dimmed());
-                            
-                            // Show highlight if available
-                            if text.highlight_start < text.highlight_end && text.highlight_start > 0 {
-                                let highlight_len = text.highlight_end - text.highlight_start;
-                                let spaces = " ".repeat(5 + text.highlight_start as usize);
-                                let carets = "^".repeat(highlight_len as usize);
-                                println!("{}{}", spaces, carets.color(level_color).bold());
-                            }
-                        }
+
+                // Print first few lines of code context
+                for text in span.text.iter().take(2) {
+                    let line = &text.text;
+                    if !line.trim().is_empty() {
+                        println!("     {}", line.dimmed());
                     }
                 }
 
                 if let Some(label) = &span.label {
                     println!("     {}: {}", "help".cyan(), label.cyan());
                 }
+                break; // Only show first primary span
             }
         }
 
-        // Print children messages (help/note)
+        // Print first help message
         for child in &msg.children {
             if child.level == "help" || child.level == "note" {
                 println!("   {} {}", child.level.cyan(), child.message.cyan());
+                break;
             }
         }
     }
 }
 
+// GitHub API structures for release information
+#[derive(Deserialize, Debug)]
+struct GitHubRelease {
+    tag_name: String,
+    name: String,
+    assets: Vec<GitHubAsset>,
+    prerelease: bool,
+}
+
+#[derive(Deserialize, Debug)]
+struct GitHubAsset {
+    name: String,
+    browser_download_url: String,
+    content_type: String,
+    size: u64,
+}
+
 // Configuration constants - no user-specific paths
 const DEFAULT_VERUS_REPO: &str = "https://github.com/hiroki-chen/verus.git";
+const VERUS_RELEASES_API: &str = "https://api.github.com/repos/verus-lang/verus/releases";
 const DEFAULT_MEMORY: &str = "4G";
 const DEFAULT_SMP_CORES: u32 = 4;
 
@@ -332,8 +534,6 @@ enum Commands {
 
     BootstrapVerus {
         #[arg(short, long)]
-        prefix: PathBuf,
-        #[arg(short, long)]
         commit: Option<String>,
     },
 
@@ -388,7 +588,7 @@ impl Builder {
 
         let log_dir = self.config.root.join("logs");
         std::fs::create_dir_all(&log_dir).context("Failed to create logs directory")?;
-        
+
         let log_file_path = log_dir.join(log_file_name);
         let mut log_file = OpenOptions::new()
             .create(true)
@@ -471,7 +671,7 @@ impl Builder {
     fn execute_with_logging(&self, mut cmd: Command, log_file_name: &str) -> Result<()> {
         let log_dir = self.config.root.join("logs");
         std::fs::create_dir_all(&log_dir).context("Failed to create logs directory")?;
-        
+
         let log_file_path = log_dir.join(log_file_name);
         let log_file = OpenOptions::new()
             .create(true)
@@ -500,7 +700,7 @@ impl Builder {
         if !output.status.success() {
             println!("{} Command failed with exit code: {}", "✗".red(), output.status);
             println!("{} Check log file for details: {:?}", "📄".yellow(), log_file_path);
-            
+
             // Print last few lines of stderr for immediate feedback
             let stderr_str = String::from_utf8_lossy(&output.stderr);
             let stderr_lines: Vec<&str> = stderr_str.lines().collect();
@@ -510,11 +710,11 @@ impl Builder {
                     println!("  {}", line);
                 }
             }
-            
+
             return Err(anyhow::anyhow!("Command failed"));
         } else {
             println!("{} Command completed successfully", "✓".green());
-            
+
             // Print last few lines of stdout for immediate feedback
             let stdout_str = String::from_utf8_lossy(&output.stdout);
             let stdout_lines: Vec<&str> = stdout_str.lines().collect();
@@ -565,7 +765,8 @@ impl Builder {
                 .arg(self.config.stage2_path(release))
                 .arg(self.config.stage2_binary_path(release));
 
-            let log_file = format!("deko-stage2-objcopy-{}-{}.log", self.config.target_arch, profile);
+            let log_file =
+                format!("deko-stage2-objcopy-{}-{}.log", self.config.target_arch, profile);
             self.execute_with_logging(cmd, &log_file)?;
         }
 
@@ -598,7 +799,8 @@ impl Builder {
                 .arg(self.config.deko_monitor_path(release))
                 .arg(self.config.deko_elf_path(release));
 
-            let log_file = format!("deko-monitor-objcopy-{}-{}.log", self.config.target_arch, profile);
+            let log_file =
+                format!("deko-monitor-objcopy-{}-{}.log", self.config.target_arch, profile);
             self.execute_with_logging(cmd, &log_file)?;
         }
 
@@ -607,7 +809,7 @@ impl Builder {
 
     fn build_stage1(&self, release: bool) -> Result<()> {
         println!("{}", "--- Building stage1 bootloader ---".bright_cyan().bold());
-        
+
         let mut cmd = Command::new("cargo");
         cmd.arg("build")
             .arg("--package")
@@ -840,7 +1042,10 @@ fn main() -> Result<()> {
 
         Commands::Pretty { paths } => pretty(paths),
 
-        Commands::BootstrapVerus { prefix, commit } => bootstrap_verus(&prefix, commit.as_deref()),
+        Commands::BootstrapVerus { commit } => {
+            let default_prefix = project_root().join("tools");
+            bootstrap_verus(&default_prefix, commit.as_deref())
+        }
 
         Commands::BootstrapQemu { prefix } => bootstrap_qemu(&prefix),
     }
@@ -959,108 +1164,249 @@ fn bootstrap_qemu(prefix: &Path) -> Result<()> {
 }
 
 fn bootstrap_verus(prefix: &Path, commit: Option<&str>) -> Result<()> {
-    println!("Bootstrapping with prefix: {}", prefix.display());
+    println!("{} Bootstrapping Verus...", "→".bright_cyan());
+    println!("Installation prefix: {}", prefix.display().to_string().bright_white());
 
     // Ensure prefix directory exists
     std::fs::create_dir_all(prefix).context("Failed to create prefix directory")?;
 
-    let verus_dir = prefix.join("verus");
-
-    // Clone or update repository
-    if verus_dir.exists() {
-        println!("Verus repository already exists at {}, using existing repo", verus_dir.display());
-
-        let repo = Repository::open(&verus_dir).context("Failed to open existing repository")?;
-
-        if let Some(commit) = commit {
-            repo.set_head_detached(repo.revparse_single(commit)?.id())?;
-            println!("Checked out commit: {}", commit);
-        }
+    // Step 1: Query GitHub releases API
+    println!("\n{} Querying GitHub releases...", "🔍".bright_yellow());
+    let client = Client::new();
+    let releases_url = if let Some(commit) = commit {
+        format!("{}/tags/{}", VERUS_RELEASES_API, commit)
     } else {
-        println!("Cloning Verus repository to {}", verus_dir.display());
-        let repo = Repository::clone(DEFAULT_VERUS_REPO, &verus_dir)?;
-
-        if let Some(commit) = commit {
-            repo.set_head_detached(repo.revparse_single(commit)?.id())?;
-            println!("Checked out commit: {}", commit);
-        }
-    }
-
-    // Step 3: Build Verus (following the official instructions)
-    let source_dir = verus_dir.join("source");
-    let activate_script = verus_dir.join("tools/activate");
-
-    // Check if activation script exists
-    if !activate_script.exists() {
-        bail!("Activation script not found at {:?}", activate_script);
-    }
-
-    println!("Building Verus with development environment...");
-
-    // Change to source directory
-    std::env::set_current_dir(&source_dir)
-        .with_context(|| format!("Failed to change directory to {:?}", source_dir))?;
-
-    // Detect the shell
-    let shell = detect_shell();
-    println!("Detected shell: {}", shell);
-
-    // Build command that sources activate script and runs vargo build
-    let build_command = match shell.as_str() {
-        "fish" => {
-            format!("source ../tools/activate.fish && vargo build --release",)
-        }
-        _ => {
-            // bash/zsh/sh
-            format!("source ../tools/activate && vargo build --release",)
-        }
+        format!("{}/latest", VERUS_RELEASES_API)
     };
 
-    // Install z3.
-    println!("Installing z3...");
-    let mut z3_cmd = std::process::Command::new("bash");
-    z3_cmd.arg("-c").arg("./tools/get-z3.sh");
-    if !z3_cmd.status()?.success() {
-        bail!("Failed to install z3");
-    }
-    println!("✓ z3 installed successfully");
+    let response = client
+        .get(&releases_url)
+        .header("User-Agent", "xtask-bootstrap")
+        .send()
+        .context("Failed to fetch releases from GitHub")?;
 
-    println!("Running build in development environment...");
-    println!("Command: {}", build_command);
-
-    let mut cmd = std::process::Command::new(&shell);
-    cmd.arg("-c").arg(&build_command).current_dir(&source_dir).env("RUST_BACKTRACE", "1");
-
-    // Run the build
-    let output = cmd.output().context("Failed to execute vargo build")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        bail!("Failed to build verus:\nSTDOUT:\n{}\nSTDERR:\n{}", stdout, stderr);
+    if !response.status().is_success() {
+        bail!("Failed to fetch release info: HTTP {}", response.status());
     }
 
-    // Check for success indicators in output
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if stdout.contains("Verified") || stdout.contains("vstd") {
-        println!("✓ Verus built and vstd verified successfully");
+    let release: GitHubRelease = response.json().context("Failed to parse release JSON")?;
+
+    println!("✓ Found release: {} ({})", release.name.green(), release.tag_name.bright_blue());
+
+    if release.prerelease {
+        println!("⚠ This is a pre-release version");
+    }
+
+    // Step 2: Find Linux binary asset and source code
+    println!("\n{} Looking for Linux binary and source code...", "📦".bright_cyan());
+    let linux_asset = release
+        .assets
+        .iter()
+        .find(|asset| {
+            asset.name.to_lowercase().contains("linux")
+                && (asset.name.ends_with(".zip") || asset.name.ends_with(".tar.gz"))
+        })
+        .ok_or_else(|| anyhow::anyhow!("No Linux binary found in release assets"))?;
+
+    // Also find source code asset
+    let source_asset = release
+        .assets
+        .iter()
+        .find(|asset| {
+            asset.name == "Source code (zip)"
+                || asset.name.contains("source") && asset.name.ends_with(".zip")
+        })
+        .or_else(|| {
+            // If no explicit source asset, construct the GitHub source URL
+            None
+        });
+
+    println!(
+        "✓ Found binary: {} ({} bytes)",
+        linux_asset.name.green(),
+        format_bytes(linux_asset.size).bright_white()
+    );
+
+    // Step 3: Download the binary asset
+    println!("\n{} Downloading {}...", "⬇".bright_green(), linux_asset.name);
+    let response = client
+        .get(&linux_asset.browser_download_url)
+        .header("User-Agent", "xtask-bootstrap")
+        .send()
+        .context("Failed to download asset")?;
+
+    if !response.status().is_success() {
+        bail!("Failed to download asset: HTTP {}", response.status());
+    }
+
+    let binary_bytes = response.bytes().context("Failed to read download bytes")?;
+    println!("✓ Downloaded {} bytes", format_bytes(binary_bytes.len() as u64).bright_white());
+
+    // Step 4: Download source code for dependencies
+    println!("\n{} Downloading source code for dependencies...", "⬇".bright_yellow());
+
+    let source_url = if let Some(asset) = source_asset {
+        asset.browser_download_url.clone()
     } else {
-        println!("✓ Verus build completed");
+        // Construct GitHub's auto-generated source zip URL
+        format!("https://github.com/verus-lang/verus/archive/refs/tags/{}.zip", release.tag_name)
+    };
+
+    let source_response = client
+        .get(&source_url)
+        .header("User-Agent", "xtask-bootstrap")
+        .send()
+        .context("Failed to download source code")?;
+
+    if !source_response.status().is_success() {
+        bail!("Failed to download source code: HTTP {}", source_response.status());
     }
 
-    println!("✓ Bootstrap completed successfully!");
+    let source_bytes = source_response.bytes().context("Failed to read source bytes")?;
+    println!(
+        "✓ Downloaded source: {} bytes",
+        format_bytes(source_bytes.len() as u64).bright_white()
+    );
+
+    // Step 5: Extract to tools/verus
+    let verus_dir = prefix.join("verus");
+    if verus_dir.exists() {
+        println!("🗑 Removing existing verus directory...");
+        std::fs::remove_dir_all(&verus_dir).context("Failed to remove existing verus directory")?;
+    }
+
+    std::fs::create_dir_all(&verus_dir).context("Failed to create verus directory")?;
+
+    println!("\n{} Extracting binary to {}...", "📂".bright_cyan(), verus_dir.display());
+
+    if linux_asset.name.ends_with(".zip") {
+        extract_zip(&binary_bytes, &verus_dir)?;
+    } else {
+        bail!("Unsupported archive format. Only ZIP files are currently supported.");
+    }
+
+    println!("✓ Verus binary extracted successfully!");
+
+    // Step 6: Extract source code to temporary directory and copy dependencies
+    println!("\n{} Extracting dependencies from source code...", "📂".bright_yellow());
+    let temp_source_dir = prefix.join("temp_source");
+    if temp_source_dir.exists() {
+        std::fs::remove_dir_all(&temp_source_dir)?;
+    }
+    std::fs::create_dir_all(&temp_source_dir)?;
+
+    extract_zip(&source_bytes, &temp_source_dir)?;
+
+    // Find the dependencies folder in the extracted source
+    let mut dependencies_found = false;
+    for entry in WalkDir::new(&temp_source_dir).max_depth(3) {
+        let entry = entry?;
+        if entry.file_type().is_dir() && entry.file_name() == "dependencies" {
+            let source_deps = entry.path();
+            let target_deps = verus_dir.join("dependencies");
+
+            println!("✓ Found dependencies folder at: {}", source_deps.display());
+            println!("📁 Copying to: {}", target_deps.display());
+
+            copy_dir_recursive(source_deps, &target_deps)?;
+            dependencies_found = true;
+            break;
+        }
+    }
+
+    if !dependencies_found {
+        println!("⚠ Dependencies folder not found in source code");
+    } else {
+        println!("✓ Dependencies folder copied successfully!");
+    }
+
+    // Clean up temporary source directory
+    std::fs::remove_dir_all(&temp_source_dir)?;
+
+    // Step 5: Check if extraction was successful and find binaries
+    let mut verus_binary = None;
+    for entry in walkdir::WalkDir::new(&verus_dir) {
+        let entry = entry?;
+        if entry.file_type().is_file() && entry.file_name() == "verus" {
+            verus_binary = Some(entry.path().to_path_buf());
+            break;
+        }
+    }
+
+    if let Some(ref binary_path) = verus_binary {
+        println!(
+            "\n{} Verus binary found at: {}",
+            "✓".green(),
+            binary_path.display().to_string().bright_white()
+        );
+
+        // Make binary executable
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&binary_path)?.permissions();
+            perms.set_mode(perms.mode() | 0o755);
+            std::fs::set_permissions(&binary_path, perms)?;
+            println!("✓ Made binary executable");
+        }
+    } else {
+        println!("⚠ Verus binary not found in extracted files");
+    }
 
     // Print final instructions
-    println!("\nVerus installation complete!");
-    println!("Verus binary should be at: {:?}", source_dir.join("target-verus/release/verus"));
-    println!("\nTo use Verus, source the activation script:");
-    match shell.as_str() {
-        "fish" => println!("  source {:?}", verus_dir.join("tools/activate.fish")),
-        _ => println!("  source {:?}", verus_dir.join("tools/activate")),
+    println!("\n{}", "=== Verus installation complete! ===".bright_cyan().bold());
+    println!("Verus installed to: {}", verus_dir.display().to_string().bright_white());
+
+    if let Some(ref binary_path) = verus_binary {
+        println!("Binary location: {}", binary_path.display().to_string().bright_white());
+        println!("\nTo use Verus, add it to your PATH:");
+        println!("  export PATH={}:$PATH", binary_path.parent().unwrap().display());
+        println!("\nOr use the full path:");
+        println!("  {}", binary_path.display());
     }
-    println!("Then run: vargo build --release");
 
     Ok(())
+}
+
+fn extract_zip(bytes: &[u8], target_dir: &Path) -> Result<()> {
+    let cursor = Cursor::new(bytes);
+    let mut archive = ZipArchive::new(cursor)?;
+
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)?;
+        let outpath = target_dir.join(file.name());
+
+        if file.name().ends_with('/') {
+            // Directory
+            std::fs::create_dir_all(&outpath)?;
+        } else {
+            // File
+            if let Some(parent) = outpath.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut outfile = std::fs::File::create(&outpath)?;
+            std::io::copy(&mut file, &mut outfile)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
+    let mut size = bytes as f64;
+    let mut unit_index = 0;
+
+    while size >= 1024.0 && unit_index < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit_index += 1;
+    }
+
+    if unit_index == 0 {
+        format!("{} {}", size as u64, UNITS[unit_index])
+    } else {
+        format!("{:.1} {}", size, UNITS[unit_index])
+    }
 }
 
 // Helper function to detect the current shell
@@ -1159,6 +1505,25 @@ fn load_qemu_config(path: &Path) -> Result<FinalQemuConfig> {
     }
 
     Ok(config)
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+
+        if file_type.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn project_root() -> PathBuf {

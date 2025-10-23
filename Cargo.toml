@@ -3,19 +3,17 @@ resolver = "2"
 members = [
     "deko-core",
     "deko-logging",
-    "deko-macros",
     "deko-stage1",
     "deko-std",
-    "xtask",
     "deko-playground",
+    "xtask",
 ]
 
 [workspace.dependencies]
-# Verus repos
-vstd = { git = "https://github.com/hiroki-chen/verus.git", default-features = false }
-verus_builtin = { git = "https://github.com/hiroki-chen/verus.git" }
-verus_builtin_macros = { git = "https://github.com/hiroki-chen/verus.git" }
-verus_state_machines_macros = { git = "https://github.com/hiroki-chen/verus.git" }
+vstd = { git = "https://github.com/verus-lang/verus.git", default-features = false }
+verus_builtin = { git = "https://github.com/verus-lang/verus.git" }
+verus_builtin_macros = { git = "https://github.com/verus-lang/verus.git" }
+verus_state_machines_macros = { git = "https://github.com/verus-lang/verus.git" }
 
 syn_verus = { git = "https://github.com/ziqiaozhou/verus", rev = "7c4a5274a4d74522f3965eb038bb7e22fa5eebef", features = [
     "full",
@@ -26,7 +24,6 @@ prettyplease_verus = { git = "https://github.com/ziqiaozhou/verus", rev = "7c4a5
 
 deko-core = { path = "deko-core", default-features = false }
 deko-logging = { path = "deko-logging" }
-deko-macros = { path = "deko-macros" }
 deko-std = { path = "deko-std" }
 
 # the profile used for `cargo build`
