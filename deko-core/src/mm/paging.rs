@@ -4,10 +4,16 @@ use vstd::pervasive::arbitrary;
 // Re-export PTE_BASE from deko-std for backward compatibility
 use vstd::{assert_by_contradiction, prelude::*};
 
+use super::DEKO_MAPPING_SPACE;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::DEKO_FRAME_ALLOCATOR;
 use crate::prelude::*;
+
+extern "C" {
+    #[link_name = "pgtable"]
+    pub static mut pgtable__: Page;
+}
 
 deko_bitflags! {
     pub struct Pte: u64 {
@@ -966,7 +972,7 @@ impl Page {
         // lack proof that the ptr is within the physmap range (how should we do this?)
         let paddr = PhysAddr::from(ptr);
         // let vaddr = ms.phys_to_virt(paddr); // this is problematic.
-        let vaddr = VirtAddr(paddr.0); // for now we assume this.
+        let vaddr = VirtAddr(paddr.0);  // for now we assume this.
 
         let pptr = DekoPPtr(vstd::simple_pptr::PPtr(vaddr.0 as usize, core::marker::PhantomData));
 
@@ -1034,7 +1040,7 @@ impl Page {
         let val = pte.borrow(Tracked(pte_perm));
         let paddr = val.address(private_bit, shared_bit);
         // let vaddr = mapping_space.phys_to_virt(paddr); // note this.
-        let vaddr = VirtAddr(paddr.0);
+        let vaddr = VirtAddr::new(paddr.0);
 
         DekoPPtr(vstd::simple_pptr::PPtr(vaddr.0 as usize, core::marker::PhantomData))
     }
@@ -1184,9 +1190,7 @@ impl Page {
         // again as mutatable later.
         {
             let tracked page_perm = &perm.pgtable_perm;
-            let (entry, Tracked(entry_perm)) = page.borrow(Tracked(page_perm)).0.index_as_ptr(
-                idx,
-            );
+            let (entry, Tracked(entry_perm)) = page.borrow(Tracked(page_perm)).0.index_as_ptr(idx);
             if PageTableEntry::is_present_pte(entry, Tracked(&entry_perm)) {
                 // Why don't we just continue the allocation here?
                 //
@@ -1214,7 +1218,6 @@ impl Page {
             // or just die?
             vstd::vpanic!("Out of memory");
         }
-
         let flags = PteFlags::writeable();
         let new_pte_value = PageTableEntry(
             PhysAddr(make_private_address(paddr.0, private_bit, shared_bit) | flags.bits() as u64),
@@ -1301,15 +1304,7 @@ impl Page {
             ));
         }
 
-        Page::allocate_pte_lvl2(
-            mapping,
-            Tracked(perm),
-            vaddr,
-            ms,
-            private_bit,
-            shared_bit,
-            huge,
-        )
+        Page::allocate_pte_lvl2(mapping, Tracked(perm), vaddr, ms, private_bit, shared_bit, huge)
     }
 
     #[verifier::spinoff_prover]
@@ -1373,15 +1368,7 @@ impl Page {
             Tracked(&page_perm.this_page_perm),
         ).0.index_as_ptr(idx);
 
-        Page::allocate_pte_lvl1(
-            mapping,
-            Tracked(perm),
-            vaddr,
-            ms,
-            private_bit,
-            shared_bit,
-            huge,
-        )
+        Page::allocate_pte_lvl1(mapping, Tracked(perm), vaddr, ms, private_bit, shared_bit, huge)
     }
 
     #[verifier::spinoff_prover]
@@ -1835,30 +1822,25 @@ impl Page {
         broadcast use PteFlags::lemma_each_bits_is_valid;
         broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
 
-        let (new_page, Tracked(new_page_perm), paddr) = Page::alloc_new(ms);
-
         let ghost path = PageTablePath::from_vaddr_at_level(vaddr, 1);
-        {
-            let (entry, Tracked(entry_perm)) = new_page.borrow(
-                Tracked(&perm.storage.tracked_borrow(path.drop_last()).this_page_perm),
-            ).0.index_as_ptr(idx);
-
-            if !PageTableEntry::is_huge_pte(entry, Tracked(entry_perm)) {
-                proof {
-                    assert(false);  // neeed to ensure this.
-                }
-                vstd::vpanic!("Expected huge page");
-            }
-        }
-
-        let tracked mut page_perm = perm.storage.tracked_remove(path.drop_last());  // we remove and then re-insert later.
-        let (entry, Tracked(entry_perm)) = new_page.borrow(
-            Tracked(&page_perm.this_page_perm),
+        let (entry, Tracked(entry_perm)) = page.borrow(
+            Tracked(&perm.storage.tracked_borrow(path.drop_last()).this_page_perm),
         ).0.index_as_ptr(idx);
 
+        // LATER REMOVE THIS DUE TO precondition.
+        if !PageTableEntry::is_huge_pte(entry, Tracked(entry_perm)) {
+            proof {
+                assert(false);  // neeed to ensure this.
+            }
+            vstd::vpanic!("Expected huge page");
+        }
+        
         let addr_2m = entry.borrow(Tracked(entry_perm)).address(private_bit, shared_bit);
         let mut flags = PteFlags::from_bits_truncate(entry.borrow(Tracked(entry_perm)).0.0);
+        let (new_page, Tracked(new_page_perm), paddr) = Page::alloc_new(ms);
         flags.remove(HUGE);
+
+        let tracked mut page_perm = perm.storage.tracked_remove(path.drop_last());  // we remove and then re-insert later.
 
         // Populate the new page.
         let mut cur = 0usize;
@@ -1923,7 +1905,7 @@ impl Page {
         }
     }
 
-    /// Sets a given page as shared.
+    /// Sets a given page (4KB) as shared.
     #[verifier::external_body]
     pub fn set_shared_4k(
         page: DekoPPtr<Self>,
@@ -1941,7 +1923,15 @@ impl Page {
         let mapping = Page::walk(page, Tracked(perm), vaddr, ms, private_bit, shared_bit);
         Page::split_page_into_4k(mapping, ms, private_bit, shared_bit, Tracked(perm), Ghost(vaddr));
 
-        let Mapping::Level0(page, idx) = mapping else {
+        // After splitting we need to walk again to get the Level0 mapping.
+        let Mapping::Level0(page, idx) = Page::walk(
+            page,
+            Tracked(perm),
+            vaddr,
+            ms,
+            private_bit,
+            shared_bit,
+        ) else {
             proof {
                 assert(false);  // by precondition.
             }
@@ -1949,7 +1939,12 @@ impl Page {
         };
 
         // set shared. todo.
-
+        let (entry, Tracked(entry_perm)) = page.borrow(Tracked::assume_new()).0.index_as_ptr(idx);  // TOOD: fix tracked.
+        let pte = entry.borrow(Tracked(&entry_perm)).0.0;
+        let new_pte_value = PageTableEntry(
+            PhysAddr(make_shared_address(pte, private_bit, shared_bit)),
+        );
+        Page::update_entry_by_ptr(page, Tracked::assume_new(), idx, new_pte_value);
     }
 
     /// Maps a single 4KB page at the given virtual address to the given physical address

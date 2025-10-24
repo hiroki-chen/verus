@@ -9,7 +9,7 @@ use crate::cpu::{
     DekoCpuCtx, DekoCpuCtxPermission, PerCpuAreas, PerCpuShared, CPUID_MAX_COUNT, CPU_AREA_MAGIC,
     PERCPU_AREAS,
 };
-use crate::mm::paging::{PageTable, PteFlags};
+use crate::mm::paging::PteFlags;
 use crate::mm::{phys_to_virt, virt_to_phys, DEKO_FRAME_ALLOCATOR};
 use crate::snp::ghcb::msr_register_ghcb_gpa;
 
@@ -33,17 +33,18 @@ pub const RMP_RWX: u8 = RMP_NO_WRITE | RMP_WRITE;
 
 impl Snp {
     /// Set up the GHCB pages and other necessary state for SNP operation.
-    #[inline]
     fn init_guest_host(
         &self,
         ctx: DekoPPtr<DekoCpuCtx>,
-        Tracked(ctx_perm): Tracked<&DekoCpuCtxPermission>,
-    ) {
-        // crate::snp::ghcb::validate_ghcb(ghcb, Tracked(ghcb_perm), pgtable, Tracked(pgtable_perm));
-        // let ghcb_vaddr = VirtAddr::new(ghcb.addr() as u64);
-        // let ghcb_paddr = virt_to_phys(ghcb_vaddr);
-        // // Register the GHCB GPA with the hypervisor.
-        // msr_register_ghcb_gpa(ghcb_paddr);
+        Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
+    )
+        requires
+            self.wf(),
+            old(ctx_perm).wf_with(ctx),
+        ensures
+            ctx_perm.wf_with(ctx),
+    {
+        crate::snp::ghcb::validate_ghcb(ctx, Tracked(ctx_perm));
     }
 
     pub fn init_platform_end(&self, igvm_params: &IgvmParamBlock)
@@ -85,8 +86,8 @@ impl Snp {
             &DEKO_FRAME_ALLOCATOR.0,
         );
         let (ghcb, Tracked(ghcb_perm)) = ghcb.into_ptr(Tracked(ghcb_perm));
-        // Initialize the GHCB.
-        // Self::heap_allocation_identity_check(ghcb.addr() as u64);
+
+        // self.test_walk_ghcb();
 
         // 2. We now set up the percpu area for this CPU.
         // Note that we do not need to initialize the percpu area since it is
@@ -119,10 +120,11 @@ impl Snp {
         let tracked mut cpu_ctx_perm = DekoCpuCtxPermission {
             ptr_perm: bsp_percpu_perm,
             pgtable_perm: ctx_perm.pgtable_perm,
-            ghcb_perm: ghcb_perm,
+            ghcb_perm,
         };
 
-        self.init_guest_host(bsp_percpu_ptr, Tracked(&mut cpu_ctx_perm));
+        // TODO: CONSTRUCT THE PAIR.
+        assume(cpu_ctx_perm.wf_with(bsp_percpu_ptr));
 
         // 4. This maps the PERCPU_BASE addr to the percpu area so `this_cpu` workds.
         DekoCpuCtx::map_page_4k(
@@ -132,14 +134,31 @@ impl Snp {
             bsp_percpu_paddr,
             PteFlags::data(),
         );
+
+        self.init_guest_host(bsp_percpu_ptr, Tracked(&mut cpu_ctx_perm));
     }
 
-    // #[verifier::external_body]
-    // fn test_rw(&self) {        
-    //     unsafe {
-    //         core::ptr::write(PERCPU_BASE.0 as *mut u8, 0xff);
-    //     }
-    // }
+    #[verifier::external_body]
+    fn test_walk_ghcb(&self) {
+        use crate::mm::paging::{index_at_level, Page, PteFlags};
+
+        let page = unsafe { &*(core::ptr::addr_of!(crate::mm::paging::pgtable__) as *const Page) };
+
+        let vaddr = VirtAddr(0x10000);
+
+        let idx_lvl3 = index_at_level::<3>(vaddr);
+
+        if page.0.0[idx_lvl3].0.0 & 0x8000000000027 != 0x8000000000027 {
+            vstd::vpanic!("GHCB PTE level 3 mismatch");
+        }
+        let next_page_addr = ((page.0.0[idx_lvl3].0.0 & 0x000f_ffff_ffff_f000) & (!(1 << 51))) & !(1
+            << 0);
+        let next_page_addr2 = page.0.0[idx_lvl3].address(1 << 51, 1 << 0);
+
+        if next_page_addr != next_page_addr2.0 {
+            vstd::vpanic!("GHCB PTE level 3 address mismatch");
+        }
+    }
 
     // #[verifier::external_body]
     // pub fn heap_allocation_identity_check(addr: u64) {

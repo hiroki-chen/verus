@@ -582,14 +582,15 @@ impl DekoCpuCtx {
         paddr: PhysAddr,
         flags: PteFlags,
     )
-        // requires
-        //     vaddr.wf(),
-        //     paddr.wf(),
-        //     vaddr@ % 0x1000 == 0,
-        //     paddr@ % 0x1000 == 0,
-        //     old(perm).wf_with(ptr),
-        // ensures
-        //     perm.wf_with(ptr),
+        requires
+    //     vaddr.wf(),
+    //     paddr.wf(),
+    //     vaddr@ % 0x1000 == 0,
+    //     paddr@ % 0x1000 == 0,
+
+            old(perm).wf_with(ptr),
+        ensures
+            perm.wf_with(ptr),
     {
         let this = ptr.borrow(Tracked(&perm.ptr_perm));
         let page = this.pgtable;
@@ -605,9 +606,9 @@ impl DekoCpuCtx {
             ms,
             flags,
             // private_bit,
-            51,
+            1 << 51,
             // shared_bit,
-            0,
+            1 << 0,
         );
     }
 
@@ -633,23 +634,13 @@ impl DekoCpuCtx {
         &&& pgperm.is_init()
     }
 
-    /// Get the page table for this CPU core.
-    ///
-    /// This method retrieves the page table from this CPU's context,
-    /// providing both the pointer and the necessary permissions.
-    /// This is the preferred way to access the page table for the current core.
-    pub fn get_pgtable<'a>(&'a self, Tracked(ctx_perm): Tracked<&'a DekoCpuCtxPermission>) -> (r: (
-        DekoPPtr<PageTable>,
-        Tracked<&'a PageTablePermission>,
-    ))
+    pub fn pgtable(&self) -> (r: DekoPPtr<PageTable>)
         requires
-            ctx_perm.pgtable_perm.pgtable_perm.pptr() == self.pgtable_spec()@,
-            ctx_perm.pgtable_perm.wf(),
+            self.wf(),
         ensures
-            r.1@.pgtable_perm.pptr() == r.0@,
-            r.1@.wf(),
+            r == self.pgtable_spec(),
     {
-        (self.pgtable, Tracked(&ctx_perm.pgtable_perm))
+        self.pgtable
     }
 }
 

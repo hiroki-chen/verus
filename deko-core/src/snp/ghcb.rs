@@ -17,8 +17,7 @@ use deko_std::sync::RwLockToks::reader;
 use vstd::atomic::PAtomicU8;
 use vstd::prelude::*;
 
-use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
-use crate::cpu::DekoCpuCtx;
+use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::paging::{PageTable, PteFlags};
 use crate::mm::virt_to_phys;
 
@@ -27,29 +26,44 @@ verus! {
 /// Validates the GHCB page allocated for the current CPU core.
 #[verifier::external_body]
 pub fn validate_ghcb(
-    ctx: DekoPPtr<DekoCtx>,
-    Tracked(ctx_perm): Tracked<&mut DekoCtxPermission>,
-    ghcb: DekoPPtr<GuestHostCommucationBlock>,
-    Tracked(ghcb_perm): Tracked<DekoPointsTo<GuestHostCommucationBlock>>,
+    ctx: DekoPPtr<DekoCpuCtx>,
+    Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
 )
     requires
-        old(ctx_perm).wf(),
         old(ctx_perm).wf_with(ctx),
-        ghcb_perm.wf(),
-        ghcb_perm.is_init(),
-        ghcb_perm.pptr() == ghcb@,
-        ghcb_perm.addr() % 0x1000 == 0,
+        old(ctx_perm).ghcb_perm.wf(),
     ensures
-        ctx_perm.wf(),
         ctx_perm.wf_with(ctx),
 {
-    // let vaddr = VirtAddr::new(ghcb.addr() as u64);
-    // let paddr = virt_to_phys(vaddr);
-    // // Invalidate this page from the CVM.
-    // crate::snp::Snp::pvalidate(vaddr.0, 0x1000, false, Tracked(ctx_perm));
-    // // Notify the hypervisor that this page is now valid.
-    // msr_set_page_valid(paddr, false);
-    // PageTable::set_shared_4k(pgtable, Tracked(pgtable_perm), vaddr);
+    let ctx = ctx.borrow(Tracked(&ctx_perm.ptr_perm));
+    let pgtable = ctx.pgtable();
+    let ghcb = ctx.ghcb();
+    let ms = ctx.kernel_mapping();
+    let private_bit = ctx.private_bit();
+    let shared_bit = ctx.shared_bit();
+
+    let ghcb_vaddr = VirtAddr::new(ghcb.addr() as u64);
+    // let ghcb_paddr = virt_to_phys(ghcb_vaddr); // todo: FIX ME.
+    let ghcb_paddr = PhysAddr(ghcb.addr() as u64);
+    // Invalidate this page from the CVM.
+    crate::snp::Snp::pvalidate(ghcb_vaddr.0, 0x1000, false, Tracked::assume_new());
+    // Notify the hypervisor that this page is now invalid.
+    msr_set_page_valid(ghcb_paddr, false);
+
+    // Then set the GHCB page as shared in the page table.
+    PageTable::set_shared_4k(
+        pgtable,
+        Tracked(&mut ctx_perm.pgtable_perm),
+        ghcb_vaddr,
+        &ms,
+        // private_bit,
+        1 << 51,
+        // shared_bit,
+        1 << 0,
+    );
+
+    // Register the GHCB GPA with the hypervisor.
+    msr_register_ghcb_gpa(ghcb_paddr);
 }
 
 pub fn msr_register_ghcb_gpa(paddr: PhysAddr)

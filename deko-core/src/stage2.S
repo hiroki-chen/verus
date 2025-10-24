@@ -273,17 +273,18 @@ gdt64_desc:
   .word gdt64_end - gdt64 - 1
   .quad gdt64
 
-.align 8
-deko_bsp_ctx:
-  .fill 0x16, 1, 0
-  /* Pre-populate the mapping space? */
-deko_bsp_ctx_end:
-
 .align 0x1000
 .globl pgtable
 pgtable:
 .fill 0x7000, 1, 0
 pgtable_end:
+
+.align 8
+deko_bsp_ctx:
+  .fill 0x40, 1, 0
+  /* Pre-populate the mapping space? */
+deko_bsp_ctx_end:
+
 
 .globl bsp_stack
 bsp_stack:
