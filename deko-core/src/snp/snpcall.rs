@@ -132,9 +132,14 @@ impl Snp {
             bsp_percpu_paddr,
             PteFlags::data(),
         );
-
-        early_dbg();  // remove this ONLY after previous functions are implemented and verified.
     }
+
+    // #[verifier::external_body]
+    // fn test_rw(&self) {        
+    //     unsafe {
+    //         core::ptr::write(PERCPU_BASE.0 as *mut u8, 0xff);
+    //     }
+    // }
 
     // #[verifier::external_body]
     // pub fn heap_allocation_identity_check(addr: u64) {

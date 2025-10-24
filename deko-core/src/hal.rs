@@ -345,6 +345,8 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
     let ctx_perm = Tracked(ctx_perm);
     dispatch_to_platform!(init_each_cpu, ctx, ctx_perm);
 
+    early_dbg(); // ensure all functions before this call will not crash.
+
     init_early_idt_late(&mut idt);
 
     dispatch_to_platform!(init_platform_end, get_igvm_params(&header));

@@ -220,6 +220,8 @@ startup_64:
     * - Wrap information as a `Ctx` struct and pass its pointer as the first argument (%rdi)
     *   -  Store the Stage2Launchinfo pointer in ctx->stage2_info (offset 0)
     *   -  Store the page table base address in ctx->pgtable (offset 8)
+    *   -  Store the gdt pointer in ctx->gdt (offset 16)
+    *   -  Store the mapping space in ctx->mapping_space (offset 24)
     * - Pass control to deko_main
     * - Make sure (%rsp + 8) is 16b-aligned when control is transferred
     *   to deko_main
@@ -230,6 +232,8 @@ startup_64:
   // Copy ebp to rdi
   movl %ebp, (%rdi)
   movq $pgtable, 8(%rdi)
+  movq $gdt64_desc, 16(%rdi)
+
   andq $~0xf, %rsp
   call deko_main
 
@@ -271,7 +275,8 @@ gdt64_desc:
 
 .align 8
 deko_bsp_ctx:
-  .fill 0x1000, 1, 0
+  .fill 0x16, 1, 0
+  /* Pre-populate the mapping space? */
 deko_bsp_ctx_end:
 
 .align 0x1000

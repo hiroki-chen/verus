@@ -287,6 +287,7 @@ pub const fn sign_extend(addr: u64) -> (r: u64)
 /// let vaddr = mapping_space.phys_to_virt(paddr);
 /// ```
 #[derive(Clone, Copy)]
+#[repr(C)]
 pub struct MappingSpace {
     pub kernel: FixedAddressMappingRange,
     pub physmap: FixedAddressMappingRange,
@@ -336,6 +337,7 @@ impl Predicate<MappingSpace> for MappingSpacePred {
 /// }
 /// ```
 #[derive(Clone, Copy)]
+#[repr(C)]
 pub struct FixedAddressMappingRange {
     pub virt_start: VirtAddr,
     pub virt_end: VirtAddr,

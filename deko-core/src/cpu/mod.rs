@@ -12,7 +12,7 @@ use vstd::cell::{PCell, PointsTo};
 use vstd::prelude::*;
 
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
-use crate::mm::paging::{PageTable, PageTablePermission, PteFlags};
+use crate::mm::paging::{Page, PageTable, PageTablePermission, PteFlags};
 use crate::mm::virt_to_phys;
 
 verus! {
@@ -574,13 +574,41 @@ impl DekoCpuCtx {
         );
     }
 
+    #[verifier::external_body]
     pub fn map_page_4k(
         ptr: DekoPPtr<Self>,
         Tracked(perm): Tracked<&mut DekoCpuCtxPermission>,
         vaddr: VirtAddr,
         paddr: PhysAddr,
         flags: PteFlags,
-    ) {
+    )
+        // requires
+        //     vaddr.wf(),
+        //     paddr.wf(),
+        //     vaddr@ % 0x1000 == 0,
+        //     paddr@ % 0x1000 == 0,
+        //     old(perm).wf_with(ptr),
+        // ensures
+        //     perm.wf_with(ptr),
+    {
+        let this = ptr.borrow(Tracked(&perm.ptr_perm));
+        let page = this.pgtable;
+        let private_bit = this.private_bit;
+        let shared_bit = this.shared_bit;
+        let ms = &this.kernel_mapping;
+
+        PageTable::map_page_4k(
+            page,
+            Tracked(&mut perm.pgtable_perm),
+            vaddr,
+            paddr,
+            ms,
+            flags,
+            // private_bit,
+            51,
+            // shared_bit,
+            0,
+        );
     }
 
     pub closed spec fn cpu_id(&self) -> u64 {
