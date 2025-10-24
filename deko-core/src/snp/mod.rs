@@ -70,7 +70,7 @@ impl Snp {
             vstd::vpanic!("We do not support VTOM yet");
         } else {
             PageEncryptionMasks {
-                private_pte_mask: 1 << 51,
+                private_pte_mask: 1 << 51, // <- perhaps we can get it from assembly.
                 shared_pte_mask: 0,
                 addr_mask_width: 51,
                 phys_addr_sizes: 48,  // todo: do not hardcode this.

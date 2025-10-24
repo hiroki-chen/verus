@@ -2,6 +2,12 @@
 .section ".startup.text","ax"
 .code32
 
+// Constants for memory layout.
+.equ STAGE2_START, 0x800000      // 8 MB - Stage2 base address
+.equ STAGE2_MAXLEN, 0xD0000      // ~832 KB - Maximum Stage2 length
+.equ LOWMEM_START, 0x0           // Low memory start
+.equ LOWMEM_END, 0xA0000         // 640 KB - End of low memory
+
 .org 0
 .globl startup_32
 
@@ -225,14 +231,49 @@ startup_64:
     * - Pass control to deko_main
     * - Make sure (%rsp + 8) is 16b-aligned when control is transferred
     *   to deko_main
+    *
+    * DekoCtx structure layout:
+    * struct DekoCtx
+    *     stage2_launch_info: DekoPPtr<Stage2LaunchInfo>,  // offset 0
+    *     pgtable: DekoPPtr<PageTable>,                    // offset 8  
+    *     gdt: DekoPPtr<GlobalDescriptorTable>,            // offset 16
+    *     mapping_space: MappingSpace,                     // offset 24
+    *
+    *
+    * MappingSpace structure layout:
+    * struct MappingSpace
+    *     kernel: FixedAddressMappingRange,                // offset 24
+    *     physmap: FixedAddressMappingRange,               // offset 48
+    *
+    *
+    * FixedAddressMappingRange structure layout:
+    * struct FixedAddressMappingRange 
+    *     virt_start: VirtAddr,                            // 8 bytes
+    *     virt_end: VirtAddr,                              // 8 bytes  
+    *     phys_start: PhysAddr,                            // 8 bytes
+    * 
     */
-  // movl %ebp, %edi
-  // movq $pgtable, %rsi 
   movq $deko_bsp_ctx, %rdi
-  // Copy ebp to rdi
+
+  // Store Stage2LaunchInfo pointer (offset 0)
   movl %ebp, (%rdi)
+  
+  // Store page table address (offset 8)
   movq $pgtable, 8(%rdi)
+  
+  // Store GDT descriptor address (offset 16)
   movq $gdt64_desc, 16(%rdi)
+  
+  // Populate MappingSpace at offset 24
+  // kernel: FixedAddressMappingRange (offset 24)
+  movq $STAGE2_START, 24(%rdi)              // kernel.virt_start = STAGE2_START
+  movq $(STAGE2_START + STAGE2_MAXLEN), 32(%rdi)  // kernel.virt_end = STAGE2_START + STAGE2_MAXLEN  
+  movq $STAGE2_START, 40(%rdi)              // kernel.phys_start = STAGE2_START (identity mapped)
+  
+  // physmap: FixedAddressMappingRange (offset 48)
+  movq $LOWMEM_START, 48(%rdi)              // physmap.virt_start = LOWMEM_START
+  movq $LOWMEM_END, 56(%rdi)                // physmap.virt_end = LOWMEM_END
+  movq $LOWMEM_START, 64(%rdi)              // physmap.phys_start = LOWMEM_START (identity mapped)
 
   andq $~0xf, %rsp
   call deko_main

@@ -55,7 +55,7 @@ impl Snp {
         let debug_console_port = igvm_params.debug_serial_port as u16;
         Self::init_ghcb_logging(debug_console_port);
 
-        crate::logging::print_str("testtesttest");
+        crate::logging::print_str(super::logging::LOGGING_BANNER);
     }
 
     pub fn init_each_cpu(

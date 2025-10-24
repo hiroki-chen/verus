@@ -971,8 +971,7 @@ impl Page {
         );
         // lack proof that the ptr is within the physmap range (how should we do this?)
         let paddr = PhysAddr::from(ptr);
-        // let vaddr = ms.phys_to_virt(paddr); // this is problematic.
-        let vaddr = VirtAddr(paddr.0);  // for now we assume this.
+        let vaddr = ms.phys_to_virt(paddr); // this is problematic.
 
         let pptr = DekoPPtr(vstd::simple_pptr::PPtr(vaddr.0 as usize, core::marker::PhantomData));
 
@@ -1039,8 +1038,7 @@ impl Page {
     {
         let val = pte.borrow(Tracked(pte_perm));
         let paddr = val.address(private_bit, shared_bit);
-        // let vaddr = mapping_space.phys_to_virt(paddr); // note this.
-        let vaddr = VirtAddr::new(paddr.0);
+        let vaddr = mapping_space.phys_to_virt(paddr); // note this.
 
         DekoPPtr(vstd::simple_pptr::PPtr(vaddr.0 as usize, core::marker::PhantomData))
     }
