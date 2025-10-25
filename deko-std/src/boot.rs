@@ -1,3 +1,4 @@
+use vstd::invariant;
 use vstd::prelude::*;
 
 use crate::prelude::*;
@@ -42,7 +43,7 @@ pub const STAGE2_MAXLEN: u32 = 0x8D0000 - STAGE2_START;
 /// The parameter's structure is defined in svsm/igvmbuilder; we can also
 /// construct one on our own if needed but not necessary for the time being.
 #[repr(C, packed)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct Stage2LaunchInfo {
     // VTOM must be the first field.
     pub vtom: u64,
@@ -61,8 +62,53 @@ pub struct Stage2LaunchInfo {
     pub _reserved: u32,
 }
 
+#[repr(u16)]
+#[derive(Clone)]
+pub enum MemoryMapEntryType {
+    /// Normal memory.
+    MEMORY = 0x0,
+    /// Platform reserved memory.
+    PLATFORM_RESERVED = 0x1,
+    /// Persistent memory (PMEM).
+    PERSISTENT = 0x2,
+    /// Memory where VTL2 protections that deny access to lower VTLs can be
+    /// applied. Some isolation architectures only allow VTL2 protections on
+    /// certain memory ranges.
+    VTL2_PROTECTABLE = 0x3,
+    /// Specific Purpose memory (SPM). This is memory with special properties
+    /// reserved for specific purposes and shouldn't be used by the firmware
+    /// or operating system. This corresponds with the UEFI memory map entry
+    /// flag EFI_MEMORY_SP, introduced in UEFI 2.8.
+    /// See https://uefi.org/specs/UEFI/2.10/07_Services_Boot_Services.html
+    SPECIFIC_PURPOSE = 0x4,
+    /// Hidden memory is visible in the memory map but is hidden from any other
+    /// enumeration that may be used to expose available memory to the VM.
+    HIDDEN = 0x5,
+}
+
 #[repr(C)]
-#[derive(Debug, Default)]
+#[derive(Clone)]
+pub struct IgvmVhsMemoryMapEntry {
+    /// The starting gpa page number for this range of memory.
+    pub starting_gpa_page_number: u64,
+    /// The number of pages in this range of memory.
+    pub number_of_pages: u64,
+    /// The type of memory this entry represents.
+    pub entry_type: MemoryMapEntryType,
+    /// Flags about this memory entry.
+    pub flags: u16,
+    /// Reserved.
+    pub reserved: u32,
+}
+
+#[derive(Clone)]
+#[repr(C, align(64))]
+pub struct IgvmMemoryMap {
+    memory_map: Array<IgvmVhsMemoryMapEntry, 0xAA>,
+}
+
+#[repr(C)]
+#[derive(Default)]
 pub tracked struct HeaderRaw {
     /// The version of the boot protocol.
     pub version: u8,
@@ -144,7 +190,7 @@ impl Constant for HeaderRaw {
 /// An entry that represents an area of pre-validated memory defined by the
 /// firmware in the IGVM file.
 #[repr(C, packed)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Clone, Copy, Default)]
 pub struct IgvmParamBlockFwMem {
     /// The base physical address of the prevalidated memory region.
     pub base: u32,
@@ -155,7 +201,7 @@ pub struct IgvmParamBlockFwMem {
 /// The portion of the IGVM parameter block that describes metadata about
 /// the firmware image embedded in the IGVM file.
 #[repr(C, packed)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Copy, Clone)]
 pub struct IgvmParamBlockFwInfo {
     /// The guest physical address of the start of the guest firmware. The
     /// permissions on the pages in the firmware range are adjusted to the guest
@@ -196,7 +242,6 @@ pub struct IgvmParamBlockFwInfo {
 /// builder which describes where the additional IGVM parameter information
 /// has been placed into the guest address space.
 #[repr(C, packed)]
-#[derive(Debug)]
 pub struct IgvmParamBlock {
     /// The total size of the parameter area, beginning with the parameter
     /// block itself and including any additional parameter pages which follow.
@@ -273,5 +318,62 @@ impl WellFormed for IgvmParamBlockFwMem {
     }
 }
 
+impl WellFormed for IgvmVhsMemoryMapEntry {
+    open spec fn wf(&self) -> bool {
+        true
+    }
+}
+
+impl WellFormed for IgvmMemoryMap {
+    open spec fn wf(&self) -> bool {
+        true
+    }
+}
+
+impl IgvmParamBlock {
+    /// Find the kernel memory region defined by the IGVM parameters.
+    #[verifier::external_body]
+    pub fn find_kernel_region(&self) -> (r: Option<(PhysAddr, PhysAddr)>)
+        requires
+            self.wf(),
+    {
+        let kernel_base = self.kernel_base;
+        let mut kernel_size = self.kernel_min_size;
+
+        // Check the untrusted hypervisor-provided memory map to see if the size of the kernel
+        // should be adjusted.
+        let igvm_mmap = unsafe {
+            &*((self as *const IgvmParamBlock as u64).checked_add(
+                self.memory_map_offset as u64,
+            )? as *const IgvmMemoryMap)
+        };
+
+        let mut i = 0;
+        while i < 0xAA
+            invariant
+                i <= 0xAA,
+                self.wf(),
+            decreases 0xAA - i,
+        {
+            let e = igvm_mmap.memory_map.index(i);
+            if let MemoryMapEntryType::HIDDEN = e.entry_type {
+                let region_size_bytes = e.number_of_pages.try_into().unwrap_or(
+                    u32::MAX,
+                ).saturating_mul(PAGE_SIZE as u32);
+                kernel_size = region_size_bytes.clamp(self.kernel_min_size, self.kernel_max_size);
+
+                break ;
+            }
+            i += 1;
+        }
+
+        Some(
+            (
+                PhysAddr::from(kernel_base),
+                PhysAddr::from(kernel_base.checked_add(kernel_size as u64)?),
+            ),
+        )
+    }
+}
 
 } // verus!

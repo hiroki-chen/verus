@@ -12,6 +12,7 @@ use crate::cpu::register_cpuid_table;
 use crate::logging::DekoDebug;
 use crate::mm::{init_frame_allocator, DEKO_MAPPING_SPACE};
 use crate::snp::{get_igvm_params, Snp};
+use crate::{log_error, log_hex_prefixed, log_info, log_str, log_str_ln};
 
 #[macro_export]
 macro_rules! dispatch_to_platform {
@@ -348,9 +349,39 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
 
     init_early_idt_late(&mut idt);
 
-    dispatch_to_platform!(init_platform_end, get_igvm_params(&header));
+    let igvm_params = get_igvm_params(&header);
+    dispatch_to_platform!(init_platform_end, igvm_params);
+
+    // now we need to load the kernel into the memory.
+    // first we need to find where it is.
+    if let Some((kernel_phys_start, kernel_phys_end)) = igvm_params.find_kernel_region() {
+        log_str!("Deko found the kernel physical range:  [");
+        log_hex_prefixed!(kernel_phys_start.0);
+        log_str!("] - [");
+        log_hex_prefixed!(kernel_phys_end.0);
+        log_str_ln!("]");
+    } else {
+        log_error!("Deko failed to find the kernel physical range from the boot header!");
+    }
 
     // will not crash; good news.
+    loop {
+    }
+}
+
+/// Finish the boostrapping and jump into the monitor's entry point.
+#[verifier::external_body]
+fn into_deko_monitor(deko_entry: u64, cmd: u64) -> (__discard: !) {
+    unsafe {
+        core::arch::asm!(
+            "jmp *%rax",
+            in("rax") deko_entry, /* Placeholder for now */
+            in("rdi") cmd,
+            in("rsi") 0, /* ? */
+            options(att_syntax),
+        );
+    }
+
     loop {
     }
 }

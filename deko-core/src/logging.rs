@@ -21,28 +21,28 @@ mod warning {
 
 verus! {
 
-const RESET_COLOR: &'static str = "\x1B[0m";
+pub const RESET_COLOR: &'static str = "\x1B[0m";
 
-const ERROR_COLOR: &'static str = "\x1B[31m";
+pub const ERROR_COLOR: &'static str = "\x1B[31m";
 
 // Red
-const WARN_COLOR: &'static str = "\x1B[33m";
+pub const WARN_COLOR: &'static str = "\x1B[33m";
 
 // Yellow
-const INFO_COLOR: &'static str = "\x1B[32m";
+pub const INFO_COLOR: &'static str = "\x1B[32m";
 
 // Green
-const DEBUG_COLOR: &'static str = "\x1B[34m";
+pub const DEBUG_COLOR: &'static str = "\x1B[34m";
 
 // Blue
-const TRACE_COLOR: &'static str = "\x1B[36m";
+pub const TRACE_COLOR: &'static str = "\x1B[36m";
 
 // Build information constants - populated by build.rs
-const GIT_HASH: &'static str = env!("DEKO_GIT_HASH");
-const BUILD_TIME: &'static str = env!("DEKO_BUILD_TIME");
+pub const GIT_HASH: &'static str = env!("DEKO_GIT_HASH");
+pub const BUILD_TIME: &'static str = env!("DEKO_BUILD_TIME");
 
 // ASCII Art Banner
-const DEKO_BANNER: &'static str = r#"
+pub const DEKO_BANNER: &'static str = r#"
 
 ██████╗ ███████╗██╗  ██╗ ██████╗ 
 ██╔══██╗██╔════╝██║ ██╔╝██╔═══██╗
@@ -174,7 +174,7 @@ impl log::Log for Console {
 }
 
 #[verifier::external]
-fn __print(arg: core::fmt::Arguments) {
+pub(crate) fn __print(arg: core::fmt::Arguments) {
     let (mut console, write_handle) = CONSOLE.acquire_write();
     console.write_fmt(arg).unwrap();
     write_handle.release_write(console);
@@ -184,15 +184,15 @@ fn __print(arg: core::fmt::Arguments) {
 #[cfg(feature = "logging")]
 verus! {
 
-/// Print integer in decimal format using itoa for efficiency
+/// Print integer in decimal format using itoa for maximum efficiency
 #[verifier::external_body]
 pub fn print_integer<T: itoa::Integer>(num: T) {
     let mut buffer = itoa::Buffer::new();
     let s = buffer.format(num);
-    __print(format_args!("{}", s));
+    print_str(s);
 }
 
-/// Print integer in hexadecimal format
+/// Print integer in hexadecimal format using optimized conversion
 #[verifier::external_body]
 pub fn print_integer_hex<T>(num: T) 
 where
@@ -210,22 +210,26 @@ where
     __print(format_args!("0x{:x}", num));
 }
 
-/// Print float in decimal format - fallback to core formatting
+/// Print float in decimal format using ryu for maximum efficiency
 #[verifier::external_body]
 pub fn print_float_decimal(num: f64) {
-    __print(format_args!("{}", num));
+    let mut buffer = ryu::Buffer::new();
+    let s = buffer.format(num);
+    print_str(s);
 }
 
-/// Print float in scientific notation
+/// Print float in scientific notation using core formatting
 #[verifier::external_body]
 pub fn print_float_scientific(num: f64) {
     __print(format_args!("{:e}", num));
 }
 
-/// Print 32-bit float in decimal format
+/// Print 32-bit float in decimal format using ryu
 #[verifier::external_body]
 pub fn print_f32_decimal(num: f32) {
-    __print(format_args!("{}", num));
+    let mut buffer = ryu::Buffer::new();
+    let s = buffer.format(num);
+    print_str(s);
 }
 
 /// Print unsigned integer in decimal format using core formatting
@@ -387,6 +391,66 @@ pub fn print_banner() {
     print_str("\n");
     print_str("Repository: https://github.com/hiroki-chen/cage-sev\n");
     print_str("\n");
+}
+
+/// Print panic information with detailed context.
+/// 
+/// Calling [`vstd::vpanic`] will force on-heap allocation for [`core::string::String`] which
+/// is not suitable for us and thus the panic information will be instead overriden by the
+/// the global allocator since we explicitly disabled global allocator in Rust.
+/// 
+/// Thus the workaround for printing panic information is to implement another stack unwinder
+/// to extract information that excludes the allocation error.
+#[verifier::external]
+pub fn print_panic_info(info: &core::panic::PanicInfo) {
+    print_str("\n");
+    print_str(ERROR_COLOR);
+    print_str("=== KERNEL PANIC ===\n");
+    print_str(RESET_COLOR);
+    
+    // Print build information for debugging
+    print_str("Build: ");
+    print_str(GIT_HASH);
+    print_str(" (");
+    print_str(BUILD_TIME);
+    print_str(")\n");
+    
+    // Print panic message if available
+    if let Some(message) = info.message().as_str() {
+        print_str("Message: ");
+        print_str(message);
+        print_str("\n");
+    } else {
+        print_str("Message: <no message>\n");
+    }
+    
+    // Print panic location if available
+    if let Some(location) = info.location() {
+        print_str("Location: ");
+        print_str(location.file());
+        print_str(":");
+        print_integer(location.line());
+        print_str(":");
+        print_integer(location.column());
+        print_str("\n");
+    } else {
+        print_str("Location: <unknown>\n");
+    }
+    
+    // Print payload information
+    let payload = info.payload();
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        print_str("Payload: \"");
+        print_str(s);
+        print_str("\"\n");
+    } else {
+        print_str("Payload: <non-string>\n");
+    }
+    
+    print_str("\n");
+    print_str(ERROR_COLOR);
+    print_str("=== SYSTEM HALTED ===\n");
+    print_str(RESET_COLOR);
 }
 
 /// Custom debug trait for Verus-compatible debugging without heap allocation
@@ -795,40 +859,34 @@ macro_rules! deko_print {
     ($label:expr, $val:expr) => {};
 }
 
-/// Simple print macros
+/// Simple string print macro (no formatting support due to Verus restrictions)
 #[cfg(feature = "logging")]
 #[macro_export]
-macro_rules! log_print {
-    ($($arg:tt)*) => {
-        $crate::logging::__print(format_args!($($arg)*))
+macro_rules! log_str {
+    ($s:expr) => {
+        $crate::logging::print_str($s)
     };
 }
 
 #[cfg(not(feature = "logging"))]
 #[macro_export]
-macro_rules! log_print {
-    ($($arg:tt)*) => {};
+macro_rules! log_str {
+    ($s:expr) => {};
 }
 
-/// Print with newline
+/// Print string with newline
 #[cfg(feature = "logging")]
 #[macro_export]
-macro_rules! log_println {
-    () => {
-        $crate::logging::print_char('\n')
-    };
-    ($($arg:tt)*) => {
-        {
-            $crate::logging::__print(format_args!($($arg)*));
-            $crate::logging::print_char('\n');
-        }
+macro_rules! log_str_ln {
+    ($s:expr) => {
+        $crate::logging::print_str_ln($s)
     };
 }
 
 #[cfg(not(feature = "logging"))]
 #[macro_export]
-macro_rules! log_println {
-    ($($arg:tt)*) => {};
+macro_rules! log_str_ln {
+    ($s:expr) => {};
 }
 
 /// Integer printing macros
@@ -939,13 +997,13 @@ macro_rules! log_addr {
     ($ptr:expr) => {};
 }
 
-/// Conditional debug printing
+/// Conditional string printing
 #[cfg(feature = "logging")]
 #[macro_export]
 macro_rules! log_if {
-    ($cond:expr, $($arg:tt)*) => {
+    ($cond:expr, $s:expr) => {
         if $cond {
-            $crate::log_println!($($arg)*);
+            $crate::logging::print_str_ln($s);
         }
     };
 }
@@ -953,18 +1011,20 @@ macro_rules! log_if {
 #[cfg(not(feature = "logging"))]
 #[macro_export]
 macro_rules! log_if {
-    ($cond:expr, $($arg:tt)*) => {};
+    ($cond:expr, $s:expr) => {};
 }
 
-/// Error logging with location info
+/// Error logging - supports multiple string arguments
 #[cfg(feature = "logging")]
 #[macro_export]
 macro_rules! log_error {
-    ($($arg:tt)*) => {
+    ($($s:expr),+ $(,)?) => {
         {
             $crate::logging::print_str($crate::logging::ERROR_COLOR);
-            $crate::log_print!("[ERROR] {}:{}: ", file!(), line!());
-            $crate::log_print!($($arg)*);
+            $crate::logging::print_str("[ERROR] ");
+            $(
+                $crate::logging::print_str($s);
+            )+
             $crate::logging::print_str($crate::logging::RESET_COLOR);
             $crate::logging::print_char('\n');
         }
@@ -974,18 +1034,20 @@ macro_rules! log_error {
 #[cfg(not(feature = "logging"))]
 #[macro_export]
 macro_rules! log_error {
-    ($($arg:tt)*) => {};
+    ($($s:expr),+ $(,)?) => {};
 }
 
-/// Warning logging with location info
+/// Warning logging - supports multiple string arguments  
 #[cfg(feature = "logging")]
 #[macro_export]
 macro_rules! log_warn {
-    ($($arg:tt)*) => {
+    ($($s:expr),+ $(,)?) => {
         {
             $crate::logging::print_str($crate::logging::WARN_COLOR);
-            $crate::log_print!("[WARN] {}:{}: ", file!(), line!());
-            $crate::log_print!($($arg)*);
+            $crate::logging::print_str("[WARN] ");
+            $(
+                $crate::logging::print_str($s);
+            )+
             $crate::logging::print_str($crate::logging::RESET_COLOR);
             $crate::logging::print_char('\n');
         }
@@ -995,18 +1057,20 @@ macro_rules! log_warn {
 #[cfg(not(feature = "logging"))]
 #[macro_export]
 macro_rules! log_warn {
-    ($($arg:tt)*) => {};
+    ($($s:expr),+ $(,)?) => {};
 }
 
-/// Info logging
+/// Info logging - supports multiple string arguments
 #[cfg(feature = "logging")]
 #[macro_export]
 macro_rules! log_info {
-    ($($arg:tt)*) => {
+    ($($s:expr),+ $(,)?) => {
         {
             $crate::logging::print_str($crate::logging::INFO_COLOR);
-            $crate::log_print!("[INFO] ");
-            $crate::log_print!($($arg)*);
+            $crate::logging::print_str("[INFO] ");
+            $(
+                $crate::logging::print_str($s);
+            )+
             $crate::logging::print_str($crate::logging::RESET_COLOR);
             $crate::logging::print_char('\n');
         }
@@ -1016,18 +1080,20 @@ macro_rules! log_info {
 #[cfg(not(feature = "logging"))]
 #[macro_export]
 macro_rules! log_info {
-    ($($arg:tt)*) => {};
+    ($($s:expr),+ $(,)?) => {};
 }
 
-/// Debug logging
+/// Debug logging - supports multiple string arguments
 #[cfg(feature = "logging")]
 #[macro_export]
 macro_rules! log_debug {
-    ($($arg:tt)*) => {
+    ($($s:expr),+ $(,)?) => {
         {
             $crate::logging::print_str($crate::logging::DEBUG_COLOR);
-            $crate::log_print!("[DEBUG] ");
-            $crate::log_print!($($arg)*);
+            $crate::logging::print_str("[DEBUG] ");
+            $(
+                $crate::logging::print_str($s);
+            )+
             $crate::logging::print_str($crate::logging::RESET_COLOR);
             $crate::logging::print_char('\n');
         }
@@ -1037,18 +1103,20 @@ macro_rules! log_debug {
 #[cfg(not(feature = "logging"))]
 #[macro_export]
 macro_rules! log_debug {
-    ($($arg:tt)*) => {};
+    ($($s:expr),+ $(,)?) => {};
 }
 
-/// Trace logging
+/// Trace logging - supports multiple string arguments
 #[cfg(feature = "logging")]
 #[macro_export]
 macro_rules! log_trace {
-    ($($arg:tt)*) => {
+    ($($s:expr),+ $(,)?) => {
         {
             $crate::logging::print_str($crate::logging::TRACE_COLOR);
-            $crate::log_print!("[TRACE] ");
-            $crate::log_print!($($arg)*);
+            $crate::logging::print_str("[TRACE] ");
+            $(
+                $crate::logging::print_str($s);
+            )+
             $crate::logging::print_str($crate::logging::RESET_COLOR);
             $crate::logging::print_char('\n');
         }
@@ -1058,7 +1126,69 @@ macro_rules! log_trace {
 #[cfg(not(feature = "logging"))]
 #[macro_export]
 macro_rules! log_trace {
-    ($($arg:tt)*) => {};
+    ($($s:expr),+ $(,)?) => {};
+}
+
+/// Helper macros for building complex log messages with mixed types
+/// Print hex value inline (for use with multi-argument log macros)
+#[cfg(feature = "logging")]
+#[macro_export]
+macro_rules! hex {
+    ($val:expr) => {{
+        // Create a temporary buffer for hex conversion
+        let mut buffer = [0u8; 32];
+        let result = lexical::to_lexical_with_options::<_, { lexical::format::HEX }>(
+            $val, &mut buffer, &lexical::WriteIntegerOptions::default()
+        );
+        if let Ok(bytes) = result {
+            if let Ok(s) = core::str::from_utf8(bytes) {
+                s
+            } else {
+                "<hex_error>"
+            }
+        } else {
+            "<hex_error>"
+        }
+    }};
+}
+
+#[cfg(not(feature = "logging"))]
+#[macro_export]
+macro_rules! hex {
+    ($val:expr) => { "" };
+}
+
+/// Print hex value with 0x prefix inline
+#[cfg(feature = "logging")]
+#[macro_export]
+macro_rules! hex_pfx {
+    ($val:expr) => {{
+        // This is a bit ugly, but we need to concatenate "0x" with the hex value
+        // For now, users need to manually include "0x" in their log calls
+        $crate::hex!($val)
+    }};
+}
+
+#[cfg(not(feature = "logging"))]
+#[macro_export]
+macro_rules! hex_pfx {
+    ($val:expr) => { "" };
+}
+
+/// Print decimal value inline
+#[cfg(feature = "logging")]
+#[macro_export]
+macro_rules! dec {
+    ($val:expr) => {{
+        let mut buffer = itoa::Buffer::new();
+        buffer.format($val)
+    }};
+}
+
+#[cfg(not(feature = "logging"))]
+#[macro_export]
+macro_rules! dec {
+    ($val:expr) => { "" };
 }
 
 /// Print the kernel banner with build information
@@ -1074,6 +1204,21 @@ macro_rules! log_banner {
 #[macro_export]
 macro_rules! log_banner {
     () => {};
+}
+
+/// Print panic information with build context
+#[cfg(feature = "logging")]
+#[macro_export]
+macro_rules! log_panic {
+    ($info:expr) => {
+        $crate::logging::print_panic_info($info)
+    };
+}
+
+#[cfg(not(feature = "logging"))]
+#[macro_export]
+macro_rules! log_panic {
+    ($info:expr) => {};
 }
 
 #[cfg(not(feature = "logging"))]

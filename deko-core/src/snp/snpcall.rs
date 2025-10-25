@@ -58,7 +58,7 @@ impl Snp {
 
         // Print the Deko banner with build information
         crate::logging::print_banner();
-        
+
         // Print IGVM parameter information for debugging
         crate::logging::print_str("IGVM Parameters:\n");
         igvm_params.deko_debug();

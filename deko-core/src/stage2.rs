@@ -43,6 +43,10 @@ verus! {
 #[verifier::external]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
+    // Print detailed panic information using the logging system
+    #[cfg(feature = "logging")]
+    crate::logging::print_panic_info(info);
+
     crate::early_die();
 
     loop {

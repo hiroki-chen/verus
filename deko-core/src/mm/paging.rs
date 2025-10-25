@@ -971,7 +971,7 @@ impl Page {
         );
         // lack proof that the ptr is within the physmap range (how should we do this?)
         let paddr = PhysAddr::from(ptr);
-        let vaddr = ms.phys_to_virt(paddr); // this is problematic.
+        let vaddr = ms.phys_to_virt(paddr);  // this is problematic.
 
         let pptr = DekoPPtr(vstd::simple_pptr::PPtr(vaddr.0 as usize, core::marker::PhantomData));
 
@@ -1037,7 +1037,7 @@ impl Page {
     {
         let val = pte.borrow(Tracked(pte_perm));
         let paddr = val.address(private_bit, shared_bit);
-        let vaddr = mapping_space.phys_to_virt(paddr); // note this.
+        let vaddr = mapping_space.phys_to_virt(paddr);  // note this.
 
         DekoPPtr(vstd::simple_pptr::PPtr(vaddr.0 as usize, core::marker::PhantomData))
     }
@@ -1831,7 +1831,6 @@ impl Page {
             }
             vstd::vpanic!("Expected huge page");
         }
-        
         let addr_2m = entry.borrow(Tracked(entry_perm)).address(private_bit, shared_bit);
         let mut flags = PteFlags::from_bits_truncate(entry.borrow(Tracked(entry_perm)).0.0);
         let (new_page, Tracked(new_page_perm), paddr) = Page::alloc_new(ms);
