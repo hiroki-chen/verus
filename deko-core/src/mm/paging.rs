@@ -967,7 +967,7 @@ impl Page {
     {
         let (ptr, Tracked(prov), Tracked(dealloc)) = DEKO_FRAME_ALLOCATOR.0.alloc(
             PAGE_SIZE as usize,
-            0x1000,
+            PAGE_SIZE as usize,
         );
         // lack proof that the ptr is within the physmap range (how should we do this?)
         let paddr = PhysAddr::from(ptr);
@@ -1012,7 +1012,6 @@ impl Page {
 
     /// This function lifts a pointer to a page table entry into a page.
     #[inline]
-    #[verifier::external_body]
     pub fn from_entry(
         pte: DekoPPtr<PageTableEntry>,
         Tracked(pte_perm): Tracked<&DekoPointsTo<PageTableEntry>>,

@@ -9,6 +9,7 @@ use crate::cpu::{
     DekoCpuCtx, DekoCpuCtxPermission, PerCpuAreas, PerCpuShared, CPUID_MAX_COUNT, CPU_AREA_MAGIC,
     PERCPU_AREAS,
 };
+use crate::logging::DekoDebug;
 use crate::mm::paging::PteFlags;
 use crate::mm::{phys_to_virt, virt_to_phys, DEKO_FRAME_ALLOCATOR};
 use crate::snp::ghcb::msr_register_ghcb_gpa;
@@ -55,7 +56,13 @@ impl Snp {
         let debug_console_port = igvm_params.debug_serial_port as u16;
         Self::init_ghcb_logging(debug_console_port);
 
-        crate::logging::print_str(super::logging::LOGGING_BANNER);
+        // Print the Deko banner with build information
+        crate::logging::print_banner();
+        
+        // Print IGVM parameter information for debugging
+        crate::logging::print_str("IGVM Parameters:\n");
+        igvm_params.deko_debug();
+        crate::logging::print_str("\n");
     }
 
     pub fn init_each_cpu(

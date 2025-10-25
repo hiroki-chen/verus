@@ -36,6 +36,7 @@ impl WellFormed for GuestVmsaRef {
 }
 
 #[repr(C, packed(4))]
+#[derive(Debug)]
 pub struct X86Tss {
     reserved0: u32,
     stacks: Array<u64, 3>,
@@ -477,7 +478,6 @@ impl DekoCpuCtx {
         self.kernel_mapping
     }
 
-    // todo: ensure only `this cpu` can call this function using
     #[verifier::external_body]
     pub fn this_cpu() -> (r: (DekoPPtr<Self>, Tracked<DekoCpuCtxPermission>))
         ensures

@@ -179,4 +179,27 @@ impl<T: WellFormed, const N: usize> View for Array<T, N> {
     }
 }
 
+#[verifier::external]
+impl<T: WellFormed, const N: usize> core::fmt::Debug for Array<T, N>
+where T: core::fmt::Debug
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_list().entries(self.0.iter()).finish()
+    }
+}
+
+impl<T: WellFormed + Clone, const N: usize> Clone for Array<T, N> {
+    #[verifier::external_body]
+    fn clone(&self) -> (r: Self)
+        ensures
+            r.wf(),
+            r@ == self@,
+    {
+        Array(self.0.clone())
+    }
+}
+
+impl<T: WellFormed + Copy, const N: usize> Copy for Array<T, N> {}
+
+
 } // verus!

@@ -9,6 +9,7 @@ use crate::cpu::idt::{
     create_early_idt, stage2_generic_idt_handler, stage2_generic_idt_handler_no_ghcb, Idt,
 };
 use crate::cpu::register_cpuid_table;
+use crate::logging::DekoDebug;
 use crate::mm::{init_frame_allocator, DEKO_MAPPING_SPACE};
 use crate::snp::{get_igvm_params, Snp};
 
@@ -345,11 +346,10 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
     let ctx_perm = Tracked(ctx_perm);
     dispatch_to_platform!(init_each_cpu, ctx, ctx_perm);
 
-    
     init_early_idt_late(&mut idt);
-    
+
     dispatch_to_platform!(init_platform_end, get_igvm_params(&header));
-    
+
     // will not crash; good news.
     loop {
     }

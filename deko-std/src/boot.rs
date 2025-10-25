@@ -42,7 +42,7 @@ pub const STAGE2_MAXLEN: u32 = 0x8D0000 - STAGE2_START;
 /// The parameter's structure is defined in svsm/igvmbuilder; we can also
 /// construct one on our own if needed but not necessary for the time being.
 #[repr(C, packed)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Stage2LaunchInfo {
     // VTOM must be the first field.
     pub vtom: u64,
@@ -144,6 +144,7 @@ impl Constant for HeaderRaw {
 /// An entry that represents an area of pre-validated memory defined by the
 /// firmware in the IGVM file.
 #[repr(C, packed)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct IgvmParamBlockFwMem {
     /// The base physical address of the prevalidated memory region.
     pub base: u32,
@@ -154,6 +155,7 @@ pub struct IgvmParamBlockFwMem {
 /// The portion of the IGVM parameter block that describes metadata about
 /// the firmware image embedded in the IGVM file.
 #[repr(C, packed)]
+#[derive(Debug, Copy, Clone)]
 pub struct IgvmParamBlockFwInfo {
     /// The guest physical address of the start of the guest firmware. The
     /// permissions on the pages in the firmware range are adjusted to the guest
@@ -194,6 +196,7 @@ pub struct IgvmParamBlockFwInfo {
 /// builder which describes where the additional IGVM parameter information
 /// has been placed into the guest address space.
 #[repr(C, packed)]
+#[derive(Debug)]
 pub struct IgvmParamBlock {
     /// The total size of the parameter area, beginning with the parameter
     /// block itself and including any additional parameter pages which follow.
@@ -269,5 +272,6 @@ impl WellFormed for IgvmParamBlockFwMem {
         true
     }
 }
+
 
 } // verus!
