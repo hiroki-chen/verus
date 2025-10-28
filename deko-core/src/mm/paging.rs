@@ -1761,7 +1761,9 @@ impl Page {
                 & 0x1FFFFF);
             return Some(PageFrame::Frame2M(PhysAddr(pa)));
         }
-        assume(pgtable_perm.virt_to_frame_spec(pte_addr) matches Some(_));
+        proof {
+            pgtable_perm.lemma_pde_present_can_read_pte(pde_addr, pte_addr);
+        }
         let (pte, Tracked(pte_perm)) = PageTableEntry::read_pte(pte_addr, Tracked(pgtable_perm));
         if !PageTableEntry::is_present_pte(pte, Tracked(pte_perm)) {
             return None;
@@ -3088,6 +3090,68 @@ impl PageTablePermission {
                 pte_3 == (pte >> 39) & 0x1FF,
                 pte == (0xFFFFF68000000000 + ((vaddr & 0x0000_FFFF_FFFF_F000) >> 9)) as u64,
         ;
+    }
+
+    #[verifier::spinoff_prover]
+    pub proof fn lemma_pde_present_can_read_pte(&self, pde_addr: VirtAddr, pte_addr: VirtAddr)
+        requires
+            self.wf(),
+            self.virt_to_frame_spec(pde_addr) matches Some(_),
+            pde_addr.wf() && pte_addr.wf(),
+            // we do not know take(1) breaks the proof.
+            PageTablePath::from_vaddr(pte_addr)@.first() == 493,
+            Page::get_pte_address_spec(pte_addr) == pde_addr,
+            PageTableEntry::read_pte_spec(pde_addr, self).is_present_pte_spec(),
+        ensures
+            self.virt_to_frame_spec(pte_addr) matches Some(_),
+    {
+        broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
+
+        let pte_path = PageTablePath::from_vaddr(pte_addr);
+        let pde_path = PageTablePath::from_vaddr(pde_addr);
+
+        assert(pte_path@[0] == 493);
+        let a = pte_path@[1];
+        let b = pte_path@[2];
+        let c = pte_path@[3];
+
+        self.lemma_pte_of_vaddr_cancels_with_self_mapping(pte_addr);
+        self.lemma_pte_of_vaddr_shares_prefix(pte_addr, pde_addr);
+        reveal_with_fuel(PageTablePath::remove_recursive_prefix, 5);
+
+        assert(pde_path == path![493, 493, a, b]);
+        if a == 493 {
+            assert(pte_path.take(2) == path![493, 493]);
+            self.lemma_pdpe_present_can_read_pde(pde_addr, pte_addr);
+        } else {
+            let pte_lvl2 = self.get_pte(pte_path, 2);
+            let pde_lvl1 = self.get_pte(pde_path, 1);
+
+            assert(pte_lvl2 == self.storage[path![a]].pte_perm);
+            assert(pde_lvl1 == self.storage[path![a]].pte_perm);
+            assert(pte_lvl2.is_present_pte_spec());
+
+            if pte_lvl2.is_huge_pte_spec() {
+            } else {
+                let pte_lvl1 = self.get_pte(pte_path, 1);
+                let pde_lvl0 = self.get_pte(pde_path, 0);
+                assert(pte_path.take(3).normalize() == path![a, b]);
+                assert(pde_path.take(4).normalize() == path![a, b]);
+
+                assert(pte_lvl1 == self.storage[path![a, b]].pte_perm);
+                assert(pde_lvl0 == self.storage[path![a, b]].pte_perm);
+                assert(pte_lvl1.is_present_pte_spec());
+
+                if pte_lvl1.is_huge_pte_spec() {
+                } else {
+                    let pte_lvl0 = self.get_pte(pte_path, 0);
+                    assert(pte_path.take(4).normalize() == path![a, b, c]);
+
+                    assert(pte_lvl0 == self.storage[path![a, b, c]].pte_perm);
+                    assert(path![a, b, c].drop_last() == path![a, b]);
+                }
+            }
+        }
     }
 
     #[verifier::spinoff_prover]
