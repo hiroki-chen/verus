@@ -883,11 +883,11 @@ impl Page {
         VirtAddr((PTE_BASE@ + offset) as u64)
     }
 
-    pub proof fn lemma_get_pte_address_wf(vaddr: VirtAddr)
+    pub broadcast proof fn lemma_get_pte_address_wf(vaddr: VirtAddr)
         requires
             vaddr.wf(),
         ensures
-            Self::get_pte_address_spec(vaddr).wf(),
+            (#[trigger] Self::get_pte_address_spec(vaddr)).wf(),
     {
         let vaddr = vaddr@;
         let addr = (0xFFFFF68000000000 + ((vaddr & 0x0000_FFFF_FFFF_F000u64) >> 9)) as u64;
@@ -2973,10 +2973,10 @@ impl PageTablePermission {
 
         let pte_index_3 = index_at_level_spec(3, pte);
 
-        &&& pml4e_index_3 == pml4e_index_2 == pml4e_index_1 == pml4e_index_0 == 493
-        &&& pdpe_index_3 == pdpe_index_2 == pdpe_index_1 == 493
-        &&& pde_index_3 == pde_index_2 == 493
-        &&& pte_index_3 == 493
+        &&& pml4e_index_3 == pml4e_index_2 == pml4e_index_1 == pml4e_index_0 == RECURSIVE_INDEX as int
+        &&& pdpe_index_3 == pdpe_index_2 == pdpe_index_1 == RECURSIVE_INDEX as int
+        &&& pde_index_3 == pde_index_2 == RECURSIVE_INDEX as int
+        &&& pte_index_3 == RECURSIVE_INDEX as int
     }
 
     /// **PROOF**: Establishes the cancellation property for self-mapped PTE access.
@@ -3286,12 +3286,6 @@ impl PageTablePermission {
 
         let vaddr_path = PageTablePath::from_vaddr(vaddr);
 
-        // Normalize paths for storage lookup
-        let pml4_storage_path = PageTablePath(vaddr_path@.take(1)).normalize();
-        let pdpe_storage_path = PageTablePath(vaddr_path@.take(2)).normalize();
-        let pde_storage_path = PageTablePath(vaddr_path@.take(3)).normalize();
-        let pte_storage_path = PageTablePath(vaddr_path@.take(4)).normalize();
-
         // Read values from recursive addresses
         let pte_val = PageTableEntry::read_pte_spec(pte_addr, self);
         let pde_val = PageTableEntry::read_pte_spec(pde_addr, self);
@@ -3361,18 +3355,83 @@ impl PageTablePermission {
         ensures
             self.pte_addr_same_as_vaddr_each_level_spec(vaddr),
     {
+        broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
+        broadcast use Page::lemma_get_pte_address_wf;
+        reveal_with_fuel(PageTablePath::remove_recursive_prefix, 5);
+
+        self.lemma_pte_of_vaddr_cancels_with_self_mapping(vaddr);
+        
         let pte_addr = Page::get_pte_address_spec(vaddr);
         let pde_addr = Page::get_pte_address_spec(pte_addr);
         let pdpe_addr = Page::get_pte_address_spec(pde_addr);
         let pml4_addr = Page::get_pte_address_spec(pdpe_addr);
+        
+        self.lemma_pte_of_vaddr_shares_prefix(vaddr, pte_addr);
+        self.lemma_pte_of_vaddr_shares_prefix(pte_addr, pde_addr);
+        self.lemma_pte_of_vaddr_shares_prefix(pde_addr, pdpe_addr);
+        self.lemma_pte_of_vaddr_shares_prefix(pdpe_addr, pml4_addr);
 
-        Page::lemma_get_pte_address_wf(vaddr);
-        Page::lemma_get_pte_address_wf(pte_addr);
-        Page::lemma_get_pte_address_wf(pde_addr);
-        Page::lemma_get_pte_address_wf(pdpe_addr);
-        Page::lemma_get_pte_address_wf(pml4_addr);
+        let pte_path = PageTablePath::from_vaddr(pte_addr);
+        let pde_path = PageTablePath::from_vaddr(pde_addr);
+        let pdpe_path = PageTablePath::from_vaddr(pdpe_addr);
+        let pml4e_path = PageTablePath::from_vaddr(pml4_addr);
+        let vaddr_path = PageTablePath::from_vaddr(vaddr);
 
-        admit();
+        let vaddr0 = vaddr_path@[0];
+        let vaddr1 = vaddr_path@[1];
+        let vaddr2 = vaddr_path@[2];
+        let vaddr3 = vaddr_path@[3];
+
+        assert(path![vaddr0, vaddr1].drop_last() == path![vaddr0]);
+        assert(path![vaddr0, vaddr1, vaddr2].drop_last() == path![vaddr0, vaddr1]);
+        assert(path![vaddr0, vaddr1, vaddr2, vaddr3].drop_last() == path![vaddr0, vaddr1, vaddr2]);
+        assert(path![vaddr1, vaddr2].drop_last() == path![vaddr1]);
+        assert(path![vaddr1, vaddr2, vaddr3].drop_last() == path![vaddr1, vaddr2]);
+        assert(path![vaddr2, vaddr3].drop_last() == path![vaddr2]);
+
+        assert(pml4e_path == path![493, 493, 493, 493]);
+        assert(pdpe_path == path![493, 493, 493, vaddr0]);
+        assert(pde_path == path![493, 493, vaddr0, vaddr1]);
+        assert(pte_path == path![493, vaddr0, vaddr1, vaddr2]);
+
+        // need to reason about 493.
+        if vaddr0 == 493 {
+            if vaddr1 == 493 {
+                if vaddr2 == 493 {
+                } else {
+                    assert(vaddr_path.take(4).normalize() == path![vaddr2, vaddr3]);
+                    assert(vaddr_path.take(3).normalize() == path![vaddr2]);
+                    assert(vaddr_path.take(2).normalize() == path![]);
+                    assert(vaddr_path.take(1).normalize() == path![]);
+                    
+                    assert(pml4e_path.normalize() == path![]);
+                    assert(pdpe_path.normalize() == path![]);
+                    assert(pde_path.normalize() == path![]);
+                    assert(pte_path.normalize() == path![vaddr2]);
+                }
+            } else {
+                assert(vaddr_path.take(4).normalize() == path![vaddr1, vaddr2, vaddr3]);
+                assert(vaddr_path.take(3).normalize() == path![vaddr1, vaddr2]);
+                assert(vaddr_path.take(2).normalize() == path![vaddr1]);
+                assert(vaddr_path.take(1).normalize() == path![]);
+                
+                assert(pml4e_path.normalize() == path![]);
+                assert(pdpe_path.normalize() == path![]);
+                assert(pde_path.normalize() == path![vaddr1]);
+                assert(pte_path.normalize() == path![vaddr1, vaddr2]);
+            }
+        } else {
+            assert(vaddr_path.take(4).normalize() == path![vaddr0, vaddr1, vaddr2, vaddr3]);
+            assert(vaddr_path.take(3).normalize() == path![vaddr0, vaddr1, vaddr2]);
+            assert(vaddr_path.take(2).normalize() == path![vaddr0, vaddr1]);
+            assert(vaddr_path.take(1).normalize() == path![vaddr0]);
+            
+            assert(pml4e_path.normalize() == path![]);
+            assert(pdpe_path.normalize() == path![vaddr0]);
+            assert(pde_path.normalize() == path![vaddr0, vaddr1]);
+            assert(pte_path.normalize() == path![vaddr0, vaddr1, vaddr2]);
+        }
+
     }
 
     /// **PROOF**: Proves that the PML4E for any virtual address is always mapped.
