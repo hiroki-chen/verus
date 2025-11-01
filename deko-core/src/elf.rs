@@ -59,28 +59,6 @@ impl<'a> ElfFile<'a> {
             )
         };
 
-        let hdr = elf::Elf64Hdr::read(bytes).unwrap();
-
-        log_str_ln!("ELF Header:");
-        log_str!("e_entry: ");
-        log_hex_prefixed!(hdr.e_entry);
-        log_str_ln!("");
-        log_str!("e_phoff: ");
-        log_hex_prefixed!(hdr.e_phoff);
-        log_str_ln!("");
-        log_str!("e_phnum: ");
-        log_hex_prefixed!(hdr.e_phnum);
-        log_str_ln!("");
-        log_str!("e_phentsize: ");
-        log_hex_prefixed!(hdr.e_phentsize);
-        log_str_ln!("");
-        log_str!("e_shoff: ");
-        log_hex_prefixed!(hdr.e_shoff);
-        log_str_ln!("");
-        log_str!("e_shnum: ");
-        log_hex_prefixed!(hdr.e_shnum);
-        log_str_ln!("");
-
         Some(Self(elf::Elf64File::read(bytes).ok()?))
     }
 

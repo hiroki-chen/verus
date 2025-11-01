@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "elf",
     "deko-core",
     "deko-logging",
     "deko-stage1",
@@ -28,7 +27,7 @@ prettyplease_verus = { git = "https://github.com/ziqiaozhou/verus", rev = "7c4a5
 deko-core = { path = "deko-core", default-features = false }
 deko-logging = { path = "deko-logging" }
 deko-std = { path = "deko-std" }
-elf = { path = "elf" }
+elf = { git = "https://github.com/coconut-svsm/svsm.git", rev = "ed60c33" }
 
 # the profile used for `cargo build`
 [profile.dev]
