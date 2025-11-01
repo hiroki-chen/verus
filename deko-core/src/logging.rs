@@ -6,6 +6,7 @@
 use core::fmt::Write;
 
 use deko_std::prelude::*;
+use lexical_write_integer::Options;
 use vstd::prelude::*;
 
 use crate::hal::{PlatformType, PLATFORM};
@@ -180,6 +181,33 @@ pub(crate) fn __print(arg: core::fmt::Arguments) {
     write_handle.release_write(console);
 }
 
+#[verifier::external]
+pub(crate) fn __print_str(s: &str) {
+    let (mut console, write_handle) = CONSOLE.acquire_write();
+    console.write_str(s).unwrap();
+    write_handle.release_write(console);
+}
+
+#[verifier::external_body]
+pub(crate) fn __hex<'a, T>(num: T)
+where
+   T: lexical_write_integer::ToLexicalWithOptions<Options = lexical_write_integer::Options>,
+{
+    let mut buffer = [0u8; 18];
+    buffer[0] = b'0';
+    buffer[1] = b'x';
+    // Use lexical with base-16 formatting
+    use lexical_write_integer::{ToLexicalWithOptions, NumberFormatBuilder};
+    let options = lexical_write_integer::Options::new();
+    const FORMAT: u128 = NumberFormatBuilder::from_radix(16);
+
+    let digits = num.to_lexical_with_options::<FORMAT>(&mut buffer[2..], &options);
+    let len = digits.len() + 2; // +2 for "0x"
+    let s = core::str::from_utf8(&buffer[..len]).unwrap_or("<hex-error>");
+
+    __print_str(s);
+}
+
 } // verus!
 #[cfg(feature = "logging")]
 verus! {
@@ -194,7 +222,7 @@ pub fn print_integer<T: itoa::Integer>(num: T) {
 
 /// Print integer in hexadecimal format using optimized conversion
 #[verifier::external_body]
-pub fn print_integer_hex<T>(num: T) 
+pub fn print_integer_hex<T>(num: T)
 where
     T: core::fmt::LowerHex,
 {
@@ -203,7 +231,7 @@ where
 
 /// Print integer in hexadecimal format with 0x prefix
 #[verifier::external_body]
-pub fn print_integer_hex_prefixed<T>(num: T) 
+pub fn print_integer_hex_prefixed<T>(num: T)
 where
     T: core::fmt::LowerHex,
 {
@@ -234,7 +262,7 @@ pub fn print_f32_decimal(num: f32) {
 
 /// Print unsigned integer in decimal format using core formatting
 #[verifier::external_body]
-pub fn print_uint_decimal<T>(num: T) 
+pub fn print_uint_decimal<T>(num: T)
 where
     T: core::fmt::Display,
 {
@@ -243,7 +271,7 @@ where
 
 /// Print signed integer in decimal format using core formatting
 #[verifier::external_body]
-pub fn print_int_decimal<T>(num: T) 
+pub fn print_int_decimal<T>(num: T)
 where
     T: core::fmt::Display,
 {
@@ -252,7 +280,7 @@ where
 
 /// Print unsigned integer with custom base (2-36) using manual conversion
 #[verifier::external_body]
-pub fn print_uint_base<T>(num: T, base: u8) 
+pub fn print_uint_base<T>(num: T, base: u8)
 where
     T: Into<u64> + Copy,
 {
@@ -260,16 +288,16 @@ where
         __print(format_args!("<invalid_base>"));
         return;
     }
-    
+
     let mut num: u64 = num.into();
     if num == 0 {
         __print(format_args!("0"));
         return;
     }
-    
+
     let mut buffer = [0u8; 64]; // 64 bits max
     let mut i = 0;
-    
+
     while num > 0 {
         let digit = (num % base as u64) as u8;
         buffer[i] = if digit < 10 {
@@ -280,10 +308,10 @@ where
         num /= base as u64;
         i += 1;
     }
-    
+
     // Reverse the buffer since we built it backwards
     buffer[..i].reverse();
-    
+
     // Convert to string and print
     if let Ok(s) = core::str::from_utf8(&buffer[..i]) {
         __print(format_args!("{}", s));
@@ -294,7 +322,7 @@ where
 
 /// Print integer in binary format
 #[verifier::external_body]
-pub fn print_integer_binary<T>(num: T) 
+pub fn print_integer_binary<T>(num: T)
 where
     T: core::fmt::Binary,
 {
@@ -303,7 +331,7 @@ where
 
 /// Print integer in octal format
 #[verifier::external_body]
-pub fn print_integer_octal<T>(num: T) 
+pub fn print_integer_octal<T>(num: T)
 where
     T: core::fmt::Octal,
 {
@@ -316,17 +344,17 @@ pub fn print_hex_dump(data: &[u8], bytes_per_line: usize) {
     for (i, chunk) in data.chunks(bytes_per_line).enumerate() {
         // Print offset
         __print(format_args!("{:04x}: ", i * bytes_per_line));
-        
+
         // Print hex values
         for &byte in chunk {
             __print(format_args!("{:02x} ", byte));
         }
-        
+
         // Pad if necessary
         for _ in chunk.len()..bytes_per_line {
             __print(format_args!("   "));
         }
-        
+
         // Print ASCII representation
         __print(format_args!("| "));
         for &byte in chunk {
@@ -336,7 +364,7 @@ pub fn print_hex_dump(data: &[u8], bytes_per_line: usize) {
                 __print(format_args!("."));
             }
         }
-        
+
         __print(format_args!("\n"));
     }
 }
@@ -380,7 +408,7 @@ pub fn print_bool(b: bool) {
 pub fn print_banner() {
     // Print the ASCII banner
     print_str(DEKO_BANNER);
-    
+
     // Print build information
     print_str("Deko Secure Monitor - Verified System Monitor\n");
     print_str("Built on: ");
@@ -394,11 +422,11 @@ pub fn print_banner() {
 }
 
 /// Print panic information with detailed context.
-/// 
+///
 /// Calling [`vstd::vpanic`] will force on-heap allocation for [`core::string::String`] which
 /// is not suitable for us and thus the panic information will be instead overriden by the
 /// the global allocator since we explicitly disabled global allocator in Rust.
-/// 
+///
 /// Thus the workaround for printing panic information is to implement another stack unwinder
 /// to extract information that excludes the allocation error.
 #[verifier::external]
@@ -407,14 +435,14 @@ pub fn print_panic_info(info: &core::panic::PanicInfo) {
     print_str(ERROR_COLOR);
     print_str("=== KERNEL PANIC ===\n");
     print_str(RESET_COLOR);
-    
+
     // Print build information for debugging
     print_str("Build: ");
     print_str(GIT_HASH);
     print_str(" (");
     print_str(BUILD_TIME);
     print_str(")\n");
-    
+
     // Print panic message if available
     if let Some(message) = info.message().as_str() {
         print_str("Message: ");
@@ -423,7 +451,7 @@ pub fn print_panic_info(info: &core::panic::PanicInfo) {
     } else {
         print_str("Message: <no message>\n");
     }
-    
+
     // Print panic location if available
     if let Some(location) = info.location() {
         print_str("Location: ");
@@ -436,7 +464,7 @@ pub fn print_panic_info(info: &core::panic::PanicInfo) {
     } else {
         print_str("Location: <unknown>\n");
     }
-    
+
     // Print payload information
     let payload = info.payload();
     if let Some(s) = payload.downcast_ref::<&str>() {
@@ -446,7 +474,7 @@ pub fn print_panic_info(info: &core::panic::PanicInfo) {
     } else {
         print_str("Payload: <non-string>\n");
     }
-    
+
     print_str("\n");
     print_str(ERROR_COLOR);
     print_str("=== SYSTEM HALTED ===\n");
@@ -457,7 +485,7 @@ pub fn print_panic_info(info: &core::panic::PanicInfo) {
 pub trait DekoDebug {
     /// Print debug information for this type
     fn deko_debug(&self);
-    
+
     /// Print debug information with a custom label
     fn deko_debug_with_label(&self, label: &str) {
         print_str(label);
@@ -613,47 +641,47 @@ impl DekoDebug for deko_std::boot::IgvmParamBlock {
     #[verifier::external_body]
     fn deko_debug(&self) {
         print_str("IgvmParamBlock {\n");
-        
+
         print_str("  param_area_size: ");
         print_integer(self.param_area_size);
         print_str(",\n");
-        
+
         print_str("  debug_serial_port: 0x");
         print_integer_hex(self.debug_serial_port);
         print_str(",\n");
-        
+
         print_str("  use_alternate_injection: ");
         print_bool(self.use_alternate_injection != 0);
         print_str(",\n");
-        
+
         print_str("  vtom: 0x");
         print_integer_hex(self.vtom);
         print_str(",\n");
-        
+
         print_str("  kernel_base: 0x");
         print_integer_hex(self.kernel_base);
         print_str(",\n");
-        
+
         print_str("  kernel_min_size: ");
         print_integer(self.kernel_min_size);
         print_str(",\n");
-        
+
         print_str("  kernel_max_size: ");
         print_integer(self.kernel_max_size);
         print_str(",\n");
-        
+
         print_str("  stage1_size: ");
         print_integer(self.stage1_size);
         print_str(",\n");
-        
+
         print_str("  stage1_base: 0x");
         print_integer_hex(self.stage1_base);
         print_str(",\n");
-        
+
         print_str("  firmware: ");
         self.firmware.deko_debug();
         print_str(",\n");
-        
+
         print_char('}');
     }
 }
@@ -663,31 +691,31 @@ impl DekoDebug for deko_std::boot::IgvmParamBlockFwInfo {
     #[verifier::external_body]
     fn deko_debug(&self) {
         print_str("IgvmParamBlockFwInfo {\n");
-        
+
         print_str("    start: 0x");
         print_integer_hex(self.start);
         print_str(",\n");
-        
+
         print_str("    size: ");
         print_integer(self.size);
         print_str(",\n");
-        
+
         print_str("    in_low_memory: ");
         print_bool(self.in_low_memory != 0);
         print_str(",\n");
-        
+
         print_str("    secrets_page: 0x");
         print_integer_hex(self.secrets_page);
         print_str(",\n");
-        
+
         print_str("    cpuid_page: 0x");
         print_integer_hex(self.cpuid_page);
         print_str(",\n");
-        
+
         print_str("    prevalidated_count: ");
         print_integer(self.prevalidated_count);
         print_str(",\n");
-        
+
         print_str("    prevalidated: [");
         for i in 0..8 {
             if i < self.prevalidated_count {
@@ -699,7 +727,7 @@ impl DekoDebug for deko_std::boot::IgvmParamBlockFwInfo {
             }
         }
         print_str("]\n");
-        
+
         print_str("  }");
     }
 }
@@ -722,23 +750,23 @@ impl DekoDebug for crate::cpu::ctx::DekoCtx {
     #[verifier::external_body]
     fn deko_debug(&self) {
         print_str("DekoCtx {\n");
-        
+
         print_str("  stage2_launch_info: ");
         print_address(self.stage2_launch_info.addr() as *const ());
         print_str(",\n");
-        
+
         print_str("  pgtable: ");
         print_address(self.pgtable.addr() as *const ());
         print_str(",\n");
-        
+
         print_str("  gdt: ");
         print_address(self.gdt.addr() as *const ());
         print_str(",\n");
-        
+
         print_str("  mapping_space: ");
         self.mapping_space.deko_debug();
         print_str(",\n");
-        
+
         print_char('}');
     }
 }
@@ -749,15 +777,15 @@ impl DekoDebug for deko_std::address::MappingSpace {
     #[verifier::external_body]
     fn deko_debug(&self) {
         print_str("MappingSpace {\n");
-        
+
         print_str("    kernel: ");
         self.kernel.deko_debug();
         print_str(",\n");
-        
+
         print_str("    physmap: ");
         self.physmap.deko_debug();
         print_str(",\n");
-        
+
         print_str("  }");
     }
 }
@@ -768,19 +796,19 @@ impl DekoDebug for deko_std::address::FixedAddressMappingRange {
     #[verifier::external_body]
     fn deko_debug(&self) {
         print_str("FixedAddressMappingRange {\n");
-        
+
         print_str("      virt_start: 0x");
         print_integer_hex(self.virt_start.0);
         print_str(",\n");
-        
+
         print_str("      virt_end: 0x");
         print_integer_hex(self.virt_end.0);
         print_str(",\n");
-        
+
         print_str("      phys_start: 0x");
         print_integer_hex(self.phys_start.0);
         print_str(",\n");
-        
+
         print_str("    }");
     }
 }
@@ -791,15 +819,15 @@ impl DekoDebug for deko_std::cpu::DekoCpuCore {
     #[verifier::external_body]
     fn deko_debug(&self) {
         print_str("DekoCpuCore {\n");
-        
+
         print_str("    heap_mapping: ");
         self.valid_heap_mapping_range().deko_debug();
         print_str(",\n");
-        
+
         print_str("    kernel_mapping: ");
         self.valid_kernel_mapping_range().deko_debug();
         print_str(",\n");
-        
+
         print_str("  }");
     }
 }
@@ -1129,33 +1157,22 @@ macro_rules! log_trace {
     ($($s:expr),+ $(,)?) => {};
 }
 
-/// Helper macros for building complex log messages with mixed types
-/// Print hex value inline (for use with multi-argument log macros)
+/// Helper macro for inline hex formatting using lexical
 #[cfg(feature = "logging")]
 #[macro_export]
 macro_rules! hex {
     ($val:expr) => {{
-        // Create a temporary buffer for hex conversion
-        let mut buffer = [0u8; 32];
-        let result = lexical::to_lexical_with_options::<_, { lexical::format::HEX }>(
-            $val, &mut buffer, &lexical::WriteIntegerOptions::default()
-        );
-        if let Ok(bytes) = result {
-            if let Ok(s) = core::str::from_utf8(bytes) {
-                s
-            } else {
-                "<hex_error>"
-            }
-        } else {
-            "<hex_error>"
-        }
+        // Create a temporary buffer (18 bytes: "0x" + 16 hex digits)
+        $crate::logging::__hex($val, &mut buffer)
     }};
 }
 
 #[cfg(not(feature = "logging"))]
 #[macro_export]
 macro_rules! hex {
-    ($val:expr) => { "" };
+    ($val:expr) => {
+        ""
+    };
 }
 
 /// Print hex value with 0x prefix inline
@@ -1172,7 +1189,9 @@ macro_rules! hex_pfx {
 #[cfg(not(feature = "logging"))]
 #[macro_export]
 macro_rules! hex_pfx {
-    ($val:expr) => { "" };
+    ($val:expr) => {
+        ""
+    };
 }
 
 /// Print decimal value inline
@@ -1188,7 +1207,9 @@ macro_rules! dec {
 #[cfg(not(feature = "logging"))]
 #[macro_export]
 macro_rules! dec {
-    ($val:expr) => { "" };
+    ($val:expr) => {
+        ""
+    };
 }
 
 /// Print the kernel banner with build information

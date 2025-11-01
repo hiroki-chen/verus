@@ -7,8 +7,6 @@
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
-use crate::prelude::*;
-
 verus! {
 
 #[derive(Clone, Copy)]
@@ -146,7 +144,7 @@ impl GlobalDescriptorTable {
 verus! {
 
 #[link_section = ".ro_after_init"]
-exec static GLOBAL_GDT: GlobalDescriptorTable
+pub exec static GLOBAL_GDT: GlobalDescriptorTable
     ensures
         GLOBAL_GDT.wf(),
 {

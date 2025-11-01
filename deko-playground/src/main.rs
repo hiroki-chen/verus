@@ -4,19 +4,15 @@ use vstd::prelude::*;
 
 verus! {
 
-pub enum Foo {
-    Apple(u64),
-    Banana(u64),
-    Cherry(u64),
-}
-
-impl Foo {
-    fn foo() {
-        let a = vstd::simple_pptr::PPtr::<u64>::from_addr(0x123);
-        let b = vstd::simple_pptr::PPtr::<u64>(a.addr(), core::marker::PhantomData);
-
-        assert(a == b);
-    }
+#[verus_spec(res =>
+    with
+        Tracked(bar): Tracked<&mut ()>,
+    requires
+        true,
+    ensures
+        true,
+)]
+fn foo() {
 }
 
 #[verifier::external_body]

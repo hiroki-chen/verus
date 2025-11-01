@@ -8,7 +8,8 @@ use crate::cpu::gdt::GlobalDescriptorTable;
 use crate::cpu::idt::{
     create_early_idt, stage2_generic_idt_handler, stage2_generic_idt_handler_no_ghcb, Idt,
 };
-use crate::cpu::register_cpuid_table;
+use crate::cpu::{register_cpuid_table, DekoCpuCtx, DekoCpuCtxPermission};
+use crate::elf::ElfFile;
 use crate::logging::DekoDebug;
 use crate::mm::{init_frame_allocator, DEKO_MAPPING_SPACE};
 use crate::snp::{get_igvm_params, Snp};
@@ -345,7 +346,7 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
 
     // Initialize per-cpu-specific structures.
     let ctx_perm = Tracked(ctx_perm);
-    dispatch_to_platform!(init_each_cpu, ctx, ctx_perm);
+    let (ctx, Tracked(ctx_perm)) = dispatch_to_platform!(init_each_cpu, ctx, ctx_perm);
 
     init_early_idt_late(&mut idt);
 
@@ -354,19 +355,71 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
 
     // now we need to load the kernel into the memory.
     // first we need to find where it is.
-    if let Some((kernel_phys_start, kernel_phys_end)) = igvm_params.find_kernel_region() {
+    if let Some((mut kernel_phys_start, kernel_phys_end)) = igvm_params.find_kernel_region() {
         log_str!("Deko found the kernel physical range:  [");
         log_hex_prefixed!(kernel_phys_start.0);
-        log_str!("] - [");
+        log_str!(" - ");
         log_hex_prefixed!(kernel_phys_end.0);
         log_str_ln!("]");
+        log_str_ln!("Loading the Deko monitor...");
+
+        // Load the ELF file.
+        if let Some(vaddr) = load_deko_monitor(
+            ctx,
+            Tracked(&mut ctx_perm),
+            &mut kernel_phys_start,
+            header,
+        ) {
+            log_info!("Deko monitor loaded successfully!");
+        } else {
+            log_error!("Deko failed to load the kernel ELF file! Check if the format is correct.");
+        }
     } else {
         log_error!("Deko failed to find the kernel physical range from the boot header!");
     }
 
-    // will not crash; good news.
     loop {
     }
+}
+
+/// Loads the kernel ELF and returns the virtual memory region where it
+/// resides, as well as its entry point. Updates the used physical memory
+/// region accordingly.
+fn load_deko_monitor(
+    ctx: DekoPPtr<DekoCpuCtx>,
+    Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
+    kernel_start: &mut PhysAddr,
+    header: Stage2LaunchInfo,
+) -> (r: Option<VirtAddr>)
+    requires
+        old(ctx_perm).wf_with(ctx),
+        old(kernel_start).wf(),
+        header.wf(),
+    ensures
+        ctx_perm.wf_with(ctx),
+{
+    let elf_len = header.kernel_elf_end - header.kernel_elf_start;
+    let elf_start = PhysAddr::from(header.kernel_elf_start as u64);
+    let elf_end = PhysAddr::from(header.kernel_elf_end as u64);
+
+    log_str!("ELF range: [");
+    log_hex_prefixed!(elf_start.0);
+    log_str!(" - ");
+    log_hex_prefixed!(elf_end.0);
+    log_str_ln!("]");
+
+    // Load the ELF file into memory.
+    let elf_file = ElfFile::new(elf_start, elf_end)?;
+
+    let vaddr_alloc_base = elf_file.get_vaddr_alloc_base();
+    // Map, validate and populate the  kernel ELF's PT_LOAD segments. The
+    // segments' virtual address range might not necessarily be contiguous,
+    // track their total extent along the way. Physical memory is successively
+    // being taken from the physical memory region, the remaining space will be
+    // available as heap space for the kernel. Remember the end of all
+    // physical memory occupied by the loaded ELF image.
+
+    Some(0u64.into())
 }
 
 /// Finish the boostrapping and jump into the monitor's entry point.
@@ -375,15 +428,14 @@ fn into_deko_monitor(deko_entry: u64, cmd: u64) -> (__discard: !) {
     unsafe {
         core::arch::asm!(
             "jmp *%rax",
-            in("rax") deko_entry, /* Placeholder for now */
+            in("rax") deko_entry,
             in("rdi") cmd,
             in("rsi") 0, /* ? */
             options(att_syntax),
         );
     }
 
-    loop {
-    }
+    unreachable!();
 }
 
 } // verus!

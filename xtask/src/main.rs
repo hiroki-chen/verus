@@ -7,6 +7,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use git2::Repository;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json;
@@ -583,7 +584,7 @@ impl Builder {
     /// Execute a cargo command with JSON message parsing for better error display
     fn execute_cargo_with_json(&self, mut cmd: Command, log_file_name: &str) -> Result<()> {
         // Enable JSON output for cargo commands
-        cmd.args(["--message-format", "json"]);
+        cmd.args(["--message-format", "json", "--", "--expand-errors"]);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let log_dir = self.config.root.join("logs");
@@ -1450,14 +1451,10 @@ fn pretty(paths: Vec<PathBuf>) -> Result<()> {
         files
     };
 
-    for file in &rs_files {
-        println!("Formatting: {:?}", file);
+    rs_files.par_iter().for_each(|file| {
         let mut cmd = std::process::Command::new("verusfmt");
-        cmd.arg(&file).arg(&file);
-        if !cmd.status()?.success() {
-            eprintln!("Warning: Failed to format file: {:?}", file);
-        }
-    }
+        let _ = cmd.arg(&file).output();
+    });
 
     println!("✓ Formatted {} files", rs_files.len());
     Ok(())

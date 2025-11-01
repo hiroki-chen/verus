@@ -5,13 +5,12 @@ edition = "2021"
 [[bin]]
 path = "src/stage2.rs"
 name = "stage2"
+test = false
 
 [[bin]]
 path = "src/monitor.rs"
 name = "deko"
-
-[lib]
-path = "src/stage2.rs"
+test = false
 
 [package.metadata.verus]
 verify = true
@@ -23,13 +22,13 @@ verus_builtin_macros = { workspace = true }
 
 deko-std = { workspace = true, features = ["alloc", "global_alloc"] }
 deko-logging = { workspace = true, optional = true }
+elf = { workspace = true }
 log = { version = "0.4.27", optional = true }
 paste = "1.0.15"
 itoa = { version = "1.0.15", features = ["no-panic"], optional = true }
 ryu = { version = "1.0.20", features = ["no-panic"], optional = true }
-lexical = { version = "7.0.5", default-features = false, optional = true, features = [
-  "write-integers",
-  "write-floats",
+lexical-write-integer = { version = "1.0.6", default-features = false, optional = true, features = [
+  "power-of-two",
 ] }
 
 [features]
@@ -40,4 +39,4 @@ default = [
 tdx = []
 snp = ["deko-std/snp"]
 # Enable logging?
-logging = ["deko-logging", "log", "itoa", "ryu", "lexical"]
+logging = ["deko-logging", "log", "itoa", "ryu", "lexical-write-integer"]

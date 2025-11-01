@@ -1,5 +1,6 @@
 use core::borrow::BorrowMut;
 
+use deko_std::prelude::*;
 use vstd::pervasive::arbitrary;
 // Re-export PTE_BASE from deko-std for backward compatibility
 use vstd::{assert_by_contradiction, prelude::*};
@@ -8,7 +9,6 @@ use super::DEKO_MAPPING_SPACE;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::DEKO_FRAME_ALLOCATOR;
-use crate::prelude::*;
 
 extern "C" {
     #[link_name = "pgtable"]
@@ -2973,7 +2973,8 @@ impl PageTablePermission {
 
         let pte_index_3 = index_at_level_spec(3, pte);
 
-        &&& pml4e_index_3 == pml4e_index_2 == pml4e_index_1 == pml4e_index_0 == RECURSIVE_INDEX as int
+        &&& pml4e_index_3 == pml4e_index_2 == pml4e_index_1 == pml4e_index_0
+            == RECURSIVE_INDEX as int
         &&& pdpe_index_3 == pdpe_index_2 == pdpe_index_1 == RECURSIVE_INDEX as int
         &&& pde_index_3 == pde_index_2 == RECURSIVE_INDEX as int
         &&& pte_index_3 == RECURSIVE_INDEX as int
@@ -3357,15 +3358,16 @@ impl PageTablePermission {
     {
         broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
         broadcast use Page::lemma_get_pte_address_wf;
+
         reveal_with_fuel(PageTablePath::remove_recursive_prefix, 5);
 
         self.lemma_pte_of_vaddr_cancels_with_self_mapping(vaddr);
-        
+
         let pte_addr = Page::get_pte_address_spec(vaddr);
         let pde_addr = Page::get_pte_address_spec(pte_addr);
         let pdpe_addr = Page::get_pte_address_spec(pde_addr);
         let pml4_addr = Page::get_pte_address_spec(pdpe_addr);
-        
+
         self.lemma_pte_of_vaddr_shares_prefix(vaddr, pte_addr);
         self.lemma_pte_of_vaddr_shares_prefix(pte_addr, pde_addr);
         self.lemma_pte_of_vaddr_shares_prefix(pde_addr, pdpe_addr);
@@ -3403,7 +3405,7 @@ impl PageTablePermission {
                     assert(vaddr_path.take(3).normalize() == path![vaddr2]);
                     assert(vaddr_path.take(2).normalize() == path![]);
                     assert(vaddr_path.take(1).normalize() == path![]);
-                    
+
                     assert(pml4e_path.normalize() == path![]);
                     assert(pdpe_path.normalize() == path![]);
                     assert(pde_path.normalize() == path![]);
@@ -3414,7 +3416,7 @@ impl PageTablePermission {
                 assert(vaddr_path.take(3).normalize() == path![vaddr1, vaddr2]);
                 assert(vaddr_path.take(2).normalize() == path![vaddr1]);
                 assert(vaddr_path.take(1).normalize() == path![]);
-                
+
                 assert(pml4e_path.normalize() == path![]);
                 assert(pdpe_path.normalize() == path![]);
                 assert(pde_path.normalize() == path![vaddr1]);
@@ -3425,7 +3427,7 @@ impl PageTablePermission {
             assert(vaddr_path.take(3).normalize() == path![vaddr0, vaddr1, vaddr2]);
             assert(vaddr_path.take(2).normalize() == path![vaddr0, vaddr1]);
             assert(vaddr_path.take(1).normalize() == path![vaddr0]);
-            
+
             assert(pml4e_path.normalize() == path![]);
             assert(pdpe_path.normalize() == path![vaddr0]);
             assert(pde_path.normalize() == path![vaddr0, vaddr1]);

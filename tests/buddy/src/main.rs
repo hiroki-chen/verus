@@ -16,7 +16,7 @@ fn main() {
 
     let a = allocator.allocate(0x1000, 0x1000);
 
-    println!("Allocated at address: 0x二分他 2{:x}", a);
+    println!("Allocated at address: 0x 2{:x}", a);
 }
 
 }

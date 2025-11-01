@@ -69,10 +69,12 @@ impl Snp {
         &self,
         ctx: DekoPPtr<DekoCtx>,
         Tracked(ctx_perm): Tracked<DekoCtxPermission>,
-    )
+    ) -> (r: (DekoPPtr<DekoCpuCtx>, Tracked<DekoCpuCtxPermission>))
         requires
             self.wf(),
             ctx_perm.wf_with(ctx),
+        ensures
+            r.1@.wf_with(r.0),
     {
         let shared_area_ptr = {
             let read_handle = PERCPU_AREAS.acquire_read();
@@ -143,6 +145,8 @@ impl Snp {
         );
 
         self.init_guest_host(bsp_percpu_ptr, Tracked(&mut cpu_ctx_perm));
+
+        (bsp_percpu_ptr, Tracked(cpu_ctx_perm))
     }
 
     #[verifier::external_body]
