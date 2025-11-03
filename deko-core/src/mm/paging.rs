@@ -3415,54 +3415,6 @@ impl PageTablePermission {
         &&& self.get_pte(vaddr_path, 0) == pte_val
     }
 
-    /// Returns a new [`PageTablePermission`] with updated child PTE permissions
-    pub open spec fn update_child_for_new_page(&self, path: PageTablePath) -> Self {
-        Self {
-            storage: self.storage.map_entries(
-                |p: PageTablePath, v: PagePermission|
-                    {
-                        if p.len() > 1 && p.drop_last()@ == path@ {
-                            PagePermission::null()
-                            // creating a null is always safe as the parent is now non-present
-
-                        } else {
-                            v
-                        }
-                    },
-            ),
-            pgtable_perm: self.pgtable_perm,
-            mapping_space: self.mapping_space,
-            private_bit: self.private_bit,
-            shared_bit: self.shared_bit,
-        }
-    }
-
-    /// Lift [`update_child_for`] to tracked mode so we can use it in proofs about state updates.
-    pub axiom fn tracked_update_child_for_new_page(tracked &mut self, path: PageTablePath)
-        requires
-            path.wf(),
-            path.len() >= 1,
-        ensures
-            *self == old(self).update_child_for_new_page(path),
-    ;
-
-    pub proof fn tracked_update_child_for_new_page_preserves_translation_valid(
-        &self,
-        after: &Self,
-        path: PageTablePath,
-    )
-        requires
-            self.translates_all_valid_addresses(),
-            path.wf(),
-            path.len() >= 1,
-            *after == self.update_child_for_new_page(path),
-        ensures
-            after.translates_all_valid_addresses(),
-    {
-        // Proof is simple as we ensure that 0 -
-        admit();
-    }
-
     #[verifier::spinoff_prover]
     pub proof fn lemma_pte_addr_same_as_vaddr_each_level(&self, vaddr: VirtAddr)
         requires
@@ -3731,21 +3683,6 @@ impl PageTablePermission {
             }
     }
 
-    /// Creates a new PageTablePermission with an empty storage map
-    /// Used when initializing a new page table
-    pub open spec fn empty(
-        root_perm: DekoPointsTo<PageTable>,
-        mapping_space: MappingSpace,
-    ) -> Self {
-        PageTablePermission {
-            pgtable_perm: root_perm,
-            storage: Map::empty(),
-            mapping_space,
-            private_bit: 0,
-            shared_bit: 0,
-        }
-    }
-
     // ============================================================================
     // LEVEL 1: Domain Invariants
     // ============================================================================
@@ -3867,7 +3804,7 @@ impl PageTablePermission {
             self.storage.contains_key(child_path) && child_path.len() > 1 ==> {
                 let parent_path = child_path.drop_last();
                 let child_index = child_path@[child_path.len() - 1];
- 
+
                 self.parent_child_consistency_spec(
                     child_path,
                     parent_path,
