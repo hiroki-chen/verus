@@ -960,6 +960,7 @@ impl Page {
             r.1@.pptr() == r.0@,
             r.1@.is_init(),
             r.1@.wf(),
+            r.1@.value().0@.len() as usize == PAGE_TABLE_ENTRY,
             ms.phys_to_virt_spec(r.2)@ as usize == r.0.addr(),
             ms.physmap.in_range_spec(r.2) || ms.kernel.in_range_spec(r.2),
             forall|i: int|
@@ -1322,6 +1323,7 @@ impl Page {
     {
         broadcast use PteFlags::lemma_from_bits_single;
         broadcast use PteFlags::lemma_each_bits_is_valid;
+        broadcast use lemma_index_at_level_spec_lt_page_entry_num;
         broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
 
         let Mapping::Level2(page, idx) = mapping else {
@@ -1802,15 +1804,14 @@ impl Page {
 
     /// Split a huge page (2MB ONLY) into 4KB pages. So the parent page table must be at level 1.
     #[verifier::spinoff_prover]
-    #[verifier::external_body]
     fn do_split_page_into_4k(
+        vaddr: VirtAddr,
         page: DekoPPtr<Page>,
         idx: usize,
         ms: &MappingSpace,
         private_bit: u64,
         shared_bit: u64,
         Tracked(perm): Tracked<&mut PageTablePermission>,
-        Ghost(vaddr): Ghost<VirtAddr>,
     )
         requires
             old(perm).do_split_page_into_4k_requires(page, idx, ms, private_bit, shared_bit, vaddr),
@@ -1819,12 +1820,18 @@ impl Page {
     {
         broadcast use PteFlags::lemma_from_bits_single;
         broadcast use PteFlags::lemma_each_bits_is_valid;
+        broadcast use PageTablePath::lemma_page_table_path_drop_last_implies;
         broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
 
         let ghost path = PageTablePath::from_vaddr_at_level(vaddr, 1);
-        let (entry, Tracked(entry_perm)) = page.borrow(
-            Tracked(&perm.storage.tracked_borrow(path.drop_last()).this_page_perm),
-        ).0.index_as_ptr(idx);
+        let ghost parent_path = path.drop_last().normalize();
+        let tracked this_page_perm = if parent_path.len() == 0 {
+            &perm.pgtable_perm
+        } else {
+            &perm.storage.tracked_borrow(parent_path).this_page_perm
+        };
+
+        let (entry, Tracked(entry_perm)) = page.borrow(Tracked(this_page_perm)).0.index_as_ptr(idx);
 
         // LATER REMOVE THIS DUE TO precondition.
         if !PageTableEntry::is_huge_pte(entry, Tracked(entry_perm)) {
@@ -1838,16 +1845,27 @@ impl Page {
         let (new_page, Tracked(new_page_perm), paddr) = Page::alloc_new(ms);
         flags.remove(HUGE);
 
-        let tracked mut page_perm = perm.storage.tracked_remove(path.drop_last());  // we remove and then re-insert later.
+        proof {
+            assert(flags.bits() & Pte_ALL_BITS == flags.bits()) by {
+                admit();
+            }
+        }
 
         // Populate the new page.
+        // Perhaps we can extract this into a helper function and hide.
         let mut cur = 0usize;
         while cur < PAGE_TABLE_ENTRY
             invariant
                 cur <= PAGE_TABLE_ENTRY,
+                addr_2m@ + PAGE_TABLE_ENTRY * PAGE_SIZE <= 0x000f_ffff_ffff_f000,
+                new_page_perm.value().0@.len() as usize == PAGE_TABLE_ENTRY,
+                new_page_perm.wf(),
+                new_page_perm.pptr() == new_page@,
+                new_page_perm.is_init(),
+                flags.wf(),
             decreases PAGE_TABLE_ENTRY - cur,
         {
-            let addr_4k = addr_2m.0 + (cur as u64) * PAGE_SIZE;
+            let addr_4k = addr_2m.0 + cur as u64 * PAGE_SIZE;
             let new_pte_value = PageTableEntry(
                 PhysAddr(
                     make_private_address(addr_4k, private_bit, shared_bit) | flags.bits() as u64,
@@ -1861,37 +1879,110 @@ impl Page {
         let new_pte_value = PageTableEntry(
             PhysAddr(make_private_address(paddr.0, private_bit, shared_bit) | flags.bits() as u64),
         );
-        Page::update_entry_by_ptr(page, Tracked(&mut page_perm.this_page_perm), idx, new_pte_value);
+
+        proof {
+            assume(!flags.contains(HUGE));  // delayed to bit proofs.
+            lemma_private_bit_non_interfering(private_bit, shared_bit, paddr.0, flags);
+            assert(!new_pte_value.is_huge_pte_spec());
+        }
+
+        // Creating `if-else` branch here is to make verification happy.
+        //
+        // We cannot just obtain a &mut DekoPointsTo<Page> as Verus will complain about returning
+        // &mut T from a borrowed context (as branches are involved).
+        //
+        // This must be circumvented by case-splitting the two scenarios in `exec` mode.
+        if index_at_level::<2>(vaddr) == RECURSIVE_INDEX as usize && index_at_level::<3>(vaddr)
+            == RECURSIVE_INDEX as usize {
+            proof {
+                assert(parent_path.len() == 0) by {
+                    reveal_with_fuel(PageTablePath::remove_recursive_prefix, 5);
+                }
+            }
+
+            Page::update_entry_by_ptr(page, Tracked(&mut perm.pgtable_perm), idx, new_pte_value);
+        } else {
+            let ghost path_norm = path.normalize();
+
+            proof {
+                assert(parent_path.wf() && path_norm.len() != 1 && path_norm != parent_path
+                    && path_norm.wf() && path_norm.is_normalized() && path_norm
+                    != path![RECURSIVE_INDEX as int]) by {
+                    reveal_with_fuel(PageTablePath::remove_recursive_prefix, 5);
+
+                    assert(path.drop_last()@[0] == index_at_level_spec(3, vaddr) as int);
+                    assert(path.drop_last()@[1] == index_at_level_spec(2, vaddr) as int);
+                }
+            }
+            let tracked mut page_perm = perm.storage.tracked_remove(parent_path);  // we remove and then re-insert later.
+            Page::update_entry_by_ptr(
+                page,
+                Tracked(&mut page_perm.this_page_perm),
+                idx,
+                new_pte_value,
+            );
+
+            proof {
+                let tracked new_page_perm = PagePermission {
+                    pte_perm: new_pte_value,
+                    this_page_perm: new_page_perm,
+                };
+
+                perm.storage.tracked_insert(parent_path, page_perm);
+                perm.storage.tracked_insert(path_norm, new_page_perm);
+                lemma_private_address_transformation_is_invertible(
+                    private_bit,
+                    shared_bit,
+                    new_pte_value,
+                    paddr.0,
+                    flags,
+                );
+                assert(forall|i: int|
+                    0 <= i < PAGE_TABLE_ENTRY as int && i != idx as int ==> old(
+                        perm,
+                    ).storage[parent_path].this_page_perm.value().0@[i]
+                        == perm.storage[parent_path].this_page_perm.value().0@[i]);
+
+                assert(perm.vaddr_based_wf()) by {
+                    // Reasoning about this gets triciky as we need to re-construct the
+                    // new_page and its children's relationship; but we do so by directing
+                    // "splitting" the address from 2m regions but the permission model
+                    // is not fully aware of this operation.
+                    //
+                    // FIXME: For now we just admit this and revisit later.
+                    admit();
+                }
+            }
+        }
 
         flush_tlb();
     }
 
     // should we add vaddr as ghost param?
-    #[verifier::external_body]
     fn split_page_into_4k(
+        vaddr: VirtAddr,
         mapping: Mapping,
         ms: &MappingSpace,
         private_bit: u64,
         shared_bit: u64,
         Tracked(perm): Tracked<&mut PageTablePermission>,
-        Ghost(vaddr): Ghost<VirtAddr>,
     )
         requires
-            old(perm).split_page_into_4k_requires(mapping, ms, vaddr),
+            old(perm).split_page_into_4k_requires(mapping, ms, private_bit, shared_bit, vaddr),
         ensures
-            old(perm).split_page_into_4k_ensures(mapping, vaddr, perm),
+            old(perm).split_page_into_4k_ensures(vaddr, perm),
     {
         match mapping {
             Mapping::Level0(_, _) => {},
             Mapping::Level1(page, idx) => {
                 Page::do_split_page_into_4k(
+                    vaddr,
                     page,
                     idx,
                     ms,
                     private_bit,
                     shared_bit,
                     Tracked(perm),
-                    Ghost(vaddr),
                 );
             },
             _ => {
@@ -1919,7 +2010,7 @@ impl Page {
             old(perm).set_shared_4k_ensures(vaddr, private_bit, shared_bit, perm),
     {
         let mapping = Page::walk(page, Tracked(perm), vaddr, ms, private_bit, shared_bit);
-        Page::split_page_into_4k(mapping, ms, private_bit, shared_bit, Tracked(perm), Ghost(vaddr));
+        Page::split_page_into_4k(vaddr, mapping, ms, private_bit, shared_bit, Tracked(perm));
 
         // After splitting we need to walk again to get the Level0 mapping.
         let Mapping::Level0(page, idx) = Page::walk(
@@ -2323,6 +2414,26 @@ impl PageTablePermission {
         &&& self.private_bit == private_bit
         &&& self.shared_bit == shared_bit
         &&& vaddr.wf()
+        &&& bit_not_overlapping(private_bit)
+        &&& bit_not_overlapping(shared_bit)
+        &&& bit_not_in_addr_region(private_bit)
+        &&& bit_not_in_addr_region(
+            shared_bit,
+        )
+        // Must be a Level1 mapping.
+        &&& self.mapping_addr_consistent(page, idx, vaddr, 1)
+        &&& {
+            let path = PageTablePath::from_vaddr_at_level(vaddr, 1).drop_last().normalize();
+            let page = if path.len() == 0 {
+                &self.pgtable_perm
+            } else {
+                &self.storage[path].this_page_perm
+            };
+
+            &&& page.value().0@.index(idx as int).is_huge_pte_spec()
+            &&& page.value().0@.index(idx as int).address_spec(private_bit, shared_bit)@
+                + PAGE_TABLE_ENTRY * PAGE_SIZE <= 0x000f_ffff_ffff_f000
+        }
     }
 
     pub open spec fn do_split_page_into_4k_ensures(
@@ -2344,6 +2455,8 @@ impl PageTablePermission {
         &self,
         mapping: Mapping,
         ms: &MappingSpace,
+        private_bit: u64,
+        shared_bit: u64,
         vaddr: VirtAddr,
     ) -> bool {
         &&& self.wf()
@@ -2353,14 +2466,20 @@ impl PageTablePermission {
         &&& ms == self.mapping_space
         &&& match mapping {
             Mapping::Level0(page, idx) => true,
-            Mapping::Level1(page, idx) => true,
+            Mapping::Level1(page, idx) => self.do_split_page_into_4k_requires(
+                page,
+                idx,
+                ms,
+                private_bit,
+                shared_bit,
+                vaddr,
+            ),
             _ => false,
         }
     }
 
     pub open spec fn split_page_into_4k_ensures(
         &self,
-        mapping: Mapping,
         vaddr: VirtAddr,
         new_perm: &PageTablePermission,
     ) -> bool {
@@ -2368,10 +2487,6 @@ impl PageTablePermission {
         &&& new_perm.mapping_space == self.mapping_space
         &&& new_perm.private_bit == self.private_bit
         &&& new_perm.shared_bit == self.shared_bit
-        &&& mapping matches Mapping::Level0(page, idx) && {
-            // todo.
-            true
-        }
     }
 
     pub open spec fn set_shared_4k_requires(
@@ -3752,7 +3867,7 @@ impl PageTablePermission {
             self.storage.contains_key(child_path) && child_path.len() > 1 ==> {
                 let parent_path = child_path.drop_last();
                 let child_index = child_path@[child_path.len() - 1];
-
+ 
                 self.parent_child_consistency_spec(
                     child_path,
                     parent_path,
