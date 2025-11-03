@@ -1,4 +1,5 @@
 #![no_std]
+#![feature(proc_macro_hygiene)]
 #![feature(abi_x86_interrupt)]
 #![feature(allocator_api)]
 #![feature(never_type)]

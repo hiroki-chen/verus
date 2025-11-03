@@ -9,7 +9,7 @@ use crate::cpu::idt::{
     create_early_idt, stage2_generic_idt_handler, stage2_generic_idt_handler_no_ghcb, Idt,
 };
 use crate::cpu::{register_cpuid_table, DekoCpuCtx, DekoCpuCtxPermission};
-use crate::elf::ElfFile;
+use crate::elf::{ElfFile, ElfLoadSegement};
 use crate::logging::DekoDebug;
 use crate::mm::{init_frame_allocator, DEKO_MAPPING_SPACE};
 use crate::snp::{get_igvm_params, Snp};
@@ -254,33 +254,37 @@ pub trait PlatformApi: Sync + Send + WellFormed {
 /// Injects dummy handlers into the IDT so that we can do early-stage
 /// exception handling (although this does nothing for now).
 #[inline(always)]
-fn init_early_idt(idt: &mut Idt)
+#[verus_spec(r =>
     requires
         old(idt).entries.wf(),
     ensures
         idt.wf(),
-{
+)]
+fn init_early_idt(idt: &mut Idt) {
     crate::cpu::idt::init_early_idt(idt);
 }
 
 #[inline(always)]
-fn init_early_idt_late(idt: &mut Idt)
+#[verus_spec(r =>
     requires
         old(idt).wf(),
     ensures
         idt.wf(),
-{
+)]
+fn init_early_idt_late(idt: &mut Idt) {
     crate::cpu::idt::init_generic_idt(idt);
 }
 
 /// Sets up the environment for the platform which will setup the GDT, kernel mapping, paging,
 /// kernel loading, heaps, etc.
 #[verifier::exec_allows_no_decreases_clause]
-pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -> (__discard: !)
+#[verus_spec(__ =>
     requires
         ctx_perm@.wf_with(ctx),
         ctx_perm@.current_cpu_core.is_bsp(),
-{
+    ensures
+)]
+pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -> (__discard: !) {
     let Tracked(mut ctx_perm) = ctx_perm;
 
     // Extract the launch info from the context.
@@ -364,12 +368,8 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
         log_str_ln!("Loading the Deko monitor...");
 
         // Load the ELF file.
-        if let Some(vaddr) = load_deko_monitor(
-            ctx,
-            Tracked(&mut ctx_perm),
-            &mut kernel_phys_start,
-            header,
-        ) {
+        if let Some(vaddr) = #[verus_spec(with Tracked(&mut ctx_perm))]
+        load_deko_monitor(ctx, &mut kernel_phys_start, header) {
             log_info!("Deko monitor loaded successfully!");
         } else {
             log_error!("Deko failed to load the kernel ELF file! Check if the format is correct.");
@@ -382,22 +382,40 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
     }
 }
 
+/// This function is intended to called as a closure to load each ELF segment.
+#[verus_spec(r =>
+    requires
+        paddr.wf(),
+        header.wf(),
+    ensures
+        r.0.wf(),
+)]
+fn load_elf_segment(segment: ElfLoadSegement, paddr: PhysAddr, header: Stage2LaunchInfo) -> (r: (
+    PhysAddr,
+    VirtAddr,
+    VirtAddr,
+)) {
+    vstd::vpanic!("Not implemented yet")
+}
+
 /// Loads the kernel ELF and returns the virtual memory region where it
 /// resides, as well as its entry point. Updates the used physical memory
 /// region accordingly.
-fn load_deko_monitor(
-    ctx: DekoPPtr<DekoCpuCtx>,
-    Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
-    kernel_start: &mut PhysAddr,
-    header: Stage2LaunchInfo,
-) -> (r: Option<VirtAddr>)
+#[verus_spec(r =>
+    with
+        Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>
     requires
         old(ctx_perm).wf_with(ctx),
-        old(kernel_start).wf(),
+        old(kernel_end).wf(),
         header.wf(),
     ensures
         ctx_perm.wf_with(ctx),
-{
+)]
+fn load_deko_monitor(
+    ctx: DekoPPtr<DekoCpuCtx>,
+    kernel_end: &mut PhysAddr,
+    header: Stage2LaunchInfo,
+) -> (r: Option<VirtAddr>) {
     let elf_len = header.kernel_elf_end - header.kernel_elf_start;
     let elf_start = PhysAddr::from(header.kernel_elf_start as u64);
     let elf_end = PhysAddr::from(header.kernel_elf_end as u64);
@@ -418,6 +436,7 @@ fn load_deko_monitor(
     // being taken from the physical memory region, the remaining space will be
     // available as heap space for the kernel. Remember the end of all
     // physical memory occupied by the loaded ELF image.
+    elf_file.load_each_segment(vaddr_alloc_base, kernel_end, header, load_elf_segment);
 
     Some(0u64.into())
 }

@@ -27,7 +27,7 @@ prettyplease_verus = { git = "https://github.com/ziqiaozhou/verus", rev = "7c4a5
 deko-core = { path = "deko-core", default-features = false }
 deko-logging = { path = "deko-logging" }
 deko-std = { path = "deko-std" }
-elf = { git = "https://github.com/coconut-svsm/svsm.git", rev = "ed60c33" }
+elf = { git = "https://github.com/hiroki-chen/elf-rs.git" }
 
 # the profile used for `cargo build`
 [profile.dev]

@@ -92,7 +92,7 @@ impl<'a> ElfFile<'a> {
         base: VirtAddr,
         paddr: &mut PhysAddr,
         header: Stage2LaunchInfo,
-        f: impl Fn(ElfLoadSegement, &PhysAddr, Stage2LaunchInfo) -> (VirtAddr, VirtAddr),
+        f: impl Fn(ElfLoadSegement, PhysAddr, Stage2LaunchInfo) -> (PhysAddr, VirtAddr, VirtAddr),
     ) -> (r: (Option<VirtAddr>, VirtAddr))
         requires
             self.wf(),
@@ -112,7 +112,11 @@ impl<'a> ElfFile<'a> {
             log_int!(i);
             log_str_ln!("...");
 
-            let (vaddr_start, vaddr_end) = f(ElfLoadSegement(segment), paddr, header);
+            let (updated_phys_addr, vaddr_start, vaddr_end) = f(
+                ElfLoadSegement(segment),
+                *paddr,
+                header,
+            );
             // Remember the mapping range's lower and upper bounds to pass it on
             // the kernel later. Note that the segments are being iterated over
             // here in increasing load order.
@@ -122,7 +126,7 @@ impl<'a> ElfFile<'a> {
             load_virt_end = vaddr_end;
 
             // Advance the physical address pointer for the next segment.
-            *paddr = PhysAddr::from(paddr.0 + vaddr_end.0 - vaddr_start.0);
+            *paddr = PhysAddr::from(updated_phys_addr.0 + vaddr_end.0 - vaddr_start.0);
         }
 
         (load_virt_start, load_virt_end)
