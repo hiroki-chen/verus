@@ -48,8 +48,8 @@ struct Span {
 #[derive(Deserialize, Debug)]
 struct SpanText {
     text: String,
-    highlight_start: u32,
-    highlight_end: u32,
+    // highlight_start: u32,
+    // highlight_end: u32,
 }
 
 #[derive(Deserialize, Debug)]
@@ -83,12 +83,12 @@ impl BuildSummary {
         if self.successful {
             println!("{} {}", "✓".green().bold(), "Build completed successfully".green());
 
-            // Only show warning count if there are errors, to keep output clean
-            if !self.warnings.is_empty() && !self.errors.is_empty() {
+            // Show notes/diagnostics count if there are any
+            if !self.notes.is_empty() {
                 println!(
-                    "{} {} warnings (suppressed)",
+                    "{} {} diagnostics/notes",
                     "ℹ".blue(),
-                    self.warnings.len().to_string().blue()
+                    self.notes.len().to_string().blue()
                 );
             }
         } else {
@@ -99,16 +99,19 @@ impl BuildSummary {
             println!("{} {} errors", "●".red(), self.errors.len().to_string().red().bold());
         }
 
-        // Only print detailed error information
-        if !self.errors.is_empty() {
-            println!("\n{}", "DETAILED ERRORS:".red().bold());
-            for (i, error) in self.errors.iter().enumerate() {
-                self.print_formatted_message(error, i + 1);
-            }
+        // Print detailed error information with diagnostics after each error
+
+        for (i, error) in self.errors.iter().enumerate() {
+            // First print the error
+            self.print_formatted_message(error, i + 1);
         }
 
-        // Suppress warnings unless there are errors - keep output clean
-        // Users can check logs if they want to see warnings
+        for note in &self.notes {
+            if let Some(rendered) = &note.rendered {
+                println!("\n{} {}", "📋".blue(), "Related diagnostic expansion:".blue().bold());
+                self.print_verification_failure_details(rendered);
+            }
+        }
     }
 
     fn print_formatted_message(&self, msg: &CompilerMessage, index: usize) {
@@ -141,6 +144,7 @@ impl BuildSummary {
     fn print_verification_failure_details(&self, rendered: &str) {
         let lines: Vec<&str> = rendered.lines().collect();
         let mut file_location = String::new();
+        let mut in_expansion = false;
 
         // Extract file location
         for line in &lines {
@@ -150,159 +154,82 @@ impl BuildSummary {
             }
         }
 
-        println!("   {} {}", "Location:".bright_blue(), file_location.bright_white());
-        println!("   {}", "Details:".red().bold());
+        if !file_location.is_empty() {
+            println!("   {} {}", "Location:".bright_blue(), file_location.bright_white());
+        }
 
-        // Simply output the full rendered message with proper formatting
+        // Determine if this is a diagnostic expansion
+        let is_diagnostic = rendered.contains("diagnostics via expansion");
+        if is_diagnostic {
+            println!("   {}", "Expansion Details:".blue().bold());
+        } else {
+            println!("   {}", "Details:".red().bold());
+        }
+
+        // Output the rendered message with enhanced formatting for diagnostics
         for line in lines {
             if line.trim().is_empty() {
                 println!();
-            } else if line.starts_with("error:") {
-                println!("   {}", line.red().bold());
-            } else if line.contains("-->") {
-                println!("   {}", line.bright_blue());
-            } else if line.contains("failed precondition")
-                || line.contains("failed this postcondition")
-                || line.contains("assertion failed")
-            {
-                println!("   {}", line.red().bold());
-            } else if line.trim_start().starts_with("|") {
-                // Code lines - highlight important ones
-                if line.contains("^") || line.contains("~") {
-                    println!("   {}", line.red().bold());
+                continue;
+            }
+
+            // Detect start of expansion
+            if line.contains("diagnostics via expansion") {
+                println!("   {}", line.blue().bold());
+                in_expansion = true;
+                continue;
+            }
+
+            if is_diagnostic && in_expansion {
+                // Enhanced formatting for diagnostic expansion
+                if line.trim_start().starts_with("|") {
+                    // Extract the code part after the line marker
+                    if let Some(pipe_pos) = line.find("|") {
+                        let prefix = &line[..pipe_pos + 1];
+                        let code_part = &line[pipe_pos + 1..];
+
+                        // Highlight different verification constructs
+                        if code_part.contains("==>") {
+                            println!("   {}{}", prefix.dimmed(), code_part.yellow().bold());
+                        } else if code_part.contains("✔") {
+                            println!("   {}{}", prefix.dimmed(), code_part.green().bold());
+                        } else if code_part.contains("✘") {
+                            println!("   {}{}", prefix.dimmed(), code_part.red().bold());
+                        } else {
+                            println!("   {}{}", prefix.dimmed(), code_part.white());
+                        }
+                    } else {
+                        println!("   {}", line.white());
+                    }
+                } else if line.contains("-->") {
+                    println!("   {}", line.bright_blue());
+                } else if line.starts_with("note:") {
+                    println!("   {}", line.blue().bold());
                 } else {
-                    println!("   {}", line.dimmed());
+                    println!("   {}", line.white());
                 }
             } else {
-                println!("   {}", line);
-            }
-        }
-    }
-
-    fn analyze_precondition_failure(&self, rendered: &str) -> String {
-        let lines: Vec<&str> = rendered.lines().collect();
-
-        // Look for the precondition block that ends with "- failed precondition"
-        let mut precondition_content = Vec::new();
-        let mut collecting_precondition = false;
-
-        for line in &lines {
-            // Start collecting when we find a line with code content
-            if line.contains(" | ") && !line.contains("failed precondition") {
-                // Extract the code part after the line number and |
-                if let Some(pipe_pos) = line.find(" | ") {
-                    let code_part = &line[pipe_pos + 3..]; // Skip " | "
-
-                    // Look for the start of a logical condition
-                    if code_part.trim_start().starts_with('/')
-                        || code_part.contains("in_range_spec")
-                        || code_part.contains("||")
-                        || code_part.contains("&&")
-                        || collecting_precondition
-                    {
-                        collecting_precondition = true;
-
-                        // Clean up the code content
-                        let cleaned = code_part
-                            .trim_start()
-                            .trim_start_matches('/')
-                            .trim_start_matches('|')
-                            .trim();
-
-                        if !cleaned.is_empty()
-                            && !cleaned.starts_with("...")
-                            && !cleaned.chars().all(|c| c == '-' || c == ' ' || c == '_')
-                        {
-                            precondition_content.push(cleaned);
-                        }
+                // Regular formatting for errors
+                if line.starts_with("error:") {
+                    println!("   {}", line.red().bold());
+                } else if line.contains("-->") {
+                    println!("   {}", line.bright_blue());
+                } else if line.contains("failed precondition")
+                    || line.contains("failed this postcondition")
+                    || line.contains("assertion failed")
+                {
+                    println!("   {}", line.red().bold());
+                } else if line.trim_start().starts_with("|") {
+                    // Code lines - highlight important ones
+                    if line.contains("^") || line.contains("~") {
+                        println!("   {}", line.red().bold());
+                    } else {
+                        println!("   {}", line.dimmed());
                     }
+                } else {
+                    println!("   {}", line);
                 }
             }
-
-            // Stop collecting when we hit the "failed precondition" line
-            if line.contains("failed precondition") {
-                collecting_precondition = false;
-            }
-        }
-
-        // If we didn't find content, try a different approach - look for the specific condition
-        if precondition_content.is_empty() {
-            for line in &lines {
-                if line.contains("mapping_space") || line.contains("in_range_spec") {
-                    // Extract just the meaningful parts
-                    if let Some(pipe_pos) = line.find(" | ") {
-                        let code_part = &line[pipe_pos + 3..].trim();
-                        precondition_content.push(code_part);
-                    }
-                }
-            }
-        }
-
-        // Analyze the precondition content to generate a meaningful explanation
-        if precondition_content.is_empty() {
-            return "Failed precondition (details not available)".to_string();
-        }
-
-        let full_condition = precondition_content.join(" ");
-
-        // Pattern matching for common failure types
-        if full_condition.contains("in_range_spec") {
-            if full_condition.contains("mapping_space.kernel.in_range_spec")
-                && full_condition.contains("mapping_space.physmap.in_range_spec")
-            {
-                return "Failed precondition because address validation failed - the address is not within either the kernel mapping space or the physical mapping space range. The memory address being accessed is outside the allowed memory regions.".to_string();
-            } else if full_condition.contains("mapping_space")
-                && full_condition.contains("in_range_spec")
-            {
-                return "Failed precondition because the address is not within the valid mapping space range. The memory address doesn't fall within the expected address space boundaries.".to_string();
-            } else if full_condition.contains("in_range_spec") {
-                return "Failed precondition because range validation failed - the value is outside the expected valid range.".to_string();
-            }
-        }
-
-        if full_condition.contains("address_spec") {
-            return "Failed precondition because the memory address specification is invalid. The address doesn't meet the required specification constraints.".to_string();
-        }
-
-        if full_condition.contains("pte_perm") || full_condition.contains("permission") {
-            return "Failed precondition because page table entry permissions are invalid. The memory access permissions don't match the required constraints.".to_string();
-        }
-
-        if full_condition.contains("private_bit") || full_condition.contains("shared_bit") {
-            return "Failed precondition because memory privacy/sharing bit validation failed. The memory page privacy settings don't meet the requirements.".to_string();
-        }
-
-        // Generic analysis based on logical structure
-        if full_condition.contains("||") {
-            return format!(
-                "Failed precondition because none of the alternative conditions were satisfied: {}",
-                self.simplify_condition(&full_condition)
-            );
-        } else if full_condition.contains("&&") {
-            return format!(
-                "Failed precondition because one or more required conditions were not met: {}",
-                self.simplify_condition(&full_condition)
-            );
-        }
-
-        // Fallback with the actual condition
-        return format!("Failed precondition: {}", self.simplify_condition(&full_condition));
-    }
-
-    fn simplify_condition(&self, condition: &str) -> String {
-        // Simplify complex expressions for better readability
-        let simplified = condition
-            .replace("mapping_space.kernel.in_range_spec", "kernel_range_check")
-            .replace("mapping_space.physmap.in_range_spec", "physmap_range_check")
-            .replace("pte_perm.value().address_spec", "address_validation")
-            .replace("private_bit", "privacy_bit")
-            .replace("shared_bit", "sharing_bit");
-
-        // Truncate if too long
-        if simplified.len() > 100 {
-            format!("{}...", &simplified[..97])
-        } else {
-            simplified
         }
     }
 
@@ -322,7 +249,7 @@ impl BuildSummary {
         }
     }
 
-    fn print_manual_formatting(&self, msg: &CompilerMessage, level_color: &str) {
+    fn print_manual_formatting(&self, msg: &CompilerMessage, _level_color: &str) {
         // Print primary spans with file information
         for span in &msg.spans {
             if span.is_primary {
@@ -372,12 +299,12 @@ struct GitHubRelease {
 struct GitHubAsset {
     name: String,
     browser_download_url: String,
-    content_type: String,
+    // content_type: String,
     size: u64,
 }
 
 // Configuration constants - no user-specific paths
-const DEFAULT_VERUS_REPO: &str = "https://github.com/hiroki-chen/verus.git";
+// const DEFAULT_VERUS_REPO: &str = "https://github.com/hiroki-chen/verus.git";
 const VERUS_RELEASES_API: &str = "https://api.github.com/repos/verus-lang/verus/releases";
 const DEFAULT_MEMORY: &str = "4G";
 const DEFAULT_SMP_CORES: u32 = 4;
@@ -1408,23 +1335,6 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{:.1} {}", size, UNITS[unit_index])
     }
-}
-
-// Helper function to detect the current shell
-fn detect_shell() -> String {
-    // Try to get shell from environment
-    if let Ok(shell) = std::env::var("SHELL") {
-        if shell.contains("fish") {
-            return "fish".to_string();
-        } else if shell.contains("zsh") {
-            return "zsh".to_string();
-        } else if shell.contains("bash") {
-            return "bash".to_string();
-        }
-    }
-
-    // Default to bash
-    "bash".to_string()
 }
 
 fn pretty(paths: Vec<PathBuf>) -> Result<()> {
