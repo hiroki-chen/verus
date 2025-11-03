@@ -405,6 +405,11 @@ pub axiom fn page_size_is_4kb()
         core::mem::size_of::<Page>() == PAGE_SIZE as usize,
 ;
 
+pub axiom fn page_is_aligned()
+    ensures
+        core::mem::align_of::<Page>() == PAGE_SIZE as usize,
+;
+
 pub axiom fn page_table_entry_size_is_qword()
     ensures
         core::mem::size_of::<PageTableEntry>() == 8,
@@ -2038,12 +2043,12 @@ impl Page {
 
     /// Maps a single 4KB page at the given virtual address to the given physical address
     #[verifier::spinoff_prover]
-    #[verifier::external_body]
     pub fn map_page_4k(
         page: DekoPPtr<Page>,
         Tracked(perm): Tracked<&mut PageTablePermission>,
         vaddr: VirtAddr,
-        paddr: PhysAddr,
+        paddr: PhysAddr, // <- this implicitly creates a "permission" out of nowhere. Is that okay?
+        /* Tracked(mapped_page_perm): Tracked<PagePermission> */
         ms: &MappingSpace,
         flags: PteFlags,
         private_bit: u64,
@@ -2054,7 +2059,11 @@ impl Page {
         ensures
             old(perm).map_page_4k_ensures(vaddr, paddr, flags, private_bit, shared_bit, perm),
     {
+        broadcast use PteFlags::lemma_from_bits_single;
+        broadcast use PteFlags::lemma_each_bits_is_valid;
+        broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
         // Allocate a page for us.
+
         let mapping = Page::allocate_pte_4k(
             page,
             Tracked(perm),
@@ -2065,18 +2074,82 @@ impl Page {
         );
 
         let Mapping::Level0(page, idx) = mapping else {
-            proof {
-                assert(false);  // by precondition.
-            }
             vstd::vpanic!("Expected Level0 mapping");
         };
 
         let new_pte_value = PageTableEntry(
             PhysAddr(make_private_address(paddr.0, private_bit, shared_bit) | flags.bits() as u64),
         );
-        let ghost path = PageTablePath::from_vaddr(vaddr);
-        let tracked mut page_perm = perm.storage.tracked_remove(path.drop_last());  // we remove and then re-insert later.
+        let ghost path = PageTablePath::from_vaddr_at_level(vaddr, 0);
+        let ghost parent_path = path.drop_last().normalize();
+
+        proof {
+            reveal_with_fuel(PageTablePath::remove_recursive_prefix, 5);
+            assert(new_pte_value.address_spec(private_bit, shared_bit) == paddr) by {
+                lemma_private_address_transformation_is_invertible(
+                    private_bit,
+                    shared_bit,
+                    new_pte_value,
+                    paddr.0,
+                    flags,
+                );
+            }
+
+            assert(path.wf() && parent_path.wf() && path.is_normalized()
+                && parent_path.is_normalized());
+            assert(path.len() == 4 && parent_path.len() == 3);
+            assert(path != path![RECURSIVE_INDEX as int]);
+            assert(parent_path != path![RECURSIVE_INDEX as int]);
+        }
+
+        let tracked perm_before = &*perm;
+        let tracked mut page_perm = perm.storage.tracked_remove(parent_path);  // we remove and then re-insert later.
         Page::update_entry_by_ptr(page, Tracked(&mut page_perm.this_page_perm), idx, new_pte_value);
+        proof {
+            page_is_aligned();
+
+            perm.storage.tracked_insert(parent_path, page_perm);
+            perm.storage.tracked_insert(
+                path,
+                PagePermission {
+                    pte_perm: new_pte_value,
+                    this_page_perm: DekoPointsTo::any_init(true), // TODO: Fix this later.
+                },
+            );
+
+            assert(perm_before.vaddr_based_wf());
+            assert
+                forall |child_path: PageTablePath|
+                    #![trigger perm.storage.contains_key(child_path)]
+                    #![trigger perm.storage.contains_key(child_path.drop_last())]
+                    perm.storage.contains_key(child_path) && child_path.len() > 1 && child_path != path implies {
+                        let parent_path = child_path.drop_last();
+                        let child_index = child_path@[child_path.len() - 1];
+
+                        perm.parent_child_consistency_spec(
+                            child_path,
+                            parent_path,
+                            child_index,
+                            perm.storage[child_path],
+                            perm.storage[parent_path],
+                        )
+                    }
+            by {
+                if child_path != path {
+                    if child_path.drop_last() == path.drop_last() {
+                        assert(child_path@[child_path.len() - 1] != idx as int) by {
+                            if (child_path@[child_path.len() - 1] == idx as int) {
+                                assert(child_path == path);
+                            }
+                        }
+                    }
+                }
+            }
+
+            assume(perm.storage[path].this_page_perm.addr() == perm.mapping_space.phys_to_virt_spec(
+                new_pte_value.address_spec(private_bit, shared_bit),
+            )@);
+        }
     }
 }
 
@@ -2296,17 +2369,16 @@ impl PageTablePermission {
             &&& self.pgtable_perm.dptr() == ptr
             &&& path@[0] == idx as int
         } else {
-            let parent_path = path.drop_last();
-            let norm_parent = parent_path.normalize();
+            let parent_path = path.drop_last().normalize();
 
-            if norm_parent.len() == 0 {
+            if parent_path.len() == 0 {
                 // Parent normalized to [] - accessing PML4 via recursive mapping
                 &&& self.pgtable_perm.dptr() == ptr
                 &&& path@[(3 - lvl) as int] == idx as int
             } else {
                 // Normal case - parent is in storage
-                &&& self.storage.contains_key(norm_parent)
-                &&& self.storage[norm_parent].this_page_perm.dptr() == ptr
+                &&& self.storage.contains_key(parent_path)
+                &&& self.storage[parent_path].this_page_perm.dptr() == ptr
                 &&& path@[(3 - lvl) as int] == idx as int
             }
         }
@@ -2374,8 +2446,8 @@ impl PageTablePermission {
     ) -> bool {
         &&& new_pgtable_perm.wf()
         &&& new_pgtable_perm.mapping_space == self.mapping_space
-        &&& new_pgtable_perm.private_bit == private_bit
-        &&& new_pgtable_perm.shared_bit == shared_bit
+        &&& new_pgtable_perm.private_bit == private_bit == self.private_bit
+        &&& new_pgtable_perm.shared_bit == shared_bit == self.shared_bit
     }
 
     /// Gets the PTE at the specified level for a given path.
@@ -2544,9 +2616,10 @@ impl PageTablePermission {
             private_bit,
             shared_bit,
         )
-        // Must return a Level0 mapping.
-        // &&& res_mapping matches Mapping::Level0(ptr, idx) ==> self.validates_level0_mapping_result(vaddr, res_mapping, new_pgtable_perm)
-
+        // Must return a Level0 mapping ?
+        &&& res_mapping matches Mapping::Level0(ptr, idx) ==> {
+            new_pgtable_perm.mapping_addr_consistent(ptr, idx, vaddr, 0)
+        }
     }
 
     pub open spec fn allocate_pte_lvl3_requires(
@@ -2586,11 +2659,10 @@ impl PageTablePermission {
         res_mapping: Mapping,
         new_pgtable_perm: &PageTablePermission,
     ) -> bool {
-        &&& self.preserves_pgtable_invariants(
-            new_pgtable_perm,
-            private_bit,
-            shared_bit,
-        )
+        &&& self.preserves_pgtable_invariants(new_pgtable_perm, private_bit, shared_bit)
+        &&& res_mapping matches Mapping::Level0(ptr, idx) ==> {
+            new_pgtable_perm.mapping_addr_consistent(ptr, idx, vaddr, 0)
+        }
         // &&& self.allocated_mapping_result_valid(vaddr, huge, res_mapping, new_pgtable_perm)
 
     }
@@ -2632,11 +2704,10 @@ impl PageTablePermission {
         res_mapping: Mapping,
         new_pgtable_perm: &PageTablePermission,
     ) -> bool {
-        &&& self.preserves_pgtable_invariants(
-            new_pgtable_perm,
-            private_bit,
-            shared_bit,
-        )
+        &&& self.preserves_pgtable_invariants(new_pgtable_perm, private_bit, shared_bit)
+        &&& res_mapping matches Mapping::Level0(ptr, idx) ==> {
+            new_pgtable_perm.mapping_addr_consistent(ptr, idx, vaddr, 0)
+        }
         // &&& self.allocated_mapping_result_valid(vaddr, huge, res_mapping, new_pgtable_perm)
 
     }
@@ -2679,6 +2750,9 @@ impl PageTablePermission {
         new_pgtable_perm: &PageTablePermission,
     ) -> bool {
         &&& self.preserves_pgtable_invariants(new_pgtable_perm, private_bit, shared_bit)
+        &&& res_mapping matches Mapping::Level0(ptr, idx) ==> {
+            new_pgtable_perm.mapping_addr_consistent(ptr, idx, vaddr, 0)
+        }
     }
 
     pub open spec fn map_page_4k_requires(
@@ -2696,6 +2770,21 @@ impl PageTablePermission {
         &&& bit_not_overlapping(shared_bit)
         &&& bit_not_in_addr_region(private_bit)
         &&& bit_not_in_addr_region(shared_bit)
+        &&& flags.wf()
+        &&& flags.bits() & Pte_ALL_BITS == flags.bits()
+        &&& paddr.wf()
+        &&& paddr@ % PAGE_SIZE == 0
+        &&& paddr@ < 0x000f_ffff_ffff_f000
+        &&& ms.kernel.in_range_spec(paddr) || ms.physmap.in_range_spec(
+            paddr,
+        )
+        // Must be canonical path for vaddr.
+        &&& {
+            let path = PageTablePath::from_vaddr(vaddr);
+
+            &&& path.is_normalized()
+            &&& path.wf()
+        }
     }
 
     pub open spec fn map_page_4k_ensures(
@@ -3801,6 +3890,7 @@ impl PageTablePermission {
         // Check consistency between all parent-child pairs
         &&& forall|child_path: PageTablePath|
             #![trigger self.storage[child_path]]
+            #![trigger self.storage[child_path.drop_last()]]
             self.storage.contains_key(child_path) && child_path.len() > 1 ==> {
                 let parent_path = child_path.drop_last();
                 let child_index = child_path@[child_path.len() - 1];

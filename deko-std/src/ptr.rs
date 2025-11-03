@@ -41,6 +41,36 @@ impl<V: WellFormed> WellFormed for DekoPointsTo<V> {
     }
 }
 
+impl<V: WellFormed> DekoPointsTo<V> {
+    /// Call this function if you want to create a placeholder
+    /// [`DekoPointsTo<V>`] that you do not care about its
+    /// actual contents and pretend it is initialized.
+    pub axiom fn any_init(aligned: bool) -> (tracked r: Self)
+        ensures
+            r.is_init(),
+            r.wf(),
+            r.addr() % if aligned {
+                align_of::<V>()
+            } else {
+                1
+            } == 0,
+    ;
+
+    /// Call this function if you want to create a placeholder
+    /// [`DekoPointsTo<V>`] that you do not care about its
+    /// actual contents and pretend it is uninitialized.
+    pub axiom fn any_uninit(aligned: bool) -> (tracked r: Self)
+        ensures
+            r.is_uninit(),
+            r.wf(),
+            r.addr() % if aligned {
+                align_of::<V>()
+            } else {
+                1
+            } == 0,
+    ;
+}
+
 impl<V: WellFormed> Clone for DekoPPtr<V> {
     fn clone(&self) -> (res: Self)
         ensures
