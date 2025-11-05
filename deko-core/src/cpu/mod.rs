@@ -286,6 +286,12 @@ with_permission! {
 impl DekoCpuCtxPermission {
     pub open spec fn wf_with(&self, cpu_data: DekoPPtr<DekoCpuCtx>) -> bool {
         &&& self.ptr_perm.pptr() == cpu_data@
+        &&& self.wf()
+    }
+}
+
+impl WellFormed for DekoCpuCtxPermission {
+    open spec fn wf(&self) -> bool {
         &&& self.ptr_perm.is_init()
         &&& self.ptr_perm.wf()
         &&& self.ptr_perm.value().kernel_mapping().wf()

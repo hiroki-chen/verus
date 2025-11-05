@@ -46,7 +46,7 @@ pub fn validate_ghcb(
     // let ghcb_paddr = virt_to_phys(ghcb_vaddr); // todo: FIX ME.
     let ghcb_paddr = PhysAddr(ghcb.addr() as u64);
     // Invalidate this page from the CVM.
-    crate::snp::Snp::pvalidate(ghcb_vaddr.0, 0x1000, false, Tracked::assume_new());
+    crate::imp::pvalidate(ghcb_vaddr.0, 0x1000, false, Tracked::assume_new());
     // Notify the hypervisor that this page is now invalid.
     msr_set_page_valid(ghcb_paddr, false);
 
@@ -83,10 +83,10 @@ pub fn msr_register_ghcb_gpa(paddr: PhysAddr)
     );
 
     if response & 0xfff != SNP_REG_GHCB_GPA_RESP {
-        vstd::vpanic!("Failed to register GHCB GPA via MSR");
+        crate::die("Failed to register GHCB GPA via MSR");
     }
     if response & !(0xfff) != paddr.0 {
-        vstd::vpanic!("Failed to register GHCB GPA via MSR");
+        crate::die("Failed to register GHCB GPA via MSR");
     }
 }
 
@@ -114,10 +114,10 @@ pub fn msr_set_page_valid(paddr: PhysAddr, valid: bool)
     );
 
     if response & 0xfff != SNP_STATE_CHANGE_RESP {
-        vstd::vpanic!("Failed to change the page state via GHCB");
+        crate::die("Failed to change the page state via GHCB");
     }
     if response & !(0xfff) != 0 {
-        vstd::vpanic!("Failed to change the page state via GHCB");
+        crate::die("Failed to change the page state via GHCB");
     }
 }
 

@@ -12,28 +12,8 @@ use crate::cpu::{register_cpuid_table, DekoCpuCtx, DekoCpuCtxPermission};
 use crate::elf::{ElfFile, ElfLoadSegement};
 use crate::logging::DekoDebug;
 use crate::mm::{init_frame_allocator, DEKO_MAPPING_SPACE};
-use crate::snp::{get_igvm_params, Snp};
-use crate::{log_error, log_hex_prefixed, log_info, log_str, log_str_ln};
-
-#[macro_export]
-macro_rules! dispatch_to_platform {
-    ($func:ident, $($args:expr),*) => {
-        {
-            let platform_type = match PLATFORM.get() {
-                Some(pt) => pt,
-                None => vstd::vpanic!("Platform not initialized"), // should not happen but could be.
-            };
-
-            match platform_type {
-                PlatformType::Snp => {
-                    let platform = Snp;
-                    platform.$func($($args),*)
-                },
-                _ => vstd::vpanic!("Unsupported platform type"),
-            }
-        }
-    };
-}
+use crate::snp::get_igvm_params;
+use crate::{die, imp, log_error, log_hex_prefixed, log_info, log_str, log_str_ln};
 
 verus! {
 
@@ -216,41 +196,6 @@ pub exec static PLATFORM: OnceLock<PlatformType, PlatformPredicate>
     OnceLock::new(Ghost(PlatformPredicate {  }))
 }
 
-/// This defines a platform abstraction to permit the Deko to run on different
-/// backend CVMs. This also gives verus to reason about the high-level verifi-
-/// cation logics without resorting to low-level details of the platform.
-pub trait PlatformApi: Sync + Send + WellFormed {
-    /// Returns the platform type of the current platform.
-    fn platform_type(&self) -> PlatformType;
-
-    /// Initializes the platform. This function should be called once at the
-    /// beginning of the program to set up the platform-specific environment.
-    fn init_platform(&self, header: Stage2LaunchInfo)
-        requires
-            header.wf(),
-            self.wf(),
-    ;
-
-    fn validate_memory(
-        &self,
-        Tracked(ctx): Tracked<&mut DekoCtxPermission>,
-        heap_start: u64,
-        heap_end: u64,
-    ) -> (r: bool)
-        requires
-            self.wf(),
-            old(ctx).wf(),
-            heap_end > heap_start,
-            heap_start % 0x1000 == 0,
-            heap_end % 0x1000 == 0,
-            heap_end <= LOWMEM_END as u64,
-        ensures
-            ctx.wf(),
-    {
-        true
-    }
-}
-
 /// Injects dummy handlers into the IDT so that we can do early-stage
 /// exception handling (although this does nothing for now).
 #[inline(always)]
@@ -298,14 +243,12 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
     let platform_type = PlatformType::from(header.platform_type);
     PLATFORM.init(platform_type.clone());
 
-    let snp = Snp;
-
     // Initialize the IDT.
     let mut idt = Idt { entries: create_early_idt() };
     init_early_idt(&mut idt);
 
     // Do some platform-specific stuff.
-    dispatch_to_platform!(init_platform, header);
+    imp::init_platform(header);
 
     // TODO: Register the CPUID table: so that we know cpuids of each core.
     unsafe {
@@ -324,7 +267,7 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
     let lowmem = VirtAddr::from(LOWMEM_END as u64);
     let heap_mapping = FixedAddressMappingRange::new(zero, lowmem, PhysAddr::from(0u64));
 
-    snp.validate_memory(Tracked(&mut ctx_perm), 0, LOWMEM_END as u64);
+    imp::validate_memory(Tracked(&mut ctx_perm), 0, LOWMEM_END as u64);
 
     assert(ctx_perm.wf());
 
@@ -350,12 +293,12 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
 
     // Initialize per-cpu-specific structures.
     let ctx_perm = Tracked(ctx_perm);
-    let (ctx, Tracked(ctx_perm)) = dispatch_to_platform!(init_each_cpu, ctx, ctx_perm);
+    let (ctx, Tracked(mut ctx_perm)) = imp::init_each_cpu(ctx, ctx_perm);
 
     init_early_idt_late(&mut idt);
 
     let igvm_params = get_igvm_params(&header);
-    dispatch_to_platform!(init_platform_end, igvm_params);
+    imp::init_platform_end(&igvm_params, Tracked(&mut ctx_perm));
 
     // now we need to load the kernel into the memory.
     // first we need to find where it is.
@@ -380,22 +323,6 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
 
     loop {
     }
-}
-
-/// This function is intended to called as a closure to load each ELF segment.
-#[verus_spec(r =>
-    requires
-        paddr.wf(),
-        header.wf(),
-    ensures
-        r.0.wf(),
-)]
-fn load_elf_segment(segment: ElfLoadSegement, paddr: PhysAddr, header: Stage2LaunchInfo) -> (r: (
-    PhysAddr,
-    VirtAddr,
-    VirtAddr,
-)) {
-    vstd::vpanic!("Not implemented yet")
 }
 
 /// Loads the kernel ELF and returns the virtual memory region where it
@@ -436,7 +363,7 @@ fn load_deko_monitor(
     // being taken from the physical memory region, the remaining space will be
     // available as heap space for the kernel. Remember the end of all
     // physical memory occupied by the loaded ELF image.
-    elf_file.load_each_segment(vaddr_alloc_base, kernel_end, header, load_elf_segment);
+    elf_file.load_each_segment(vaddr_alloc_base, kernel_end, header, Tracked(ctx_perm));
 
     Some(0u64.into())
 }

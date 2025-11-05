@@ -14,7 +14,6 @@ use vstd::prelude::*;
 use crate::snp::ghcb::current_ghcb;
 #[cfg(feature = "logging")]
 use crate::snp::ghcb::*;
-use crate::snp::Snp;
 
 #[cfg(feature = "logging")]
 verus! {
@@ -181,21 +180,19 @@ impl GHCBIoPort {
     }
 
     pub fn inb(&self) {
-        vstd::vpanic!("Not implemented");
+        crate::die("Not implemented");
     }
 }
 
-impl Snp {
-    /// Initialize the GHCB logging mechanism.
-    pub(crate) fn init_ghcb_logging(serial_port: u16)
-        requires
-            serial_port + 8 <= u16::MAX,
-    {
-        let v = GHCBIoPort::new(0x3f8);
-        v.init();
+/// Initialize the GHCB logging mechanism.
+pub(crate) fn init_ghcb_logging(serial_port: u16)
+    requires
+        serial_port + 8 <= u16::MAX,
+{
+    let v = GHCBIoPort::new(0x3f8);
+    v.init();
 
-        GHCB_IO_PORT.init(v);
-    }
+    GHCB_IO_PORT.init(v);
 }
 
 } // verus!

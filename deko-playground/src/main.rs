@@ -4,18 +4,13 @@ use vstd::prelude::*;
 
 verus! {
 
-#[verus_spec(res =>
-    with
-        Tracked(bar): Tracked<&mut ()>,
-    requires
-        true,
-    ensures
-        true,
-)]
-fn foo() {
+fn bar(Tracked(aaa): Tracked<&mut ()>) {
 }
 
-#[verifier::external_body]
+fn foo(Tracked(aaa): Tracked<&mut ()>) {
+    bar(Tracked(aaa));
+}
+
 fn main() {
 }
 

@@ -1155,7 +1155,7 @@ impl Page {
                 proof {
                     assert(false);  // by precondition.
                 }
-                vstd::vpanic!("Invalid mapping level");
+                crate::die("Invalid mapping level");
             },
         }
     }
@@ -1184,7 +1184,7 @@ impl Page {
             proof {
                 assert(false);  // by precondition.
             }
-            vstd::vpanic!("Expected Level3 mapping");
+            crate::die("Expected Level3 mapping");
         };
         // Temporary borrow.
         //
@@ -1215,11 +1215,11 @@ impl Page {
 
         // Now we allocate a new page and start to insert it.
         let (new_page, Tracked(new_page_perm), paddr) = Page::alloc_new(ms);
-        if new_page.addr() == 0 || paddr.0 == 0 {
+        if core::intrinsics::unlikely(new_page.addr() == 0 || paddr.0 == 0) {
             // Heap does not start with 0 so use 0 to indicate OOM
             // is fine; but should we indicate something else here
             // or just die?
-            vstd::vpanic!("Out of memory");
+            crate::die("Out of memory");
         }
         let flags = PteFlags::writeable();
         let new_pte_value = PageTableEntry(
@@ -1336,7 +1336,7 @@ impl Page {
                 assert(false);  // by precondition.
             }
 
-            vstd::vpanic!("Expected Level2 mapping");
+            crate::die("Expected Level2 mapping");
         };
 
         let ghost path = PageTablePath::from_vaddr_at_level(vaddr, 2);
@@ -1357,7 +1357,7 @@ impl Page {
             // Heap does not start with 0 so use 0 to indicate OOM
             // is fine; but should we indicate something else here
             // or just die?
-            vstd::vpanic!("Out of memory");
+            crate::die("Out of memory");
         }
         let flags = PteFlags::writeable();
         let new_pte_value = PageTableEntry(
@@ -1400,7 +1400,7 @@ impl Page {
                 assert(false);  // by precondition.
             }
 
-            vstd::vpanic!("Expected Level1 mapping");
+            crate::die("Expected Level1 mapping");
         };
 
         let ghost path = PageTablePath::from_vaddr_at_level(vaddr, 1);
@@ -1418,11 +1418,11 @@ impl Page {
         }
         // Now we allocate a new page and start to insert it.
         let (new_page, Tracked(new_page_perm), paddr) = Page::alloc_new(ms);
-        if new_page.addr() == 0 || paddr.0 == 0 {
+        if core::intrinsics::unlikely(new_page.addr() == 0 || paddr.0 == 0) {
             // Heap does not start with 0 so use 0 to indicate OOM
             // is fine; but should we indicate something else here
             // or just die?
-            vstd::vpanic!("Out of memory");
+            crate::die("Out of memory");
         }
         let flags = PteFlags::writeable();
         let new_pte_value = PageTableEntry(
@@ -1839,11 +1839,11 @@ impl Page {
         let (entry, Tracked(entry_perm)) = page.borrow(Tracked(this_page_perm)).0.index_as_ptr(idx);
 
         // LATER REMOVE THIS DUE TO precondition.
-        if !PageTableEntry::is_huge_pte(entry, Tracked(entry_perm)) {
+        if core::intrinsics::unlikely(!PageTableEntry::is_huge_pte(entry, Tracked(entry_perm))) {
             proof {
                 assert(false);  // neeed to ensure this.
             }
-            vstd::vpanic!("Expected huge page");
+            crate::die("Expected huge page");
         }
         let addr_2m = entry.borrow(Tracked(entry_perm)).address(private_bit, shared_bit);
         let mut flags = PteFlags::from_bits_truncate(entry.borrow(Tracked(entry_perm)).0.0);
@@ -1994,7 +1994,7 @@ impl Page {
                 proof {
                     assert(false);  // by precondition.
                 }
-                vstd::vpanic!("Expected Level1 mapping");
+                crate::die("Expected Level1 mapping");
             },
         }
     }
@@ -2029,7 +2029,7 @@ impl Page {
             proof {
                 assert(false);  // by precondition.
             }
-            vstd::vpanic!("Expected Level0 mapping");
+            crate::die("Expected Level0 mapping");
         };
 
         // set shared. todo.
@@ -2047,7 +2047,7 @@ impl Page {
         page: DekoPPtr<Page>,
         Tracked(perm): Tracked<&mut PageTablePermission>,
         vaddr: VirtAddr,
-        paddr: PhysAddr, // <- this implicitly creates a "permission" out of nowhere. Is that okay?
+        paddr: PhysAddr,  // <- this implicitly creates a "permission" out of nowhere. Is that okay?
         /* Tracked(mapped_page_perm): Tracked<PagePermission> */
         ms: &MappingSpace,
         flags: PteFlags,
@@ -2074,7 +2074,7 @@ impl Page {
         );
 
         let Mapping::Level0(page, idx) = mapping else {
-            vstd::vpanic!("Expected Level0 mapping");
+            crate::die("Expected Level0 mapping");
         };
 
         let new_pte_value = PageTableEntry(
@@ -2113,28 +2113,29 @@ impl Page {
                 path,
                 PagePermission {
                     pte_perm: new_pte_value,
-                    this_page_perm: DekoPointsTo::any_init(true), // TODO: Fix this later.
+                    this_page_perm: DekoPointsTo::any_init(
+                        true,
+                    ),  // TODO: Fix this later.
                 },
             );
 
             assert(perm_before.vaddr_based_wf());
-            assert
-                forall |child_path: PageTablePath|
-                    #![trigger perm.storage.contains_key(child_path)]
-                    #![trigger perm.storage.contains_key(child_path.drop_last())]
-                    perm.storage.contains_key(child_path) && child_path.len() > 1 && child_path != path implies {
-                        let parent_path = child_path.drop_last();
-                        let child_index = child_path@[child_path.len() - 1];
+            assert forall|child_path: PageTablePath|
+                #![trigger perm.storage.contains_key(child_path)]
+                #![trigger perm.storage.contains_key(child_path.drop_last())]
+                perm.storage.contains_key(child_path) && child_path.len() > 1 && child_path
+                    != path implies {
+                let parent_path = child_path.drop_last();
+                let child_index = child_path@[child_path.len() - 1];
 
-                        perm.parent_child_consistency_spec(
-                            child_path,
-                            parent_path,
-                            child_index,
-                            perm.storage[child_path],
-                            perm.storage[parent_path],
-                        )
-                    }
-            by {
+                perm.parent_child_consistency_spec(
+                    child_path,
+                    parent_path,
+                    child_index,
+                    perm.storage[child_path],
+                    perm.storage[parent_path],
+                )
+            } by {
                 if child_path != path {
                     if child_path.drop_last() == path.drop_last() {
                         assert(child_path@[child_path.len() - 1] != idx as int) by {
@@ -3322,7 +3323,7 @@ impl PageTablePermission {
 
         self.lemma_pte_of_vaddr_cancels_with_self_mapping(pte_addr);
         self.lemma_pte_of_vaddr_shares_prefix(pte_addr, pde_addr);
-        reveal_with_fuel(PageTablePath::remove_recursive_prefix, 5);
+        reveal_with_fuel(PageTablePath::remove_recursive_prefix, 10);  // Sometimes 5 is not enough.
 
         assert(pde_path == path![493, 493, a, b]);
         if a == 493 {
@@ -4150,6 +4151,25 @@ impl Mapping {
             Mapping::Level0(_, _) => 0,
         }
     }
+}
+
+/// Map and validate the specified virtual memory region at `paddr`.
+#[verus_spec(r =>
+    with
+        Tracked(ctx): Tracked<&mut DekoCpuCtxPermission>
+    requires
+        header.wf(),
+        vaddr_start.wf(),
+        vaddr_end.wf(),
+        paddr.wf(),
+    ensures
+)]
+pub(crate) fn map_and_validate_elf_segment(
+    header: Stage2LaunchInfo,
+    vaddr_start: VirtAddr,
+    vaddr_end: VirtAddr,
+    paddr: PhysAddr,
+) {
 }
 
 } // verus!

@@ -9,6 +9,8 @@
 pub mod frame_allocator;
 pub mod paging;
 
+use core::ops::Range;
+
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
@@ -76,7 +78,7 @@ pub struct PageEncryptionMasks {
 
 /// This function initializes the global `DEKO_FRAME_ALLOCATOR` with the given
 /// physical memory region for physical memory allocation.
-pub fn init_frame_allocator(heap_start: &VirtAddr, heap_end: &VirtAddr)
+#[verus_spec(r =>
     requires
         heap_start.wf(),
         heap_end.wf(),
@@ -86,7 +88,8 @@ pub fn init_frame_allocator(heap_start: &VirtAddr, heap_end: &VirtAddr)
         valid_heap_param(heap_start.0, (heap_end.0 - heap_start.0) as u64, HEAP_SIZE as u64),
         heap_start == VirtAddr::new_spec(STAGE2_HEAP_START as u64),
         heap_end == VirtAddr::new_spec(STAGE2_HEAP_END as u64),
-{
+)]
+pub fn init_frame_allocator(heap_start: &VirtAddr, heap_end: &VirtAddr) {
     let phys_start = PhysAddr(heap_start.0);
 
     DEKO_FRAME_ALLOCATOR.init(phys_start.0, heap_end.0 - heap_start.0);
@@ -110,7 +113,7 @@ pub fn virt_to_phys(
     match PageTable::virt_to_frame(vaddr, private_bit, Tracked(&ctx_perm.pgtable_perm)) {
         Some(v) => v.address(private_bit, shared_bit),
         None => {
-            vstd::vpanic!("virt_to_phys: address not mapped");
+            crate::die("virt_to_phys: address not mapped");
         },
     }
 }
@@ -259,6 +262,19 @@ impl DekoMemoryRegion {
 
     pub fn init_mem_region(&mut self, phys_start: PhysAddr, virt_start: VirtAddr, npages: u64) {
     }
+}
+
+/// This function copies memory from one ELF segment to another.
+///
+/// # Safety
+///
+/// The caller must ensure that the source and destination memory regions are valid and do not overlap.
+#[verifier::external_body]
+#[verus_spec(r =>
+    requires
+        true,
+)]
+pub unsafe fn copy_elf_mem(seg: Range<VirtAddr>) {
 }
 
 } // verus!

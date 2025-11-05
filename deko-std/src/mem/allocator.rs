@@ -261,7 +261,22 @@ impl<V: WellFormed + Heap> DekoBuddyAllocator<V> {
     {
         let (mut allocator, write_handle) = self.allocator.acquire_write();
 
-        vstd::vpanic!("todo: implement dealloc")
+        if allocator.check_allocation_size(size as u64, align as u64) {
+            // TODO: Since the allocator itself is globally shared and protected
+            // by the RwLock, we need to find a way to reason about the safety
+            // issue here to guarantee that the pointer is indeed allocated from
+            // this allocator.
+            //
+            // Perhaps we will need to have a tracked registry of all allocated
+            // pointers from this allocator like a `tracked` meta allocator.
+            assume(allocator.in_heap_range(ptr.addr() as nat, size as nat));
+
+            allocator.deallocate(ptr.addr() as u64, size as u64, align as u64);
+            write_handle.release_write(allocator);
+            return ;
+        } else {
+            write_handle.release_write(allocator);
+        }
     }
 }
 

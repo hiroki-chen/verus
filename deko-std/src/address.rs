@@ -633,6 +633,27 @@ impl VirtAddr {
         VirtAddr(ret)
     }
 
+    pub open spec fn page_align_up_requires(self) -> bool {
+        &&& self.wf()
+        &&& if self@ <= VADDR_LOWER_MASK {
+            self@ + (PAGE_SIZE - 1) <= VADDR_LOWER_MASK
+        } else if self@ >= VADDR_UPPER_MASK {
+            self@ + (PAGE_SIZE - 1) <= u64::MAX
+        } else {
+            true
+        }
+    }
+
+    pub open spec fn page_align_up_spec(self) -> VirtAddr {
+        let r = self@ % PAGE_SIZE;
+
+        if r == 0 {
+            self
+        } else {
+            VirtAddr((self@ + (PAGE_SIZE - r)) as u64)
+        }
+    }
+
     /// Creates a canonical virtual address from any 64-bit value.
     ///
     /// This function converts any 64-bit input to a canonical x86-64 virtual address.
@@ -715,6 +736,24 @@ impl VirtAddr {
             sign_extend_ensures(addr, r@),
     {
         Self::make_canonical(addr)
+    }
+
+    /// Aligns the virtual address up to the nearest page boundary.
+    #[verifier::when_used_as_spec(page_align_up_spec)]
+    pub fn page_align_up(self) -> (r: Self)
+        requires
+            self.page_align_up_requires(),
+        ensures
+            r.wf(),
+            r == self.page_align_up_spec(),
+    {
+        let v = if self.0 % PAGE_SIZE == 0 {
+            self.0
+        } else {
+            self.0 + (PAGE_SIZE - (self.0 % PAGE_SIZE))
+        };
+
+        VirtAddr(v)
     }
 }
 

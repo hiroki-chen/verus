@@ -55,7 +55,7 @@ impl FrameAllocator for DekoPageFrameAllocator {
     }
 
     fn deallocate_frame(&self, frame: PhysAddr) {
-        vstd::vpanic!("todo")
+        crate::die("todo")
     }
 }
 
