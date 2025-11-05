@@ -77,6 +77,8 @@ pub struct DekoCtx {
     pub pgtable: DekoPPtr<PageTable>,
     pub gdt: DekoPPtr<GlobalDescriptorTable>,
     pub mapping_space: MappingSpace,
+    pub private_bit: u64,
+    pub shared_bit: u64,
 }
 
 impl DekoCtx {

@@ -12,7 +12,7 @@ use vstd::cell::{PCell, PointsTo};
 use vstd::prelude::*;
 
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
-use crate::mm::paging::{Page, PageTable, PageTablePermission, PteFlags};
+use crate::mm::paging::{Mapping, Page, PageTable, PageTablePermission, PteFlags};
 use crate::mm::virt_to_phys;
 
 verus! {
@@ -284,6 +284,14 @@ with_permission! {
 }
 
 impl DekoCpuCtxPermission {
+    #[verifier::inline]
+    pub open spec fn has_self_mapped(&self) -> bool
+        recommends
+            self.wf(),
+    {
+        self.pgtable_perm.virt_to_frame_spec(PERCPU_BASE) matches Some(_)
+    }
+
     pub open spec fn wf_with(&self, cpu_data: DekoPPtr<DekoCpuCtx>) -> bool {
         &&& self.ptr_perm.pptr() == cpu_data@
         &&& self.wf()
@@ -484,6 +492,7 @@ impl DekoCpuCtx {
         self.kernel_mapping
     }
 
+    #[inline]
     #[verifier::external_body]
     pub fn this_cpu() -> (r: (DekoPPtr<Self>, Tracked<DekoCpuCtxPermission>))
         ensures
@@ -589,14 +598,19 @@ impl DekoCpuCtx {
         flags: PteFlags,
     )
         requires
-    //     vaddr.wf(),
-    //     paddr.wf(),
-    //     vaddr@ % 0x1000 == 0,
-    //     paddr@ % 0x1000 == 0,
-
+            vaddr.wf(),
+            paddr.wf(),
+            vaddr@ % 0x1000 == 0,
+            paddr@ % 0x1000 == 0,
             old(perm).wf_with(ptr),
         ensures
+            perm.pgtable_perm.private_bit == old(perm).pgtable_perm.private_bit,
+            perm.pgtable_perm.shared_bit == old(perm).pgtable_perm.shared_bit,
             perm.wf_with(ptr),
+            perm.pgtable_perm.virt_to_frame_spec(vaddr) matches Some(frame) && frame.address_spec(
+                old(perm).pgtable_perm.private_bit,
+                old(perm).pgtable_perm.shared_bit,
+            ) == paddr,
     {
         let this = ptr.borrow(Tracked(&perm.ptr_perm));
         let page = this.pgtable;
@@ -611,10 +625,8 @@ impl DekoCpuCtx {
             paddr,
             ms,
             flags,
-            // private_bit,
-            1 << 51,
-            // shared_bit,
-            1 << 0,
+            private_bit,
+            shared_bit,
         );
     }
 

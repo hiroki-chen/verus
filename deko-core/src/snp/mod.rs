@@ -277,8 +277,8 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
         shared_area_ptr,
         ghcb,
         0,  // cpu_id
-        masks.shared_pte_mask,
-        masks.private_pte_mask,
+        ctx.borrow(Tracked(&ctx_perm.deko_ctx_ptr_perm)).shared_bit,
+        ctx.borrow(Tracked(&ctx_perm.deko_ctx_ptr_perm)).private_bit,
         ctx.borrow(Tracked(&ctx_perm.deko_ctx_ptr_perm)).mapping_space,
     );
     bsp_percpu_ptr.write(Tracked(&mut bsp_percpu_perm), bsp_percpu);

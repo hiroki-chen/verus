@@ -35,7 +35,7 @@ use elf::Elf64ImageLoadSegment;
 use vstd::prelude::*;
 use vstd::{bytes, invariant};
 
-use crate::cpu::DekoCpuCtxPermission;
+use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::{log_hex_dump, log_hex_prefixed, log_int, log_str, log_str_ln};
 
 verus! {
@@ -44,6 +44,7 @@ verus! {
     with
         Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>
     requires
+        old(ctx_perm).wf_with(ctx),
         segment.wf(),
         paddr.wf(),
         header.wf(),
@@ -51,11 +52,12 @@ verus! {
         r.2@ >= r.1@,
         /* Non overflowing properties... */
 )]
-fn load_elf_segment(segment: ElfLoadSegement, paddr: PhysAddr, header: Stage2LaunchInfo) -> (r: (
-    PhysAddr,
-    VirtAddr,
-    VirtAddr,
-)) {
+fn load_elf_segment(
+    segment: ElfLoadSegement,
+    paddr: PhysAddr,
+    header: Stage2LaunchInfo,
+    ctx: DekoPPtr<DekoCpuCtx>,
+) -> (r: (PhysAddr, VirtAddr, VirtAddr)) {
     // Find the segment's bounds
     // All ELF segments should be aligned to the page size. If not, there's
     // the risk of pvalidating a page twice, bail out if so. Note that the
@@ -152,7 +154,7 @@ impl<'a> ElfFile<'a> {
             start_paddr.wf(),
             end_paddr.wf(),
         ensures
-            r matches Some(r) ==> r.wf(),
+            r.wf(),
     {
         let bytes = unsafe {
             core::slice::from_raw_parts(
@@ -204,18 +206,19 @@ impl<'a> ElfFile<'a> {
         base: VirtAddr,
         paddr: &mut PhysAddr,
         header: Stage2LaunchInfo,
+        ctx: DekoPPtr<DekoCpuCtx>,
         Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
     ) -> (r: (Option<VirtAddr>, VirtAddr))
         requires
             self.wf(),
             header.wf(),
             old(paddr).wf(),
-            old(ctx_perm).wf(),
+            old(ctx_perm).wf_with(ctx),
             forall|i: int|
                 0 <= i < self.load_segment_num_spec(base) ==> (
                 #[trigger] self.load_segments()[i]).wf(),
         ensures
-            old(ctx_perm) == ctx_perm,  // FIX IT LATER.
+            ctx_perm.wf_with(ctx),
     {
         let mut load_virt_start = None::<VirtAddr>;
         let mut load_virt_end = VirtAddr::from(0u64);
@@ -226,7 +229,7 @@ impl<'a> ElfFile<'a> {
             invariant
                 self.wf(),
                 header.wf(),
-                ctx_perm.wf(),
+                ctx_perm.wf_with(ctx),
                 forall|i: int|
                     0 <= i < self.load_segment_num_spec(base) ==> (
                     #[trigger] self.load_segments()[i]).wf(),
@@ -239,7 +242,7 @@ impl<'a> ElfFile<'a> {
             log_str_ln!("...");
 
             let (updated_phys_addr, vaddr_start, vaddr_end) = #[verus_spec(with Tracked(ctx_perm))]
-            load_elf_segment(self.get_segment(i, base), *paddr, header);
+            load_elf_segment(self.get_segment(i, base), *paddr, header, ctx);
 
             // Remember the mapping range's lower and upper bounds to pass it on
             // the kernel later. Note that the segments are being iterated over
@@ -249,11 +252,11 @@ impl<'a> ElfFile<'a> {
             }
             load_virt_end = vaddr_end;
             // Advance the physical address pointer for the next segment.
-            assume(updated_phys_addr@ + (vaddr_end@ - vaddr_start@) < u64::MAX); // FIX IT LATER.
+            assume(updated_phys_addr@ + (vaddr_end@ - vaddr_start@) < u64::MAX);  // FIX IT LATER.
             *paddr = PhysAddr::from(updated_phys_addr.0 + (vaddr_end.0 - vaddr_start.0));
             i += 1;
 
-            assume(ctx_perm.wf());  // FIX IT LATER.
+            assume(ctx_perm.wf_with(ctx));  // FIX IT LATER.
         }
 
         assume(ctx_perm == old(ctx_perm));  // FIX IT LATER.

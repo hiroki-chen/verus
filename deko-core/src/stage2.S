@@ -7,6 +7,7 @@
 .equ STAGE2_MAXLEN, 0xD0000      // ~832 KB - Maximum Stage2 length
 .equ LOWMEM_START, 0x0           // Low memory start
 .equ LOWMEM_END, 0xA0000         // 640 KB - End of low memory
+.equ SHARED_BIT, 0x1            // Shared memory bit
 
 .org 0
 .globl startup_32
@@ -238,6 +239,8 @@ startup_64:
     *     pgtable: DekoPPtr<PageTable>,                    // offset 8  
     *     gdt: DekoPPtr<GlobalDescriptorTable>,            // offset 16
     *     mapping_space: MappingSpace,                     // offset 24
+    *     private_bit: u64,                                // offset 72
+    *     shared_bit: u64,                                 // offset 80
     *
     *
     * MappingSpace structure layout:
@@ -275,8 +278,17 @@ startup_64:
   movq $LOWMEM_END, 56(%rdi)                // physmap.virt_end = LOWMEM_END
   movq $LOWMEM_START, 64(%rdi)              // physmap.phys_start = LOWMEM_START (identity mapped)
 
+  // bits.
+  // FIXME: The weird thing is that rdx value is incorrect.
+  movabsq $0x8000000000000, %rdx  // Load the calculated private_bit into %rax
+  movq %rdx, 72(%rdi)      // Store the calculated private_bit
+  movq $SHARED_BIT, 80(%rdi)           // Store the shared_bit
+
   andq $~0xf, %rsp
   call deko_main
+
+.Lfail:
+  ud2
 
 .data
 .align 4
@@ -322,7 +334,7 @@ pgtable_end:
 
 .align 8
 deko_bsp_ctx:
-  .fill 0x40, 1, 0
+  .fill 0x50, 1, 0
   /* Pre-populate the mapping space? */
 deko_bsp_ctx_end:
 

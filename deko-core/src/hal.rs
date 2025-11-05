@@ -363,7 +363,7 @@ fn load_deko_monitor(
     // being taken from the physical memory region, the remaining space will be
     // available as heap space for the kernel. Remember the end of all
     // physical memory occupied by the loaded ELF image.
-    elf_file.load_each_segment(vaddr_alloc_base, kernel_end, header, Tracked(ctx_perm));
+    elf_file.load_each_segment(vaddr_alloc_base, kernel_end, header, ctx, Tracked(ctx_perm));
 
     Some(0u64.into())
 }
