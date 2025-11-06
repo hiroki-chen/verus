@@ -38,66 +38,66 @@ To ensure security-critical correctness, Deko is formally verified using [Verus]
 
 ## Quick Start
 
-### Using Docker (Recommended)
+### Prerequisites Setup
 
-Build the development Docker image:
+For a complete development environment setup, see **[docs/Preparation.md](docs/Preparation.md)** for detailed instructions.
 
+**Quick setup:**
 ```bash
-docker build -f Dockerfile -t deko-dev . \
-  --build-arg HOST_UID=$(id -u) \
-  --build-arg HOST_GID=$(id -g)
+# Install system dependencies
+sudo apt install -y build-essential cmake ninja-build python3 git pkg-config libssl-dev
+
+# Clone the repository
+git clone https://github.com/hiroki-chen/cage-sev.git
+cd cage-sev
+
+# Set up KVM access
+sudo usermod -a -G kvm $USER && newgrp kvm
+
+# Bootstrap development tools (takes 15-30 minutes)
+cargo run --bin xtask -- bootstrap-verus
 ```
 
-Launch the development environment:
+### Building the Monitor
 
 ```bash
-docker run --user "$(id -u):$(id -g)" \
-  -v $(pwd):/app -it deko-dev /bin/bash
-```
+# Build all components
+cargo run --bin xtask -- build --target all --release
 
-Inside the container, build the monitor:
+# Create bootable image
+cargo run --bin xtask -- create-bootable
 
-```bash
-cargo verus build
+# Run with QEMU
+cargo run --bin xtask -- qemu
 ```
 
 ## Building from Source
 
-### Prerequisites
+All build operations are handled through the integrated xtask build system. See the **[Build Guide](docs/Build.md)** for comprehensive instructions.
 
-To create a fully functional environment, you need to build several components with SVSM support:
-
-1. **Linux host kernel** with SVSM support
-2. **Linux guest kernel** with SVSM support  
-3. **EDK2 firmware** with SVSM support
-4. **QEMU emulator** with IGVM guest launching support
-
-> **Note**: SVSM is not yet merged into the upstream kernel, so we use community-forked versions.
-
-### Build Scripts
-
-Run these scripts in order to set up the environment:
+### Complete Build Process
 
 ```bash
-# Build EDK2 firmware
-./scripts/edk2.sh
+# 1. Bootstrap required tools (one-time setup)
+cargo run --bin xtask -- bootstrap-verus
+cargo run --bin xtask -- bootstrap-qemu    # Optional but recommended
+cargo run --bin xtask -- bootstrap-ovmf    # Optional for SVSM support
 
-# Build and install QEMU (installs to ~/.local/bin)
-./scripts/qemu.sh
+# 2. Build all components
+cargo run --bin xtask -- build --target all --release
 
-# Build guest kernel (output: ./build/linux/arch/x86/boot/bzImage)
-./scripts/guest.sh
+# 3. Create bootable image
+cargo run --bin xtask -- create-bootable
+
+# 4. Test with QEMU
+cargo run --bin xtask -- qemu
 ```
 
-### Creating the Monitor Image
-
-Package the kernel and monitor into a TDVF file:
-
-```bash
-./scripts/stage1.sh
-```
-
-This produces `target/x86_64-tdx-deko/release/deko.bin`, which serves as the BIOS file containing the Deko monitor and the OS kernel loader.
+The build system automatically handles:
+- Cross-compilation for TDX/SNP architectures
+- Formal verification with Verus
+- Dependency management
+- Tool integration (QEMU, OVMF, etc.)
 
 ## Project Structure
 

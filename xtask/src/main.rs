@@ -445,11 +445,9 @@ enum Commands {
         commit: Option<String>,
     },
 
-    BootstrapQemu {
-        #[arg(short, long)]
-        /// The directory where QEMU will be built and installed
-        prefix: PathBuf,
-    },
+    BootstrapQemu,
+
+    BootstrapOvmf,
 }
 
 impl Default for FinalQemuConfig {
@@ -566,6 +564,43 @@ impl Builder {
         }
 
         bail!("Could not find z3 binary. Please ensure it's in PATH, set VERUS_Z3_PATH, or run 'cargo run --bin xtask -- bootstrap-verus' first.");
+    }
+
+    /// Find the QEMU binary using fallback strategy:
+    /// 1. Check if QEMU_BIN environment variable is set (highest priority)
+    /// 2. If not, check if tools/bin/qemu-system-x86_64 exists
+    /// 3. Fallback to qemu-system-x86_64 in PATH
+    fn find_qemu_binary(&self) -> Result<PathBuf> {
+        // Check QEMU_BIN environment variable first (highest priority)
+        if let Ok(qemu_path) = std::env::var("QEMU_BIN") {
+            let path = PathBuf::from(qemu_path);
+            if path.exists() {
+                println!(
+                    "✓ Found QEMU via QEMU_BIN: {}",
+                    path.display().to_string().bright_green()
+                );
+                return Ok(path);
+            } else {
+                println!(
+                    "⚠ QEMU_BIN set but file doesn't exist: {}",
+                    path.display().to_string().yellow()
+                );
+            }
+        }
+
+        // Check tools/bin/qemu-system-x86_64 in project
+        let tools_qemu = self.config.root.join("tools").join("bin").join("qemu-system-x86_64");
+        if tools_qemu.exists() {
+            println!(
+                "✓ Found QEMU in project tools: {}",
+                tools_qemu.display().to_string().bright_green()
+            );
+            return Ok(tools_qemu);
+        }
+
+        // Fallback to qemu-system-x86_64 in PATH
+        println!("✓ Using QEMU from PATH: qemu-system-x86_64");
+        Ok(PathBuf::from("qemu-system-x86_64"))
     }
 
     pub fn build(&self, target: BuildTarget, release: bool) -> Result<()> {
@@ -861,7 +896,33 @@ impl Builder {
         println!("✓ Launching QEMU");
         println!("Configuration: {:#?}", config);
 
-        let mut cmd = std::process::Command::new("qemu-system-x86_64");
+        // Find QEMU binary using priority: QEMU_BIN > tools/bin > PATH
+        let qemu_binary = self.find_qemu_binary()?;
+        let mut cmd = std::process::Command::new(qemu_binary);
+        
+        // Set LD_LIBRARY_PATH to include tools/lib directories for IGVM library
+        let tools_lib = self.config.root.join("tools").join("lib");
+        let tools_lib_arch = tools_lib.join("x86_64-linux-gnu");
+        let current_ld_path = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+        
+        let mut lib_paths = Vec::new();
+        if tools_lib_arch.exists() {
+            lib_paths.push(tools_lib_arch.display().to_string());
+        }
+        if tools_lib.exists() {
+            lib_paths.push(tools_lib.display().to_string());
+        }
+        
+        if !lib_paths.is_empty() {
+            let new_ld_path = if current_ld_path.is_empty() {
+                lib_paths.join(":")
+            } else {
+                format!("{}:{}", lib_paths.join(":"), current_ld_path)
+            };
+            cmd.env("LD_LIBRARY_PATH", &new_ld_path);
+            println!("✓ Set LD_LIBRARY_PATH={}", new_ld_path);
+        }
+        
         cmd.args(["-accel", "kvm", "-cpu", "host"]);
         cmd.arg("-smp").arg(config.smp_cores.to_string());
 
@@ -1064,11 +1125,200 @@ fn main() -> Result<()> {
             bootstrap_verus(&default_prefix, commit.as_deref())
         }
 
-        Commands::BootstrapQemu { prefix } => bootstrap_qemu(&prefix),
+        Commands::BootstrapQemu => bootstrap_qemu(),
+
+        Commands::BootstrapOvmf => bootstrap_ovmf(),
     }
 }
 
-fn bootstrap_qemu(_prefix: &Path) -> Result<()> {
+fn bootstrap_ovmf() -> Result<()> {
+    println!("{} Bootstrapping OVMF with COCONUT-SVSM support...", "→".bright_cyan());
+
+    let project_root = project_root();
+    let build_dir = project_root.join("/tmp");
+    let tools_dir = project_root.join("tools");
+    let share_dir = tools_dir.join("share");
+
+    println!("Build directory: {}", build_dir.display().to_string().bright_white());
+    println!("Installation destination: {}", share_dir.display().to_string().bright_white());
+
+    // Ensure directories exist
+    std::fs::create_dir_all(&build_dir).context("Failed to create build directory")?;
+    std::fs::create_dir_all(&share_dir).context("Failed to create tools/share directory")?;
+
+    // Step 1: Clone EDK2 repository
+    println!("\n{} Cloning EDK2 repository...", "🔀".bright_yellow());
+    let edk2_dir = build_dir.join("edk2");
+
+    if edk2_dir.exists() {
+        println!("🗑 Removing existing edk2 directory...");
+        std::fs::remove_dir_all(&edk2_dir).context("Failed to remove existing edk2 directory")?;
+    }
+
+    let repo_url = "https://github.com/coconut-svsm/edk2.git";
+    println!("Cloning from: {}", repo_url.bright_blue());
+
+    let repo = Repository::clone(repo_url, &edk2_dir).context("Failed to clone EDK2 repository")?;
+    println!("✓ Cloned EDK2 repository");
+
+    // Step 2: Checkout svsm branch
+    println!("\n{} Checking out svsm branch...", "🌿".bright_green());
+    std::env::set_current_dir(&edk2_dir).context("Failed to change to EDK2 directory")?;
+
+    let branch_name = "svsm";
+    println!("Checking out {} branch...", branch_name);
+
+    // First fetch all remotes to ensure we have the latest branch info
+    let mut remote = repo.find_remote("origin").context("Failed to find origin remote")?;
+    remote
+        .fetch(&["refs/heads/*:refs/remotes/origin/*"], None, None)
+        .context("Failed to fetch from origin")?;
+
+    // Now try to find the remote branch
+    let remote_branch_name = format!("origin/{}", branch_name);
+    let (object, _reference) = repo
+        .revparse_ext(&remote_branch_name)
+        .with_context(|| format!("Failed to find remote branch {}", remote_branch_name))?;
+
+    // Checkout the remote branch
+    repo.checkout_tree(&object, None)?;
+
+    // Check if local branch already exists and handle accordingly
+    let branch_ref_name = format!("refs/heads/{}", branch_name);
+    if let Ok(_existing_ref) = repo.find_reference(&branch_ref_name) {
+        // Local branch exists, just set HEAD to it
+        repo.set_head(&branch_ref_name)?;
+    } else {
+        // Create local branch tracking the remote branch
+        repo.reference(&branch_ref_name, object.id(), false, "checkout remote branch")?;
+        repo.set_head(&branch_ref_name)?;
+    }
+
+    println!("✓ Checked out branch: {}", branch_name);
+
+    // Step 3: Initialize and update git submodules
+    println!("\n{} Initializing git submodules...", "📦".bright_yellow());
+    
+    let mut cmd = Command::new("git");
+    cmd.arg("submodule").arg("init");
+    println!("Running: {:?}", cmd);
+    let output = cmd.output().context("Failed to initialize git submodules")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Failed to initialize git submodules:\n{}", stderr);
+    }
+    println!("✓ Git submodules initialized");
+
+    let mut cmd = Command::new("git");
+    cmd.arg("submodule").arg("update");
+    println!("Running: {:?}", cmd);
+    println!("This may take several minutes...");
+    let output = cmd.output().context("Failed to update git submodules")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Failed to update git submodules:\n{}", stderr);
+    }
+    println!("✓ Git submodules updated");
+
+    // Step 4: Set environment variables
+    println!("\n{} Setting up environment variables...", "⚙️".bright_cyan());
+    std::env::set_var("PYTHON3_ENABLE", "TRUE");
+    std::env::set_var("PYTHON_COMMAND", "python3");
+    println!("✓ Set PYTHON3_ENABLE=TRUE");
+    println!("✓ Set PYTHON_COMMAND=python3");
+
+    // Step 5: Build BaseTools
+    println!("\n{} Building BaseTools...", "🔨".bright_green());
+    let mut cmd = Command::new("make");
+    cmd.arg("-j16").arg("-C").arg("BaseTools/");
+    println!("Running: {:?}", cmd);
+    println!("This may take several minutes...");
+    
+    let output = cmd.output().context("Failed to build BaseTools")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        bail!("Failed to build BaseTools:\nSTDOUT:\n{}\nSTDERR:\n{}", stdout, stderr);
+    }
+    println!("✓ BaseTools built successfully");
+
+    // Step 6: Run edksetup.sh
+    println!("\n{} Running edksetup.sh...", "🔧".bright_blue());
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c").arg("source ./edksetup.sh --reconfig");
+    println!("Running: source ./edksetup.sh --reconfig");
+    
+    let output = cmd.output().context("Failed to run edksetup.sh")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        bail!("Failed to run edksetup.sh:\nSTDOUT:\n{}\nSTDERR:\n{}", stdout, stderr);
+    }
+    println!("✓ edksetup.sh completed");
+
+    // Step 7: Build OVMF firmware
+    println!("\n{} Building OVMF firmware...", "🚀".bright_green());
+    println!("This will take several minutes...");
+    
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c").arg(
+        "source ./edksetup.sh --reconfig && \
+         build -p OvmfPkg/OvmfPkgX64.dsc -a X64 \
+         -b DEBUG -t GCC \
+         -D DEBUG_ON_SERIAL_PORT \
+         -D DEBUG_VERBOSE \
+         -D TPM2_ENABLE \
+         --pcd PcdUninstallMemAttrProtocol=TRUE"
+    );
+
+    println!("Running OVMF build with TPM2 support and debug flags...");
+    
+    let output = cmd.output().context("Failed to build OVMF firmware")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        bail!("Failed to build OVMF firmware:\nSTDOUT:\n{}\nSTDERR:\n{}", stdout, stderr);
+    }
+    println!("✓ OVMF firmware built successfully");
+
+    // Step 8: Copy firmware to tools/share
+    println!("\n{} Copying firmware to tools/share...", "📋".bright_cyan());
+    
+    let ovmf_source = edk2_dir.join("Build/OvmfX64/DEBUG_GCC/FV/OVMF.fd");
+    let ovmf_dest = share_dir.join("OVMF.fd");
+
+    if !ovmf_source.exists() {
+        bail!("OVMF.fd not found at expected location: {:?}", ovmf_source);
+    }
+
+    std::fs::copy(&ovmf_source, &ovmf_dest)
+        .with_context(|| format!("Failed to copy OVMF.fd from {:?} to {:?}", ovmf_source, ovmf_dest))?;
+    
+    println!("✓ OVMF firmware copied to: {}", ovmf_dest.display().to_string().bright_white());
+
+    // Step 9: Clean up build directory
+    println!("\n{} Cleaning up build directory...", "🧹".bright_cyan());
+    if edk2_dir.exists() {
+        std::fs::remove_dir_all(&edk2_dir).context("Failed to remove EDK2 build directory")?;
+        println!("✓ Removed EDK2 build directory");
+    }
+
+    // Print final instructions
+    println!("\n{}", "=== OVMF firmware bootstrap completed successfully! ===".bright_green().bold());
+    println!("OVMF firmware location: {}", ovmf_dest.display().to_string().bright_white());
+    
+    println!("\n{}", "Features included:".bright_cyan());
+    println!("• TPM2 support enabled (-D TPM2_ENABLE)");
+    println!("• Debug output on serial port (-D DEBUG_ON_SERIAL_PORT)");
+    println!("• Verbose debugging (-D DEBUG_VERBOSE)");
+    println!("• Memory attribute protocol workaround (--pcd PcdUninstallMemAttrProtocol=TRUE)");
+    
+    println!("\nThis OVMF binary is ready to use with COCONUT-SVSM and can be packaged into IGVM files.");
+
+    Ok(())
+}
+
+fn bootstrap_qemu() -> Result<()> {
     println!("{} Bootstrapping QEMU with IGVM support...", "→".bright_cyan());
 
     // Use tools/ as installation directory
@@ -1196,7 +1446,8 @@ fn bootstrap_qemu(_prefix: &Path) -> Result<()> {
 
     // First fetch all remotes to ensure we have the latest branch info
     let mut remote = repo.find_remote("origin").context("Failed to find origin remote")?;
-    remote.fetch(&["refs/heads/*:refs/remotes/origin/*"], None, None)
+    remote
+        .fetch(&["refs/heads/*:refs/remotes/origin/*"], None, None)
         .context("Failed to fetch from origin")?;
 
     // Now try to find the remote branch
@@ -1676,5 +1927,15 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 }
 
 fn project_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(1).unwrap().to_path_buf()
+    // Try to get the manifest directory from environment variable first
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        Path::new(&manifest_dir).ancestors().nth(1).unwrap().to_path_buf()
+    } else {
+        // Fallback: assume we're in the xtask subdirectory and go up one level
+        std::env::current_dir()
+            .unwrap()
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf()
+    }
 }

@@ -24,6 +24,7 @@ install-igvmbuilder = "install --git https://github.com/coconut-svsm/svsm.git ig
 
 bootstrap-verus = "xtask bootstrap-verus"
 bootstrap-qemu = "xtask bootstrap-qemu"
+bootstrap-ovmf = "xtask bootstrap-ovmf"
 
 [target.x86_64-snp-deko]
 rustflags = [
