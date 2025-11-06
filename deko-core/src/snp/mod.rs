@@ -17,6 +17,7 @@ use crate::mm::{
     MAX_PHYS_ADDR, PHYS_ADDR_SIZE, PTE_MASK_PRIVATE, PTE_MASK_SHARED,
 };
 use crate::snp::ghcb::msr_register_ghcb_gpa;
+use crate::Stage2LaunchInfo;
 
 pub mod ghcb;
 
@@ -36,6 +37,7 @@ pub fn get_igvm_params<'a>(header: &'a Stage2LaunchInfo) -> (r: &'a IgvmParamBlo
         header.wf(),
     ensures
         r.wf(),
+        r == header.get_igvm_params_spec(),
 {
     // Note that this case does NOT include all the fields contained in the
     // `header.igvm_params` structure; we just extract the leading `IgvmParamBlock`

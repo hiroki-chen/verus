@@ -897,4 +897,25 @@ impl<T> From<*mut T> for PhysAddr {
     }
 }
 
+/// A range of canonical virtual addresses.
+///
+/// Note when using this range, since now Verus does not support
+/// [`core::iter::Iterator`] very well, you may need to manually
+/// define functions to iterate over the range if needed; and to
+/// avoid accidental misuse, you have to ensure that your step
+/// must be mutliple of [`PAGE_SIZE`].
+pub type VaddrRange = core::ops::Range<VirtAddr>;
+
+impl WellFormed for VaddrRange {
+    /// The well-formedness predicate for virtual address ranges is
+    /// simple as we just need to ensure the whole thing is bounded
+    /// by well-formed virtual addresses.
+    #[verifier::inline]
+    open spec fn wf(&self) -> bool {
+        &&& self.start.wf()
+        &&& self.end.wf()
+        &&& self.start@ < self.end@ < u64::MAX
+    }
+}
+
 } // verus!

@@ -48,6 +48,17 @@ sudo apt install -y \
 
 ## Initial Setup
 
+### 0. Ensure the host supports SEV-SNP
+
+Although newer Ubuntu or other Linux distribution contains kernels that _might_ support SNP, the complete features for SNP might not be always found and sometimes SNP will fail to initialize (e.g., RMP table not found). For the best of the experience please consider to switch to AMD's patched kernel at https://github.com/AMDESE/linux.git on branch `snp-host-latest`.
+
+Please also be aware that KVM module might not be compatible with the specific QEMU version that supports IGVM. You may want to switch to https://github.com/coconut-svsm/linux for host kernel replacement if you find errors like
+
+```bash
+qemu-system-x86_64: -accel kvm: check_sev_features: VMSA contains unsupported sev_features: 9, supported features: 21
+qemu-system-x86_64: -accel kvm: failed to initialize kvm: Operation not permitted
+```
+
 ### 1. Clone the Repository
 
 ```bash

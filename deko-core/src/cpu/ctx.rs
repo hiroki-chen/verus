@@ -5,6 +5,7 @@ use crate::cpu::gdt::GlobalDescriptorTable;
 use crate::mm::paging::{
     bit_not_in_addr_region, bit_not_overlapping, PageTable, PageTablePermission,
 };
+use crate::Stage2LaunchInfo;
 
 verus! {
 

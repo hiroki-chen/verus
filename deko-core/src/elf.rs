@@ -36,7 +36,7 @@ use vstd::prelude::*;
 use vstd::{bytes, invariant};
 
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
-use crate::{log_hex_dump, log_hex_prefixed, log_int, log_str, log_str_ln};
+use crate::{log_hex_dump, log_hex_prefixed, log_int, log_str, log_str_ln, Stage2LaunchInfo};
 
 verus! {
 
@@ -48,15 +48,17 @@ verus! {
         segment.wf(),
         paddr.wf(),
         header.wf(),
+        paddr@ % PAGE_SIZE == 0,
+        segment.wf_with_load_base(paddr),
     ensures
         r.2@ >= r.1@,
         /* Non overflowing properties... */
 )]
 fn load_elf_segment(
+    ctx: DekoPPtr<DekoCpuCtx>,
     segment: ElfLoadSegement,
     paddr: PhysAddr,
     header: Stage2LaunchInfo,
-    ctx: DekoPPtr<DekoCpuCtx>,
 ) -> (r: (PhysAddr, VirtAddr, VirtAddr)) {
     // Find the segment's bounds
     // All ELF segments should be aligned to the page size. If not, there's
@@ -85,7 +87,7 @@ fn load_elf_segment(
     // Note that here wo have to map and validate the memory
 
     #[verus_spec(with Tracked(ctx_perm))]
-    crate::mm::paging::map_and_validate_elf_segment(header, segment_start, segment_end, paddr);
+    crate::mm::paging::map_and_validate_elf_segment(ctx, header, segment_start, segment_end, paddr);
 
     crate::die("Not implemented yet")
 }
@@ -102,7 +104,6 @@ pub struct ElfFile<'a>(elf::Elf64File<'a>);
 pub struct ElfLoadSegement<'a>(Elf64ImageLoadSegment<'a>);
 
 impl<'a> WellFormed for ElfFile<'a> {
-    /// Also see [`xmas_elf::header::sanity_check`].
     open spec fn wf(&self) -> bool {
         let segments = self.load_segments();
 
@@ -124,9 +125,23 @@ impl<'a> WellFormed for ElfLoadSegement<'a> {
 impl<'a> ElfFile<'a> {
     pub uninterp spec fn get_vaddr_alloc_base_spec(&self) -> VirtAddr;
 
+    pub uninterp spec fn new_spec(start_paddr: PhysAddr, end_paddr: PhysAddr) -> Option<Self>;
+
     #[verifier::inline]
     pub open spec fn load_segment_num_spec(&self, base: VirtAddr) -> usize {
         self.load_segments().len() as usize
+    }
+
+    #[verifier::inline]
+    pub open spec fn wf_with_load_base(&self, load_base: PhysAddr) -> bool
+        recommends
+            load_base.wf(),
+    {
+        let segments = self.load_segments();
+
+        forall|i: int|
+            #![trigger(segments[i])]
+            0 <= i < segments.len() ==> segments[i].wf_with_load_base(load_base)
     }
 
     #[verifier::inline]
@@ -155,6 +170,7 @@ impl<'a> ElfFile<'a> {
             end_paddr.wf(),
         ensures
             r.wf(),
+            r == Self::new_spec(start_paddr, end_paddr),
     {
         let bytes = unsafe {
             core::slice::from_raw_parts(
@@ -203,20 +219,19 @@ impl<'a> ElfFile<'a> {
 
     pub fn load_each_segment(
         &self,
+        ctx: DekoPPtr<DekoCpuCtx>,
         base: VirtAddr,
         paddr: &mut PhysAddr,
         header: Stage2LaunchInfo,
-        ctx: DekoPPtr<DekoCpuCtx>,
         Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
     ) -> (r: (Option<VirtAddr>, VirtAddr))
         requires
             self.wf(),
+            self.wf_with_load_base(*old(paddr)),
             header.wf(),
             old(paddr).wf(),
             old(ctx_perm).wf_with(ctx),
-            forall|i: int|
-                0 <= i < self.load_segment_num_spec(base) ==> (
-                #[trigger] self.load_segments()[i]).wf(),
+            old(paddr)@ % PAGE_SIZE == 0,
         ensures
             ctx_perm.wf_with(ctx),
     {
@@ -228,11 +243,11 @@ impl<'a> ElfFile<'a> {
         while i < segment_len
             invariant
                 self.wf(),
+                self.wf_with_load_base(*paddr),
                 header.wf(),
                 ctx_perm.wf_with(ctx),
-                forall|i: int|
-                    0 <= i < self.load_segment_num_spec(base) ==> (
-                    #[trigger] self.load_segments()[i]).wf(),
+                paddr@ % PAGE_SIZE == 0,
+                paddr.wf(),
                 i <= segment_len,
                 segment_len == self.load_segment_num_spec(base),
             decreases segment_len - i,
@@ -242,7 +257,7 @@ impl<'a> ElfFile<'a> {
             log_str_ln!("...");
 
             let (updated_phys_addr, vaddr_start, vaddr_end) = #[verus_spec(with Tracked(ctx_perm))]
-            load_elf_segment(self.get_segment(i, base), *paddr, header, ctx);
+            load_elf_segment(ctx, self.get_segment(i, base), *paddr, header);
 
             // Remember the mapping range's lower and upper bounds to pass it on
             // the kernel later. Note that the segments are being iterated over
@@ -253,9 +268,11 @@ impl<'a> ElfFile<'a> {
             load_virt_end = vaddr_end;
             // Advance the physical address pointer for the next segment.
             assume(updated_phys_addr@ + (vaddr_end@ - vaddr_start@) < u64::MAX);  // FIX IT LATER.
-            *paddr = PhysAddr::from(updated_phys_addr.0 + (vaddr_end.0 - vaddr_start.0));
+            *paddr = PhysAddr(updated_phys_addr.0 + (vaddr_end.0 - vaddr_start.0));
             i += 1;
 
+            assume(paddr@ % PAGE_SIZE == 0);  // FIX IT LATER.
+            assume(self.wf_with_load_base(*paddr));  // FIX IT LATER.
             assume(ctx_perm.wf_with(ctx));  // FIX IT LATER.
         }
 
@@ -270,6 +287,17 @@ impl<'a> ElfLoadSegement<'a> {
 
     pub uninterp spec fn vaddr_end(self) -> VirtAddr;
 
+    #[verifier::inline]
+    pub open spec fn wf_with_load_base(self, load_base: PhysAddr) -> bool
+        recommends
+            load_base.wf(),
+    {
+        let vaddr_begin = self.vaddr_begin();
+        let vaddr_end = self.vaddr_end();
+
+        load_base@ + (vaddr_end.page_align_up_spec()@ - vaddr_begin@) < 0x000f_ffff_ffff_f000
+    }
+
     #[verifier::external_body]
     pub fn vaddr_range(&self) -> (r: Range<VirtAddr>)
         requires
@@ -277,6 +305,9 @@ impl<'a> ElfLoadSegement<'a> {
         ensures
             r.start == self.vaddr_begin(),
             r.end == self.vaddr_end(),
+            r.start@ % PAGE_MASK == 0,
+            r.start@ < r.end@ < u64::MAX,
+            r.end.page_align_up_spec()@ - r.start@ < u32::MAX,
     {
         let begin = VirtAddr(self.0.vaddr_range.vaddr_begin as u64);
         let end = VirtAddr(self.0.vaddr_range.vaddr_end as u64);

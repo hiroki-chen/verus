@@ -899,12 +899,12 @@ impl Builder {
         // Find QEMU binary using priority: QEMU_BIN > tools/bin > PATH
         let qemu_binary = self.find_qemu_binary()?;
         let mut cmd = std::process::Command::new(qemu_binary);
-        
+
         // Set LD_LIBRARY_PATH to include tools/lib directories for IGVM library
         let tools_lib = self.config.root.join("tools").join("lib");
         let tools_lib_arch = tools_lib.join("x86_64-linux-gnu");
         let current_ld_path = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
-        
+
         let mut lib_paths = Vec::new();
         if tools_lib_arch.exists() {
             lib_paths.push(tools_lib_arch.display().to_string());
@@ -912,7 +912,7 @@ impl Builder {
         if tools_lib.exists() {
             lib_paths.push(tools_lib.display().to_string());
         }
-        
+
         if !lib_paths.is_empty() {
             let new_ld_path = if current_ld_path.is_empty() {
                 lib_paths.join(":")
@@ -922,7 +922,7 @@ impl Builder {
             cmd.env("LD_LIBRARY_PATH", &new_ld_path);
             println!("✓ Set LD_LIBRARY_PATH={}", new_ld_path);
         }
-        
+
         cmd.args(["-accel", "kvm", "-cpu", "host"]);
         cmd.arg("-smp").arg(config.smp_cores.to_string());
 
@@ -1198,7 +1198,7 @@ fn bootstrap_ovmf() -> Result<()> {
 
     // Step 3: Initialize and update git submodules
     println!("\n{} Initializing git submodules...", "📦".bright_yellow());
-    
+
     let mut cmd = Command::new("git");
     cmd.arg("submodule").arg("init");
     println!("Running: {:?}", cmd);
@@ -1233,7 +1233,7 @@ fn bootstrap_ovmf() -> Result<()> {
     cmd.arg("-j16").arg("-C").arg("BaseTools/");
     println!("Running: {:?}", cmd);
     println!("This may take several minutes...");
-    
+
     let output = cmd.output().context("Failed to build BaseTools")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1247,7 +1247,7 @@ fn bootstrap_ovmf() -> Result<()> {
     let mut cmd = Command::new("bash");
     cmd.arg("-c").arg("source ./edksetup.sh --reconfig");
     println!("Running: source ./edksetup.sh --reconfig");
-    
+
     let output = cmd.output().context("Failed to run edksetup.sh")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1259,7 +1259,7 @@ fn bootstrap_ovmf() -> Result<()> {
     // Step 7: Build OVMF firmware
     println!("\n{} Building OVMF firmware...", "🚀".bright_green());
     println!("This will take several minutes...");
-    
+
     let mut cmd = Command::new("bash");
     cmd.arg("-c").arg(
         "source ./edksetup.sh --reconfig && \
@@ -1268,11 +1268,11 @@ fn bootstrap_ovmf() -> Result<()> {
          -D DEBUG_ON_SERIAL_PORT \
          -D DEBUG_VERBOSE \
          -D TPM2_ENABLE \
-         --pcd PcdUninstallMemAttrProtocol=TRUE"
+         --pcd PcdUninstallMemAttrProtocol=TRUE",
     );
 
     println!("Running OVMF build with TPM2 support and debug flags...");
-    
+
     let output = cmd.output().context("Failed to build OVMF firmware")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1283,7 +1283,7 @@ fn bootstrap_ovmf() -> Result<()> {
 
     // Step 8: Copy firmware to tools/share
     println!("\n{} Copying firmware to tools/share...", "📋".bright_cyan());
-    
+
     let ovmf_source = edk2_dir.join("Build/OvmfX64/DEBUG_GCC/FV/OVMF.fd");
     let ovmf_dest = share_dir.join("OVMF.fd");
 
@@ -1291,9 +1291,10 @@ fn bootstrap_ovmf() -> Result<()> {
         bail!("OVMF.fd not found at expected location: {:?}", ovmf_source);
     }
 
-    std::fs::copy(&ovmf_source, &ovmf_dest)
-        .with_context(|| format!("Failed to copy OVMF.fd from {:?} to {:?}", ovmf_source, ovmf_dest))?;
-    
+    std::fs::copy(&ovmf_source, &ovmf_dest).with_context(|| {
+        format!("Failed to copy OVMF.fd from {:?} to {:?}", ovmf_source, ovmf_dest)
+    })?;
+
     println!("✓ OVMF firmware copied to: {}", ovmf_dest.display().to_string().bright_white());
 
     // Step 9: Clean up build directory
@@ -1304,16 +1305,21 @@ fn bootstrap_ovmf() -> Result<()> {
     }
 
     // Print final instructions
-    println!("\n{}", "=== OVMF firmware bootstrap completed successfully! ===".bright_green().bold());
+    println!(
+        "\n{}",
+        "=== OVMF firmware bootstrap completed successfully! ===".bright_green().bold()
+    );
     println!("OVMF firmware location: {}", ovmf_dest.display().to_string().bright_white());
-    
+
     println!("\n{}", "Features included:".bright_cyan());
     println!("• TPM2 support enabled (-D TPM2_ENABLE)");
     println!("• Debug output on serial port (-D DEBUG_ON_SERIAL_PORT)");
     println!("• Verbose debugging (-D DEBUG_VERBOSE)");
     println!("• Memory attribute protocol workaround (--pcd PcdUninstallMemAttrProtocol=TRUE)");
-    
-    println!("\nThis OVMF binary is ready to use with COCONUT-SVSM and can be packaged into IGVM files.");
+
+    println!(
+        "\nThis OVMF binary is ready to use with COCONUT-SVSM and can be packaged into IGVM files."
+    );
 
     Ok(())
 }
@@ -1365,7 +1371,7 @@ fn bootstrap_qemu() -> Result<()> {
 
     if !igvm_dir.exists() {
         println!("Cloning IGVM repository...");
-        let repo = Repository::clone("https://github.com/microsoft/igvm", &igvm_dir)
+        let _ = Repository::clone("https://github.com/microsoft/igvm", &igvm_dir)
             .context("Failed to clone IGVM repository")?;
         println!("✓ Cloned IGVM repository");
     } else {
@@ -1431,7 +1437,7 @@ fn bootstrap_qemu() -> Result<()> {
 
     if !qemu_dir.exists() {
         println!("Cloning QEMU repository...");
-        let repo = Repository::clone("https://github.com/coconut-svsm/qemu", &qemu_dir)
+        let _ = Repository::clone("https://github.com/coconut-svsm/qemu", &qemu_dir)
             .context("Failed to clone QEMU repository")?;
         println!("✓ Cloned QEMU repository");
     } else {
@@ -1932,10 +1938,6 @@ fn project_root() -> PathBuf {
         Path::new(&manifest_dir).ancestors().nth(1).unwrap().to_path_buf()
     } else {
         // Fallback: assume we're in the xtask subdirectory and go up one level
-        std::env::current_dir()
-            .unwrap()
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf()
+        std::env::current_dir().unwrap().parent().unwrap_or_else(|| Path::new(".")).to_path_buf()
     }
 }

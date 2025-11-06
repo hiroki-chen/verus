@@ -9,6 +9,7 @@ use super::DEKO_MAPPING_SPACE;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::DEKO_FRAME_ALLOCATOR;
+use crate::{log_hex_prefixed, log_str, log_str_ln, Stage2LaunchInfo};
 
 extern "C" {
     #[link_name = "pgtable"]
@@ -378,6 +379,7 @@ deko_bitflags_quick! {
     Pte,
     data: { PRESENT, WRITABLE, USER, ACCESSED, DIRTY, GLOBAL, NX },
     writeable: { PRESENT, USER, WRITABLE, ACCESSED, DIRTY },
+    writeable_kernel: { PRESENT, WRITABLE, ACCESSED, DIRTY },
     read_only: { PRESENT, USER, ACCESSED },
     kernel_code: { PRESENT, GLOBAL },
 }
@@ -2041,6 +2043,61 @@ impl Page {
         Page::update_entry_by_ptr(page, Tracked::assume_new(), idx, new_pte_value);
     }
 
+    /// Maps _multiple_ pages in the given virtual address range to the given physical address.
+    #[verifier::spinoff_prover]
+    pub fn map_page_multiple(
+        page: DekoPPtr<Page>,
+        Tracked(ctx_perm): Tracked<&mut PageTablePermission>,
+        vaddr: VaddrRange,
+        paddr: PhysAddr,
+        flags: PteFlags,
+        ms: &MappingSpace,
+        private_bit: u64,
+        shared_bit: u64,
+    )
+        requires
+            old(ctx_perm).map_page_multiple_requires(
+                page,
+                vaddr,
+                paddr,
+                ms,
+                flags,
+                private_bit,
+                shared_bit,
+            ),
+        ensures
+            old(ctx_perm).map_page_multiple_ensures(
+                vaddr,
+                paddr,
+                flags,
+                private_bit,
+                shared_bit,
+                ctx_perm,
+            ),
+    {
+        let mut i = 0;
+        let len = (vaddr.end.0 - vaddr.start.0) / PAGE_SIZE;
+
+        while i < len
+            invariant
+                i <= len,
+                len == (vaddr.end@ - vaddr.start@) / PAGE_SIZE as int,
+                vaddr.wf(),
+                vaddr.start@ % PAGE_SIZE == 0,
+                vaddr.end@ % PAGE_SIZE == 0,
+                vaddr.end@ < u64::MAX,
+                paddr@ % PAGE_SIZE == 0,
+                paddr@ + (vaddr.end@ - vaddr.start@) < 0x000f_ffff_ffff_f000,
+                PAGE_SIZE == 0x1000,  // seems verus fails to inline this.
+
+            decreases len - i,
+        {
+            let curr_vaddr = VirtAddr(vaddr.start.0 + i * PAGE_SIZE);
+            let curr_paddr = PhysAddr(paddr.0 + i * PAGE_SIZE);
+            i += 1;
+        }
+    }
+
     /// Maps a single 4KB page at the given virtual address to the given physical address
     #[verifier::spinoff_prover]
     pub fn map_page_4k(
@@ -2754,6 +2811,47 @@ impl PageTablePermission {
         &&& res_mapping matches Mapping::Level0(ptr, idx) ==> {
             new_pgtable_perm.mapping_addr_consistent(ptr, idx, vaddr, 0)
         }
+    }
+
+    pub open spec fn map_page_multiple_requires(
+        &self,
+        page: DekoPPtr<Page>,
+        vaddr_range: VaddrRange,
+        paddr: PhysAddr,
+        ms: &MappingSpace,
+        flags: PteFlags,
+        private_bit: u64,
+        shared_bit: u64,
+    ) -> bool {
+        &&& self.wf()
+        &&& ms.wf()
+        &&& ms == self.mapping_space
+        &&& self.private_bit == private_bit
+        &&& self.shared_bit == shared_bit
+        &&& bit_not_overlapping(private_bit)
+        &&& bit_not_overlapping(shared_bit)
+        &&& bit_not_in_addr_region(private_bit)
+        &&& bit_not_in_addr_region(shared_bit)
+        &&& flags.wf()
+        &&& flags.bits() & Pte_ALL_BITS == flags.bits()
+        &&& paddr.wf()
+        &&& paddr@ % PAGE_SIZE == 0
+        &&& paddr@ + (vaddr_range.end@ - vaddr_range.start@) < 0x000f_ffff_ffff_f000
+        &&& vaddr_range.wf()
+        &&& vaddr_range.start@ % PAGE_SIZE == 0
+        &&& vaddr_range.end@ % PAGE_SIZE == 0
+    }
+
+    pub open spec fn map_page_multiple_ensures(
+        &self,
+        vaddr_range: VaddrRange,
+        paddr: PhysAddr,
+        flags: PteFlags,
+        private_bit: u64,
+        shared_bit: u64,
+        new_pgtable_perm: &PageTablePermission,
+    ) -> bool {
+        true
     }
 
     pub open spec fn map_page_4k_requires(
@@ -4156,20 +4254,86 @@ impl Mapping {
 /// Map and validate the specified virtual memory region at `paddr`.
 #[verus_spec(r =>
     with
-        Tracked(ctx): Tracked<&mut DekoCpuCtxPermission>
+        Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>
     requires
+        old(ctx_perm).wf_with(ctx),
         header.wf(),
         vaddr_start.wf(),
         vaddr_end.wf(),
         paddr.wf(),
+        vaddr_start@ % PAGE_SIZE == 0,
+        vaddr_end@ % PAGE_SIZE == 0,
+        vaddr_start@ < vaddr_end@ < u64::MAX,
+        paddr@ % PAGE_SIZE == 0,
+        paddr@ + (vaddr_end@ - vaddr_start@) < 0x000f_ffff_ffff_f000,
     ensures
 )]
 pub(crate) fn map_and_validate_elf_segment(
+    ctx: DekoPPtr<DekoCpuCtx>,
     header: Stage2LaunchInfo,
     vaddr_start: VirtAddr,
     vaddr_end: VirtAddr,
     paddr: PhysAddr,
 ) {
+    broadcast use PteFlags::lemma_each_bits_is_valid;
+
+    log_str!("Mapping and validating ELF segment from [");
+    log_hex_prefixed!(vaddr_start.0);
+    log_str!("] to [");
+    log_hex_prefixed!(vaddr_end.0);
+    log_str!("] at physical address [");
+    log_hex_prefixed!(paddr.0);
+    log_str_ln!("]");
+
+    let flags = PteFlags::writeable_kernel();
+
+    proof {
+        // Proof is boring but we have to repeat.
+        //
+        // Perhaps there is a way for us to wrap such
+        // proofs inside some sort of macros to automate
+        // this tedious process for any flags defined
+        // inside `deko_bitflags_quick!`.
+        assert(flags.bits() & Pte_ALL_BITS == flags.bits()) by {
+            let p = 1u64 << 0;
+            let w = 1u64 << 1;
+            let u = 1u64 << 2;
+            let a = 1u64 << 5;
+            let d = 1u64 << 6;
+            let h = 1u64 << 7;
+            let g = 1u64 << 8;
+            let nx = 1u64 << 63;
+            let all = p | w | u | a | d | h | g | nx;
+
+            let writeable_kernel_bits = p | w | a | d;
+            assert(flags.bits() == writeable_kernel_bits & all);
+            assert((writeable_kernel_bits & all) & all == (writeable_kernel_bits & all))
+                by (bit_vector)
+                requires
+                    writeable_kernel_bits == (1u64 << 0) | (1u64 << 1) | (1u64 << 5) | (1u64 << 6),
+                    all == (1u64 << 0) | (1u64 << 1) | (1u64 << 2) | (1u64 << 5) | (1u64 << 6) | (
+                    1u64 << 7) | (1u64 << 8) | (1u64 << 63),
+            ;
+        }
+    }
+
+    let ctx_borrowed = ctx.borrow(Tracked(&ctx_perm.ptr_perm));
+    let shared_bit = ctx_borrowed.shared_bit();
+    let private_bit = ctx_borrowed.private_bit();
+    let ms = ctx_borrowed.kernel_mapping();
+    let pgtable = ctx_borrowed.pgtable();
+
+    let virt_range = vaddr_start..vaddr_end;
+    PageTable::map_page_multiple(
+        pgtable,
+        Tracked(&mut ctx_perm.pgtable_perm),
+        virt_range,
+        paddr,
+        flags,
+        &ms,
+        private_bit,
+        shared_bit,
+    );
 }
 
 } // verus!

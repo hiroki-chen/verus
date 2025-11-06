@@ -13,7 +13,9 @@ use crate::elf::{ElfFile, ElfLoadSegement};
 use crate::logging::DekoDebug;
 use crate::mm::{init_frame_allocator, DEKO_MAPPING_SPACE};
 use crate::snp::get_igvm_params;
-use crate::{die, imp, log_error, log_hex_prefixed, log_info, log_str, log_str_ln};
+use crate::{
+    die, imp, log_error, log_hex_prefixed, log_info, log_str, log_str_ln, Stage2LaunchInfo,
+};
 
 verus! {
 
@@ -334,7 +336,14 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
     requires
         old(ctx_perm).wf_with(ctx),
         old(kernel_end).wf(),
+        old(kernel_end)@ % PAGE_SIZE == 0,
         header.wf(),
+        ElfFile::new_spec(
+            PhysAddr(header.kernel_elf_start as u64),
+            PhysAddr(header.kernel_elf_end as u64),
+        ) matches Some(file) ==> file.wf_with_load_base(
+            *old(kernel_end),
+        ),
     ensures
         ctx_perm.wf_with(ctx),
 )]
@@ -357,13 +366,16 @@ fn load_deko_monitor(
     let elf_file = ElfFile::new(elf_start, elf_end)?;
 
     let vaddr_alloc_base = elf_file.get_vaddr_alloc_base();
+    log_str!("Kernel load base virtual address: ");
+    log_hex_prefixed!(vaddr_alloc_base.0);
+    log_str_ln!("");
     // Map, validate and populate the  kernel ELF's PT_LOAD segments. The
     // segments' virtual address range might not necessarily be contiguous,
     // track their total extent along the way. Physical memory is successively
     // being taken from the physical memory region, the remaining space will be
     // available as heap space for the kernel. Remember the end of all
     // physical memory occupied by the loaded ELF image.
-    elf_file.load_each_segment(vaddr_alloc_base, kernel_end, header, ctx, Tracked(ctx_perm));
+    elf_file.load_each_segment(ctx, vaddr_alloc_base, kernel_end, header, Tracked(ctx_perm));
 
     Some(0u64.into())
 }

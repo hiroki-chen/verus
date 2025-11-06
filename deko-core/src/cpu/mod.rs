@@ -12,7 +12,10 @@ use vstd::cell::{PCell, PointsTo};
 use vstd::prelude::*;
 
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
-use crate::mm::paging::{Mapping, Page, PageTable, PageTablePermission, PteFlags};
+use crate::mm::paging::{
+    bit_not_in_addr_region, bit_not_overlapping, Mapping, Page, PageTable, PageTablePermission,
+    PteFlags,
+};
 use crate::mm::virt_to_phys;
 
 verus! {
@@ -308,6 +311,10 @@ impl WellFormed for DekoCpuCtxPermission {
         &&& self.pgtable_perm.mapping_space === self.ptr_perm.value().kernel_mapping_spec()
         &&& self.pgtable_perm.private_bit == self.ptr_perm.value().private_bit_spec()
         &&& self.pgtable_perm.shared_bit == self.ptr_perm.value().shared_bit_spec()
+        &&& bit_not_in_addr_region(self.pgtable_perm.private_bit)
+        &&& bit_not_in_addr_region(self.pgtable_perm.shared_bit)
+        &&& bit_not_overlapping(self.pgtable_perm.private_bit)
+        &&& bit_not_overlapping(self.pgtable_perm.shared_bit)
         &&& self.ghcb_perm.is_init()
         &&& self.ghcb_perm.wf()
         &&& self.ghcb_perm.pptr() == self.ptr_perm.value().ghcb_spec()@
