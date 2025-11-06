@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Cursor, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -8,11 +8,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use git2::Repository;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json;
-use walkdir::WalkDir;
-use zip::ZipArchive;
 
 // Cargo JSON message structures for parsing build output
 #[derive(Deserialize, Debug)]
@@ -286,26 +283,8 @@ impl BuildSummary {
     }
 }
 
-// GitHub API structures for release information
-#[derive(Deserialize, Debug)]
-struct GitHubRelease {
-    tag_name: String,
-    name: String,
-    assets: Vec<GitHubAsset>,
-    prerelease: bool,
-}
-
-#[derive(Deserialize, Debug)]
-struct GitHubAsset {
-    name: String,
-    browser_download_url: String,
-    // content_type: String,
-    size: u64,
-}
-
 // Configuration constants - no user-specific paths
 // const DEFAULT_VERUS_REPO: &str = "https://github.com/hiroki-chen/verus.git";
-const VERUS_RELEASES_API: &str = "https://api.github.com/repos/verus-lang/verus/releases";
 const DEFAULT_MEMORY: &str = "4G";
 const DEFAULT_SMP_CORES: u32 = 4;
 
@@ -496,6 +475,80 @@ struct Builder {
 impl Builder {
     pub fn new(target_arch: String) -> Self { Builder { config: ProjectConfig::new(target_arch) } }
 
+    /// Find the verus binary using fallback strategy:
+    /// 1. Look if it exists in PATH
+    /// 2. If not, check if VERUS_PATH environment variable is set  
+    /// 3. If not, check if tools/verus exists
+    fn find_verus_binary(&self) -> Result<PathBuf> {
+        // First check if verus is in PATH
+        if let Ok(output) = Command::new("which").arg("verus").output() {
+            if output.status.success() {
+                let path_str = String::from_utf8_lossy(&output.stdout);
+                if !path_str.is_empty() {
+                    println!("✓ Found verus in PATH: {}", path_str.bright_green());
+                    return Ok(PathBuf::from(path_str.to_string()));
+                }
+            }
+        }
+
+        // Check VERUS_PATH environment variable
+        if let Ok(verus_path) = std::env::var("VERUS_PATH") {
+            let path = PathBuf::from(verus_path);
+            if path.exists() {
+                println!("✓ Found verus via VERUS_PATH: {}", path.display().to_string().bright_green());
+                return Ok(path);
+            } else {
+                println!("⚠ VERUS_PATH set but file doesn't exist: {}", path.display().to_string().yellow());
+            }
+        }
+
+        // Check tools/verus in project
+        let tools_verus = self.config.root.join("tools").join("verus");
+        if tools_verus.exists() {
+            println!("✓ Found verus in project tools: {}", tools_verus.display().to_string().bright_green());
+            return Ok(tools_verus);
+        }
+
+        bail!("Could not find verus binary. Please ensure it's in PATH, set VERUS_PATH, or run 'cargo run --bin xtask -- bootstrap-verus' first.");
+    }
+
+    /// Find the z3 binary using fallback strategy:
+    /// 1. Look if it exists in PATH
+    /// 2. If not, check if VERUS_Z3_PATH environment variable is set
+    /// 3. If not, check if tools/z3 exists  
+    fn find_z3_binary(&self) -> Result<PathBuf> {
+        // First check if z3 is in PATH
+        if let Ok(output) = Command::new("which").arg("z3").output() {
+            if output.status.success() {
+                let path_str = String::from_utf8_lossy(&output.stdout);
+                if !path_str.is_empty() {
+                    println!("✓ Found z3 in PATH: {}", path_str.bright_green());
+                    return Ok(PathBuf::from(path_str.to_string()));
+                }
+            }
+        }
+
+        // Check VERUS_Z3_PATH environment variable
+        if let Ok(z3_path) = std::env::var("VERUS_Z3_PATH") {
+            let path = PathBuf::from(z3_path);
+            if path.exists() {
+                println!("✓ Found z3 via VERUS_Z3_PATH: {}", path.display().to_string().bright_green());
+                return Ok(path);
+            } else {
+                println!("⚠ VERUS_Z3_PATH set but file doesn't exist: {}", path.display().to_string().yellow());
+            }
+        }
+
+        // Check tools/z3 in project
+        let tools_z3 = self.config.root.join("tools").join("z3");
+        if tools_z3.exists() {
+            println!("✓ Found z3 in project tools: {}", tools_z3.display().to_string().bright_green());
+            return Ok(tools_z3);
+        }
+
+        bail!("Could not find z3 binary. Please ensure it's in PATH, set VERUS_Z3_PATH, or run 'cargo run --bin xtask -- bootstrap-verus' first.");
+    }
+
     pub fn build(&self, target: BuildTarget, release: bool) -> Result<()> {
         match target {
             BuildTarget::All => {
@@ -662,12 +715,29 @@ impl Builder {
     fn build_deko(&self, release: bool) -> Result<()> {
         println!("{}", "--- Building stage2 bootloader ---".bright_cyan().bold());
 
+        // Discover required binaries
+        println!("\n{} Discovering required binaries...", "🔍".bright_yellow());
+        let verus_binary = self.find_verus_binary()?;
+        let z3_binary = self.find_z3_binary()?;
+
+        // Set up environment for verus
+        std::env::set_var("VERUS_Z3_PATH", &z3_binary);
+        
         let deko_stage2 = self.config.root.join("deko-core");
         std::env::set_current_dir(&deko_stage2)
             .context("Failed to change directory to deko-core")?;
 
-        // Build stage2
+        // Build stage2 using discovered verus binary
         let mut cmd = Command::new("cargo");
+        // Set the verus binary path in PATH or use custom cargo subcommand
+        if verus_binary != PathBuf::from("verus") {
+            // If verus is not in PATH, we need to set up the environment
+            let verus_dir = verus_binary.parent().unwrap_or_else(|| Path::new("."));
+            let current_path = std::env::var("PATH").unwrap_or_default();
+            let new_path = format!("{}:{}", verus_dir.display(), current_path);
+            std::env::set_var("PATH", new_path);
+        }
+        
         cmd.arg("verus")
             .arg("build")
             .arg("--target")
@@ -971,7 +1041,7 @@ fn main() -> Result<()> {
         Commands::Pretty { paths } => pretty(paths),
 
         Commands::BootstrapVerus { commit } => {
-            let default_prefix = project_root().join("tools");
+            let default_prefix = project_root().join("/tmp");
             bootstrap_verus(&default_prefix, commit.as_deref())
         }
 
@@ -1092,249 +1162,201 @@ fn bootstrap_qemu(prefix: &Path) -> Result<()> {
 }
 
 fn bootstrap_verus(prefix: &Path, commit: Option<&str>) -> Result<()> {
-    println!("{} Bootstrapping Verus...", "→".bright_cyan());
+    println!("{} Bootstrapping Verus from source...", "→".bright_cyan());
     println!("Installation prefix: {}", prefix.display().to_string().bright_white());
 
     // Ensure prefix directory exists
     std::fs::create_dir_all(prefix).context("Failed to create prefix directory")?;
 
-    // Step 1: Query GitHub releases API
-    println!("\n{} Querying GitHub releases...", "🔍".bright_yellow());
-    let client = Client::new();
-    let releases_url = if let Some(commit) = commit {
-        format!("{}/tags/{}", VERUS_RELEASES_API, commit)
-    } else {
-        format!("{}/latest", VERUS_RELEASES_API)
-    };
-
-    let response = client
-        .get(&releases_url)
-        .header("User-Agent", "xtask-bootstrap")
-        .send()
-        .context("Failed to fetch releases from GitHub")?;
-
-    if !response.status().is_success() {
-        bail!("Failed to fetch release info: HTTP {}", response.status());
-    }
-
-    let release: GitHubRelease = response.json().context("Failed to parse release JSON")?;
-
-    println!("✓ Found release: {} ({})", release.name.green(), release.tag_name.bright_blue());
-
-    if release.prerelease {
-        println!("⚠ This is a pre-release version");
-    }
-
-    // Step 2: Find Linux binary asset and source code
-    println!("\n{} Looking for Linux binary and source code...", "📦".bright_cyan());
-    let linux_asset = release
-        .assets
-        .iter()
-        .find(|asset| {
-            asset.name.to_lowercase().contains("linux")
-                && (asset.name.ends_with(".zip") || asset.name.ends_with(".tar.gz"))
-        })
-        .ok_or_else(|| anyhow::anyhow!("No Linux binary found in release assets"))?;
-
-    // Also find source code asset
-    let source_asset = release
-        .assets
-        .iter()
-        .find(|asset| {
-            asset.name == "Source code (zip)"
-                || asset.name.contains("source") && asset.name.ends_with(".zip")
-        })
-        .or_else(|| {
-            // If no explicit source asset, construct the GitHub source URL
-            None
-        });
-
-    println!(
-        "✓ Found binary: {} ({} bytes)",
-        linux_asset.name.green(),
-        format_bytes(linux_asset.size).bright_white()
-    );
-
-    // Step 3: Download the binary asset
-    println!("\n{} Downloading {}...", "⬇".bright_green(), linux_asset.name);
-    let response = client
-        .get(&linux_asset.browser_download_url)
-        .header("User-Agent", "xtask-bootstrap")
-        .send()
-        .context("Failed to download asset")?;
-
-    if !response.status().is_success() {
-        bail!("Failed to download asset: HTTP {}", response.status());
-    }
-
-    let binary_bytes = response.bytes().context("Failed to read download bytes")?;
-    println!("✓ Downloaded {} bytes", format_bytes(binary_bytes.len() as u64).bright_white());
-
-    // Step 4: Download source code for dependencies
-    println!("\n{} Downloading source code for dependencies...", "⬇".bright_yellow());
-
-    let source_url = if let Some(asset) = source_asset {
-        asset.browser_download_url.clone()
-    } else {
-        // Construct GitHub's auto-generated source zip URL
-        format!("https://github.com/verus-lang/verus/archive/refs/tags/{}.zip", release.tag_name)
-    };
-
-    let source_response = client
-        .get(&source_url)
-        .header("User-Agent", "xtask-bootstrap")
-        .send()
-        .context("Failed to download source code")?;
-
-    if !source_response.status().is_success() {
-        bail!("Failed to download source code: HTTP {}", source_response.status());
-    }
-
-    let source_bytes = source_response.bytes().context("Failed to read source bytes")?;
-    println!(
-        "✓ Downloaded source: {} bytes",
-        format_bytes(source_bytes.len() as u64).bright_white()
-    );
-
-    // Step 5: Extract to tools/verus
     let verus_dir = prefix.join("verus");
+
+    // Step 1: Clone or update Verus repository
+    println!("\n{} Cloning Verus repository...", "🔀".bright_yellow());
+
     if verus_dir.exists() {
         println!("🗑 Removing existing verus directory...");
         std::fs::remove_dir_all(&verus_dir).context("Failed to remove existing verus directory")?;
     }
 
-    std::fs::create_dir_all(&verus_dir).context("Failed to create verus directory")?;
+    let repo_url = "https://github.com/verus-lang/verus.git";
+    println!("Cloning from: {}", repo_url.bright_blue());
 
-    println!("\n{} Extracting binary to {}...", "📂".bright_cyan(), verus_dir.display());
+    let repo =
+        Repository::clone(repo_url, &verus_dir).context("Failed to clone Verus repository")?;
 
-    if linux_asset.name.ends_with(".zip") {
-        extract_zip(&binary_bytes, &verus_dir)?;
-    } else {
-        bail!("Unsupported archive format. Only ZIP files are currently supported.");
+    // Checkout specific commit if provided
+    if let Some(commit_hash) = commit {
+        println!("Checking out commit: {}", commit_hash.bright_yellow());
+        let (object, _) = repo
+            .revparse_ext(commit_hash)
+            .with_context(|| format!("Failed to find commit {}", commit_hash))?;
+        repo.checkout_tree(&object, None).context("Failed to checkout commit")?;
+        repo.set_head_detached(object.id()).context("Failed to set HEAD to commit")?;
     }
 
-    println!("✓ Verus binary extracted successfully!");
+    println!("✓ Repository cloned successfully!");
 
-    // Step 6: Extract source code to temporary directory and copy dependencies
-    println!("\n{} Extracting dependencies from source code...", "📂".bright_yellow());
-    let temp_source_dir = prefix.join("temp_source");
-    if temp_source_dir.exists() {
-        std::fs::remove_dir_all(&temp_source_dir)?;
+    // Enter the verus directory
+    std::env::set_current_dir(&verus_dir).context("Failed to change to verus directory")?;
+    println!("✓ Changed to verus directory: {}", verus_dir.display().to_string().bright_white());
+    let rust_toolchain = std::fs::read_to_string(verus_dir.join("rust-toolchain.toml"))
+        .context("Failed to read rust-toolchain file")?
+        .split("\n")
+        .map(|s| s.to_string())
+        .collect::<Vec<String>>();
+    let rust_version = rust_toolchain
+        .iter()
+        .find(|line| line.trim_start().starts_with("channel"))
+        .and_then(|line| line.split('=').nth(1))
+        .map(|s| s.trim().trim_matches('"'))
+        .unwrap_or("stable");
+    println!("{} Setting Rust toolchain to: {}", "🛠".bright_green(), rust_version.bright_white());
+
+    let mut cmd = Command::new("rustup");
+    cmd.arg("override").arg("set").arg(rust_version);
+    let output = cmd.output().context("Failed to set rustup override")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("rustup override failed:\nSTDERR:\n{}", stderr);
     }
-    std::fs::create_dir_all(&temp_source_dir)?;
 
-    extract_zip(&source_bytes, &temp_source_dir)?;
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let output = cmd.output().context("Failed to check rustup version")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("rustup check failed:\nSTDERR:\n{}", stderr);
+    }
 
-    // Find the dependencies folder in the extracted source
-    let mut dependencies_found = false;
-    for entry in WalkDir::new(&temp_source_dir).max_depth(3) {
-        let entry = entry?;
-        if entry.file_type().is_dir() && entry.file_name() == "dependencies" {
-            let source_deps = entry.path();
-            let target_deps = verus_dir.join("dependencies");
+    // Step 2: Change to source directory
+    let source_dir = verus_dir.join("source");
+    if !source_dir.exists() {
+        bail!("Source directory not found at: {:?}", source_dir);
+    }
 
-            println!("✓ Found dependencies folder at: {}", source_deps.display());
-            println!("📁 Copying to: {}", target_deps.display());
+    println!("\n{} Changing to source directory: {}", "📂".bright_cyan(), source_dir.display());
+    std::env::set_current_dir(&source_dir).context("Failed to change to source directory")?;
 
-            copy_dir_recursive(source_deps, &target_deps)?;
-            dependencies_found = true;
-            break;
+    // Step 3: Setup Z3
+    println!("\n{} Setting up Z3...", "🔧".bright_green());
+
+    let mut cmd = Command::new("bash");
+    cmd.arg("./tools/get-z3.sh");
+    println!("Running: {:?}", cmd);
+
+    let output = cmd.output().context("Failed to execute get-z3.sh")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        bail!("get-z3.sh failed:\nSTDOUT:\n{}\nSTDERR:\n{}", stdout, stderr);
+    }
+
+    println!("✓ Z3 setup completed successfully!");
+
+    // Step 4: Check for rustup
+    println!("\n{} Checking rustup installation...", "🦀".bright_yellow());
+    let rustup_check = Command::new("rustup").arg("--version").output();
+
+    match rustup_check {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout);
+            println!("✓ Found rustup: {}", version.trim().bright_white());
+        }
+        _ => {
+            bail!("rustup not found. Please install rustup from https://rustup.rs first.");
         }
     }
 
-    if !dependencies_found {
-        println!("⚠ Dependencies folder not found in source code");
-    } else {
-        println!("✓ Dependencies folder copied successfully!");
+    println!("✓ rustup is installed.");
+
+    // Step 5: Build vargo
+    println!("\n{} Building vargo... ", "⚙️".bright_green());
+    let vargo_dir = verus_dir.join("tools/vargo");
+    std::env::set_current_dir(&vargo_dir).context("Failed to change to vargo directory")?;
+    let mut cmd = Command::new("cargo");
+    cmd.arg("build").arg("--release");
+    println!("Running: {:?}", cmd);
+    let output = cmd.output().context("Failed to build vargo")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        bail!("Failed to build vargo:\nSTDOUT:\n{}\nSTDERR:\n{}", stdout, stderr);
     }
 
-    // Clean up temporary source directory
-    std::fs::remove_dir_all(&temp_source_dir)?;
+    let vargo_binary = vargo_dir.join("target/release/vargo");
 
-    // Step 5: Check if extraction was successful and find binaries
-    let mut verus_binary = None;
-    for entry in walkdir::WalkDir::new(&verus_dir) {
-        let entry = entry?;
-        if entry.file_type().is_file() && entry.file_name() == "verus" {
-            verus_binary = Some(entry.path().to_path_buf());
-            break;
-        }
+    // Step 6: build verus.
+    println!("\n{} Building Verus using vargo...", "🚀".bright_green());
+    // unset RUSTUP_TOOLCHAIN.
+    std::env::remove_var("RUSTUP_TOOLCHAIN");
+    std::env::set_current_dir(&source_dir).context("Failed to change to source directory")?;
+    let mut cmd = Command::new(&vargo_binary);
+    cmd.arg("build").arg("--release");
+    println!("Running: {:?} at {}", cmd, source_dir.display());
+    let output = cmd.output().context("Failed to build Verus using vargo")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        bail!("Failed to build Verus:\nSTDOUT:\n{}\nSTDERR:\n{}", stdout, stderr);
     }
 
-    if let Some(ref binary_path) = verus_binary {
-        println!(
-            "\n{} Verus binary found at: {}",
-            "✓".green(),
-            binary_path.display().to_string().bright_white()
-        );
+    println!("✓ Verus built successfully!");
 
-        // Make binary executable
+    // Step 7: Copy all built files from /tmp/verus/source/target/release to tools directory
+    println!("\n{} Copying Verus binaries to project tools directory...", "📦".bright_cyan());
+    
+    let verus_target_path = source_dir.join("target/release");
+    let project_tools_dir = project_root().join("tools");
+    
+    println!("Source directory: {}", verus_target_path.display().to_string().bright_white());
+    println!("Destination directory: {}", project_tools_dir.display().to_string().bright_white());
+    
+    // Ensure destination directory exists
+    std::fs::create_dir_all(&project_tools_dir).context("Failed to create tools directory")?;
+    
+    // Copy all files from target/release to tools
+    copy_dir_recursive(&verus_target_path, &project_tools_dir)
+        .context("Failed to copy Verus built files to tools directory")?;
+    
+    // Also copy z3 binary
+    let z3_path = source_dir.join("z3");
+    if z3_path.exists() {
+        println!("Copying Z3 binary...");
+        let z3_dest = project_tools_dir.join("z3");
+        std::fs::copy(&z3_path, &z3_dest).context("Failed to copy Z3 binary")?;
+        
+        // Make Z3 executable
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&binary_path)?.permissions();
+            let mut perms = std::fs::metadata(&z3_dest)?.permissions();
             perms.set_mode(perms.mode() | 0o755);
-            std::fs::set_permissions(&binary_path, perms)?;
-            println!("✓ Made binary executable");
+            std::fs::set_permissions(&z3_dest, perms)?;
         }
-    } else {
-        println!("⚠ Verus binary not found in extracted files");
+        
+        println!("✓ Z3 binary copied and made executable at: {}", z3_dest.display());
     }
+    
+    println!("✓ All Verus files copied successfully to tools directory!");
 
-    // Print final instructions
-    println!("\n{}", "=== Verus installation complete! ===".bright_cyan().bold());
-    println!("Verus installed to: {}", verus_dir.display().to_string().bright_white());
-
-    if let Some(ref binary_path) = verus_binary {
-        println!("Binary location: {}", binary_path.display().to_string().bright_white());
-        println!("\nTo use Verus, add it to your PATH:");
-        println!("  export PATH={}:$PATH", binary_path.parent().unwrap().display());
-        println!("\nOr use the full path:");
-        println!("  {}", binary_path.display());
+    // Step 8: Clean up temporary build directory and create verusroot marker file
+    println!("\n{} Finalizing bootstrap setup...", "🔧".bright_cyan());
+    
+    // Delete the temporary /tmp/verus build directory
+    if verus_dir.exists() {
+        std::fs::remove_dir_all(&verus_dir).context("Failed to delete temporary verus build directory")?;
+        println!("✓ Deleted temporary build directory: {}", verus_dir.display());
     }
+    
+    // Create empty verusroot marker file
+    let verusroot_file = project_tools_dir.join("verus-root");
+    std::fs::File::create(&verusroot_file).context("Failed to create verus-root marker file")?;
+    println!("✓ Created verusroot marker file at: {}", verusroot_file.display());
+
+    println!("\n=== Verus bootstrap completed successfully! ===");
 
     Ok(())
-}
-
-fn extract_zip(bytes: &[u8], target_dir: &Path) -> Result<()> {
-    let cursor = Cursor::new(bytes);
-    let mut archive = ZipArchive::new(cursor)?;
-
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i)?;
-        let outpath = target_dir.join(file.name());
-
-        if file.name().ends_with('/') {
-            // Directory
-            std::fs::create_dir_all(&outpath)?;
-        } else {
-            // File
-            if let Some(parent) = outpath.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let mut outfile = std::fs::File::create(&outpath)?;
-            std::io::copy(&mut file, &mut outfile)?;
-        }
-    }
-
-    Ok(())
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
-    let mut size = bytes as f64;
-    let mut unit_index = 0;
-
-    while size >= 1024.0 && unit_index < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit_index += 1;
-    }
-
-    if unit_index == 0 {
-        format!("{} {}", size as u64, UNITS[unit_index])
-    } else {
-        format!("{:.1} {}", size, UNITS[unit_index])
-    }
 }
 
 fn pretty(paths: Vec<PathBuf>) -> Result<()> {

@@ -10,6 +10,9 @@ members = [
     "tests/buddy",
     "tests/elf",
 ]
+exclude = [
+    "tools/verus",
+]
 
 [workspace.dependencies]
 vstd = { git = "https://github.com/verus-lang/verus.git", default-features = false }
