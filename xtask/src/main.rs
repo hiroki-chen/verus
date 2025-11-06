@@ -339,6 +339,7 @@ impl ProjectConfig {
             PathBuf::from("/usr/local/share/ovmf/OVMF.fd"),
             dirs::data_local_dir().map(|d| d.join("share/ovmf/OVMF.fd")).unwrap_or_default(),
             PathBuf::from("/usr/share/ovmf/OVMF_CODE.fd"),
+            PathBuf::from("./tools/share/OVMF.fd"),
         ];
 
         for path in possible_paths {
@@ -495,17 +496,26 @@ impl Builder {
         if let Ok(verus_path) = std::env::var("VERUS_PATH") {
             let path = PathBuf::from(verus_path);
             if path.exists() {
-                println!("✓ Found verus via VERUS_PATH: {}", path.display().to_string().bright_green());
+                println!(
+                    "✓ Found verus via VERUS_PATH: {}",
+                    path.display().to_string().bright_green()
+                );
                 return Ok(path);
             } else {
-                println!("⚠ VERUS_PATH set but file doesn't exist: {}", path.display().to_string().yellow());
+                println!(
+                    "⚠ VERUS_PATH set but file doesn't exist: {}",
+                    path.display().to_string().yellow()
+                );
             }
         }
 
         // Check tools/verus in project
         let tools_verus = self.config.root.join("tools").join("verus");
         if tools_verus.exists() {
-            println!("✓ Found verus in project tools: {}", tools_verus.display().to_string().bright_green());
+            println!(
+                "✓ Found verus in project tools: {}",
+                tools_verus.display().to_string().bright_green()
+            );
             return Ok(tools_verus);
         }
 
@@ -532,17 +542,26 @@ impl Builder {
         if let Ok(z3_path) = std::env::var("VERUS_Z3_PATH") {
             let path = PathBuf::from(z3_path);
             if path.exists() {
-                println!("✓ Found z3 via VERUS_Z3_PATH: {}", path.display().to_string().bright_green());
+                println!(
+                    "✓ Found z3 via VERUS_Z3_PATH: {}",
+                    path.display().to_string().bright_green()
+                );
                 return Ok(path);
             } else {
-                println!("⚠ VERUS_Z3_PATH set but file doesn't exist: {}", path.display().to_string().yellow());
+                println!(
+                    "⚠ VERUS_Z3_PATH set but file doesn't exist: {}",
+                    path.display().to_string().yellow()
+                );
             }
         }
 
         // Check tools/z3 in project
         let tools_z3 = self.config.root.join("tools").join("z3");
         if tools_z3.exists() {
-            println!("✓ Found z3 in project tools: {}", tools_z3.display().to_string().bright_green());
+            println!(
+                "✓ Found z3 in project tools: {}",
+                tools_z3.display().to_string().bright_green()
+            );
             return Ok(tools_z3);
         }
 
@@ -722,7 +741,7 @@ impl Builder {
 
         // Set up environment for verus
         std::env::set_var("VERUS_Z3_PATH", &z3_binary);
-        
+
         let deko_stage2 = self.config.root.join("deko-core");
         std::env::set_current_dir(&deko_stage2)
             .context("Failed to change directory to deko-core")?;
@@ -737,7 +756,7 @@ impl Builder {
             let new_path = format!("{}:{}", verus_dir.display(), current_path);
             std::env::set_var("PATH", new_path);
         }
-        
+
         cmd.arg("verus")
             .arg("build")
             .arg("--target")
@@ -1049,85 +1068,231 @@ fn main() -> Result<()> {
     }
 }
 
-fn bootstrap_qemu(prefix: &Path) -> Result<()> {
-    println!("Bootstrapping QEMU with IGVM support...");
-    println!("Installation prefix: {}", prefix.display());
+fn bootstrap_qemu(_prefix: &Path) -> Result<()> {
+    println!("{} Bootstrapping QEMU with IGVM support...", "→".bright_cyan());
 
-    // Ensure prefix directory exists
-    std::fs::create_dir_all(prefix).context("Failed to create prefix directory")?;
+    // Use tools/ as installation directory
+    let project_root = project_root();
+    let tools_dir = project_root.join("tools");
+    let build_dir = project_root.join("/tmp");
 
-    // Step 2: Clone and build QEMU with IGVM support
-    println!("\n--- Building QEMU with IGVM support ---");
-    let qemu_dir = prefix.join("qemu");
+    println!("Installation directory: {}", tools_dir.display().to_string().bright_white());
 
-    if !qemu_dir.exists() {
-        println!("Cloning QEMU repository...");
-        let repo = Repository::clone("https://github.com/coconut-svsm/qemu", &qemu_dir)
-            .context("Failed to clone QEMU repository")?;
+    // Ensure directories exist
+    std::fs::create_dir_all(&build_dir).context("Failed to create build directory")?;
+    std::fs::create_dir_all(&tools_dir).context("Failed to create tools directory")?;
 
-        // Checkout the svsm-igvm branch
-        println!("Checking out svsm-igvm branch...");
+    // Step 1: Install cargo-c with nightly toolchain
+    println!("\n{} Installing cargo-c...", "📦".bright_yellow());
 
-        let branch_name = "svsm-igvm";
-        let (object, reference) = repo
-            .revparse_ext(branch_name)
-            .with_context(|| format!("Failed to find branch {}", branch_name))?;
-        repo.checkout_tree(&object, None)?;
-        repo.set_head(reference.unwrap().name().unwrap())?;
+    std::env::set_var("RUSTUP_TOOLCHAIN", "nightly");
+    println!("✓ Set RUSTUP_TOOLCHAIN to nightly for cargo-c installation");
 
-        println!("✓ Checked out branch: {}", branch_name);
-    } else {
-        println!("QEMU repository already exists at {:?}", qemu_dir);
-
-        // Ensure we're on the right branch
-        let repo = Repository::open(&qemu_dir)?;
-        let head = repo.head()?;
-        let current_branch = head.shorthand().unwrap_or("unknown");
-
-        if current_branch != "svsm-igvm" {
-            println!("Switching to svsm-igvm branch...");
-            repo.set_head("refs/heads/svsm-igvm")?;
-            repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
-        }
-    }
-
-    // Configure QEMU
-    std::env::set_current_dir(&qemu_dir).context("Failed to change directory to QEMU repo")?;
-
-    let qemu_install_dir = prefix.join("qemu-svsm");
-    println!("Configuring QEMU...");
-    println!("  Install directory: {:?}", qemu_install_dir);
-
-    let mut cmd = std::process::Command::new("./configure");
-    cmd.arg(format!("--prefix={}", qemu_install_dir.display()))
-        .arg("--target-list=x86_64-softmmu")
-        .arg("--enable-igvm");
+    let mut cmd = Command::new("cargo");
+    cmd.arg("install").arg("cargo-c");
 
     println!("Running: {:?}", cmd);
-    let output = cmd.output().context("Failed to configure QEMU")?;
+    let output = cmd.output().context("Failed to install cargo-c")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
 
-        // Check for common issues
-        if stderr.contains("igvm") || stdout.contains("igvm") {
-            eprintln!(
-                "IGVM library might not be properly installed. Make sure ldconfig has been run."
-            );
-            eprintln!("You may need to run: sudo ldconfig");
+        // Check if already installed
+        if stderr.contains("already exists") || stdout.contains("already installed") {
+            println!("✓ cargo-c already installed");
+        } else {
+            bail!("Failed to install cargo-c:\nSTDOUT:\n{}\nSTDERR:\n{}", stdout, stderr);
         }
+    } else {
+        println!("✓ cargo-c installed successfully");
+    }
 
+    // Step 2: Clone and build IGVM library
+    println!("\n{} Building IGVM library...", "🔧".bright_green());
+    let igvm_dir = build_dir.join("igvm");
+    let igvm_install_dir = tools_dir.clone();
+
+    if !igvm_dir.exists() {
+        println!("Cloning IGVM repository...");
+        let repo = Repository::clone("https://github.com/microsoft/igvm", &igvm_dir)
+            .context("Failed to clone IGVM repository")?;
+        println!("✓ Cloned IGVM repository");
+    } else {
+        println!("IGVM repository already exists at {:?}", igvm_dir);
+    }
+
+    // Build IGVM library - use cargo cinstall directly in igvm_c directory
+    std::env::set_current_dir(&igvm_dir).context("Failed to change to IGVM directory")?;
+
+    // Check directory structure to understand what's available
+    println!("Checking IGVM repository structure...");
+    println!("Installing IGVM library to: {}", igvm_install_dir.display());
+
+    // Ensure destination directory exists
+    std::fs::create_dir_all(&igvm_install_dir).context("Failed to create tools/lib directory")?;
+
+    // Try building the C library directly using cargo cinstall
+    let igvm_c_dir = igvm_dir.join("igvm_c");
+    if igvm_c_dir.exists() {
+        std::env::set_current_dir(&igvm_c_dir).context("Failed to change to igvm_c directory")?;
+
+        let mut cmd = Command::new("cargo");
+        cmd.arg("cinstall").arg("--prefix").arg(&igvm_install_dir);
+
+        println!("Running: {:?}", cmd);
+        let output = cmd.output().context("Failed to build IGVM library with cargo cinstall")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            bail!("Failed to build IGVM library:\nSTDOUT:\n{}\nSTDERR:\n{}", stdout, stderr);
+        }
+        println!("✓ IGVM library built and installed to tools/lib");
+
+        // Also manually install header files
+        let include_src_dir = igvm_dir.join("igvm_c").join("include");
+        let include_dest_dir = igvm_install_dir.join("include/igvm");
+
+        if include_src_dir.exists() {
+            std::fs::create_dir_all(&include_dest_dir)
+                .context("Failed to create include directory")?;
+
+            for entry in std::fs::read_dir(&include_src_dir)? {
+                let entry = entry?;
+                let src_path = entry.path();
+                if src_path.is_file() {
+                    let dest_path = include_dest_dir.join(entry.file_name());
+                    std::fs::copy(&src_path, &dest_path)
+                        .with_context(|| format!("Failed to copy header file: {:?}", src_path))?;
+                }
+            }
+            println!("✓ IGVM header files installed to tools/include/igvm");
+        } else {
+            println!("⚠ IGVM include directory not found, skipping header installation");
+        }
+    } else {
+        bail!("IGVM repository structure is not as expected - igvm_c directory not found");
+    }
+
+    // Step 3: Clone and build QEMU with IGVM support
+    println!("\n{} Building QEMU with IGVM support...", "⚙️".bright_green());
+    let qemu_dir = build_dir.join("qemu");
+
+    if !qemu_dir.exists() {
+        println!("Cloning QEMU repository...");
+        let repo = Repository::clone("https://github.com/coconut-svsm/qemu", &qemu_dir)
+            .context("Failed to clone QEMU repository")?;
+        println!("✓ Cloned QEMU repository");
+    } else {
+        println!("QEMU repository already exists at {:?}", qemu_dir);
+    }
+
+    // Checkout the svsm-igvm branch
+    let repo = Repository::open(&qemu_dir).context("Failed to open QEMU repository")?;
+    let branch_name = "svsm-igvm";
+
+    println!("Checking out {} branch...", branch_name);
+
+    // First fetch all remotes to ensure we have the latest branch info
+    let mut remote = repo.find_remote("origin").context("Failed to find origin remote")?;
+    remote.fetch(&["refs/heads/*:refs/remotes/origin/*"], None, None)
+        .context("Failed to fetch from origin")?;
+
+    // Now try to find the remote branch
+    let remote_branch_name = format!("origin/{}", branch_name);
+    let (object, _reference) = repo
+        .revparse_ext(&remote_branch_name)
+        .with_context(|| format!("Failed to find remote branch {}", remote_branch_name))?;
+
+    // Checkout the remote branch
+    repo.checkout_tree(&object, None)?;
+
+    // Check if local branch already exists and handle accordingly
+    let branch_ref_name = format!("refs/heads/{}", branch_name);
+    if let Ok(_existing_ref) = repo.find_reference(&branch_ref_name) {
+        // Local branch exists, just set HEAD to it
+        repo.set_head(&branch_ref_name)?;
+    } else {
+        // Create local branch tracking the remote branch
+        repo.reference(&branch_ref_name, object.id(), false, "checkout remote branch")?;
+        repo.set_head(&branch_ref_name)?;
+    }
+
+    println!("✓ Checked out branch: {}", branch_name);
+
+    // Configure QEMU
+    std::env::set_current_dir(&qemu_dir).context("Failed to change to QEMU directory")?;
+
+    let qemu_install_dir = tools_dir.clone();
+    // No need to create qemu_install_dir as tools_dir already exists
+
+    println!("Configuring QEMU...");
+    println!("  QEMU install directory: {}", qemu_install_dir.display());
+
+    // Set up environment variables for IGVM library discovery
+    let pkgconfig_path = format!(
+        "{}:{}",
+        igvm_install_dir.join("lib/x86_64-linux-gnu/pkgconfig").display(),
+        std::env::var("PKG_CONFIG_PATH").unwrap_or_default()
+    );
+
+    let c_include_path = format!(
+        "{}:{}",
+        igvm_install_dir.join("include/igvm").display(),
+        std::env::var("C_INCLUDE_PATH").unwrap_or_default()
+    );
+
+    let library_path = format!(
+        "{}:{}",
+        igvm_install_dir.join("lib").display(),
+        std::env::var("LIBRARY_PATH").unwrap_or_default()
+    );
+
+    let mut cmd = Command::new("./configure");
+    cmd.env("PKG_CONFIG_PATH", &pkgconfig_path);
+    cmd.env("C_INCLUDE_PATH", &c_include_path);
+    cmd.env("LIBRARY_PATH", &library_path);
+    cmd.arg(format!("--prefix={}", qemu_install_dir.display()))
+        .arg("--target-list=x86_64-softmmu")
+        .arg("--enable-igvm");
+
+    println!("Running: {:?}", cmd);
+    println!("  PKG_CONFIG_PATH: {}", pkgconfig_path);
+    println!("  C_INCLUDE_PATH: {}", c_include_path);
+    println!("  LIBRARY_PATH: {}", library_path);
+
+    let output = cmd.output().context("Failed to configure QEMU")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
         bail!("Failed to configure QEMU:\nSTDOUT:\n{}\nSTDERR:\n{}", stdout, stderr);
     }
     println!("✓ QEMU configured successfully");
 
     // Build QEMU with ninja
     println!("Building QEMU with ninja...");
-    let mut cmd = std::process::Command::new("ninja");
-    cmd.arg("-C").arg("build/");
-
     println!("This may take several minutes...");
+
+    let c_include_path = format!(
+        "{}:{}",
+        igvm_install_dir.join("include").display(),
+        std::env::var("C_INCLUDE_PATH").unwrap_or_default()
+    );
+
+    let library_path = format!(
+        "{}:{}",
+        igvm_install_dir.join("lib/x86_64-linux-gnu").display(),
+        std::env::var("LIBRARY_PATH").unwrap_or_default()
+    );
+
+    let mut cmd = Command::new("ninja");
+    cmd.arg("-C").arg("build/");
+    cmd.env("C_INCLUDE_PATH", &c_include_path);
+    cmd.env("LIBRARY_PATH", &library_path);
+
+    println!("Running: {:?}", cmd);
     let output = cmd.output().context("Failed to build QEMU with ninja")?;
 
     if !output.status.success() {
@@ -1137,8 +1302,8 @@ fn bootstrap_qemu(prefix: &Path) -> Result<()> {
     println!("✓ QEMU built successfully");
 
     // Install QEMU
-    println!("Installing QEMU...");
-    let mut cmd = std::process::Command::new("make");
+    println!("Installing QEMU to tools/bin...");
+    let mut cmd = Command::new("make");
     cmd.arg("install");
 
     let output = cmd.output().context("Failed to install QEMU")?;
@@ -1150,13 +1315,41 @@ fn bootstrap_qemu(prefix: &Path) -> Result<()> {
 
     println!("✓ QEMU installed successfully");
 
+    // Clean up temporary build directories
+    println!("\n{} Cleaning up build directories...", "🧹".bright_cyan());
+
+    if igvm_dir.exists() {
+        std::fs::remove_dir_all(&igvm_dir).context("Failed to remove IGVM build directory")?;
+        println!("✓ Removed IGVM build directory");
+    }
+
+    if qemu_dir.exists() {
+        std::fs::remove_dir_all(&qemu_dir).context("Failed to remove QEMU build directory")?;
+        println!("✓ Removed QEMU build directory");
+    }
+
     // Print final instructions
-    println!("\n=== QEMU with IGVM support installed successfully! ===");
-    println!("QEMU binary location: {:?}", qemu_install_dir.join("bin/qemu-system-x86_64"));
-    println!("\nTo use this QEMU, add it to your PATH:");
-    println!("  export PATH={}:$PATH", qemu_install_dir.join("bin").display());
-    println!("\nOr use the full path when running QEMU:");
-    println!("  {}/qemu-system-x86_64 [options]", qemu_install_dir.join("bin").display());
+    println!(
+        "\n{}",
+        "=== QEMU with IGVM support installed successfully! ===".bright_green().bold()
+    );
+    println!(
+        "QEMU binary location: {}",
+        qemu_install_dir.join("bin/qemu-system-x86_64").display().to_string().bright_white()
+    );
+    println!("IGVM library location: {}", igvm_install_dir.display().to_string().bright_white());
+
+    println!("\nTo use this QEMU, you can:");
+    println!("• Add tools/bin/qemu-svsm/bin to your PATH:");
+    println!(
+        "  export PATH={}:$PATH",
+        qemu_install_dir.join("bin").display().to_string().bright_blue()
+    );
+    println!("• Or use the full path when running QEMU:");
+    println!(
+        "  {}",
+        qemu_install_dir.join("bin/qemu-system-x86_64").display().to_string().bright_blue()
+    );
 
     Ok(())
 }
@@ -1196,24 +1389,50 @@ fn bootstrap_verus(prefix: &Path, commit: Option<&str>) -> Result<()> {
 
     println!("✓ Repository cloned successfully!");
 
+    // Copy our project's rust-toolchain.toml to verus directory to ensure same nightly version
+    println!("\n{} Synchronizing Rust toolchain with project...", "🔄".bright_yellow());
+    let project_toolchain_path = project_root().join("rust-toolchain.toml");
+    let verus_toolchain_path = verus_dir.join("rust-toolchain.toml");
+
+    if project_toolchain_path.exists() {
+        let toolchain_content = std::fs::read_to_string(&project_toolchain_path)
+            .context("Failed to read project's rust-toolchain.toml")?;
+        std::fs::write(&verus_toolchain_path, &toolchain_content)
+            .context("Failed to write Verus rust-toolchain.toml")?;
+        println!("✓ Copied project's rust-toolchain.toml to Verus directory");
+
+        // Extract the channel version for display
+        let rust_version = toolchain_content
+            .lines()
+            .find(|line| line.trim_start().starts_with("channel"))
+            .and_then(|line| line.split('=').nth(1))
+            .map(|s| s.trim().trim_matches('"'))
+            .unwrap_or("unknown");
+        println!("✓ Using Rust toolchain: {}", rust_version.bright_white());
+    } else {
+        println!("⚠ No project rust-toolchain.toml found, using Verus default");
+    }
+
     // Enter the verus directory
     std::env::set_current_dir(&verus_dir).context("Failed to change to verus directory")?;
     println!("✓ Changed to verus directory: {}", verus_dir.display().to_string().bright_white());
-    let rust_toolchain = std::fs::read_to_string(verus_dir.join("rust-toolchain.toml"))
-        .context("Failed to read rust-toolchain file")?
-        .split("\n")
-        .map(|s| s.to_string())
-        .collect::<Vec<String>>();
-    let rust_version = rust_toolchain
-        .iter()
-        .find(|line| line.trim_start().starts_with("channel"))
-        .and_then(|line| line.split('=').nth(1))
-        .map(|s| s.trim().trim_matches('"'))
-        .unwrap_or("stable");
-    println!("{} Setting Rust toolchain to: {}", "🛠".bright_green(), rust_version.bright_white());
+
+    // Extract rust version from the toolchain content for rustup override
+    let rust_version = if project_toolchain_path.exists() {
+        let toolchain_content = std::fs::read_to_string(&project_toolchain_path)
+            .context("Failed to read project's rust-toolchain.toml")?;
+        toolchain_content
+            .lines()
+            .find(|line| line.trim_start().starts_with("channel"))
+            .and_then(|line| line.split('=').nth(1))
+            .map(|s| s.trim().trim_matches('"').to_string())
+            .unwrap_or_else(|| "nightly".to_string())
+    } else {
+        "nightly".to_string()
+    };
 
     let mut cmd = Command::new("rustup");
-    cmd.arg("override").arg("set").arg(rust_version);
+    cmd.arg("override").arg("set").arg(&rust_version);
     let output = cmd.output().context("Failed to set rustup override")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1305,27 +1524,27 @@ fn bootstrap_verus(prefix: &Path, commit: Option<&str>) -> Result<()> {
 
     // Step 7: Copy all built files from /tmp/verus/source/target/release to tools directory
     println!("\n{} Copying Verus binaries to project tools directory...", "📦".bright_cyan());
-    
+
     let verus_target_path = source_dir.join("target/release");
     let project_tools_dir = project_root().join("tools");
-    
+
     println!("Source directory: {}", verus_target_path.display().to_string().bright_white());
     println!("Destination directory: {}", project_tools_dir.display().to_string().bright_white());
-    
+
     // Ensure destination directory exists
     std::fs::create_dir_all(&project_tools_dir).context("Failed to create tools directory")?;
-    
+
     // Copy all files from target/release to tools
     copy_dir_recursive(&verus_target_path, &project_tools_dir)
         .context("Failed to copy Verus built files to tools directory")?;
-    
+
     // Also copy z3 binary
     let z3_path = source_dir.join("z3");
     if z3_path.exists() {
         println!("Copying Z3 binary...");
         let z3_dest = project_tools_dir.join("z3");
         std::fs::copy(&z3_path, &z3_dest).context("Failed to copy Z3 binary")?;
-        
+
         // Make Z3 executable
         #[cfg(unix)]
         {
@@ -1334,21 +1553,22 @@ fn bootstrap_verus(prefix: &Path, commit: Option<&str>) -> Result<()> {
             perms.set_mode(perms.mode() | 0o755);
             std::fs::set_permissions(&z3_dest, perms)?;
         }
-        
+
         println!("✓ Z3 binary copied and made executable at: {}", z3_dest.display());
     }
-    
+
     println!("✓ All Verus files copied successfully to tools directory!");
 
     // Step 8: Clean up temporary build directory and create verusroot marker file
     println!("\n{} Finalizing bootstrap setup...", "🔧".bright_cyan());
-    
+
     // Delete the temporary /tmp/verus build directory
     if verus_dir.exists() {
-        std::fs::remove_dir_all(&verus_dir).context("Failed to delete temporary verus build directory")?;
+        std::fs::remove_dir_all(&verus_dir)
+            .context("Failed to delete temporary verus build directory")?;
         println!("✓ Deleted temporary build directory: {}", verus_dir.display());
     }
-    
+
     // Create empty verusroot marker file
     let verusroot_file = project_tools_dir.join("verus-root");
     std::fs::File::create(&verusroot_file).context("Failed to create verus-root marker file")?;

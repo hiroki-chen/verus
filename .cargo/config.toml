@@ -23,7 +23,7 @@ pretty = "xtask pretty"
 install-igvmbuilder = "install --git https://github.com/coconut-svsm/svsm.git igvmbuilder"
 
 bootstrap-verus = "xtask bootstrap-verus"
-boostrap-qemu = "xtask bootstrap-qemu"
+bootstrap-qemu = "xtask bootstrap-qemu"
 
 [target.x86_64-snp-deko]
 rustflags = [
