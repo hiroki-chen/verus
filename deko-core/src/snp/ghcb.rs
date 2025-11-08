@@ -46,7 +46,7 @@ pub fn validate_ghcb(
     // let ghcb_paddr = virt_to_phys(ghcb_vaddr); // todo: FIX ME.
     let ghcb_paddr = PhysAddr(ghcb.addr() as u64);
     // Invalidate this page from the CVM.
-    crate::imp::pvalidate(ghcb_vaddr.0, 0x1000, false, Tracked::assume_new());
+    crate::imp::pvalidate(ghcb_vaddr.0, 0x1000, false, Tracked(&mut ctx_perm.pgtable_perm));
     // Notify the hypervisor that this page is now invalid.
     msr_set_page_valid(ghcb_paddr, false);
 

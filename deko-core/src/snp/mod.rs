@@ -1,8 +1,10 @@
+use core::ops::Range;
 use core::sync::atomic::AtomicU32;
 
 use deko_std::prelude::*;
 use deko_std::snp::ghcb::GuestHostCommucationBlock;
 use vstd::cell::PCell;
+use vstd::invariant;
 use vstd::prelude::*;
 
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
@@ -11,7 +13,7 @@ use crate::cpu::{
     PERCPU_AREAS,
 };
 use crate::logging::DekoDebug;
-use crate::mm::paging::PteFlags;
+use crate::mm::paging::{PageTablePermission, PteFlags};
 use crate::mm::{
     phys_to_virt, virt_to_phys, PageEncryptionMasks, DEKO_FRAME_ALLOCATOR, FEATURE_MASK,
     MAX_PHYS_ADDR, PHYS_ADDR_SIZE, PTE_MASK_PRIVATE, PTE_MASK_SHARED,
@@ -139,8 +141,8 @@ pub fn validate_memory(
     requires
         old(ctx_perm).wf(),
         heap_end > heap_start,
-        heap_start % 0x1000 == 0,
-        heap_end % 0x1000 == 0,
+        heap_start % PAGE_SIZE == 0,
+        heap_end % PAGE_SIZE == 0,
         heap_end <= LOWMEM_END as u64,
     ensures
         ctx_perm.wf(),
@@ -154,9 +156,10 @@ pub fn validate_memory(
         invariant
             cur <= heap_end,
             ctx_perm.wf(),
-            cur % 0x1000 == 0,
-            heap_start % 0x1000 == 0,
-            heap_end % 0x1000 == 0,
+            cur % PAGE_SIZE == 0,
+            heap_start % PAGE_SIZE == 0,
+            heap_end % PAGE_SIZE == 0,
+            PAGE_SIZE == 0x1000,
             heap_end <= LOWMEM_END as u64,
             old(ctx_perm).deko_ctx_ptr_perm.pptr() === ctx_perm.deko_ctx_ptr_perm.pptr(),
             old(ctx_perm).private_bit() == ctx_perm.private_bit(),
@@ -171,8 +174,8 @@ pub fn validate_memory(
             VirtAddr::lemma_make_canonical_preserves_alignment_4k(cur, addr@);
         }
 
-        let (ret, cf) = pvalidate(addr.0, 0x1000, true, Tracked(ctx_perm));
-        cur += 0x1000;
+        let (ret, cf) = pvalidate(addr.0, PAGE_SIZE, true, Tracked(&mut ctx_perm.pgtable_perm));
+        cur += PAGE_SIZE;
     }
 
     true
@@ -311,6 +314,70 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
     (bsp_percpu_ptr, Tracked(cpu_ctx_perm))
 }
 
+/// Marks all pages within `vrange` as valid/invalid in the RMP table.
+///
+/// The operation is not `unsafe` as in the precondition we ensure that
+/// the caller has the necessary permissions to perform this operation
+/// and that the addresses within `vrange` are mapped in the page table
+/// so that `rmpadjust` will not page fault.
+#[verus_spec(r =>
+    with
+        Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
+    requires
+        old(ctx_perm).wf(),
+        old(ctx_perm).pgtable_perm.mapped_region(vrange),
+        vrange.wf(),
+        vrange.start@ % PAGE_SIZE == 0,
+        vrange.end@ % PAGE_SIZE == 0,
+    ensures
+        if validate { true } else { true },  // TODO: fill in later.
+        ctx_perm.wf(),
+        ctx_perm.pgtable_perm.mapped_region(vrange),
+)]
+pub fn validate_vaddr_region(vrange: Range<VirtAddr>, validate: bool) {
+    broadcast use vstd::arithmetic::div_mod::lemma_mod_subtraction;
+
+    let mut cur = vrange.start.0;
+    let end = vrange.end.0;
+
+    proof {
+        assert(PAGE_SIZE > 0);
+        assert(end % PAGE_SIZE == 0);
+        assert(cur % PAGE_SIZE == 0);
+        assert(((end - cur) as u64) % PAGE_SIZE == 0);
+    }
+
+    while cur < end
+        invariant
+            vrange.start@ <= cur <= end,
+            end == vrange.end@,
+            ctx_perm.wf(),
+            ctx_perm.pgtable_perm.mapped_region(vrange),
+            vrange.wf(),
+            vrange.start@ % PAGE_SIZE == 0,
+            vrange.end@ % PAGE_SIZE == 0,
+            cur % PAGE_SIZE == 0,
+            ((end - cur) as u64) % PAGE_SIZE == 0,
+            PAGE_SIZE == PAGE_SIZE,  // <- important: must inline it.
+
+        decreases end - cur,
+    {
+        let tracked prev_ctx_perm = &*ctx_perm;
+        proof {
+            ctx_perm.pgtable_perm.lemma_mapped_region_implies_mapped(vrange, VirtAddr(cur));
+        }
+        pvalidate(cur, PAGE_SIZE, validate, Tracked(&mut ctx_perm.pgtable_perm));
+        proof {
+            assert(forall|v: VirtAddr|
+                vrange.start@ <= v@ < vrange.end@ && v@ % PAGE_SIZE == 0
+                    ==> prev_ctx_perm.pgtable_perm.mapped(v)
+                    ==> #[trigger] ctx_perm.pgtable_perm.mapped(v));
+            ctx_perm.pgtable_perm.lemma_mapped_region_implies_mapped(vrange, VirtAddr(cur));
+        }
+        cur += PAGE_SIZE;
+    }
+}
+
 /// PVALIDATE takes a page size as an input parameter indicating that either a
 /// 4KB or 2MB page should be validated.
 ///
@@ -324,21 +391,24 @@ pub fn pvalidate(
     vaddr: u64,
     psize: u64,
     validate: bool,
-    Tracked(perm): Tracked<&mut DekoCtxPermission>,
+    Tracked(pgtable_perm): Tracked<&mut PageTablePermission>,
 ) -> (r: (u64, bool))
     requires
-        psize == 0x1000 || psize == 0x200000,  // Either 4K or 2M page.
-        vaddr % 0x1000 == 0,
-        old(perm).wf(),
+        psize == PAGE_SIZE || psize == PAGE_SIZE_2M,  // Either 4K or 2M page.
+        vaddr % PAGE_SIZE == 0,
+        old(pgtable_perm).wf(),
+        old(pgtable_perm).mapped(VirtAddr(vaddr)),
     ensures
-        perm.wf(),
-        old(perm).deko_ctx_ptr_perm.pptr() === perm.deko_ctx_ptr_perm.pptr(),
-        old(perm).private_bit() == perm.private_bit(),
-        old(perm).shared_bit() == perm.shared_bit(),
+        pgtable_perm.wf(),
+        // old(pgtable_perm).private_bit() == pgtable_perm.private_bit(),
+        // old(pgtable_perm).shared_bit() == pgtable_perm.shared_bit(),
+        forall|vaddr: VirtAddr| #[trigger]
+            old(pgtable_perm).mapped(vaddr) ==> pgtable_perm.mapped(vaddr),
+        old(pgtable_perm) == pgtable_perm,
 {
     let rax = vaddr;
     let ret: u64;
-    let rcx = if psize == 0x1000 {
+    let rcx = if psize == PAGE_SIZE {
         RMP_4K
     } else {
         RMP_2M

@@ -4,13 +4,6 @@ use vstd::prelude::*;
 
 verus! {
 
-fn bar(Tracked(aaa): Tracked<&mut ()>) {
-}
-
-fn foo(Tracked(aaa): Tracked<&mut ()>) {
-    bar(Tracked(aaa));
-}
-
 fn main() {
 }
 

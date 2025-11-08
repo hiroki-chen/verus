@@ -446,7 +446,10 @@ pub tracked struct PagePermission {
     /// The PTE value of this page in the _parent_ page.
     pub pte_perm: PageTableEntry,
     /// The permission to the page at this level.
-    pub this_page_perm: DekoPointsTo<Page>,
+    pub this_page_perm: DekoPointsTo<
+        Page,
+    >,
+    // TODO: This requires more properties like the page state.
 }
 
 /// A page table path is a sequence of integers representing the indices
@@ -2125,6 +2128,15 @@ impl Page {
                 shared_bit,
             ));
 
+            log_str!("arguments for map_page_4k:\n");
+            log_str!("  page addr:");
+            log_hex_prefixed!(page.addr());
+            log_str!("  curr_vaddr:");
+            log_hex_prefixed!(curr_vaddr.0);
+            log_str!("\n");
+            log_str!("  curr_paddr:");
+            log_hex_prefixed!(curr_paddr.0);
+            log_str!("\n");
             // Need to add something explicit about the before and after-state of
             // pgtable_perm to ensure that we know that mapped pages are preserved.
             // otherwise verus has no idea that previous pages are still mapped.
@@ -2146,7 +2158,6 @@ impl Page {
 
             i += 1;
         }
-
     }
 
     /// Maps a single 4KB page at the given virtual address to the given physical address
@@ -3362,6 +3373,20 @@ impl PageTablePermission {
         &&& pte_index_3 == RECURSIVE_INDEX as int
     }
 
+    pub proof fn lemma_mapped_region_implies_mapped(&self, vrange: VaddrRange, vaddr: VirtAddr)
+        requires
+            self.wf(),
+            vrange.wf(),
+            vaddr.wf(),
+            self.mapped_region(vrange),
+            vrange.start@ <= vaddr@ < vrange.end@,
+            vaddr@ % PAGE_SIZE == 0,
+        ensures
+            self.mapped(vaddr),
+    {
+        admit();
+    }
+
     /// **PROOF**: Establishes the cancellation property for self-mapped PTE access.
     ///
     /// This lemma proves that the self-mapping mechanism creates the fundamental
@@ -4409,13 +4434,19 @@ pub(crate) fn map_and_validate_elf_segment(
     PageTable::map_page_multiple(
         pgtable,
         Tracked(&mut ctx_perm.pgtable_perm),
-        virt_range,
+        virt_range.clone(),
         paddr,
         flags,
         &ms,
         private_bit,
         shared_bit,
     );
+
+    // Then validate these pages.
+    #[verus_spec(with Tracked(ctx_perm))]
+    crate::imp::validate_vaddr_region(virt_range, true);
+
+    assume(ctx_perm.wf_with(ctx)); // need more so here we postpone
 }
 
 } // verus!

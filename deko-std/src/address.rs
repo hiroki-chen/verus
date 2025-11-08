@@ -910,6 +910,9 @@ impl WellFormed for VaddrRange {
     /// The well-formedness predicate for virtual address ranges is
     /// simple as we just need to ensure the whole thing is bounded
     /// by well-formed virtual addresses.
+    ///
+    /// Note that we do not require that they must be aligned to
+    /// [`PAGE_SIZE`] as this is just a collection of vaddr range.
     #[verifier::inline]
     open spec fn wf(&self) -> bool {
         &&& self.end@ <= VADDR_LOWER_MASK || self.start@ >= VADDR_UPPER_MASK

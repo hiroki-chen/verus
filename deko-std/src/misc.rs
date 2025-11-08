@@ -4,6 +4,13 @@ use crate::prelude::*;
 
 verus! {
 
+pub assume_specification<Idx>[ <core::ops::Range<Idx> as core::clone::Clone>::clone ](
+    this: &core::ops::Range<Idx>,
+) -> (r: core::ops::Range<Idx>) where Idx: core::clone::Clone
+    ensures
+        *this == r,
+;
+
 /// Trait that defines safe casting relationships between types.
 /// Only types that implement this trait for each other can be safely cast.
 /// This prevents arbitrary casting while allowing legitimate conversions.
