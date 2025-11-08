@@ -322,7 +322,7 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
 /// so that `rmpadjust` will not page fault.
 #[verus_spec(r =>
     with
-        Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
+        Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>
     requires
         old(ctx_perm).wf(),
         old(ctx_perm).pgtable_perm.mapped_region(vrange),
