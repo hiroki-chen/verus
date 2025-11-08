@@ -9,7 +9,7 @@
 //!
 //! The module centers around two main wrapper types:
 //! - [`ElfFile`]: A trusted wrapper around `Elf64File` that represents a complete ELF binary
-//! - [`ElfLoadSegement`]: A wrapper for individual ELF load segments with address validation
+//! - [`ElfLoadSegment`]: A wrapper for individual ELF load segments with address validation
 //!
 //! ## Key Functionality
 //!
@@ -36,27 +36,34 @@ use vstd::prelude::*;
 use vstd::{bytes, invariant};
 
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
+use crate::mm::paging::PageTablePath;
 use crate::{log_hex_dump, log_hex_prefixed, log_int, log_str, log_str_ln, Stage2LaunchInfo};
 
 verus! {
 
 #[verus_spec(r =>
     with
-        Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>
+        Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
+        Ghost(segment_index): Ghost<usize>
     requires
         old(ctx_perm).wf_with(ctx),
         segment.wf(),
         paddr.wf(),
-        header.wf(),
         paddr@ % PAGE_SIZE == 0,
+        header.wf_for_loading(old(ctx_perm).pgtable_perm.mapping_space),
+        header.get_elf() matches Some(elf_file) && segment == elf_file.load_segments()[segment_index as int],
         segment.wf_with_load_base(paddr),
     ensures
+        r.0@ == paddr@ + (r.2@ - r.1@),
         r.2@ >= r.1@,
+        r.2@ == segment.vaddr_end().page_align_up_spec()@,
+        r.1@ == segment.vaddr_begin()@,
+        ctx_perm.pgtable_perm.mapping_space == old(ctx_perm).pgtable_perm.mapping_space,
         /* Non overflowing properties... */
 )]
 fn load_elf_segment(
     ctx: DekoPPtr<DekoCpuCtx>,
-    segment: ElfLoadSegement,
+    segment: ElfLoadSegment,
     paddr: PhysAddr,
     header: Stage2LaunchInfo,
 ) -> (r: (PhysAddr, VirtAddr, VirtAddr)) {
@@ -84,10 +91,12 @@ fn load_elf_segment(
 
         crate::die("ELF segment virtual address not page-aligned!");
     }
-    // Note that here wo have to map and validate the memory
 
-    #[verus_spec(with Tracked(ctx_perm))]
+    // FIXME: This function isn't doing the right thing. investigate it.
+    #[verus_spec(with Tracked(ctx_perm), Ghost(segment_index))]
     crate::mm::paging::map_and_validate_elf_segment(ctx, header, segment_start, segment_end, paddr);
+
+    unsafe { #[verus_spec(with Tracked(ctx_perm))] segment.copy_file_contents(); }
 
     crate::die("Not implemented yet")
 }
@@ -101,24 +110,32 @@ fn load_elf_segment(
 pub struct ElfFile<'a>(elf::Elf64File<'a>);
 
 #[verifier::external_body]
-pub struct ElfLoadSegement<'a>(Elf64ImageLoadSegment<'a>);
+pub struct ElfLoadSegment<'a>(Elf64ImageLoadSegment<'a>);
 
 impl<'a> WellFormed for ElfFile<'a> {
     open spec fn wf(&self) -> bool {
         let segments = self.load_segments();
 
-        forall|i: int| 0 <= i < segments.len() ==> (#[trigger] segments[i]).wf()
+        &&& forall|i: int|
+            #![trigger segments[i]]
+            0 <= i < segments.len()
+                ==> segments[i].wf()
+        // Ensure that the segments are non-overlapping in virtual address space and ordered.
+        &&& forall|i: int|
+            #![trigger segments[i]]
+            1 <= i < segments.len() ==> segments[i - 1].vaddr_end()@ <= segments[i].vaddr_begin()@
     }
 }
 
-impl<'a> WellFormed for ElfLoadSegement<'a> {
+impl<'a> WellFormed for ElfLoadSegment<'a> {
     open spec fn wf(&self) -> bool {
         // The build system should ensure that the segment
         // virtual address range is at higher half.
         &&& self.vaddr_end()@ >= self.vaddr_begin()@ >= VADDR_UPPER_MASK
         &&& self.vaddr_end()@ + PAGE_SIZE - 1 < u64::MAX
         &&& self.vaddr_begin()@ % PAGE_SIZE == 0  // begin is aligned.
-
+        &&& PageTablePath::from_vaddr(self.vaddr_begin()).is_normalized()
+            && PageTablePath::from_vaddr(self.vaddr_end()).is_normalized()
     }
 }
 
@@ -127,33 +144,74 @@ impl<'a> ElfFile<'a> {
 
     pub uninterp spec fn new_spec(start_paddr: PhysAddr, end_paddr: PhysAddr) -> Option<Self>;
 
-    #[verifier::inline]
-    pub open spec fn load_segment_num_spec(&self, base: VirtAddr) -> usize {
-        self.load_segments().len() as usize
+    pub uninterp spec fn load_segments(&self) -> Seq<ElfLoadSegment>;
+
+    pub open spec fn paddr_after_load_ith_segment(&self, i: usize, base: PhysAddr) -> PhysAddr
+        recommends
+            self.wf(),
+            base.wf(),
+            i < self.load_segments().len() as usize,
+    {
+        let lengths = self.load_segments().subrange(0, i + 1).map_values(
+            |seg: ElfLoadSegment|
+                (seg.vaddr_end().page_align_up_spec()@ - seg.vaddr_begin()@) as usize,
+        );
+        let length_so_far = lengths.fold_right(
+            |acc: usize, len: usize| (acc + len) as usize,
+            0usize,
+        );
+        PhysAddr((base@ + length_so_far) as u64)
     }
 
+    /// Validates that the entire ELF file is constrainetd.
+    ///
+    /// This only requires that the last segment is constrained
+    /// because we ensure that the segments are non-overlapping
+    /// and ordered in the [`ElfFile::wf`] spec function.
     #[verifier::inline]
     pub open spec fn wf_with_load_base(&self, load_base: PhysAddr) -> bool
         recommends
             load_base.wf(),
+            self.wf(),
     {
-        let segments = self.load_segments();
+        self.load_segments().last().wf_with_load_base(load_base)
+    }
 
-        forall|i: int|
-            #![trigger(segments[i])]
-            0 <= i < segments.len() ==> segments[i].wf_with_load_base(load_base)
+    #[verifier::inline]
+    pub open spec fn wf_with_ms(&self, load_base: PhysAddr, ms: MappingSpace) -> bool
+        recommends
+            ms.wf(),
+            self.wf(),
+    {
+        &&& self.load_segments().first().wf_with_ms(load_base, ms)
+        &&& self.load_segments().last().wf_with_ms(load_base, ms)
     }
 
     #[verifier::inline]
     pub open spec fn segment_in_loaded_range_spec(
         &self,
-        segment: ElfLoadSegement,
+        segment: ElfLoadSegment,
         base: VirtAddr,
     ) -> bool {
         self.load_segments().contains(segment)
     }
 
-    pub uninterp spec fn load_segments(&self) -> Seq<ElfLoadSegement>;
+    pub proof fn lemma_last_wf_with_load_base_implies_all(&self, load_base: PhysAddr)
+        requires
+            self.wf(),
+            load_base.wf(),
+            self.wf_with_load_base(load_base),
+        ensures
+            forall|i: int|
+                #![trigger self.load_segments()[i]]
+                0 <= i < self.load_segments().len() ==> {
+                    let now_paddr = self.paddr_after_load_ith_segment(i as usize, load_base);
+
+                    self.load_segments()[i].wf_with_load_base(now_paddr)
+                },
+    {
+        admit()
+    }
 
     /// Creates a new `ElfFile` from the given byte slice.
     ///
@@ -196,27 +254,27 @@ impl<'a> ElfFile<'a> {
 
     #[inline]
     #[verifier::external_body]
-    #[verifier::when_used_as_spec(load_segment_num_spec)]
     pub fn load_segment_num(&self, base: VirtAddr) -> (r: usize)
         requires
             self.wf(),
         ensures
-            r == self.load_segment_num_spec(base),
+            r == self.load_segments().len() as usize,
     {
         self.0.image_load_segment_iter(base.0).count()
     }
 
     #[verifier::external_body]
-    pub fn get_segment(&self, index: usize, base: VirtAddr) -> (r: ElfLoadSegement)
+    pub fn get_segment(&self, index: usize, base: VirtAddr) -> (r: ElfLoadSegment)
         requires
             self.wf(),
-            index < self.load_segment_num_spec(base),
+            index < self.load_segments().len() as usize,
         ensures
             r == self.load_segments()[index as int],
     {
-        ElfLoadSegement(self.0.image_load_segment_iter(0).nth(index).unwrap())
+        ElfLoadSegment(self.0.image_load_segment_iter(base.0).nth(index).unwrap())
     }
 
+    #[verifier::spinoff_prover]
     pub fn load_each_segment(
         &self,
         ctx: DekoPPtr<DekoCpuCtx>,
@@ -227,14 +285,20 @@ impl<'a> ElfFile<'a> {
     ) -> (r: (Option<VirtAddr>, VirtAddr))
         requires
             self.wf(),
-            self.wf_with_load_base(*old(paddr)),
-            header.wf(),
+            header.get_elf() matches Some(elf_file) && elf_file == *self,
+            header.wf_for_loading(old(ctx_perm).pgtable_perm.mapping_space),
+            header.get_igvm_params_spec().find_kernel_region_spec() matches Some((kstart, _))
+                && kstart == old(paddr),
             old(paddr).wf(),
             old(ctx_perm).wf_with(ctx),
             old(paddr)@ % PAGE_SIZE == 0,
         ensures
             ctx_perm.wf_with(ctx),
+    // r.0 matches Some(start) ==> true,
+    // r.1 ??
+
     {
+        let ghost old_paddr = *paddr;
         let mut load_virt_start = None::<VirtAddr>;
         let mut load_virt_end = VirtAddr::from(0u64);
 
@@ -242,22 +306,44 @@ impl<'a> ElfFile<'a> {
         let segment_len = self.load_segment_num(base);
         while i < segment_len
             invariant
-                self.wf(),
-                self.wf_with_load_base(*paddr),
-                header.wf(),
-                ctx_perm.wf_with(ctx),
-                paddr@ % PAGE_SIZE == 0,
-                paddr.wf(),
                 i <= segment_len,
-                segment_len == self.load_segment_num_spec(base),
+                0 < i ==> paddr@ == self.paddr_after_load_ith_segment(i, old_paddr)@,
+                segment_len == self.load_segments().len() as usize,
+                header.get_elf() matches Some(elf_file) && elf_file == *self,
+                header.wf_for_loading(ctx_perm.pgtable_perm.mapping_space),
+                header.get_igvm_params_spec().find_kernel_region_spec() matches Some((kstart, _)) && kstart == old_paddr,
+                self.wf(),
+                paddr.wf(),
+                paddr@ % PAGE_SIZE == 0,
+                ctx_perm.wf_with(ctx),
             decreases segment_len - i,
         {
             log_str!("Loading ELF segment ");
             log_int!(i);
             log_str_ln!("...");
 
-            let (updated_phys_addr, vaddr_start, vaddr_end) = #[verus_spec(with Tracked(ctx_perm))]
-            load_elf_segment(ctx, self.get_segment(i, base), *paddr, header);
+            let segment = self.get_segment(i, base);
+
+            proof {
+                assert(segment.wf_with_load_base(*paddr)) by {
+                    assert(self.wf());
+                    assert(self.wf_with_load_base(old_paddr));
+                    assert(paddr.wf());
+                    // The proof is tricky because old states and new states are mixed
+                    // here and verus has trouble dealing with old(xx) inside loop bodies
+                    // be extra careful.
+
+                    // assert(paddr@ == self.paddr_after_load_ith_segment(i, old_paddr)@);
+                    // self.lemma_last_wf_with_load_base_implies_all(old_paddr);
+
+                    admit();
+                }
+            }
+
+            // We are having trouble with verifying the following call.
+            let (updated_phys_addr, vaddr_start, vaddr_end) =
+                #[verus_spec(with Tracked(ctx_perm), Ghost(i))]
+            load_elf_segment(ctx, segment, *paddr, header);
 
             // Remember the mapping range's lower and upper bounds to pass it on
             // the kernel later. Note that the segments are being iterated over
@@ -267,13 +353,13 @@ impl<'a> ElfFile<'a> {
             }
             load_virt_end = vaddr_end;
             // Advance the physical address pointer for the next segment.
-            assume(updated_phys_addr@ + (vaddr_end@ - vaddr_start@) < u64::MAX);  // FIX IT LATER.
             *paddr = PhysAddr(updated_phys_addr.0 + (vaddr_end.0 - vaddr_start.0));
             i += 1;
 
-            assume(paddr@ % PAGE_SIZE == 0);  // FIX IT LATER.
-            assume(self.wf_with_load_base(*paddr));  // FIX IT LATER.
             assume(ctx_perm.wf_with(ctx));  // FIX IT LATER.
+            assume(paddr@ % PAGE_SIZE == 0);
+            assume(paddr.wf());
+            assume(paddr@ == self.paddr_after_load_ith_segment(i, old_paddr)@);
         }
 
         assume(ctx_perm == old(ctx_perm));  // FIX IT LATER.
@@ -282,11 +368,52 @@ impl<'a> ElfFile<'a> {
     }
 }
 
-impl<'a> ElfLoadSegement<'a> {
+impl<'a> ElfLoadSegment<'a> {
     pub uninterp spec fn vaddr_begin(self) -> VirtAddr;
 
     pub uninterp spec fn vaddr_end(self) -> VirtAddr;
 
+    pub uninterp spec fn file_contents_len_spec(self) -> usize;
+
+    /// Returns the length of this ELF load segment in bytes.
+    #[verifier::inline]
+    pub open spec fn segment_len(self) -> usize {
+        (self.vaddr_end()@ - self.vaddr_begin()@) as usize
+    }
+
+    /// Validates that this ELF load segment is well-formed when loaded at a specific physical base address.
+    ///
+    /// This specification function performs overflow and bounds checking to ensure that loading
+    /// the segment at the given physical base address will not cause arithmetic overflow or
+    /// exceed safe address space limits.
+    ///
+    /// # Parameters
+    ///
+    /// * `load_base` - The physical address where the segment will be loaded. Must be well-formed.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the segment can be safely loaded at the specified base address, `false` otherwise.
+    ///
+    /// # Safety Requirements
+    ///
+    /// This function verifies that:
+    /// - The total physical address range (base + segment size) remains below the safe upper limit
+    /// - No arithmetic overflow occurs when computing the final physical address
+    /// - The segment respects the 64-bit address space constraints (below `0x000f_ffff_ffff_f000`)
+    ///
+    /// # Usage
+    ///
+    /// This function is typically called during ELF loading to verify that segments can be
+    /// safely placed at their intended physical addresses without violating memory safety.
+    ///
+    /// ```rust,ignore
+    /// if segment.wf_with_load_base(phys_base) {
+    ///     // Safe to proceed with loading
+    /// } else {
+    ///     // Loading would cause overflow or exceed limits
+    /// }
+    /// ```
     #[verifier::inline]
     pub open spec fn wf_with_load_base(self, load_base: PhysAddr) -> bool
         recommends
@@ -296,6 +423,63 @@ impl<'a> ElfLoadSegement<'a> {
         let vaddr_end = self.vaddr_end();
 
         load_base@ + (vaddr_end.page_align_up_spec()@ - vaddr_begin@) < 0x000f_ffff_ffff_f000
+    }
+
+    /// Validates that this ELF load segment fits within the specified mapping space when loaded.
+    ///
+    /// This specification function ensures that both the start and end addresses of the segment,
+    /// when loaded at the given physical base address, fall within the valid range of the
+    /// kernel's address space as defined by the mapping space.
+    ///
+    /// # Parameters
+    ///
+    /// * `load_base` - The physical address where the segment will be loaded
+    /// * `ms` - The mapping space that defines valid address ranges. Must be well-formed.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the entire segment (from start to page-aligned end) fits within the kernel's
+    /// address space range, `false` otherwise.
+    ///
+    /// # Address Range Validation
+    ///
+    /// This function computes the physical address range that the segment will occupy:
+    /// - Start address: `load_base + segment.vaddr_begin()`
+    /// - End address: `load_base + segment.vaddr_end().page_align_up()`
+    ///
+    /// Both addresses must be within the kernel's valid address range as specified by
+    /// `ms.kernel.in_range_spec()`.
+    ///
+    /// # Usage
+    ///
+    /// This function is used during ELF loading to ensure segments don't extend beyond
+    /// the allocated kernel address space:
+    ///
+    /// ```rust,ignore
+    /// if segment.wf_with_ms(phys_base, mapping_space) {
+    ///     // Segment fits within kernel address space
+    /// } else {
+    ///     // Segment would exceed kernel boundaries
+    /// }
+    /// ```
+    ///
+    /// # Note
+    ///
+    /// The end address is page-aligned up to ensure proper page boundary handling,
+    /// and the validation checks `end - 1` to account for inclusive range semantics.
+    pub open spec fn wf_with_ms(self, load_base: PhysAddr, ms: MappingSpace) -> bool
+        recommends
+            ms.wf(),
+    {
+        let vaddr_begin = self.vaddr_begin();
+        let vaddr_end = self.vaddr_end();
+
+        let start = load_base@ + vaddr_begin@;
+        let end = load_base@ + vaddr_end.page_align_up_spec()@;
+
+        ms.kernel.in_range_spec(PhysAddr(start as u64)) && ms.kernel.in_range_spec(
+            PhysAddr((end - 1) as u64),
+        )
     }
 
     #[verifier::external_body]
@@ -312,6 +496,49 @@ impl<'a> ElfLoadSegement<'a> {
         let begin = VirtAddr(self.0.vaddr_range.vaddr_begin as u64);
         let end = VirtAddr(self.0.vaddr_range.vaddr_end as u64);
         Range { start: begin, end }
+    }
+
+    /// Copies the contents of this ELF load segment from its source location
+    /// in physical memory to its destination virtual address.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the destination virtual address is valid
+    /// and mapped to physical memory that can be written to.
+    #[verus_spec(r =>
+        with
+            Tracked(ctx_perm): Tracked<&DekoCpuCtxPermission>
+    )]
+    #[verifier::external_body]
+    pub unsafe fn copy_file_contents(&self)
+        requires
+            self.wf(),
+            ctx_perm.wf(),
+            ctx_perm.pgtable_perm.mapped_region(
+                self.vaddr_begin()..self.vaddr_end().page_align_up_spec(),
+            ),
+        ensures
+            true,
+    {
+        let end = VirtAddr(self.0.vaddr_range.vaddr_end).page_align_up();
+
+        log_str!("Copying ELF segment file contents to [");
+        log_hex_prefixed!(self.0.vaddr_range.vaddr_begin);
+        log_str!(" - ");
+        log_hex_prefixed!(end.0);
+        log_str_ln!("]");
+
+        let mut buf = core::slice::from_raw_parts_mut(
+            self.0.vaddr_range.vaddr_begin as *mut u8,
+            (end.0 - self.0.vaddr_range.vaddr_begin) as usize,
+        );
+
+        let file_contents = self.0.file_contents;
+        buf[..file_contents.len()].copy_from_slice(file_contents);
+        // Pad zeros.
+        buf[file_contents.len()..].fill(0);
+
+        log_str_ln!("Finished copying ELF segment file contents.");
     }
 }
 

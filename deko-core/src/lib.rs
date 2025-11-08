@@ -86,6 +86,24 @@ pub struct Stage2LaunchInfo {
 
 impl Stage2LaunchInfo {
     pub uninterp spec fn get_igvm_params_spec(&self) -> IgvmParamBlock;
+
+    pub open spec fn get_elf(&self) -> Option<ElfFile> {
+        if self.get_igvm_params_spec().find_kernel_region_spec() matches Some((kstart, kend)) {
+            ElfFile::new_spec(
+                PhysAddr(self.kernel_elf_start as u64),
+                PhysAddr(self.kernel_elf_end as u64),
+            )
+        } else {
+            None
+        }
+    }
+
+    pub open spec fn wf_for_loading(&self, ms: MappingSpace) -> bool {
+        &&& self.wf()
+        &&& self.get_igvm_params_spec().find_kernel_region_spec() matches Some((kstart, kend))
+            && self.get_elf() matches Some(elf_file) ==> elf_file.wf_with_load_base(kstart)
+            && elf_file.wf_with_ms(kstart, ms)
+    }
 }
 
 impl WellFormed for Stage2LaunchInfo {
@@ -105,12 +123,7 @@ impl WellFormed for Stage2LaunchInfo {
         &&& self.platform_type matches 0x0001 ==> self.vtom != 0
         &&& self.stage2_end > STAGE2_START
         &&& self.stage2_end <= u32::MAX  // ensures no overflow.
-        &&& self.get_igvm_params_spec().find_kernel_region_spec() matches Some((kstart, kend)) ==> {
-            ElfFile::new_spec(
-                PhysAddr(self.kernel_elf_start as u64),
-                PhysAddr(self.kernel_elf_end as u64),
-            ) matches Some(elf_file) ==> elf_file.wf_with_load_base(kstart)
-        }
+
     }
 }
 

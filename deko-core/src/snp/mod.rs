@@ -237,6 +237,9 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
         ctx_perm.wf_with(ctx),
     ensures
         r.1@.wf_with(r.0),
+        r.1@.pgtable_perm.private_bit == ctx_perm.private_bit(),
+        r.1@.pgtable_perm.shared_bit == ctx_perm.shared_bit(),
+        r.1@.pgtable_perm.mapping_space == ctx_perm.mapping_space,
 {
     let shared_area_ptr = {
         let read_handle = PERCPU_AREAS.acquire_read();

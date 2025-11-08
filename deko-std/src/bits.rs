@@ -78,6 +78,20 @@ macro_rules! deko_bitflags {
                 pub flags: vstd::prelude::Ghost<vstd::set::Set<$name>>,
             }
 
+            impl Clone for [<$name Flags>] {
+                fn clone(&self) -> (r: Self)
+                    returns ([<$name Flags>] {
+                        bits: self.bits,
+                        flags: self.flags,
+                    })
+                {
+                    [<$name Flags>] {
+                        bits: self.bits,
+                        flags: self.flags.clone(),
+                    }
+                }
+            }
+
             pub open spec fn from_bits(bits: $T) -> Set<$name> {
                 vstd::set::Set::new(|flag: $name| flag.bit() & bits != 0)
             }

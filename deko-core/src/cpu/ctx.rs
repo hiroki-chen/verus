@@ -177,6 +177,7 @@ impl WellFormed for DekoCtxPermission {
         &&& self.current_cpu_core.cpu_id() == self.deko_ctx_ptr_perm.value().cpu_id()
         &&& self.current_cpu_core.wf()
         &&& self.stage2_launch_info_perm.is_init() && self.stage2_launch_info_perm.wf()
+        &&& self.stage2_launch_info_perm.value().wf_for_loading(self.mapping_space)
         &&& self.pgtable_perm.wf()
         &&& self.gdt_perm.wf()  // gdt can be uninitialized at first
         &&& {

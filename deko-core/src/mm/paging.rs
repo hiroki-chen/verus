@@ -2047,7 +2047,7 @@ impl Page {
     #[verifier::spinoff_prover]
     pub fn map_page_multiple(
         page: DekoPPtr<Page>,
-        Tracked(ctx_perm): Tracked<&mut PageTablePermission>,
+        Tracked(pgtable_perm): Tracked<&mut PageTablePermission>,
         vaddr: VaddrRange,
         paddr: PhysAddr,
         flags: PteFlags,
@@ -2056,7 +2056,7 @@ impl Page {
         shared_bit: u64,
     )
         requires
-            old(ctx_perm).map_page_multiple_requires(
+            old(pgtable_perm).map_page_multiple_requires(
                 page,
                 vaddr,
                 paddr,
@@ -2066,13 +2066,13 @@ impl Page {
                 shared_bit,
             ),
         ensures
-            old(ctx_perm).map_page_multiple_ensures(
+            old(pgtable_perm).map_page_multiple_ensures(
                 vaddr,
                 paddr,
                 flags,
                 private_bit,
                 shared_bit,
-                ctx_perm,
+                pgtable_perm,
             ),
     {
         let mut i = 0;
@@ -2083,19 +2083,70 @@ impl Page {
                 i <= len,
                 len == (vaddr.end@ - vaddr.start@) / PAGE_SIZE as int,
                 vaddr.wf(),
+                flags.wf(),
+                flags.bits() & Pte_ALL_BITS == flags.bits(),
+                ms.wf(),
+                ms == pgtable_perm.mapping_space,
+                private_bit == pgtable_perm.private_bit,
+                shared_bit == pgtable_perm.shared_bit,
+                page.addr() == pgtable_perm.pgtable_perm.pptr().addr(),
+                bit_not_overlapping(private_bit),
+                bit_not_overlapping(shared_bit),
+                bit_not_in_addr_region(private_bit),
+                bit_not_in_addr_region(shared_bit),
+                pgtable_perm.wf(),
                 vaddr.start@ % PAGE_SIZE == 0,
                 vaddr.end@ % PAGE_SIZE == 0,
-                vaddr.end@ < u64::MAX,
+                vaddr.end@ > vaddr.start@,
+                vaddr.end@ <= VADDR_LOWER_MASK || vaddr.start@ >= VADDR_UPPER_MASK,
                 paddr@ % PAGE_SIZE == 0,
                 paddr@ + (vaddr.end@ - vaddr.start@) < 0x000f_ffff_ffff_f000,
-                PAGE_SIZE == 0x1000,  // seems verus fails to inline this.
-
+                PAGE_SIZE == 0x1000,
+                0 < i <= len ==> pgtable_perm.mapped_region(
+                    vaddr.start..VirtAddr((vaddr.start@ + i * PAGE_SIZE) as u64),
+                ),
             decreases len - i,
         {
             let curr_vaddr = VirtAddr(vaddr.start.0 + i * PAGE_SIZE);
             let curr_paddr = PhysAddr(paddr.0 + i * PAGE_SIZE);
+
+            proof {
+                assert(curr_vaddr.wf());
+                // prove: pgtable_perm.walk_addr_lvl3_requires
+            }
+
+            assume(pgtable_perm.map_page_4k_requires(
+                page,
+                curr_vaddr,
+                curr_paddr,
+                ms,
+                flags,
+                private_bit,
+                shared_bit,
+            ));
+
+            // Need to add something explicit about the before and after-state of
+            // pgtable_perm to ensure that we know that mapped pages are preserved.
+            // otherwise verus has no idea that previous pages are still mapped.
+            Page::map_page_4k(
+                page,
+                Tracked(pgtable_perm),
+                curr_vaddr,
+                curr_paddr,
+                ms,
+                flags.clone(),
+                private_bit,
+                shared_bit,
+            );
+
+            // TODO: FIX ME LATER.
+            assume(pgtable_perm.mapped_region(
+                vaddr.start..VirtAddr((vaddr.start@ + (i + 1) * PAGE_SIZE) as u64),
+            ));
+
             i += 1;
         }
+
     }
 
     /// Maps a single 4KB page at the given virtual address to the given physical address
@@ -2204,9 +2255,13 @@ impl Page {
                 }
             }
 
+            assert(perm.mapped(vaddr)) by {
+                admit();  // FIX later.
+            };
             assume(perm.storage[path].this_page_perm.addr() == perm.mapping_space.phys_to_virt_spec(
                 new_pte_value.address_spec(private_bit, shared_bit),
             )@);
+
         }
     }
 }
@@ -2506,6 +2561,7 @@ impl PageTablePermission {
         &&& new_pgtable_perm.mapping_space == self.mapping_space
         &&& new_pgtable_perm.private_bit == private_bit == self.private_bit
         &&& new_pgtable_perm.shared_bit == shared_bit == self.shared_bit
+        &&& new_pgtable_perm.pgtable_perm.pptr() == self.pgtable_perm.pptr()
     }
 
     /// Gets the PTE at the specified level for a given path.
@@ -2828,6 +2884,7 @@ impl PageTablePermission {
         &&& ms == self.mapping_space
         &&& self.private_bit == private_bit
         &&& self.shared_bit == shared_bit
+        &&& page.addr() == self.pgtable_perm.pptr().addr()
         &&& bit_not_overlapping(private_bit)
         &&& bit_not_overlapping(shared_bit)
         &&& bit_not_in_addr_region(private_bit)
@@ -2851,7 +2908,8 @@ impl PageTablePermission {
         shared_bit: u64,
         new_pgtable_perm: &PageTablePermission,
     ) -> bool {
-        true
+        &&& self.preserves_pgtable_invariants(new_pgtable_perm, private_bit, shared_bit)
+        &&& new_pgtable_perm.mapped_region(vaddr_range)
     }
 
     pub open spec fn map_page_4k_requires(
@@ -2895,7 +2953,8 @@ impl PageTablePermission {
         shared_bit: u64,
         new_pgtable_perm: &PageTablePermission,
     ) -> bool {
-        &&& new_pgtable_perm.wf()
+        &&& self.preserves_pgtable_invariants(new_pgtable_perm, private_bit, shared_bit)
+        &&& new_pgtable_perm.mapped(vaddr)
     }
 
     /// For naming consistency
@@ -3125,6 +3184,26 @@ impl PageTablePermission {
         } else {
             self.walk_addr_lvl2_spec(vaddr)
         }
+    }
+
+    /// Checks whether all pages in the given virtual address range are mapped.
+    pub open spec fn mapped_region(&self, vaddr_range: VaddrRange) -> bool
+        recommends
+            self.wf(),
+            vaddr_range.wf(),
+    {
+        // We need to step by PAGE_SIZE to check each page in the range.
+        forall|vaddr: VirtAddr|
+            #![trigger self.mapped(vaddr)]
+            vaddr_range.start@ <= vaddr@ && vaddr@ < vaddr_range.end@ && vaddr@ % PAGE_SIZE == 0
+                ==> self.mapped(vaddr)
+    }
+
+    /// This spec is explicitly marked as non-inline to avoid
+    /// trigger invalidation for the [`Self::mapped_region`]
+    /// specification.
+    pub open spec fn mapped(&self, vaddr: VirtAddr) -> bool {
+        self.virt_to_frame_spec(vaddr) matches Some(_)
     }
 
     /// This specification works slightly differently from the walk function which
@@ -4254,10 +4333,11 @@ impl Mapping {
 /// Map and validate the specified virtual memory region at `paddr`.
 #[verus_spec(r =>
     with
-        Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>
+        Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
+        Ghost(i): Ghost<usize>
     requires
         old(ctx_perm).wf_with(ctx),
-        header.wf(),
+        header.wf_for_loading(old(ctx_perm).pgtable_perm.mapping_space),
         vaddr_start.wf(),
         vaddr_end.wf(),
         paddr.wf(),
@@ -4267,6 +4347,8 @@ impl Mapping {
         paddr@ % PAGE_SIZE == 0,
         paddr@ + (vaddr_end@ - vaddr_start@) < 0x000f_ffff_ffff_f000,
     ensures
+        ctx_perm.wf_with(ctx),
+        ctx_perm.pgtable_perm.mapped_region(vaddr_start..vaddr_end),
 )]
 pub(crate) fn map_and_validate_elf_segment(
     ctx: DekoPPtr<DekoCpuCtx>,

@@ -9,7 +9,7 @@ use crate::cpu::idt::{
     create_early_idt, stage2_generic_idt_handler, stage2_generic_idt_handler_no_ghcb, Idt,
 };
 use crate::cpu::{register_cpuid_table, DekoCpuCtx, DekoCpuCtxPermission};
-use crate::elf::{ElfFile, ElfLoadSegement};
+use crate::elf::{ElfFile, ElfLoadSegment};
 use crate::logging::DekoDebug;
 use crate::mm::{init_frame_allocator, DEKO_MAPPING_SPACE};
 use crate::snp::get_igvm_params;
@@ -330,6 +330,7 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
 /// Loads the kernel ELF and returns the virtual memory region where it
 /// resides, as well as its entry point. Updates the used physical memory
 /// region accordingly.
+#[verifier::spinoff_prover]
 #[verus_spec(r =>
     with
         Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>
@@ -337,13 +338,8 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
         old(ctx_perm).wf_with(ctx),
         old(kernel_end).wf(),
         old(kernel_end)@ % PAGE_SIZE == 0,
-        header.wf(),
-        ElfFile::new_spec(
-            PhysAddr(header.kernel_elf_start as u64),
-            PhysAddr(header.kernel_elf_end as u64),
-        ) matches Some(file) ==> file.wf_with_load_base(
-            *old(kernel_end),
-        ),
+        header.wf_for_loading(old(ctx_perm).pgtable_perm.mapping_space),
+        header.get_igvm_params_spec().find_kernel_region_spec() matches Some((kstart, _)) ==> kstart == old(kernel_end),
     ensures
         ctx_perm.wf_with(ctx),
 )]
@@ -364,6 +360,8 @@ fn load_deko_monitor(
 
     // Load the ELF file into memory.
     let elf_file = ElfFile::new(elf_start, elf_end)?;
+
+    proof { assert(elf_file == header.get_elf().unwrap()) }
 
     let vaddr_alloc_base = elf_file.get_vaddr_alloc_base();
     log_str!("Kernel load base virtual address: ");

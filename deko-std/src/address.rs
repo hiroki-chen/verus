@@ -912,8 +912,7 @@ impl WellFormed for VaddrRange {
     /// by well-formed virtual addresses.
     #[verifier::inline]
     open spec fn wf(&self) -> bool {
-        &&& self.start.wf()
-        &&& self.end.wf()
+        &&& self.end@ <= VADDR_LOWER_MASK || self.start@ >= VADDR_UPPER_MASK
         &&& self.start@ < self.end@ < u64::MAX
     }
 }
