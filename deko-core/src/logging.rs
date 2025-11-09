@@ -6,7 +6,8 @@
 use core::fmt::Write;
 
 use deko_std::prelude::*;
-use lexical_write_integer::Options;
+#[cfg(feature = "logging")]
+use lexical_core::{write_with_options, NumberFormatBuilder, WriteIntegerOptions};
 use vstd::prelude::*;
 
 use crate::hal::{PlatformType, PLATFORM};
@@ -111,296 +112,197 @@ impl core::fmt::Write for Console {
     }
 }
 
-#[verifier::external]
-impl log::Log for Console {
-    fn enabled(&self, _metadata: &log::Metadata) -> bool {
-        true
-    }
+} // verus!
+#[cfg(feature = "logging")]
+verus! {
 
-    fn log(&self, record: &log::Record) {
-        if self.enabled(record.metadata()) {
-            return ;
-        }
-        match record.metadata().level() {
-            log::Level::Error => __print(
-                format_args!(
-                    "{}[Deko-Monitor] {}: {}{}\n",
-                    ERROR_COLOR,
-                    record.metadata().level().as_str(),
-                    record.args(),
-                    RESET_COLOR
-                ),
-            ),
-            log::Level::Warn => __print(
-                format_args!(
-                    "{}[Deko-Monitor] {}: {}{}\n",
-                    WARN_COLOR,
-                    record.metadata().level().as_str(),
-                    record.args(),
-                    RESET_COLOR
-                ),
-            ),
-            log::Level::Info => __print(
-                format_args!(
-                    "{}[Deko-Monitor] {}: {}{}\n",
-                    INFO_COLOR,
-                    record.metadata().level().as_str(),
-                    record.args(),
-                    RESET_COLOR
-                ),
-            ),
-            log::Level::Debug => __print(
-                format_args!(
-                    "{}[Deko-Monitor] {}: {}{}\n",
-                    DEBUG_COLOR,
-                    record.metadata().level().as_str(),
-                    record.args(),
-                    RESET_COLOR
-                ),
-            ),
-            log::Level::Trace => __print(
-                format_args!(
-                    "{}[Deko-Monitor] {}: {}{}\n",
-                    TRACE_COLOR,
-                    record.metadata().level().as_str(),
-                    record.args(),
-                    RESET_COLOR
-                ),
-            ),
-        }
-    }
-
-    fn flush(&self) {
-    }
+macro_rules! debug_packed_field {
+    ($self:expr, $field:ident, $method:ident) => {
+        let value = $self.$field;
+        value.$method();
+    };
 }
 
-#[verifier::external]
-pub(crate) fn __print(arg: core::fmt::Arguments) {
-    let (mut console, write_handle) = CONSOLE.acquire_write();
-    console.write_fmt(arg).unwrap();
-    write_handle.release_write(console);
+#[verifier::external_body]
+fn print_byte_hex_padded(byte: u8) {
+    let hex_chars = b"0123456789ABCDEF";
+    print_char(hex_chars[(byte >> 4) as usize] as char);
+    print_char(hex_chars[(byte & 0xF) as usize] as char);
 }
 
-#[verifier::external]
-pub(crate) fn __print_str(s: &str) {
+#[verifier::external_body]
+pub(crate) fn print_str(s: &str) {
     let (mut console, write_handle) = CONSOLE.acquire_write();
     console.write_str(s).unwrap();
     write_handle.release_write(console);
 }
 
 #[verifier::external_body]
-pub(crate) fn __hex<'a, T>(num: T)
-where
-   T: lexical_write_integer::ToLexicalWithOptions<Options = lexical_write_integer::Options>,
-{
-    let mut buffer = [0u8; 18];
-    buffer[0] = b'0';
-    buffer[1] = b'x';
-    // Use lexical with base-16 formatting
-    use lexical_write_integer::{ToLexicalWithOptions, NumberFormatBuilder};
-    let options = lexical_write_integer::Options::new();
-    const FORMAT: u128 = NumberFormatBuilder::from_radix(16);
-
-    let digits = num.to_lexical_with_options::<FORMAT>(&mut buffer[2..], &options);
-    let len = digits.len() + 2; // +2 for "0x"
-    let s = core::str::from_utf8(&buffer[..len]).unwrap_or("<hex-error>");
-
-    __print_str(s);
-}
-
-} // verus!
-#[cfg(feature = "logging")]
-verus! {
-
-/// Print integer in decimal format using itoa for maximum efficiency
-#[verifier::external_body]
-pub fn print_integer<T: itoa::Integer>(num: T) {
-    let mut buffer = itoa::Buffer::new();
-    let s = buffer.format(num);
+pub(crate) fn print_char(c: char) {
+    let mut buffer = [0u8; 4];
+    let s = c.encode_utf8(&mut buffer);
     print_str(s);
 }
 
-/// Print integer in hexadecimal format using optimized conversion
 #[verifier::external_body]
-pub fn print_integer_hex<T>(num: T)
-where
-    T: core::fmt::LowerHex,
-{
-    __print(format_args!("{:x}", num));
+pub(crate) fn print_bytes(bytes: &[u8]) {
+    let (mut console, write_handle) = CONSOLE.acquire_write();
+    console.write_bytes(bytes);
+    write_handle.release_write(console);
 }
 
-/// Print integer in hexadecimal format with 0x prefix
+// Specific helpers for common cases with optimized buffer sizes
 #[verifier::external_body]
-pub fn print_integer_hex_prefixed<T>(num: T)
-where
-    T: core::fmt::LowerHex,
-{
-    __print(format_args!("0x{:x}", num));
+pub(crate) fn print_integer_hex<T: lexical_core::ToLexicalWithOptions>(num: T) {
+    print_str("0x");
+
+    const FORMAT: u128 = NumberFormatBuilder::hexadecimal();
+    let mut buffer = [0u8; 32]; // Enough for 128-bit hex
+    let digits = write_with_options::<_, { FORMAT }>(
+        num,
+        &mut buffer,
+        &T::Options::default(),
+    );
+
+    print_bytes(&digits);
 }
 
-/// Print float in decimal format using ryu for maximum efficiency
 #[verifier::external_body]
-pub fn print_float_decimal(num: f64) {
-    let mut buffer = ryu::Buffer::new();
-    let s = buffer.format(num);
-    print_str(s);
+pub(crate) fn print_integer_oct<T: lexical_core::ToLexicalWithOptions>(num: T) {
+    print_str("0o");
+    
+    const FORMAT: u128 = NumberFormatBuilder::octal();
+    let mut buffer = [0u8; 44]; // Enough for 128-bit octal
+    let digits = write_with_options::<_, { FORMAT }>(
+        num,
+        &mut buffer,
+        &T::Options::default(),
+    );
+
+    print_bytes(&digits);
 }
 
-/// Print float in scientific notation using core formatting
 #[verifier::external_body]
-pub fn print_float_scientific(num: f64) {
-    __print(format_args!("{:e}", num));
+pub(crate) fn print_integer_bin<T: lexical_core::ToLexicalWithOptions>(num: T) {
+    print_str("0b");
+    const FORMAT: u128 = NumberFormatBuilder::binary();
+    let mut buffer = [0u8; 128]; // Enough for 128-bit
+    let digits = write_with_options::<_, { FORMAT }>(
+        num,
+        &mut buffer,
+        &T::Options::default(),
+    );
+
+    print_bytes(&digits);
 }
 
-/// Print 32-bit float in decimal format using ryu
+// Enhanced byte formatting using lexical
 #[verifier::external_body]
-pub fn print_f32_decimal(num: f32) {
-    let mut buffer = ryu::Buffer::new();
-    let s = buffer.format(num);
-    print_str(s);
+pub(crate) fn print_byte_hex(byte: u8) {
+    let mut buffer = [0u8; 2];
+
+    const FORMAT: u128 = NumberFormatBuilder::hexadecimal();
+    let digits = write_with_options::<_, { FORMAT }>(
+        byte,
+        &mut buffer,
+        &Default::default(),
+    );
+
+    print_bytes(&digits);
 }
 
-/// Print unsigned integer in decimal format using core formatting
 #[verifier::external_body]
-pub fn print_uint_decimal<T>(num: T)
-where
-    T: core::fmt::Display,
-{
-    __print(format_args!("{}", num));
+pub(crate) fn print_offset_hex(offset: usize) {
+    let mut buffer = [0u8; 16]; // Enough for 64-bit hex
+
+    const FORMAT: u128 = NumberFormatBuilder::hexadecimal();
+    let digits = write_with_options::<_, { FORMAT }>(
+        offset,
+        &mut buffer,
+        &Default::default(),
+    );
+
+    print_bytes(&digits);
 }
 
-/// Print signed integer in decimal format using core formatting
 #[verifier::external_body]
-pub fn print_int_decimal<T>(num: T)
-where
-    T: core::fmt::Display,
-{
-    __print(format_args!("{}", num));
-}
-
-/// Print unsigned integer with custom base (2-36) using manual conversion
-#[verifier::external_body]
-pub fn print_uint_base<T>(num: T, base: u8)
-where
-    T: Into<u64> + Copy,
-{
-    if base < 2 || base > 36 {
-        __print(format_args!("<invalid_base>"));
+pub(crate) fn print_hex_dump_readable(bytes: &[u8], start_offset: usize) {
+    if bytes.is_empty() {
+        print_str("(empty)\n");
         return;
     }
 
-    let mut num: u64 = num.into();
-    if num == 0 {
-        __print(format_args!("0"));
-        return;
-    }
+    const BYTES_PER_LINE: usize = 16;
 
-    let mut buffer = [0u8; 64]; // 64 bits max
-    let mut i = 0;
+    // Print header
+    print_str("       00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F  |ASCII          |\n");
+    print_str("       ────────────────────────────────────────────────  ──────────────────\n");
 
-    while num > 0 {
-        let digit = (num % base as u64) as u8;
-        buffer[i] = if digit < 10 {
-            b'0' + digit
-        } else {
-            b'a' + digit - 10
-        };
-        num /= base as u64;
-        i += 1;
-    }
+    for (line_idx, chunk) in bytes.chunks(BYTES_PER_LINE).enumerate() {
+        let offset = start_offset + (line_idx * BYTES_PER_LINE);
 
-    // Reverse the buffer since we built it backwards
-    buffer[..i].reverse();
+        // Print offset with consistent width
+        print_offset_padded(offset);
+        print_str(" │ ");
 
-    // Convert to string and print
-    if let Ok(s) = core::str::from_utf8(&buffer[..i]) {
-        __print(format_args!("{}", s));
-    } else {
-        __print(format_args!("<base_error>"));
-    }
-}
-
-/// Print integer in binary format
-#[verifier::external_body]
-pub fn print_integer_binary<T>(num: T)
-where
-    T: core::fmt::Binary,
-{
-    __print(format_args!("{:b}", num));
-}
-
-/// Print integer in octal format
-#[verifier::external_body]
-pub fn print_integer_octal<T>(num: T)
-where
-    T: core::fmt::Octal,
-{
-    __print(format_args!("{:o}", num));
-}
-
-/// Print bytes as hexadecimal dump
-#[verifier::external_body]
-pub fn print_hex_dump(data: &[u8], bytes_per_line: usize) {
-    for (i, chunk) in data.chunks(bytes_per_line).enumerate() {
-        // Print offset
-        __print(format_args!("{:04x}: ", i * bytes_per_line));
-
-        // Print hex values
-        for &byte in chunk {
-            __print(format_args!("{:02x} ", byte));
-        }
-
-        // Pad if necessary
-        for _ in chunk.len()..bytes_per_line {
-            __print(format_args!("   "));
-        }
-
-        // Print ASCII representation
-        __print(format_args!("| "));
-        for &byte in chunk {
-            if byte.is_ascii_graphic() {
-                __print(format_args!("{}", byte as char));
-            } else {
-                __print(format_args!("."));
+        // Print hex bytes in two groups of 8
+        for (i, &byte) in chunk.iter().enumerate() {
+            if i == 8 {
+                print_str(" "); // Extra space between groups
             }
+            print_byte_hex_padded(byte);
+            print_str(" ");
         }
 
-        __print(format_args!("\n"));
+        // Pad incomplete lines
+        let padding_needed = BYTES_PER_LINE - chunk.len();
+        for i in 0..padding_needed {
+            if chunk.len() + i == 8 {
+                print_str(" "); // Maintain group spacing
+            }
+            print_str("   "); // 3 spaces (2 hex + 1 space)
+        }
+
+        print_str(" │");
+
+        // Print ASCII with visual clarity
+        for &byte in chunk.iter() {
+            let c = match byte {
+                0x00..=0x1F => '·',           // Control chars as middle dot
+                0x20..=0x7E => byte as char,   // Printable ASCII
+                0x7F => '⌂',                  // DEL as house symbol
+                0x80..=0xFF => '▒',           // Extended ASCII as block
+            };
+            print_char(c);
+        }
+
+        // Pad ASCII section for incomplete lines
+        for _ in 0..padding_needed {
+            print_char(' ');
+        }
+
+        print_str("│\n");
     }
+
+    // Print footer
+    print_str("       ────────────────────────────────────────────────  ──────────────────\n");
 }
 
-/// Print memory address in standard format
 #[verifier::external_body]
-pub fn print_address<T>(ptr: *const T) {
-    __print(format_args!("{:p}", ptr));
-}
+fn print_offset_padded(offset: usize) {
+    // Print 6-digit hex offset with leading zeros
+    let mut buffer = [b'0'; 6];
+    let mut temp = offset;
+    let hex_chars = b"0123456789ABCDEF";
 
-/// Print raw string without any formatting
-#[verifier::external_body]
-#[inline]
-pub fn print_str(out: &str) {
-    __print(format_args!("{}", out));
-}
+    for i in (0..6).rev() {
+        buffer[i] = hex_chars[temp & 0xF];
+        temp >>= 4;
+    }
 
-/// Print string with newline
-#[verifier::external_body]
-#[inline]
-pub fn print_str_ln(out: &str) {
-    __print(format_args!("{}\n", out));
-}
-
-/// Print character
-#[verifier::external_body]
-#[inline]
-pub fn print_char(c: char) {
-    __print(format_args!("{}", c));
-}
-
-/// Print boolean value
-#[verifier::external_body]
-#[inline]
-pub fn print_bool(b: bool) {
-    __print(format_args!("{}", b));
+    for &b in buffer.iter() {
+        print_char(b as char);
+    }
 }
 
 /// Print the Deko kernel banner with build information
@@ -455,11 +357,11 @@ pub fn print_panic_info(info: &core::panic::PanicInfo) {
     // Print panic location if available
     if let Some(location) = info.location() {
         print_str("Location: ");
-        print_str(location.file());
+        location.file().deko_debug();
         print_str(":");
-        print_integer(location.line());
+        location.line().deko_debug();
         print_str(":");
-        print_integer(location.column());
+        location.column().deko_debug();
         print_str("\n");
     } else {
         print_str("Location: <unknown>\n");
@@ -486,90 +388,55 @@ pub trait DekoDebug {
     /// Print debug information for this type
     fn deko_debug(&self);
 
-    /// Print debug information with a custom label
-    fn deko_debug_with_label(&self, label: &str) {
-        print_str(label);
-        print_str(": ");
-        self.deko_debug();
-        print_char('\n');
+    fn deko_debug_hex(&self) {
+        print_str("No hex debug format available");
+    }
+
+    fn deko_debug_oct(&self) {
+        print_str("No octal debug format available");
     }
 }
 
-// Implement DekoDebug for basic types
-impl DekoDebug for u8 {
-    #[verifier::external_body]
-    fn deko_debug(&self) {
-        print_integer(*self);
-    }
+// Remove the generic implementation and use a macro instead
+macro_rules! impl_deko_debug_integer {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            verus! {
+                
+            impl DekoDebug for $ty {
+                #[verifier::external_body]
+                fn deko_debug(&self) {
+                    let mut buffer = itoa::Buffer::new();
+                    let s = buffer.format(*self);
+                    print_str(s);
+                }
+
+                #[verifier::external_body]
+                fn deko_debug_hex(&self) {
+                    print_integer_hex(*self);
+                }
+
+                #[verifier::external_body]
+                fn deko_debug_oct(&self) {
+                    print_integer_oct(*self);
+                }
+            }
+            }
+        )*
+    };
 }
 
-impl DekoDebug for u16 {
-    #[verifier::external_body]
-    fn deko_debug(&self) {
-        print_integer(*self);
-    }
-}
+// Implement for all integer types explicitly
+impl_deko_debug_integer!(
+    u8, u16, u32, u64, u128, usize,
+    i8, i16, i32, i64, i128, isize,
+);
 
-impl DekoDebug for u32 {
-    #[verifier::external_body]
-    fn deko_debug(&self) {
-        print_integer(*self);
-    }
-}
-
-impl DekoDebug for u64 {
-    #[verifier::external_body]
-    fn deko_debug(&self) {
-        print_integer(*self);
-    }
-}
-
-impl DekoDebug for usize {
-    #[verifier::external_body]
-    fn deko_debug(&self) {
-        print_integer(*self);
-    }
-}
-
-impl DekoDebug for i8 {
-    #[verifier::external_body]
-    fn deko_debug(&self) {
-        print_integer(*self);
-    }
-}
-
-impl DekoDebug for i16 {
-    #[verifier::external_body]
-    fn deko_debug(&self) {
-        print_integer(*self);
-    }
-}
-
-impl DekoDebug for i32 {
-    #[verifier::external_body]
-    fn deko_debug(&self) {
-        print_integer(*self);
-    }
-}
-
-impl DekoDebug for i64 {
-    #[verifier::external_body]
-    fn deko_debug(&self) {
-        print_integer(*self);
-    }
-}
-
-impl DekoDebug for isize {
-    #[verifier::external_body]
-    fn deko_debug(&self) {
-        print_integer(*self);
-    }
-}
 
 impl DekoDebug for bool {
     #[verifier::external_body]
     fn deko_debug(&self) {
-        print_bool(*self);
+        print_str(if *self { "true" } else { "false" });
     }
 }
 
@@ -583,23 +450,21 @@ impl DekoDebug for char {
 impl DekoDebug for &str {
     #[verifier::external_body]
     fn deko_debug(&self) {
-        print_char('"');
         print_str(self);
-        print_char('"');
     }
 }
 
 impl<T> DekoDebug for *const T {
     #[verifier::external_body]
     fn deko_debug(&self) {
-        print_address(*self);
+        (*self as usize).deko_debug();
     }
 }
 
 impl<T> DekoDebug for *mut T {
     #[verifier::external_body]
     fn deko_debug(&self) {
-        print_address(*self as *const T);
+        (*self as usize).deko_debug();
     }
 }
 
@@ -635,85 +500,133 @@ impl<T: DekoDebug, E: DekoDebug> DekoDebug for Result<T, E> {
     }
 }
 
-// DekoDebug implementations for IgvmParamBlock types from deko-std
-#[cfg(feature = "logging")]
+impl<'a> DekoDebug for &'a [u8] {
+    #[verifier::external_body]
+    fn deko_debug(&self) {
+        if self.is_empty() {
+            print_str("&[u8] { len: 0, data: [] }");
+            return;
+        }
+
+        match self.len() {
+            1..=8 => {
+                // Very short - inline with brackets
+                print_str("&[u8] { len: ");
+                self.len().deko_debug();
+                print_str(", data: [");
+                for (i, &byte) in self.iter().enumerate() {
+                    if i > 0 { print_str(", "); }
+                    print_str("0x");
+                    print_byte_hex_padded(byte);
+                }
+                print_str("] }");
+            }
+            9..=32 => {
+                // Short - compact hex line
+                print_str("&[u8] { len: ");
+                self.len().deko_debug();
+                print_str(", data:\n  ");
+
+                for (i, &byte) in self.iter().enumerate() {
+                    if i > 0 && i % 8 == 0 {
+                        print_str("\n  ");
+                    } else if i > 0 {
+                        print_str(" ");
+                    }
+
+                    print_str("0x");
+                    print_byte_hex_padded(byte);
+                }
+                print_str("\n}");
+            }
+            _ => {
+                // Long - full hex dump
+                print_str("&[u8] { len: ");
+                self.len().deko_debug();
+                print_str(", data:\n");
+                print_hex_dump_readable(self, 0);
+                print_str("}");
+            }
+        }
+    }
+}
 impl DekoDebug for deko_std::boot::IgvmParamBlock {
     #[verifier::external_body]
     fn deko_debug(&self) {
         print_str("IgvmParamBlock {\n");
 
         print_str("  param_area_size: ");
-        print_integer(self.param_area_size);
+        debug_packed_field!(self, param_area_size, deko_debug);
         print_str(",\n");
 
-        print_str("  debug_serial_port: 0x");
-        print_integer_hex(self.debug_serial_port);
+        print_str("  debug_serial_port: ");
+        debug_packed_field!(self, debug_serial_port, deko_debug_hex);
         print_str(",\n");
 
         print_str("  use_alternate_injection: ");
-        print_bool(self.use_alternate_injection != 0);
+        let use_alternate_injection = self.use_alternate_injection;
+        (use_alternate_injection != 0).deko_debug();
         print_str(",\n");
 
-        print_str("  vtom: 0x");
-        print_integer_hex(self.vtom);
+        print_str("  vtom: ");
+        debug_packed_field!(self, vtom, deko_debug_hex);
         print_str(",\n");
 
-        print_str("  kernel_base: 0x");
-        print_integer_hex(self.kernel_base);
+        print_str("  kernel_base: ");
+        debug_packed_field!(self, kernel_base, deko_debug_hex);
         print_str(",\n");
 
         print_str("  kernel_min_size: ");
-        print_integer(self.kernel_min_size);
+        debug_packed_field!(self, kernel_min_size, deko_debug);
         print_str(",\n");
 
         print_str("  kernel_max_size: ");
-        print_integer(self.kernel_max_size);
+        debug_packed_field!(self, kernel_max_size, deko_debug);
         print_str(",\n");
 
         print_str("  stage1_size: ");
-        print_integer(self.stage1_size);
+        debug_packed_field!(self, stage1_size, deko_debug);
         print_str(",\n");
 
-        print_str("  stage1_base: 0x");
-        print_integer_hex(self.stage1_base);
+        print_str("  stage1_base: ");
+        debug_packed_field!(self, stage1_base, deko_debug_hex);
         print_str(",\n");
 
         print_str("  firmware: ");
-        self.firmware.deko_debug();
+        debug_packed_field!(self, firmware, deko_debug);
         print_str(",\n");
 
         print_char('}');
     }
 }
 
-#[cfg(feature = "logging")]
 impl DekoDebug for deko_std::boot::IgvmParamBlockFwInfo {
     #[verifier::external_body]
     fn deko_debug(&self) {
         print_str("IgvmParamBlockFwInfo {\n");
 
-        print_str("    start: 0x");
-        print_integer_hex(self.start);
+        print_str("    start: ");
+        debug_packed_field!(self, start, deko_debug_hex);
         print_str(",\n");
 
         print_str("    size: ");
-        print_integer(self.size);
+        debug_packed_field!(self, size, deko_debug);
         print_str(",\n");
 
         print_str("    in_low_memory: ");
-        print_bool(self.in_low_memory != 0);
+        (self.in_low_memory != 0).deko_debug();
         print_str(",\n");
 
-        print_str("    secrets_page: 0x");
-        print_integer_hex(self.secrets_page);
+        print_str("    secrets_page: ");
+        debug_packed_field!(self, secrets_page, deko_debug_hex);
         print_str(",\n");
 
-        print_str("    cpuid_page: 0x");
-        print_integer_hex(self.cpuid_page);
+        print_str("    cpuid_page: ");
+        debug_packed_field!(self, cpuid_page, deko_debug_hex);
         print_str(",\n");
 
         print_str("    prevalidated_count: ");
-        print_integer(self.prevalidated_count);
+        debug_packed_field!(self, prevalidated_count, deko_debug);
         print_str(",\n");
 
         print_str("    prevalidated: [");
@@ -732,35 +645,33 @@ impl DekoDebug for deko_std::boot::IgvmParamBlockFwInfo {
     }
 }
 
-#[cfg(feature = "logging")]
 impl DekoDebug for deko_std::boot::IgvmParamBlockFwMem {
     #[verifier::external_body]
     fn deko_debug(&self) {
-        print_str("{ base: 0x");
-        print_integer_hex(self.base);
+        print_str("{ base: ");
+        debug_packed_field!(self, base, deko_debug_hex);
         print_str(", size: ");
-        print_integer(self.size);
+        debug_packed_field!(self, size, deko_debug);
         print_str(" }");
     }
 }
 
 // DekoDebug implementations for DekoCtx and related types
-#[cfg(feature = "logging")]
 impl DekoDebug for crate::cpu::ctx::DekoCtx {
     #[verifier::external_body]
     fn deko_debug(&self) {
         print_str("DekoCtx {\n");
 
         print_str("  stage2_launch_info: ");
-        print_address(self.stage2_launch_info.addr() as *const ());
+        (self.stage2_launch_info.addr() as usize).deko_debug_hex();
         print_str(",\n");
 
         print_str("  pgtable: ");
-        print_address(self.pgtable.addr() as *const ());
+        (self.pgtable.addr() as usize).deko_debug_hex();
         print_str(",\n");
 
         print_str("  gdt: ");
-        print_address(self.gdt.addr() as *const ());
+        (self.gdt.addr() as usize).deko_debug_hex();
         print_str(",\n");
 
         print_str("  mapping_space: ");
@@ -772,7 +683,6 @@ impl DekoDebug for crate::cpu::ctx::DekoCtx {
 }
 
 // DekoDebug implementation for MappingSpace from deko-std
-#[cfg(feature = "logging")]
 impl DekoDebug for deko_std::address::MappingSpace {
     #[verifier::external_body]
     fn deko_debug(&self) {
@@ -791,463 +701,186 @@ impl DekoDebug for deko_std::address::MappingSpace {
 }
 
 // DekoDebug implementation for FixedAddressMappingRange from deko-std
-#[cfg(feature = "logging")]
 impl DekoDebug for deko_std::address::FixedAddressMappingRange {
     #[verifier::external_body]
     fn deko_debug(&self) {
         print_str("FixedAddressMappingRange {\n");
 
-        print_str("      virt_start: 0x");
-        print_integer_hex(self.virt_start.0);
+        print_str("      virt_start: ");
+        self.virt_start.0.deko_debug_hex();
         print_str(",\n");
 
-        print_str("      virt_end: 0x");
-        print_integer_hex(self.virt_end.0);
+        print_str("      virt_end: ");
+        self.virt_end.0.deko_debug_hex();
         print_str(",\n");
 
-        print_str("      phys_start: 0x");
-        print_integer_hex(self.phys_start.0);
+        print_str("      phys_start: ");
+        self.phys_start.0.deko_debug_hex();
         print_str(",\n");
 
         print_str("    }");
     }
 }
 
-// DekoDebug implementation for DekoCpuCore from deko-std
-#[cfg(feature = "logging")]
-impl DekoDebug for deko_std::cpu::DekoCpuCore {
-    #[verifier::external_body]
-    fn deko_debug(&self) {
-        print_str("DekoCpuCore {\n");
+macro_rules! print_with_format {
+    ($expr:expr => hex) => {
+        {
+            use $crate::logging::DekoDebug;
+            $expr.deko_debug_hex();
+        }
+    };
+    ($expr:expr => oct) => {
+        {
+            use $crate::logging::DekoDebug;
+            $expr.deko_debug_oct();
+        }
+    };
+    ($expr:expr => dec) => {
+        {
+            use $crate::logging::DekoDebug;
+            $expr.deko_debug();
+        }
+    };
 
-        print_str("    heap_mapping: ");
-        self.valid_heap_mapping_range().deko_debug();
-        print_str(",\n");
+    // Custom radix support
+    ($expr:expr => base($radix:literal)) => {
+        $crate::logging::print_integer_lexical_base($expr, $radix);
+    };
 
-        print_str("    kernel_mapping: ");
-        self.valid_kernel_mapping_range().deko_debug();
-        print_str(",\n");
+    // Boolean with custom text
+    ($expr:expr => enabled) => {
+        $crate::logging::print_str(if $expr { "enabled" } else { "disabled" });
+    };
+    ($expr:expr => yesno) => {
+        $crate::logging::print_str(if $expr { "yes" } else { "no" });
+    };
+    ($expr:expr => onoff) => {
+        $crate::logging::print_str(if $expr { "on" } else { "off" });
+    };
 
-        print_str("  }");
-    }
+    // Default formatting (no specifier)
+    ($expr:expr) => {
+        {
+            use $crate::logging::DekoDebug;
+            $expr.deko_debug();
+        }
+    };
+}
+
+// Internal macro for variadic argument processing
+macro_rules! print_args_internal {
+    // Base case - no arguments
+    () => {};
+
+    // Single argument with format specifier
+    ($arg:expr => $fmt:ident) => {
+        $crate::logging::print_with_format!($arg => $fmt);
+    };
+    ($arg:expr => $fmt:ident($param:literal)) => {
+        $crate::logging::print_with_format!($arg => $fmt($param));
+    };
+
+    // Single argument without format specifier
+    ($arg:expr) => {
+        $crate::logging::print_with_format!($arg);
+    };
+
+    // Multiple arguments - first with format specifier
+    ($head:expr => $fmt:ident, $($tail:tt)*) => {
+        $crate::logging::print_with_format!($head => $fmt);
+        $crate::logging::print_str(" ");
+        $crate::logging::print_args_internal!($($tail)*);
+    };
+    ($head:expr => $fmt:ident($param:literal), $($tail:tt)*) => {
+        $crate::logging::print_with_format!($head => $fmt($param));
+        $crate::logging::print_str(" ");
+        $crate::logging::print_args_internal!($($tail)*);
+    };
+
+    // Multiple arguments - first without format specifier
+    ($head:expr, $($tail:tt)*) => {
+        $crate::logging::print_with_format!($head);
+        $crate::logging::print_str(" ");
+        $crate::logging::print_args_internal!($($tail)*);
+    };
 }
 
 } // verus!
 
-// Ergonomic macros for debugging with DekoDebug trait
 
-/// Debug print macro using DekoDebug trait
-#[cfg(feature = "logging")]
+// Should be defined outside verus! block to allow macro export
+// otherwise the macro hygiene will complain about $crate usage.
 #[macro_export]
-macro_rules! deko_dbg {
-    () => {
-        $crate::logging::print_str_ln("");
-    };
-    ($val:expr $(,)?) => {
-        {
-            $crate::logging::print_str("[DBG] ");
-            $crate::logging::print_str(stringify!($val));
-            $crate::logging::print_str(" = ");
-            $val.deko_debug();
-            $crate::logging::print_char('\n');
-        }
-    };
-    ($($val:expr),+ $(,)?) => {
-        {
-            $crate::logging::print_str("[DBG] ");
-            $(
-                $crate::logging::print_str(stringify!($val));
-                $crate::logging::print_str(" = ");
-                $val.deko_debug();
-                $crate::logging::print_str(", ");
-            )+
-            $crate::logging::print_char('\n');
-        }
-    };
-}
-
-#[cfg(not(feature = "logging"))]
-#[macro_export]
-macro_rules! deko_dbg {
-    ($($arg:tt)*) => {};
-}
-
-/// Print with DekoDebug and custom label
-#[cfg(feature = "logging")]
-#[macro_export]
-macro_rules! deko_print {
-    ($label:expr, $val:expr) => {
-        $val.deko_debug_with_label($label)
-    };
-}
-
-#[cfg(not(feature = "logging"))]
-#[macro_export]
-macro_rules! deko_print {
-    ($label:expr, $val:expr) => {};
-}
-
-/// Simple string print macro (no formatting support due to Verus restrictions)
-#[cfg(feature = "logging")]
-#[macro_export]
-macro_rules! log_str {
-    ($s:expr) => {
-        $crate::logging::print_str($s)
-    };
-}
-
-#[cfg(not(feature = "logging"))]
-#[macro_export]
-macro_rules! log_str {
-    ($s:expr) => {};
-}
-
-/// Print string with newline
-#[cfg(feature = "logging")]
-#[macro_export]
-macro_rules! log_str_ln {
-    ($s:expr) => {
-        $crate::logging::print_str_ln($s)
-    };
-}
-
-#[cfg(not(feature = "logging"))]
-#[macro_export]
-macro_rules! log_str_ln {
-    ($s:expr) => {};
-}
-
-/// Integer printing macros
-#[cfg(feature = "logging")]
-#[macro_export]
-macro_rules! log_int {
-    ($val:expr) => {
-        $crate::logging::print_integer($val)
-    };
-}
-
-#[cfg(not(feature = "logging"))]
-#[macro_export]
-macro_rules! log_int {
-    ($val:expr) => {};
-}
-
-/// Hexadecimal printing macros
-#[cfg(feature = "logging")]
-#[macro_export]
-macro_rules! log_hex {
-    ($val:expr) => {
-        $crate::logging::print_integer_hex($val)
-    };
-}
-
-#[cfg(not(feature = "logging"))]
-#[macro_export]
-macro_rules! log_hex {
-    ($val:expr) => {};
-}
-
-/// Hexadecimal with prefix printing macros
-#[cfg(feature = "logging")]
-#[macro_export]
-macro_rules! log_hex_prefixed {
-    ($val:expr) => {
-        $crate::logging::print_integer_hex_prefixed($val)
-    };
-}
-
-#[cfg(not(feature = "logging"))]
-#[macro_export]
-macro_rules! log_hex_prefixed {
-    ($val:expr) => {};
-}
-
-/// Binary printing macro
-#[cfg(feature = "logging")]
-#[macro_export]
-macro_rules! log_bin {
-    ($val:expr) => {
-        $crate::logging::print_integer_binary($val)
-    };
-}
-
-#[cfg(not(feature = "logging"))]
-#[macro_export]
-macro_rules! log_bin {
-    ($val:expr) => {};
-}
-
-/// Float printing macros
-#[cfg(feature = "logging")]
-#[macro_export]
-macro_rules! log_float {
-    ($val:expr) => {
-        $crate::logging::print_float_decimal($val)
-    };
-}
-
-#[cfg(not(feature = "logging"))]
-#[macro_export]
-macro_rules! log_float {
-    ($val:expr) => {};
-}
-
-/// Memory dump macro
-#[cfg(feature = "logging")]
-#[macro_export]
-macro_rules! log_hex_dump {
-    ($data:expr) => {
-        $crate::logging::print_hex_dump($data, 16)
-    };
-    ($data:expr, $bytes_per_line:expr) => {
-        $crate::logging::print_hex_dump($data, $bytes_per_line)
-    };
-}
-
-#[cfg(not(feature = "logging"))]
-#[macro_export]
-macro_rules! log_hex_dump {
-    ($data:expr $(, $bytes_per_line:expr)?) => {};
-}
-
-/// Address printing macro
-#[cfg(feature = "logging")]
-#[macro_export]
-macro_rules! log_addr {
-    ($ptr:expr) => {
-        $crate::logging::print_address($ptr)
-    };
-}
-
-#[cfg(not(feature = "logging"))]
-#[macro_export]
-macro_rules! log_addr {
-    ($ptr:expr) => {};
-}
-
-/// Conditional string printing
-#[cfg(feature = "logging")]
-#[macro_export]
-macro_rules! log_if {
-    ($cond:expr, $s:expr) => {
-        if $cond {
-            $crate::logging::print_str_ln($s);
-        }
-    };
-}
-
-#[cfg(not(feature = "logging"))]
-#[macro_export]
-macro_rules! log_if {
-    ($cond:expr, $s:expr) => {};
-}
-
-/// Error logging - supports multiple string arguments
-#[cfg(feature = "logging")]
-#[macro_export]
-macro_rules! log_error {
-    ($($s:expr),+ $(,)?) => {
-        {
-            $crate::logging::print_str($crate::logging::ERROR_COLOR);
-            $crate::logging::print_str("[ERROR] ");
-            $(
-                $crate::logging::print_str($s);
-            )+
-            $crate::logging::print_str($crate::logging::RESET_COLOR);
-            $crate::logging::print_char('\n');
-        }
-    };
-}
-
-#[cfg(not(feature = "logging"))]
-#[macro_export]
-macro_rules! log_error {
-    ($($s:expr),+ $(,)?) => {};
-}
-
-/// Warning logging - supports multiple string arguments  
-#[cfg(feature = "logging")]
-#[macro_export]
-macro_rules! log_warn {
-    ($($s:expr),+ $(,)?) => {
-        {
-            $crate::logging::print_str($crate::logging::WARN_COLOR);
-            $crate::logging::print_str("[WARN] ");
-            $(
-                $crate::logging::print_str($s);
-            )+
-            $crate::logging::print_str($crate::logging::RESET_COLOR);
-            $crate::logging::print_char('\n');
-        }
-    };
-}
-
-#[cfg(not(feature = "logging"))]
-#[macro_export]
-macro_rules! log_warn {
-    ($($s:expr),+ $(,)?) => {};
-}
-
-/// Info logging - supports multiple string arguments
-#[cfg(feature = "logging")]
-#[macro_export]
-macro_rules! log_info {
-    ($($s:expr),+ $(,)?) => {
+macro_rules! kinfo {
+    ($($args:tt)*) => {
+        #[cfg(feature = "logging")]
         {
             $crate::logging::print_str($crate::logging::INFO_COLOR);
             $crate::logging::print_str("[INFO] ");
-            $(
-                $crate::logging::print_str($s);
-            )+
             $crate::logging::print_str($crate::logging::RESET_COLOR);
-            $crate::logging::print_char('\n');
+            $crate::logging::print_args_internal!($($args)*);
+            $crate::logging::print_str("\n");
         }
     };
 }
 
-#[cfg(not(feature = "logging"))]
 #[macro_export]
-macro_rules! log_info {
-    ($($s:expr),+ $(,)?) => {};
+macro_rules! kwarn {
+    ($($args:tt)*) => {
+        #[cfg(feature = "logging")]
+        {
+            $crate::logging::print_str($crate::logging::WARN_COLOR);
+            $crate::logging::print_str("[WARN] ");
+            $crate::logging::print_str($crate::logging::RESET_COLOR);
+            $crate::logging::print_args_internal!($($args)*);
+            $crate::logging::print_str("\n");
+        }
+    };
 }
 
-/// Debug logging - supports multiple string arguments
-#[cfg(feature = "logging")]
 #[macro_export]
-macro_rules! log_debug {
-    ($($s:expr),+ $(,)?) => {
+macro_rules! kerror {
+    ($($args:tt)*) => {
+        #[cfg(feature = "logging")]
+        {
+            $crate::logging::print_str($crate::logging::ERROR_COLOR);
+            $crate::logging::print_str("[ERROR] ");
+            $crate::logging::print_str($crate::logging::RESET_COLOR);
+            $crate::logging::print_args_internal!($($args)*);
+            $crate::logging::print_str("\n");
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! kdebug {
+    ($($args:tt)*) => {
+        #[cfg(feature = "logging")]
         {
             $crate::logging::print_str($crate::logging::DEBUG_COLOR);
             $crate::logging::print_str("[DEBUG] ");
-            $(
-                $crate::logging::print_str($s);
-            )+
             $crate::logging::print_str($crate::logging::RESET_COLOR);
-            $crate::logging::print_char('\n');
+            $crate::logging::print_args_internal!($($args)*);
+            $crate::logging::print_str("\n");
         }
     };
 }
 
-#[cfg(not(feature = "logging"))]
 #[macro_export]
-macro_rules! log_debug {
-    ($($s:expr),+ $(,)?) => {};
-}
-
-/// Trace logging - supports multiple string arguments
-#[cfg(feature = "logging")]
-#[macro_export]
-macro_rules! log_trace {
-    ($($s:expr),+ $(,)?) => {
+macro_rules! ktrace {
+    ($($args:tt)*) => {
+        #[cfg(feature = "logging")]
         {
             $crate::logging::print_str($crate::logging::TRACE_COLOR);
             $crate::logging::print_str("[TRACE] ");
-            $(
-                $crate::logging::print_str($s);
-            )+
             $crate::logging::print_str($crate::logging::RESET_COLOR);
-            $crate::logging::print_char('\n');
+            $crate::logging::print_args_internal!($($args)*);
+            $crate::logging::print_str("\n");
         }
     };
 }
 
-#[cfg(not(feature = "logging"))]
-#[macro_export]
-macro_rules! log_trace {
-    ($($s:expr),+ $(,)?) => {};
-}
-
-/// Helper macro for inline hex formatting using lexical
-#[cfg(feature = "logging")]
-#[macro_export]
-macro_rules! hex {
-    ($val:expr) => {{
-        // Create a temporary buffer (18 bytes: "0x" + 16 hex digits)
-        $crate::logging::__hex($val, &mut buffer)
-    }};
-}
-
-#[cfg(not(feature = "logging"))]
-#[macro_export]
-macro_rules! hex {
-    ($val:expr) => {
-        ""
-    };
-}
-
-/// Print hex value with 0x prefix inline
-#[cfg(feature = "logging")]
-#[macro_export]
-macro_rules! hex_pfx {
-    ($val:expr) => {{
-        // This is a bit ugly, but we need to concatenate "0x" with the hex value
-        // For now, users need to manually include "0x" in their log calls
-        $crate::hex!($val)
-    }};
-}
-
-#[cfg(not(feature = "logging"))]
-#[macro_export]
-macro_rules! hex_pfx {
-    ($val:expr) => {
-        ""
-    };
-}
-
-/// Print decimal value inline
-#[cfg(feature = "logging")]
-#[macro_export]
-macro_rules! dec {
-    ($val:expr) => {{
-        let mut buffer = itoa::Buffer::new();
-        buffer.format($val)
-    }};
-}
-
-#[cfg(not(feature = "logging"))]
-#[macro_export]
-macro_rules! dec {
-    ($val:expr) => {
-        ""
-    };
-}
-
-/// Print the kernel banner with build information
-#[cfg(feature = "logging")]
-#[macro_export]
-macro_rules! log_banner {
-    () => {
-        $crate::logging::print_banner()
-    };
-}
-
-#[cfg(not(feature = "logging"))]
-#[macro_export]
-macro_rules! log_banner {
-    () => {};
-}
-
-/// Print panic information with build context
-#[cfg(feature = "logging")]
-#[macro_export]
-macro_rules! log_panic {
-    ($info:expr) => {
-        $crate::logging::print_panic_info($info)
-    };
-}
-
-#[cfg(not(feature = "logging"))]
-#[macro_export]
-macro_rules! log_panic {
-    ($info:expr) => {};
-}
-
-#[cfg(not(feature = "logging"))]
-verus! {
-
-#[verifier::external_body]
-#[inline]
-pub fn print_str(out: &str) {
-}
-
-} // verus!
+pub(crate) use {
+    print_args_internal,
+    print_with_format,
+};

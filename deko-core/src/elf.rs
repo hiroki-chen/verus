@@ -37,7 +37,7 @@ use vstd::{bytes, invariant};
 
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::paging::PageTablePath;
-use crate::{log_hex_dump, log_hex_prefixed, log_int, log_str, log_str_ln, Stage2LaunchInfo};
+use crate::{kinfo, Stage2LaunchInfo};
 
 verus! {
 
@@ -76,11 +76,8 @@ fn load_elf_segment(
     let segment_end = segment.vaddr_range().end.page_align_up();
     let segment_len = segment_end.0 - segment_start.0;
 
-    log_str!("Mapping ELF segment: [");
-    log_hex_prefixed!(segment_start.0);
-    log_str!(" - ");
-    log_hex_prefixed!(segment_end.0);
-    log_str_ln!("]");
+    kinfo!("Mapping ELF segment: [",
+            segment_start.0 => hex, " - ", segment_end.0 => hex, "]");
 
     // Although we've checked in the spec that the segment start is page-aligned,
     // double-check here to avoid any risk just to ensure safety.
@@ -318,9 +315,7 @@ impl<'a> ElfFile<'a> {
                 ctx_perm.wf_with(ctx),
             decreases segment_len - i,
         {
-            log_str!("Loading ELF segment ");
-            log_int!(i);
-            log_str_ln!("...");
+            kinfo!("Loading ELF segment @[", i, "]...");
 
             let segment = self.get_segment(i, base);
 
@@ -521,12 +516,9 @@ impl<'a> ElfLoadSegment<'a> {
             true,
     {
         let end = VirtAddr(self.0.vaddr_range.vaddr_end).page_align_up();
-
-        log_str!("Copying ELF segment file contents to [");
-        log_hex_prefixed!(self.0.vaddr_range.vaddr_begin);
-        log_str!(" - ");
-        log_hex_prefixed!(end.0);
-        log_str_ln!("]");
+        kinfo!("Copying ELF segment file contents to [",
+                self.0.vaddr_range.vaddr_begin => hex, " - ",
+                end.0 => hex, "]");
 
         let mut buf = core::slice::from_raw_parts_mut(
             self.0.vaddr_range.vaddr_begin as *mut u8,
@@ -538,7 +530,7 @@ impl<'a> ElfLoadSegment<'a> {
         // Pad zeros.
         buf[file_contents.len()..].fill(0);
 
-        log_str_ln!("Finished copying ELF segment file contents.");
+        kinfo!("Finished copying ELF segment file contents.");
     }
 }
 

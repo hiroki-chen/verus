@@ -9,7 +9,7 @@ use super::DEKO_MAPPING_SPACE;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::DEKO_FRAME_ALLOCATOR;
-use crate::{log_hex_prefixed, log_str, log_str_ln, Stage2LaunchInfo};
+use crate::{Stage2LaunchInfo, kinfo};
 
 extern "C" {
     #[link_name = "pgtable"]
@@ -2128,15 +2128,9 @@ impl Page {
                 shared_bit,
             ));
 
-            log_str!("arguments for map_page_4k:\n");
-            log_str!("  page addr:");
-            log_hex_prefixed!(page.addr());
-            log_str!("  curr_vaddr:");
-            log_hex_prefixed!(curr_vaddr.0);
-            log_str!("\n");
-            log_str!("  curr_paddr:");
-            log_hex_prefixed!(curr_paddr.0);
-            log_str!("\n");
+            kinfo!("arguments for map_page_4k:\n\t", "page_addr:", page.addr() => hex,
+                    "\n\t", "curr_vaddr:", curr_vaddr.0 => hex, "\n\t", "curr_paddr:", curr_paddr.0 => hex, "\n");
+
             // Need to add something explicit about the before and after-state of
             // pgtable_perm to ensure that we know that mapped pages are preserved.
             // otherwise verus has no idea that previous pages are still mapped.
@@ -4384,13 +4378,8 @@ pub(crate) fn map_and_validate_elf_segment(
 ) {
     broadcast use PteFlags::lemma_each_bits_is_valid;
 
-    log_str!("Mapping and validating ELF segment from [");
-    log_hex_prefixed!(vaddr_start.0);
-    log_str!("] to [");
-    log_hex_prefixed!(vaddr_end.0);
-    log_str!("] at physical address [");
-    log_hex_prefixed!(paddr.0);
-    log_str_ln!("]");
+    kinfo!("Mapping and validating ELF segment from [", vaddr_start.0 => hex, "] to [",
+            vaddr_end.0 => hex, "] at physical address [", paddr.0 => hex, "]");
 
     let flags = PteFlags::writeable_kernel();
 
@@ -4446,7 +4435,7 @@ pub(crate) fn map_and_validate_elf_segment(
     #[verus_spec(with Tracked(ctx_perm))]
     crate::imp::validate_vaddr_region(virt_range, true);
 
-    assume(ctx_perm.wf_with(ctx)); // need more so here we postpone
+    assume(ctx_perm.wf_with(ctx));  // need more so here we postpone
 }
 
 } // verus!

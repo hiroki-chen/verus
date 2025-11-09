@@ -12,6 +12,7 @@ use crate::cpu::{
     DekoCpuCtx, DekoCpuCtxPermission, PerCpuAreas, PerCpuShared, CPUID_MAX_COUNT, CPU_AREA_MAGIC,
     PERCPU_AREAS,
 };
+use crate::kinfo;
 use crate::logging::DekoDebug;
 use crate::mm::paging::{PageTablePermission, PteFlags};
 use crate::mm::{
@@ -227,9 +228,7 @@ pub fn init_platform_end(
     crate::logging::print_banner();
 
     // Print IGVM parameter information for debugging
-    crate::logging::print_str("IGVM Parameters:\n");
-    igvm_params.deko_debug();
-    crate::logging::print_str("\n");
+    kinfo!("IGVM Parameters\n\t", igvm_params);
 }
 
 pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxPermission>) -> (r: (

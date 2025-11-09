@@ -13,9 +13,7 @@ use crate::elf::{ElfFile, ElfLoadSegment};
 use crate::logging::DekoDebug;
 use crate::mm::{init_frame_allocator, DEKO_MAPPING_SPACE};
 use crate::snp::get_igvm_params;
-use crate::{
-    die, imp, log_error, log_hex_prefixed, log_info, log_str, log_str_ln, Stage2LaunchInfo,
-};
+use crate::{die, imp, kerror, kinfo, Stage2LaunchInfo};
 
 verus! {
 
@@ -305,22 +303,19 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
     // now we need to load the kernel into the memory.
     // first we need to find where it is.
     if let Some((mut kernel_phys_start, kernel_phys_end)) = igvm_params.find_kernel_region() {
-        log_str!("Deko found the kernel physical range:  [");
-        log_hex_prefixed!(kernel_phys_start.0);
-        log_str!(" - ");
-        log_hex_prefixed!(kernel_phys_end.0);
-        log_str_ln!("]");
-        log_str_ln!("Loading the Deko monitor...");
+        kinfo!("Deko found the kernel physical range:  [",
+                kernel_phys_start.0 => hex, " - ", kernel_phys_end.0 => hex, "]");
+        kinfo!("Loading the Deko monitor...");
 
         // Load the ELF file.
         if let Some(vaddr) = #[verus_spec(with Tracked(&mut ctx_perm))]
         load_deko_monitor(ctx, &mut kernel_phys_start, header) {
-            log_info!("Deko monitor loaded successfully!");
+            kinfo!("Deko monitor loaded successfully!");
         } else {
-            log_error!("Deko failed to load the kernel ELF file! Check if the format is correct.");
+            kerror!("Deko failed to load the kernel ELF file! Check if the format is correct.");
         }
     } else {
-        log_error!("Deko failed to find the kernel physical range from the boot header!");
+        kerror!("Deko failed to find the kernel physical range from the boot header!");
     }
 
     loop {
@@ -352,11 +347,7 @@ fn load_deko_monitor(
     let elf_start = PhysAddr::from(header.kernel_elf_start as u64);
     let elf_end = PhysAddr::from(header.kernel_elf_end as u64);
 
-    log_str!("ELF range: [");
-    log_hex_prefixed!(elf_start.0);
-    log_str!(" - ");
-    log_hex_prefixed!(elf_end.0);
-    log_str_ln!("]");
+    kinfo!("ELF range: [", elf_start.0 => hex, " - ", elf_end.0 => hex, "]");
 
     // Load the ELF file into memory.
     let elf_file = ElfFile::new(elf_start, elf_end)?;
@@ -364,9 +355,7 @@ fn load_deko_monitor(
     proof { assert(elf_file == header.get_elf().unwrap()) }
 
     let vaddr_alloc_base = elf_file.get_vaddr_alloc_base();
-    log_str!("Kernel load base virtual address: ");
-    log_hex_prefixed!(vaddr_alloc_base.0);
-    log_str_ln!("");
+    kinfo!("Kernel load base virtual address: ", vaddr_alloc_base.0 => hex,);
     // Map, validate and populate the  kernel ELF's PT_LOAD segments. The
     // segments' virtual address range might not necessarily be contiguous,
     // track their total extent along the way. Physical memory is successively

@@ -23,11 +23,12 @@ verus_builtin_macros = { workspace = true }
 deko-std = { workspace = true, features = ["alloc", "global_alloc"] }
 deko-logging = { workspace = true, optional = true }
 elf = { workspace = true }
-log = { version = "0.4.27", optional = true }
 paste = "1.0.15"
 itoa = { version = "1.0.15", features = ["no-panic"], optional = true }
 ryu = { version = "1.0.20", features = ["no-panic"], optional = true }
-lexical-write-integer = { version = "1.0.6", default-features = false, optional = true, features = [
+lexical-core = { version = "1.0.6", default-features = false, optional = true, features = [
+  "write-integers",
+  "write-floats",
   "power-of-two",
 ] }
 
@@ -39,4 +40,4 @@ default = [
 tdx = []
 snp = ["deko-std/snp"]
 # Enable logging?
-logging = ["deko-logging", "log", "itoa", "ryu", "lexical-write-integer"]
+logging = ["deko-logging", "itoa", "ryu", "lexical-core"]
