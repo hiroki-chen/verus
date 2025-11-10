@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -9,279 +9,7 @@ use colored::Colorize;
 use git2::Repository;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use serde::Deserialize;
-use serde_json;
 
-// Cargo JSON message structures for parsing build output
-#[derive(Deserialize, Debug)]
-#[serde(tag = "reason")]
-enum CargoMessage {
-    #[serde(rename = "compiler-message")]
-    CompilerMessage { message: CompilerMessage },
-    #[serde(rename = "build-finished")]
-    BuildFinished { success: bool },
-    #[serde(other)]
-    Other,
-}
-
-#[derive(Deserialize, Debug)]
-struct CompilerMessage {
-    message: String,
-    level: String,
-    spans: Vec<Span>,
-    children: Vec<ChildMessage>,
-    rendered: Option<String>,
-}
-
-#[derive(Deserialize, Debug)]
-struct Span {
-    file_name: String,
-    line_start: u32,
-    column_start: u32,
-    is_primary: bool,
-    text: Vec<SpanText>,
-    label: Option<String>,
-}
-
-#[derive(Deserialize, Debug)]
-struct SpanText {
-    text: String,
-    // highlight_start: u32,
-    // highlight_end: u32,
-}
-
-#[derive(Deserialize, Debug)]
-struct ChildMessage {
-    message: String,
-    level: String,
-}
-
-// Build summary for tracking compilation results
-#[derive(Debug, Default)]
-struct BuildSummary {
-    errors: Vec<CompilerMessage>,
-    warnings: Vec<CompilerMessage>,
-    notes: Vec<CompilerMessage>,
-    successful: bool,
-}
-
-impl BuildSummary {
-    fn add_message(&mut self, msg: CompilerMessage) {
-        match msg.level.as_str() {
-            "error" => self.errors.push(msg),
-            "warning" => self.warnings.push(msg),
-            "note" | "help" => self.notes.push(msg),
-            _ => {}
-        }
-    }
-
-    fn print_summary(&self) {
-        println!("\n{}", "=== BUILD SUMMARY ===".bright_cyan().bold());
-
-        if self.successful {
-            println!("{} {}", "✓".green().bold(), "Build completed successfully".green());
-
-            // Show notes/diagnostics count if there are any
-            if !self.notes.is_empty() {
-                println!(
-                    "{} {} diagnostics/notes",
-                    "ℹ".blue(),
-                    self.notes.len().to_string().blue()
-                );
-            }
-        } else {
-            println!("{} {}", "✗".red().bold(), "Build failed".red());
-        }
-
-        if !self.errors.is_empty() {
-            println!("{} {} errors", "●".red(), self.errors.len().to_string().red().bold());
-        }
-
-        // Print detailed error information with diagnostics after each error
-
-        for (i, error) in self.errors.iter().enumerate() {
-            // First print the error
-            self.print_formatted_message(error, i + 1);
-        }
-
-        for note in &self.notes {
-            if let Some(rendered) = &note.rendered {
-                println!("\n{} {}", "📋".blue(), "Related diagnostic expansion:".blue().bold());
-                self.print_verification_failure_details(rendered);
-            }
-        }
-    }
-
-    fn print_formatted_message(&self, msg: &CompilerMessage, index: usize) {
-        let level_color = match msg.level.as_str() {
-            "error" => "red",
-            "warning" => "yellow",
-            "note" => "blue",
-            "help" => "cyan",
-            _ => "white",
-        };
-
-        println!(
-            "\n{}. {}: {}",
-            index.to_string().bright_white().bold(),
-            msg.level.to_uppercase().color(level_color).bold(),
-            msg.message.color(level_color)
-        );
-
-        if let Some(rendered) = &msg.rendered {
-            self.print_verification_failure_details(rendered);
-        } else if let Some(rendered) = &msg.rendered {
-            // For other errors, show key information
-            self.print_error_summary(rendered, level_color);
-        } else {
-            // Fallback to manual formatting if no rendered field
-            self.print_manual_formatting(msg, level_color);
-        }
-    }
-
-    fn print_verification_failure_details(&self, rendered: &str) {
-        let lines: Vec<&str> = rendered.lines().collect();
-        let mut file_location = String::new();
-        let mut in_expansion = false;
-
-        // Extract file location
-        for line in &lines {
-            if line.contains("-->") {
-                file_location = line.trim().to_string();
-                break;
-            }
-        }
-
-        if !file_location.is_empty() {
-            println!("   {} {}", "Location:".bright_blue(), file_location.bright_white());
-        }
-
-        // Determine if this is a diagnostic expansion
-        let is_diagnostic = rendered.contains("diagnostics via expansion");
-        if is_diagnostic {
-            println!("   {}", "Expansion Details:".blue().bold());
-        } else {
-            println!("   {}", "Details:".red().bold());
-        }
-
-        // Output the rendered message with enhanced formatting for diagnostics
-        for line in lines {
-            if line.trim().is_empty() {
-                println!();
-                continue;
-            }
-
-            // Detect start of expansion
-            if line.contains("diagnostics via expansion") {
-                println!("   {}", line.blue().bold());
-                in_expansion = true;
-                continue;
-            }
-
-            if is_diagnostic && in_expansion {
-                // Enhanced formatting for diagnostic expansion
-                if line.trim_start().starts_with("|") {
-                    // Extract the code part after the line marker
-                    if let Some(pipe_pos) = line.find("|") {
-                        let prefix = &line[..pipe_pos + 1];
-                        let code_part = &line[pipe_pos + 1..];
-
-                        // Highlight different verification constructs
-                        if code_part.contains("==>") {
-                            println!("   {}{}", prefix.dimmed(), code_part.yellow().bold());
-                        } else if code_part.contains("✔") {
-                            println!("   {}{}", prefix.dimmed(), code_part.green().bold());
-                        } else if code_part.contains("✘") {
-                            println!("   {}{}", prefix.dimmed(), code_part.red().bold());
-                        } else {
-                            println!("   {}{}", prefix.dimmed(), code_part.white());
-                        }
-                    } else {
-                        println!("   {}", line.white());
-                    }
-                } else if line.contains("-->") {
-                    println!("   {}", line.bright_blue());
-                } else if line.starts_with("note:") {
-                    println!("   {}", line.blue().bold());
-                } else {
-                    println!("   {}", line.white());
-                }
-            } else {
-                // Regular formatting for errors
-                if line.starts_with("error:") {
-                    println!("   {}", line.red().bold());
-                } else if line.contains("-->") {
-                    println!("   {}", line.bright_blue());
-                } else if line.contains("failed precondition")
-                    || line.contains("failed this postcondition")
-                    || line.contains("assertion failed")
-                {
-                    println!("   {}", line.red().bold());
-                } else if line.trim_start().starts_with("|") {
-                    // Code lines - highlight important ones
-                    if line.contains("^") || line.contains("~") {
-                        println!("   {}", line.red().bold());
-                    } else {
-                        println!("   {}", line.dimmed());
-                    }
-                } else {
-                    println!("   {}", line);
-                }
-            }
-        }
-    }
-
-    fn print_error_summary(&self, rendered: &str, level_color: &str) {
-        let lines: Vec<&str> = rendered.lines().collect();
-
-        // Show key lines only
-        for line in lines.iter().take(10) {
-            if line.contains("-->") {
-                println!("   {}", line.bright_blue());
-            } else if line.contains("^") || line.contains("~") {
-                println!("   {}", line.color(level_color).bold());
-            } else if line.starts_with("help:") || line.starts_with("note:") {
-                println!("   {}", line.cyan());
-                break; // Show first help/note and stop
-            }
-        }
-    }
-
-    fn print_manual_formatting(&self, msg: &CompilerMessage, _level_color: &str) {
-        // Print primary spans with file information
-        for span in &msg.spans {
-            if span.is_primary {
-                println!(
-                    "   {} {}:{}:{}",
-                    "→".bright_blue(),
-                    span.file_name.bright_white(),
-                    span.line_start.to_string().bright_white(),
-                    span.column_start.to_string().bright_white()
-                );
-
-                // Print first few lines of code context
-                for text in span.text.iter().take(2) {
-                    let line = &text.text;
-                    if !line.trim().is_empty() {
-                        println!("     {}", line.dimmed());
-                    }
-                }
-
-                if let Some(label) = &span.label {
-                    println!("     {}: {}", "help".cyan(), label.cyan());
-                }
-                break; // Only show first primary span
-            }
-        }
-
-        // Print first help message
-        for child in &msg.children {
-            if child.level == "help" || child.level == "note" {
-                println!("   {} {}", child.level.cyan(), child.message.cyan());
-                break;
-            }
-        }
-    }
-}
 
 // Configuration constants - no user-specific paths
 // const DEFAULT_VERUS_REPO: &str = "https://github.com/hiroki-chen/verus.git";
@@ -615,90 +343,18 @@ impl Builder {
         }
     }
 
-    /// Execute a cargo command with JSON message parsing for better error display
-    fn execute_cargo_with_json(&self, mut cmd: Command, log_file_name: &str) -> Result<()> {
-        // Enable JSON output for cargo commands
-        cmd.args(["--message-format", "json", "--", "--expand-errors"]);
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-        let log_dir = self.config.root.join("logs");
-        std::fs::create_dir_all(&log_dir).context("Failed to create logs directory")?;
-
-        let log_file_path = log_dir.join(log_file_name);
-        let mut log_file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&log_file_path)
-            .with_context(|| format!("Failed to create log file: {:?}", log_file_path))?;
-
+    /// Execute a cargo command - simplified version that just runs normally
+    fn execute_cargo_with_json(&self, mut cmd: Command, _log_file_name: &str) -> Result<()> {
         println!("{} Executing command: {:?}", "→".bright_blue(), cmd);
-        println!("{} Logs will be written to: {:?}", "📝".bright_cyan(), log_file_path);
-
-        writeln!(log_file, "=== COMMAND ===")?;
-        writeln!(log_file, "{:?}", cmd)?;
-        writeln!(log_file, "\n=== OUTPUT ===")?;
-
-        let mut child = cmd.spawn().context("Failed to spawn command")?;
-        let stdout = child.stdout.take().unwrap();
-        let stderr = child.stderr.take().unwrap();
-
-        let mut summary = BuildSummary::default();
-        let mut progress_count = 0;
-
-        // Parse stdout for JSON messages
-        let stdout_reader = BufReader::new(stdout);
-        for line in stdout_reader.lines() {
-            let line = line.context("Failed to read stdout line")?;
-            writeln!(log_file, "{}", line)?;
-
-            // Try to parse as JSON cargo message
-            if let Ok(msg) = serde_json::from_str::<CargoMessage>(&line) {
-                match msg {
-                    CargoMessage::CompilerMessage { message } => {
-                        summary.add_message(message);
-                    }
-                    CargoMessage::BuildFinished { success } => {
-                        summary.successful = success;
-                    }
-                    CargoMessage::Other => {
-                        // Could be a progress message, show some progress
-                        progress_count += 1;
-                        if progress_count % 10 == 0 {
-                            print!(".");
-                            std::io::stdout().flush().unwrap_or(());
-                        }
-                    }
-                }
-            } else {
-                // Non-JSON output, just show it
-                if !line.trim().is_empty() {
-                    println!("{}", line);
-                }
-            }
-        }
-
-        // Read stderr
-        let stderr_reader = BufReader::new(stderr);
-        for line in stderr_reader.lines() {
-            let line = line.context("Failed to read stderr line")?;
-            writeln!(log_file, "STDERR: {}", line)?;
-            if !line.trim().is_empty() {
-                println!("{} {}", "stderr:".red(), line);
-            }
-        }
-
-        let status = child.wait().context("Failed to wait for command")?;
-        writeln!(log_file, "\n=== EXIT STATUS ===")?;
-        writeln!(log_file, "{}", status)?;
-
-        // Print summary
-        summary.print_summary();
+        
+        // Run the command normally - no redirection, no JSON parsing, just let it run
+        let status = cmd.status().context("Failed to execute command")?;
 
         if !status.success() {
             return Err(anyhow::anyhow!("Command failed with exit code: {}", status));
         }
 
+        println!("{} Command completed successfully", "✓".green());
         Ok(())
     }
 
@@ -799,7 +455,9 @@ impl Builder {
             .arg("--features")
             .arg(&self.config.target_arch)
             .arg("--bin")
-            .arg("stage2");
+            .arg("stage2")
+            .arg("--")
+            .arg("--expand-errors");
 
         if release {
             cmd.arg("--release");
@@ -833,7 +491,9 @@ impl Builder {
             .arg("--features")
             .arg(&self.config.target_arch)
             .arg("--bin")
-            .arg("deko");
+            .arg("deko")
+            .arg("--")
+            .arg("--expand-errors");
 
         if release {
             cmd.arg("--release");
