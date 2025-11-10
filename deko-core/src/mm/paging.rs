@@ -2128,8 +2128,8 @@ impl Page {
                 shared_bit,
             ));
 
-            kinfo!("arguments for map_page_4k:\n\t", "page_addr:", page.addr() => hex,
-                    "\n\t", "curr_vaddr:", curr_vaddr.0 => hex, "\n\t", "curr_paddr:", curr_paddr.0 => hex, "\n");
+            // kinfo!("arguments for map_page_4k:\n\t", "page_addr:", page.addr() => hex,
+            //         "\n\t", "curr_vaddr:", curr_vaddr.0 => hex, "\n\t", "curr_paddr:", curr_paddr.0 => hex, "\n");
 
             // Need to add something explicit about the before and after-state of
             // pgtable_perm to ensure that we know that mapped pages are preserved.
@@ -4368,6 +4368,7 @@ impl Mapping {
     ensures
         ctx_perm.wf_with(ctx),
         ctx_perm.pgtable_perm.mapped_region(vaddr_start..vaddr_end),
+        ctx_perm.pgtable_perm.mapping_space == old(ctx_perm).pgtable_perm.mapping_space,
 )]
 pub(crate) fn map_and_validate_elf_segment(
     ctx: DekoPPtr<DekoCpuCtx>,

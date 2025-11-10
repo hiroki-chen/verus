@@ -332,6 +332,7 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
         if validate { true } else { true },  // TODO: fill in later.
         ctx_perm.wf(),
         ctx_perm.pgtable_perm.mapped_region(vrange),
+        ctx_perm.pgtable_perm.mapping_space == old(ctx_perm).pgtable_perm.mapping_space,
 )]
 pub fn validate_vaddr_region(vrange: Range<VirtAddr>, validate: bool) {
     broadcast use vstd::arithmetic::div_mod::lemma_mod_subtraction;
@@ -352,6 +353,7 @@ pub fn validate_vaddr_region(vrange: Range<VirtAddr>, validate: bool) {
             end == vrange.end@,
             ctx_perm.wf(),
             ctx_perm.pgtable_perm.mapped_region(vrange),
+            ctx_perm.pgtable_perm.mapping_space == old(ctx_perm).pgtable_perm.mapping_space,
             vrange.wf(),
             vrange.start@ % PAGE_SIZE == 0,
             vrange.end@ % PAGE_SIZE == 0,

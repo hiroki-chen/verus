@@ -337,17 +337,25 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
         header.get_igvm_params_spec().find_kernel_region_spec() matches Some((kstart, _)) ==> kstart == old(kernel_end),
     ensures
         ctx_perm.wf_with(ctx),
+        r matches Some((entry_point, vaddr_range))
+            ==> {
+                    &&& entry_point.wf()
+                    &&& vaddr_range.wf()
+                    &&& entry_point@ % PAGE_SIZE == 0
+                    &&& vaddr_range.start@ % PAGE_SIZE == 0
+                    &&& vaddr_range.end@ % PAGE_SIZE == 0
+                }
 )]
 fn load_deko_monitor(
     ctx: DekoPPtr<DekoCpuCtx>,
     kernel_end: &mut PhysAddr,
     header: Stage2LaunchInfo,
-) -> (r: Option<VirtAddr>) {
+) -> (r: Option<(VirtAddr, VaddrRange)>) {
     let elf_len = header.kernel_elf_end - header.kernel_elf_start;
     let elf_start = PhysAddr::from(header.kernel_elf_start as u64);
     let elf_end = PhysAddr::from(header.kernel_elf_end as u64);
 
-    kinfo!("ELF range: [", elf_start.0 => hex, " - ", elf_end.0 => hex, "]");
+    kinfo!("ELF range: [", elf_start => hex, " - ", elf_end => hex, "]");
 
     // Load the ELF file into memory.
     let elf_file = ElfFile::new(elf_start, elf_end)?;
@@ -355,16 +363,34 @@ fn load_deko_monitor(
     proof { assert(elf_file == header.get_elf().unwrap()) }
 
     let vaddr_alloc_base = elf_file.get_vaddr_alloc_base();
-    kinfo!("Kernel load base virtual address: ", vaddr_alloc_base.0 => hex,);
+    kinfo!("Kernel load base virtual address: ", vaddr_alloc_base => hex,);
+
     // Map, validate and populate the  kernel ELF's PT_LOAD segments. The
     // segments' virtual address range might not necessarily be contiguous,
     // track their total extent along the way. Physical memory is successively
     // being taken from the physical memory region, the remaining space will be
     // available as heap space for the kernel. Remember the end of all
     // physical memory occupied by the loaded ELF image.
-    elf_file.load_each_segment(ctx, vaddr_alloc_base, kernel_end, header, Tracked(ctx_perm));
+    let (vaddr_start, vaddr_end) = elf_file.load_each_segment(ctx, vaddr_alloc_base, kernel_end, header, Tracked(ctx_perm));
 
-    Some(0u64.into())
+    if core::intrinsics::unlikely(vaddr_start.is_none()) {
+        kerror!("No loadable segment in the ELF. Likely broken");
+
+        crate::die("");
+    }
+
+    let vaddr_start = vaddr_start.unwrap();
+
+    proof {
+
+    }
+
+    // Apply relocations if any.
+    // todo.
+
+    let kernel_entry = elf_file.get_entry_point(vaddr_alloc_base);
+
+    Some((kernel_entry, vaddr_start..vaddr_end))
 }
 
 /// Finish the boostrapping and jump into the monitor's entry point.

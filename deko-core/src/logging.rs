@@ -432,7 +432,6 @@ impl_deko_debug_integer!(
     i8, i16, i32, i64, i128, isize,
 );
 
-
 impl DekoDebug for bool {
     #[verifier::external_body]
     fn deko_debug(&self) {
@@ -550,6 +549,35 @@ impl<'a> DekoDebug for &'a [u8] {
         }
     }
 }
+
+impl DekoDebug for deko_std::address::VirtAddr {
+    #[verifier::external_body]
+    fn deko_debug(&self) {
+        print_str("VirtAddr(");
+        self.0.deko_debug_hex();
+        print_char(')');
+    }
+
+    #[verifier::external_body]
+    fn deko_debug_hex(&self) {
+        self.deko_debug();
+    }
+}
+
+impl DekoDebug for deko_std::address::PhysAddr {
+    #[verifier::external_body]
+    fn deko_debug(&self) {
+        print_str("PhysAddr(");
+        self.0.deko_debug_hex();
+        print_char(')');
+    }
+
+    #[verifier::external_body]
+    fn deko_debug_hex(&self) {
+        self.deko_debug();
+    }
+}
+
 impl DekoDebug for deko_std::boot::IgvmParamBlock {
     #[verifier::external_body]
     fn deko_debug(&self) {
@@ -719,6 +747,31 @@ impl DekoDebug for deko_std::address::FixedAddressMappingRange {
         print_str(",\n");
 
         print_str("    }");
+    }
+}
+
+impl<T: DekoDebug> DekoDebug for core::ops::Range<T> {
+    #[verifier::external_body]
+    fn deko_debug(&self) {
+        print_str("Range { start: ");
+        self.start.deko_debug();
+        print_str(", end: ");
+        self.end.deko_debug();
+        print_str(" }");
+    }
+}
+
+impl<T: DekoDebug + WellFormed, const N: usize> DekoDebug for deko_std::array::Array<T, N> {
+    #[verifier::external_body]
+    fn deko_debug(&self) {
+        print_str("Array [");
+        for i in 0..N {
+            if i > 0 {
+                print_str(", ");
+            }
+            self.0[i].deko_debug();
+        }
+        print_str("]");
     }
 }
 

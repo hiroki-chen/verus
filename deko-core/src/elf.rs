@@ -58,6 +58,10 @@ verus! {
         r.2@ >= r.1@,
         r.2@ == segment.vaddr_end().page_align_up_spec()@,
         r.1@ == segment.vaddr_begin()@,
+        r.1.wf(),
+        r.2.wf(),
+        r.1@ % PAGE_SIZE == 0,
+        r.2@ % PAGE_SIZE == 0,
         ctx_perm.pgtable_perm.mapping_space == old(ctx_perm).pgtable_perm.mapping_space,
         /* Non overflowing properties... */
 )]
@@ -89,13 +93,16 @@ fn load_elf_segment(
         crate::die("ELF segment virtual address not page-aligned!");
     }
 
-    // FIXME: This function isn't doing the right thing. investigate it.
     #[verus_spec(with Tracked(ctx_perm), Ghost(segment_index))]
     crate::mm::paging::map_and_validate_elf_segment(ctx, header, segment_start, segment_end, paddr);
 
     unsafe { #[verus_spec(with Tracked(ctx_perm))] segment.copy_file_contents(); }
 
-    crate::die("Not implemented yet")
+    (
+        PhysAddr(paddr.0 + segment_len),
+        segment_start,
+        segment_end,
+    )
 }
 
 /// A thin wrapper around [`elf::Elf64File`] to be used in Verus code.
@@ -142,6 +149,8 @@ impl<'a> ElfFile<'a> {
     pub uninterp spec fn new_spec(start_paddr: PhysAddr, end_paddr: PhysAddr) -> Option<Self>;
 
     pub uninterp spec fn load_segments(&self) -> Seq<ElfLoadSegment>;
+
+    pub uninterp spec fn entry_point(&self, base: VirtAddr) -> VirtAddr;
 
     pub open spec fn paddr_after_load_ith_segment(&self, i: usize, base: PhysAddr) -> PhysAddr
         recommends
@@ -245,6 +254,8 @@ impl<'a> ElfFile<'a> {
             self.wf(),
         ensures
             r == self.get_vaddr_alloc_base_spec(),
+            r.wf(),
+            r@ >= VADDR_UPPER_MASK,
     {
         self.0.image_load_vaddr_alloc_info().range.vaddr_begin.into()
     }
@@ -289,11 +300,16 @@ impl<'a> ElfFile<'a> {
             old(paddr).wf(),
             old(ctx_perm).wf_with(ctx),
             old(paddr)@ % PAGE_SIZE == 0,
+            base@ >= VADDR_LOWER_MASK,
         ensures
             ctx_perm.wf_with(ctx),
-    // r.0 matches Some(start) ==> true,
-    // r.1 ??
-
+            r matches (Some(vaddr_start), vaddr_end) ==> {
+                &&& vaddr_start.wf()
+                &&& vaddr_end.wf()
+                &&& vaddr_start@ % PAGE_SIZE == 0
+                &&& vaddr_end@ % PAGE_SIZE == 0
+                &&& base@ < vaddr_start@ < vaddr_end@ < u64::MAX
+            },
     {
         let ghost old_paddr = *paddr;
         let mut load_virt_start = None::<VirtAddr>;
@@ -304,7 +320,17 @@ impl<'a> ElfFile<'a> {
         while i < segment_len
             invariant
                 i <= segment_len,
-                0 < i ==> paddr@ == self.paddr_after_load_ith_segment(i, old_paddr)@,
+                i == 0 ==> load_virt_start.is_none() && load_virt_end@ == 0,
+                0 < i ==>
+                    { 
+                        &&& paddr@ == self.paddr_after_load_ith_segment(i, old_paddr)@
+                        &&& load_virt_start matches Some(vaddr)
+                            && vaddr.wf()
+                            && vaddr@ % PAGE_SIZE == 0
+                            && load_virt_end.wf()
+                            && load_virt_end@ % PAGE_SIZE == 0
+                            && base@ < vaddr@ < load_virt_end@ < u64::MAX
+                    },
                 segment_len == self.load_segments().len() as usize,
                 header.get_elf() matches Some(elf_file) && elf_file == *self,
                 header.wf_for_loading(ctx_perm.pgtable_perm.mapping_space),
@@ -313,6 +339,7 @@ impl<'a> ElfFile<'a> {
                 paddr.wf(),
                 paddr@ % PAGE_SIZE == 0,
                 ctx_perm.wf_with(ctx),
+                PAGE_SIZE == 0x1000,
             decreases segment_len - i,
         {
             kinfo!("Loading ELF segment @[", i, "]...");
@@ -351,15 +378,44 @@ impl<'a> ElfFile<'a> {
             *paddr = PhysAddr(updated_phys_addr.0 + (vaddr_end.0 - vaddr_start.0));
             i += 1;
 
-            assume(ctx_perm.wf_with(ctx));  // FIX IT LATER.
-            assume(paddr@ % PAGE_SIZE == 0);
-            assume(paddr.wf());
-            assume(paddr@ == self.paddr_after_load_ith_segment(i, old_paddr)@);
+            proof {
+                assume(ctx_perm.wf_with(ctx));  // FIX IT LATER.
+                assume(paddr@ % PAGE_SIZE == 0);
+                assume(paddr.wf());
+                assume(paddr@ == self.paddr_after_load_ith_segment(i, old_paddr)@);
+                // Let's revisit the base later; might need to add something for segment.
+                assume(load_virt_start matches Some(vaddr) && base@ < vaddr@ < load_virt_end@ < u64::MAX);
+            }
         }
 
-        assume(ctx_perm == old(ctx_perm));  // FIX IT LATER.
+        proof {
+            if i == 0 {
+                assert(load_virt_start.is_none());
+                assert(load_virt_end@ == 0);
+            } else {
+                assert(load_virt_start matches Some(vaddr) && vaddr.wf() && load_virt_end.wf()
+                    && vaddr@ % PAGE_SIZE == 0 && load_virt_end@ % PAGE_SIZE == 0 && base@ < vaddr@ < load_virt_end@ < u64::MAX);
+            }
+
+            assume(ctx_perm == old(ctx_perm));  // FIX IT LATER.
+
+        }
 
         (load_virt_start, load_virt_end)
+    }
+
+    #[inline]
+    #[verifier::external_body]
+    pub fn get_entry_point(&self, base: VirtAddr) -> (r: VirtAddr)
+        requires
+            self.wf(),
+            base.wf(),
+        ensures
+            r == self.entry_point(base),
+            r.wf(),
+            r@ % PAGE_SIZE == 0,
+    {
+        VirtAddr::from(self.0.get_entry(base.0) as u64)
     }
 }
 

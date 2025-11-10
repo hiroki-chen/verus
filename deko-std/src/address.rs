@@ -906,6 +906,9 @@ impl<T> From<*mut T> for PhysAddr {
 /// must be mutliple of [`PAGE_SIZE`].
 pub type VaddrRange = core::ops::Range<VirtAddr>;
 
+/// A range of physical addresses.
+pub type PaddrRange = core::ops::Range<PhysAddr>;
+
 impl WellFormed for VaddrRange {
     /// The well-formedness predicate for virtual address ranges is
     /// simple as we just need to ensure the whole thing is bounded
@@ -917,6 +920,15 @@ impl WellFormed for VaddrRange {
     open spec fn wf(&self) -> bool {
         &&& self.end@ <= VADDR_LOWER_MASK || self.start@ >= VADDR_UPPER_MASK
         &&& self.start@ < self.end@ < u64::MAX
+    }
+}
+
+impl WellFormed for PaddrRange {
+    /// The well-formedness predicate for physical address ranges
+    /// is trivial as all physical addresses are well-formed.
+    #[verifier::inline]
+    open spec fn wf(&self) -> bool {
+        &&& self.start@ < self.end@ < 0x000f_ffff_ffff_f000u64
     }
 }
 
