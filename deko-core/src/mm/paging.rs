@@ -1,5 +1,6 @@
 use core::borrow::BorrowMut;
 
+use deko_macros::DekoDebug;
 use deko_std::prelude::*;
 use vstd::pervasive::arbitrary;
 // Re-export PTE_BASE from deko-std for backward compatibility
@@ -9,7 +10,7 @@ use super::DEKO_MAPPING_SPACE;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::DEKO_FRAME_ALLOCATOR;
-use crate::{kinfo, Stage2LaunchInfo};
+use crate::{kerror, kinfo, Stage2LaunchInfo};
 
 extern "C" {
     #[link_name = "pgtable"]
@@ -2047,6 +2048,10 @@ impl Page {
     }
 
     /// Maps _multiple_ pages in the given virtual address range to the given physical address.
+    /// 
+    /// TODO: Here we leave mapping 2M pages as unimplemented; BUT SOME PAGES ARE 2m;
+    ///       thus, the correct way is to first check if we can map_2m pages; if not
+    ///       we fallback to mapping 4k pages.
     #[verifier::spinoff_prover]
     pub fn map_page_multiple(
         page: DekoPPtr<Page>,
@@ -2187,7 +2192,8 @@ impl Page {
         );
 
         let Mapping::Level0(page, idx) = mapping else {
-            crate::die("Expected Level0 mapping");
+            kerror!("Expected Level0 mapping but got different mapping ", mapping, " for vaddr: ", vaddr);
+            crate::die("");
         };
 
         let new_pte_value = PageTableEntry(
@@ -4285,7 +4291,7 @@ pub enum PageFrame {
 /// - [ ] Fix mapping's definition.
 /// - [ ] Make walk and allocate take input as Mapping.
 /// - [ ] remove `this_page` as no longer needed.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, DekoDebug)]
 pub enum Mapping {
     Level3(DekoPPtr<Page>, usize),
     Level2(DekoPPtr<Page>, usize),

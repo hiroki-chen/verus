@@ -33,10 +33,10 @@ pub fn generate_deko_debug_impl(input: &DeriveInput) -> Result<TokenStream2, syn
 fn generate_struct_impl(input: &DeriveInput, fields: &Fields) -> Result<TokenStream2, syn::Error> {
     let name = &input.ident;
     let struct_name = name.to_string();
-    
+
     // Extract generics for proper impl bounds
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-    
+
     // Check if struct is packed
     let is_packed = is_struct_packed(&input.attrs);
 
@@ -96,7 +96,7 @@ fn generate_enum_impl(
 ) -> Result<TokenStream2, syn::Error> {
     let name = &input.ident;
     let enum_name = name.to_string();
-    
+
     // Extract generics for proper impl bounds
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     let variant_arms = variants
@@ -265,7 +265,10 @@ fn is_struct_packed(attrs: &[Attribute]) -> bool {
     false
 }
 
-fn generate_field_debug_calls(fields: &[FieldInfo], is_packed: bool) -> Vec<proc_macro2::TokenStream> {
+fn generate_field_debug_calls(
+    fields: &[FieldInfo],
+    is_packed: bool,
+) -> Vec<proc_macro2::TokenStream> {
     fields
         .iter()
         .map(|field| {
@@ -423,11 +426,11 @@ fn generate_tuple_field_debug_calls(
                 FieldFormat::Skip => return Ok(quote! {}),
                 FieldFormat::Hex => quote! { self.#index.deko_debug_hex(writer); },
                 FieldFormat::Oct => quote! { self.#index.deko_debug_oct(writer); },
-                FieldFormat::Bin => quote! { 
+                FieldFormat::Bin => quote! {
                     writer.write_str("0b");
                     self.#index.deko_debug(writer);
                 },
-                FieldFormat::Size => quote! { 
+                FieldFormat::Size => quote! {
                     #[cfg(feature = "logging")]
                     {
                         let size_value = ::deko_std::misc::get_size_value(self.#index);

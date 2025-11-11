@@ -222,14 +222,16 @@ fn init_early_idt_late(idt: &mut Idt) {
 /// Sets up the environment for the platform which will setup the GDT, kernel mapping, paging,
 /// kernel loading, heaps, etc.
 #[verifier::exec_allows_no_decreases_clause]
-#[verus_spec(__ =>
+#[verus_spec(r =>
+    with
+        ctx_perm: Tracked<DekoCtxPermission>,
     requires
         ctx_perm@.wf_with(ctx),
         ctx_perm@.current_cpu_core.is_bsp(),
     ensures
 )]
-pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -> (__discard: !) {
-    let Tracked(mut ctx_perm) = ctx_perm;
+pub fn setup_env(ctx: DekoPPtr<DekoCtx>) -> (__discard: !) {
+    let tracked Tracked(mut ctx_perm) = ctx_perm;
 
     // Extract the launch info from the context.
     let header = ctx.borrow(Tracked(&ctx_perm.deko_ctx_ptr_perm)).stage2_launch_info.borrow(
@@ -334,17 +336,47 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
             }
             let igvm_params = #[verus_spec(with Tracked(&ctx_perm))]
             header.get_igvm_params();
+            kinfo!("IGVM params found:", igvm_params);
+
             let (igvm_vregion, igvm_pregion) = #[verus_spec(with Tracked(&mut ctx_perm))]
             load_igvm_params(
                 ctx,
                 header,
                 &igvm_params,
-                loaded_kernel_vregion,
-                loaded_kernel_pregion,
+                loaded_kernel_vregion.clone(),
+                loaded_kernel_pregion.clone(),
             );
 
             kinfo!("IGVM params virtual range:", igvm_vregion);
             kinfo!("IGVM params physical range:", igvm_pregion);
+
+            // Expand the loaded regions to include the IGVM params.
+            loaded_kernel_vregion.end = igvm_vregion.end.clone();
+            loaded_kernel_pregion.end = igvm_pregion.end.clone();
+
+            // Use remaining space after kernel image as heap space.
+            proof {
+                // FIX LATER.
+                assume(loaded_kernel_pregion.wf());
+                assume(loaded_kernel_vregion.wf());
+                assume(loaded_kernel_pregion.end@ % PAGE_SIZE == 0);
+                assume(loaded_kernel_pregion.start@ % PAGE_SIZE == 0);
+                assume(loaded_kernel_vregion.end@ % PAGE_SIZE == 0);
+                assume(loaded_kernel_vregion.start@ % PAGE_SIZE == 0);
+                assume(header.wf_for_loading(ctx_perm.pgtable_perm.mapping_space));
+            }
+            let (heap_vregion, heap_pregion) = #[verus_spec(with Tracked(&mut ctx_perm))]
+            prepare_heap(
+                ctx,
+                kernel_phys_start..kernel_phys_end,
+                loaded_kernel_pregion.clone(),
+                loaded_kernel_vregion.clone(),
+                igvm_params,
+                header,
+            );
+
+            kinfo!("Deko setup complete. Jumping to kernel entry point...");
+            into_deko_monitor(entry.0, 0xdeadbeef);  // placeholder for now.
         } else {
             kerror!("Deko failed to load the kernel ELF file! Check if the format is correct.");
         }
@@ -364,6 +396,7 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
         Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>
     requires
         old(ctx_perm).wf_with(ctx),
+        old(ctx_perm).pgtable_perm.mapped(VirtAddr::new(header.igvm_params as u64)),
         header.wf_for_loading(old(ctx_perm).pgtable_perm.mapping_space),
         igvm_params.wf(),
         loaded_kernel_vregion.wf(),
@@ -376,6 +409,7 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
     ensures
         r.0.wf(),
         r.1.wf(),
+        ctx_perm.wf_with(ctx),
 )]
 fn load_igvm_params(
     ctx: DekoPPtr<DekoCpuCtx>,
@@ -427,12 +461,47 @@ fn load_igvm_params(
     crate::mm::paging::map_and_validate(
         ctx,
         header,
-        igvm_vregion.start,
-        igvm_vregion.end,
+        igvm_vregion.start.clone(),
+        igvm_vregion.end.clone(),
         igvm_pregion.start,
     );
 
-    crate::die("Not implemented yet");
+    // Need to add extra condition that other mappings will
+    // not get changed during `map_and_Validate`.
+    assume(ctx_perm.pgtable_perm.mapped(VirtAddr::new(header.igvm_params as u64)));
+
+    // Then copy the IGVM params into the mapped region.
+    unsafe {
+        #[verus_spec(with Tracked(ctx_perm))]
+        copy_igvm_params_to_mapped_region(
+            VirtAddr::new(header.igvm_params as u64),
+            igvm_vregion.clone(),
+        );
+    }
+
+    (igvm_vregion, igvm_pregion)
+}
+
+#[verifier::external_body]
+#[verus_spec(r =>
+    with
+        Tracked(ctx_perm): Tracked<&DekoCpuCtxPermission>,
+    requires
+        ctx_perm.wf(),
+        ctx_perm.pgtable_perm.mapped(src_addr),
+        ctx_perm.pgtable_perm.mapped_region(igvm_vregion),
+        src_addr.wf(),
+        igvm_vregion.wf(),
+        igvm_vregion.start@ % PAGE_SIZE == 0,
+        igvm_vregion.end@ % PAGE_SIZE == 0,
+    ensures
+)]
+unsafe fn copy_igvm_params_to_mapped_region(src_addr: VirtAddr, igvm_vregion: VaddrRange) {
+    core::ptr::copy_nonoverlapping(
+        src_addr.0 as *const u8,
+        igvm_vregion.start.0 as *mut u8,
+        (igvm_vregion.end.0 - igvm_vregion.start.0) as usize,
+    );
 }
 
 /// Loads the kernel ELF and returns the virtual memory region where it
@@ -510,6 +579,74 @@ fn load_deko_monitor(
     let kernel_entry = elf_file.get_entry_point(vaddr_alloc_base);
 
     Some((kernel_entry, vaddr_start..vaddr_end))
+}
+
+/// Maps any remaining memory between the end of the kernel image and the end
+/// of the allocated kernel memory region as heap space. Exclude any memory
+/// reserved by the configuration.
+#[verus_spec(r =>
+    with
+        Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>
+    requires
+        old(ctx_perm).wf_with(ctx),
+        loaded_kernel_vregion.wf(),
+        loaded_kernel_pregion.wf(),
+        loaded_kernel_pregion.start@ % PAGE_SIZE == 0,
+        loaded_kernel_pregion.end@ % PAGE_SIZE == 0,
+        loaded_kernel_vregion.start@ % PAGE_SIZE == 0,
+        loaded_kernel_vregion.end@ % PAGE_SIZE == 0,
+        loaded_kernel_vregion.start@ >= VADDR_UPPER_MASK,
+        header.wf_for_loading(old(ctx_perm).pgtable_perm.mapping_space),
+        igvm_params.wf(),
+    ensures
+)]
+fn prepare_heap(
+    ctx: DekoPPtr<DekoCpuCtx>,
+    kernel_pregion: PaddrRange,
+    loaded_kernel_pregion: PaddrRange,
+    loaded_kernel_vregion: VaddrRange,
+    igvm_params: IgvmParams,
+    header: Stage2LaunchInfo,
+) -> (r: (VaddrRange, PaddrRange)) {
+    let heap_pstart = loaded_kernel_pregion.end;
+    let heap_vstart = loaded_kernel_vregion.end;
+    let heap_size = match kernel_pregion.end.0.checked_sub(heap_pstart.0) {
+        Some(v) => match v.checked_sub(igvm_params.igvm_param_block.kernel_reserved_size as u64) {
+            Some(r) => r,
+            None => {
+                kerror!("No remaining memory for heap after loading kernel and IGVM params!");
+                crate::die("");
+            },
+        },
+        None => {
+            kerror!("No remaining memory for heap after loading kernel and IGVM params!");
+            crate::die("");
+        },
+    };
+
+    proof {
+        // FIX LATER.
+        assume(heap_size + heap_pstart@ < 0x000f_ffff_ffff_f000);
+        assume(heap_size + heap_vstart@ < u64::MAX);
+        assume((heap_size + heap_pstart@) % PAGE_SIZE as int == 0);
+        assume((heap_size + heap_vstart@) % PAGE_SIZE as int == 0);
+        assume(heap_size > 0);
+    }
+
+    let heap_pregion = heap_pstart..PhysAddr(heap_pstart.0 + heap_size);
+    let heap_vregion = heap_vstart..VirtAddr(heap_vstart.0 + heap_size);
+
+    // Map and validate the address range.
+    #[verus_spec(with Tracked(ctx_perm))]
+    crate::mm::paging::map_and_validate(
+        ctx,
+        header,
+        heap_vregion.start.clone(),
+        heap_vregion.end.clone(),
+        heap_pregion.start,
+    );
+
+    (heap_vregion, heap_pregion)
 }
 
 /// Finish the boostrapping and jump into the monitor's entry point.

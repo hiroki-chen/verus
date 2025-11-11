@@ -10,7 +10,6 @@ use git2::Repository;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use serde::Deserialize;
 
-
 // Configuration constants - no user-specific paths
 // const DEFAULT_VERUS_REPO: &str = "https://github.com/hiroki-chen/verus.git";
 const DEFAULT_MEMORY: &str = "4G";
@@ -346,7 +345,7 @@ impl Builder {
     /// Execute a cargo command - simplified version that just runs normally
     fn execute_cargo_with_json(&self, mut cmd: Command, _log_file_name: &str) -> Result<()> {
         println!("{} Executing command: {:?}", "→".bright_blue(), cmd);
-        
+
         // Run the command normally - no redirection, no JSON parsing, just let it run
         let status = cmd.status().context("Failed to execute command")?;
 

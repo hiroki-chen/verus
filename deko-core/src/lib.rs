@@ -8,6 +8,7 @@
 #![allow(named_asm_labels)]
 #![allow(binary_asm_labels)]
 
+use deko_macros::DekoDebug;
 use deko_std::prelude::*;
 use elf::ElfFile;
 use vstd::prelude::*;
@@ -65,7 +66,7 @@ pub fn die(s: &str) -> ! {
 /// The parameter's structure is defined in svsm/igvmbuilder; we can also
 /// construct one on our own if needed but not necessary for the time being.
 #[repr(C, packed)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, DekoDebug)]
 pub struct Stage2LaunchInfo {
     // VTOM must be the first field.
     pub vtom: u64,
@@ -81,7 +82,38 @@ pub struct Stage2LaunchInfo {
     pub kernel_fs_start: u32,
     pub kernel_fs_end: u32,
     pub igvm_params: u32,
+    #[deko(skip)]
     pub _reserved: u32,
+}
+
+#[derive(Copy, Clone, DekoDebug)]
+#[repr(C)]
+pub struct DekoKernelLaunchInfo {
+    /// Start of the kernel in physical memory.
+    pub kernel_region_phys_start: u64,
+    /// Exclusive end of the kernel in physical memory.
+    pub kernel_region_phys_end: u64,
+    pub heap_area_phys_start: u64,  // Start of trailing heap area within the physical memory region.
+    pub heap_area_size: u64,
+    pub kernel_region_virt_start: u64,
+    pub heap_area_virt_start: u64,  // Start of virtual heap area mapping.
+    pub kernel_elf_stage2_virt_start: u64,  // Virtual address of kernel ELF in Stage2 mapping.
+    pub kernel_elf_stage2_virt_end: u64,
+    pub kernel_fs_start: u64,
+    pub kernel_fs_end: u64,
+    pub stage2_start: u64,
+    pub stage2_end: u64,
+    pub cpuid_page: u64,
+    pub secrets_page: u64,
+    pub stage2_igvm_params_phys_addr: u64,
+    pub stage2_igvm_params_size: u64,
+    pub igvm_params_phys_addr: u64,
+    pub igvm_params_virt_addr: u64,
+    pub vtom: u64,
+    pub debug_serial_port: u16,
+    pub use_alternate_injection: bool,
+    #[deko(enabled)]
+    pub suppress_deko_interrupts: bool,
 }
 
 impl Stage2LaunchInfo {

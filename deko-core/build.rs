@@ -33,7 +33,7 @@ fn main() {
         .ok()
         .and_then(|epoch| epoch.parse::<i64>().ok())
         .map(|epoch| {
-            use std::time::{SystemTime, UNIX_EPOCH};
+            use std::time::UNIX_EPOCH;
             let dt = UNIX_EPOCH + std::time::Duration::from_secs(epoch as u64);
             format_timestamp(dt)
         })

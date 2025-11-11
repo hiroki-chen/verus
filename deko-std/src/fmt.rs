@@ -1,7 +1,7 @@
 use lexical_core::{write_with_options, NumberFormatBuilder};
 use vstd::prelude::*;
 
-use crate::WellFormed;
+use crate::{DekoPPtr, WellFormed};
 
 // Remove the generic implementation and use a macro instead
 macro_rules! impl_deko_debug_integer {
@@ -75,7 +75,7 @@ pub trait DekoDebug {
     }
 }
 
-#[verifier::external_body]
+#[verifier::external]
 fn print_byte_hex_padded<W: DekoWriter>(byte: u8, writer: &W) {
     let hex_chars = b"0123456789ABCDEF";
     writer.write_char(hex_chars[(byte >> 4) as usize] as char);
@@ -83,7 +83,7 @@ fn print_byte_hex_padded<W: DekoWriter>(byte: u8, writer: &W) {
 }
 
 // Specific helpers for common cases with optimized buffer sizes
-#[verifier::external_body]
+#[verifier::external]
 pub(crate) fn print_integer_hex<T: lexical_core::ToLexicalWithOptions, W: DekoWriter>(num: T, writer: &W) {
     writer.write_str("0x");
 
@@ -98,7 +98,7 @@ pub(crate) fn print_integer_hex<T: lexical_core::ToLexicalWithOptions, W: DekoWr
     writer.write_bytes(&digits);
 }
 
-#[verifier::external_body]
+#[verifier::external]
 pub(crate) fn print_integer_oct<T: lexical_core::ToLexicalWithOptions, W: DekoWriter>(num: T, writer: &W) {
     writer.write_str("0o");
 
@@ -113,7 +113,7 @@ pub(crate) fn print_integer_oct<T: lexical_core::ToLexicalWithOptions, W: DekoWr
     writer.write_bytes(&digits);
 }
 
-#[verifier::external_body]
+#[verifier::external]
 pub(crate) fn print_integer_bin<T: lexical_core::ToLexicalWithOptions, W: DekoWriter>(num: T, writer: &W) {
     writer.write_str("0b");
     const FORMAT: u128 = NumberFormatBuilder::binary();
@@ -316,12 +316,12 @@ impl<T: DekoDebug + ?Sized> DekoDebug for &T {
     fn deko_debug<W: DekoWriter>(&self, writer: &W) {
         (*self).deko_debug(writer);
     }
-    
+
     #[verifier::external_body]
     fn deko_debug_hex<W: DekoWriter>(&self, writer: &W) {
         (*self).deko_debug_hex(writer);
     }
-    
+
     #[verifier::external_body]
     fn deko_debug_oct<W: DekoWriter>(&self, writer: &W) {
         (*self).deko_debug_oct(writer);
@@ -411,6 +411,15 @@ impl<T: DekoDebug, const N: usize> DekoDebug for [T; N] {
             self[i].deko_debug(writer);
         }
         writer.write_str("]");
+    }
+}
+
+impl<V: WellFormed> DekoDebug for DekoPPtr<V> {
+    #[verifier::external_body]
+    fn deko_debug<W: DekoWriter>(&self, writer: &W) {
+        writer.write_str("DekoPPtr(");
+        (self.addr()).deko_debug_hex(writer);
+        writer.write_str(")");
     }
 }
 

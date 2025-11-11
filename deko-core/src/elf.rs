@@ -331,7 +331,7 @@ impl<'a> ElfFile<'a> {
                     load_virt_start matches None && load_virt_end@ == 0
                 },
                 0 < i ==>
-                { 
+                {
                     &&& paddr@ == self.paddr_after_load_ith_segment(i, *old(paddr))@
                     &&& load_virt_start matches Some(vaddr)
                     && vaddr.wf()

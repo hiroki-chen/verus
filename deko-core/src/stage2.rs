@@ -34,13 +34,15 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 // Making this function as `external` is awkward as
 // verus treats imports from `deko_core` as external.
 #[verifier::external]
-extern "C" fn deko_main(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -> (__discard:
-    !)
+#[verus_spec(r =>
+    with
+        Tracked(ctx_perm): Tracked<DekoCtxPermission>,
     requires
-        ctx_perm@.wf_with(ctx),
-        ctx_perm@.current_cpu_core.is_bsp(),
-{
-    deko_core::hal::setup_env(ctx, ctx_perm);
+        ctx_perm.wf_with(ctx),
+        ctx_perm.current_cpu_core.is_bsp(),
+)]
+extern "C" fn deko_main(ctx: DekoPPtr<DekoCtx>) -> (__discard: !) {
+    deko_core::hal::setup_env(ctx);
 }
 
 } // verus!

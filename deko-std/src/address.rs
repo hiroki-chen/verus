@@ -589,7 +589,10 @@ impl MappingSpace {
 /// ```
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Default, DekoDebug)]
 #[repr(transparent)]
-pub struct VirtAddr(#[deko(hex)] pub u64);
+pub struct VirtAddr(
+    #[deko(hex)]
+    pub u64,
+);
 
 impl View for VirtAddr {
     type V = u64;
@@ -790,7 +793,10 @@ impl WellFormed for VirtAddr {
 /// ```
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Default, DekoDebug)]
 #[repr(transparent)]
-pub struct PhysAddr(#[deko(hex)] pub u64);
+pub struct PhysAddr(
+    #[deko(hex)]
+    pub u64,
+);
 
 impl View for PhysAddr {
     type V = u64;
