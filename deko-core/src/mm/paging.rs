@@ -9,7 +9,7 @@ use super::DEKO_MAPPING_SPACE;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::DEKO_FRAME_ALLOCATOR;
-use crate::{Stage2LaunchInfo, kinfo};
+use crate::{kinfo, Stage2LaunchInfo};
 
 extern "C" {
     #[link_name = "pgtable"]
@@ -1181,7 +1181,7 @@ impl Page {
             old(perm).allocate_pte_lvl3_ensures(vaddr, private_bit, shared_bit, huge, r, perm),
     {
         broadcast use PteFlags::lemma_from_bits_single;
-        broadcast use PteFlags::lemma_each_bits_is_valid;
+        broadcast use PteFlags::lemma_each_bit_is_valid;
         broadcast use lemma_index_at_level_spec_lt_page_entry_num;
         broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
 
@@ -1332,7 +1332,7 @@ impl Page {
             old(perm).allocate_pte_lvl2_ensures(vaddr, private_bit, shared_bit, huge, r, perm),
     {
         broadcast use PteFlags::lemma_from_bits_single;
-        broadcast use PteFlags::lemma_each_bits_is_valid;
+        broadcast use PteFlags::lemma_each_bit_is_valid;
         broadcast use lemma_index_at_level_spec_lt_page_entry_num;
         broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
 
@@ -1397,7 +1397,7 @@ impl Page {
             old(perm).allocate_pte_lvl1_ensures(vaddr, private_bit, shared_bit, huge, r, perm),
     {
         broadcast use PteFlags::lemma_from_bits_single;
-        broadcast use PteFlags::lemma_each_bits_is_valid;
+        broadcast use PteFlags::lemma_each_bit_is_valid;
         broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
 
         let Mapping::Level1(page, idx) = mapping else {
@@ -1681,7 +1681,7 @@ impl Page {
             r.wf(),
             r == pgtable_perm.virt_to_frame_spec(vaddr),
     {
-        broadcast use PteFlags::lemma_each_bits_is_valid;
+        broadcast use PteFlags::lemma_each_bit_is_valid;
         broadcast use PteFlags::lemma_from_bits_single;
         broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
         // Calculate the vaddr of each level's PTE.
@@ -1829,7 +1829,7 @@ impl Page {
             old(perm).do_split_page_into_4k_ensures(page, idx, vaddr, perm),
     {
         broadcast use PteFlags::lemma_from_bits_single;
-        broadcast use PteFlags::lemma_each_bits_is_valid;
+        broadcast use PteFlags::lemma_each_bit_is_valid;
         broadcast use PageTablePath::lemma_page_table_path_drop_last_implies;
         broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
 
@@ -2173,7 +2173,7 @@ impl Page {
             old(perm).map_page_4k_ensures(vaddr, paddr, flags, private_bit, shared_bit, perm),
     {
         broadcast use PteFlags::lemma_from_bits_single;
-        broadcast use PteFlags::lemma_each_bits_is_valid;
+        broadcast use PteFlags::lemma_each_bit_is_valid;
         broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
         // Allocate a page for us.
 
@@ -2355,7 +2355,7 @@ impl PageTableEntry {
         ensures
             r == Self::is_valid_pte_spec(&perm.value()),
     {
-        broadcast use PteFlags::lemma_each_bits_is_valid;
+        broadcast use PteFlags::lemma_each_bit_is_valid;
         broadcast use PteFlags::lemma_from_bits_single;
 
         let flags = PteFlags::from_bits_truncate(pte.borrow(Tracked(&perm)).0.0);
@@ -2371,7 +2371,7 @@ impl PageTableEntry {
         ensures
             r == Self::is_huge_pte_spec(&perm.value()),
     {
-        broadcast use PteFlags::lemma_each_bits_is_valid;
+        broadcast use PteFlags::lemma_each_bit_is_valid;
         broadcast use PteFlags::lemma_from_bits_single;
 
         let flags = PteFlags::from_bits_truncate(pte.borrow(Tracked(&perm)).0.0);
@@ -2387,7 +2387,7 @@ impl PageTableEntry {
         ensures
             r == perm.value().is_present_pte_spec(),
     {
-        broadcast use PteFlags::lemma_each_bits_is_valid;
+        broadcast use PteFlags::lemma_each_bit_is_valid;
         broadcast use PteFlags::lemma_from_bits_single;
 
         let flags = PteFlags::from_bits_truncate(pte.borrow(Tracked(&perm)).0.0);
@@ -4349,11 +4349,9 @@ impl Mapping {
     }
 }
 
-/// Map and validate the specified virtual memory region at `paddr`.
 #[verus_spec(r =>
     with
-        Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
-        Ghost(i): Ghost<usize>
+        Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>
     requires
         old(ctx_perm).wf_with(ctx),
         header.wf_for_loading(old(ctx_perm).pgtable_perm.mapping_space),
@@ -4370,17 +4368,14 @@ impl Mapping {
         ctx_perm.pgtable_perm.mapped_region(vaddr_start..vaddr_end),
         ctx_perm.pgtable_perm.mapping_space == old(ctx_perm).pgtable_perm.mapping_space,
 )]
-pub(crate) fn map_and_validate_elf_segment(
+pub(crate) fn map_and_validate(
     ctx: DekoPPtr<DekoCpuCtx>,
     header: Stage2LaunchInfo,
     vaddr_start: VirtAddr,
     vaddr_end: VirtAddr,
     paddr: PhysAddr,
 ) {
-    broadcast use PteFlags::lemma_each_bits_is_valid;
-
-    kinfo!("Mapping and validating ELF segment from [", vaddr_start.0 => hex, "] to [",
-            vaddr_end.0 => hex, "] at physical address [", paddr.0 => hex, "]");
+    broadcast use PteFlags::lemma_each_bit_is_valid;
 
     let flags = PteFlags::writeable_kernel();
 

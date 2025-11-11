@@ -12,7 +12,6 @@ use crate::cpu::{
     DekoCpuCtx, DekoCpuCtxPermission, PerCpuAreas, PerCpuShared, CPUID_MAX_COUNT, CPU_AREA_MAGIC,
     PERCPU_AREAS,
 };
-use crate::kinfo;
 use crate::logging::DekoDebug;
 use crate::mm::paging::{PageTablePermission, PteFlags};
 use crate::mm::{
@@ -20,7 +19,7 @@ use crate::mm::{
     MAX_PHYS_ADDR, PHYS_ADDR_SIZE, PTE_MASK_PRIVATE, PTE_MASK_SHARED,
 };
 use crate::snp::ghcb::msr_register_ghcb_gpa;
-use crate::Stage2LaunchInfo;
+use crate::{kinfo, Stage2LaunchInfo};
 
 pub mod ghcb;
 
@@ -35,12 +34,12 @@ verus! {
 
 #[verifier::external_body]
 #[inline(always)]
-pub fn get_igvm_params<'a>(header: &'a Stage2LaunchInfo) -> (r: &'a IgvmParamBlock)
+pub fn get_igvm_params_block<'a>(header: &'a Stage2LaunchInfo) -> (r: &'a IgvmParamBlock)
     requires
         header.wf(),
     ensures
         r.wf(),
-        r == header.get_igvm_params_spec(),
+        r == header.get_igvm_param_block_spec(),
 {
     // Note that this case does NOT include all the fields contained in the
     // `header.igvm_params` structure; we just extract the leading `IgvmParamBlock`

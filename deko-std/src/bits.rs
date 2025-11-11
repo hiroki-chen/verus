@@ -121,7 +121,7 @@ macro_rules! deko_bitflags {
                 }
 
                 /// Gives the proof that for each $Flag, it is a valid bit.
-                pub broadcast proof fn lemma_each_bits_is_valid()
+                pub broadcast proof fn lemma_each_bit_is_valid()
                     ensures
                         #[trigger]
                         $(([<$name _ALL_BITS>]) & ($Flag) == $Flag,)*

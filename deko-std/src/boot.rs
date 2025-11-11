@@ -77,10 +77,59 @@ pub struct IgvmVhsMemoryMapEntry {
     pub reserved: u32,
 }
 
+/// The IGVM parameter page is an unmeasured page containing individual
+/// parameters that are provided by the host loader.
+#[repr(C, packed)]
+pub struct IgvmParamPage {
+    /// The number of vCPUs that are configured for the guest VM.
+    pub cpu_count: u32,
+    /// The environment informatiom supplied to describe the execution
+    /// environment.  This is defined as a u32 and is converted to an
+    /// IgvmEnvironmentInfo when it is used.
+    pub environment_info: u32,
+}
+
 #[derive(Clone)]
 #[repr(C, align(64))]
 pub struct IgvmMemoryMap {
     memory_map: Array<IgvmVhsMemoryMapEntry, 0xAA>,
+}
+
+#[repr(C, packed)]
+pub struct IgvmGuestContext {
+    pub cr0: u64,
+    pub cr3: u64,
+    pub cr4: u64,
+    pub efer: u64,
+    pub gdt_base: u64,
+    pub gdt_limit: u32,
+    pub code_selector: u16,
+    pub data_selector: u16,
+    pub rip: u64,
+    pub rax: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rbx: u64,
+    pub rsp: u64,
+    pub rbp: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+}
+
+pub struct IgvmParams<'a> {
+    pub igvm_param_block: &'a IgvmParamBlock,
+    pub igvm_param_page: &'a IgvmParamPage,
+    pub igvm_memory_map: &'a IgvmMemoryMap,
+    pub igvm_madt: Option<&'a [u8]>,
+    pub igvm_guest_context: Option<&'a IgvmGuestContext>,
 }
 
 #[repr(C)]
@@ -259,6 +308,8 @@ pub struct IgvmParamBlock {
 impl WellFormed for IgvmParamBlock {
     open spec fn wf(&self) -> bool {
         &&& self.debug_serial_port + 8 <= u16::MAX
+        &&& self.param_area_size as u64 % PAGE_SIZE == 0
+        &&& self.param_area_size != 0
     }
 }
 
@@ -341,6 +392,25 @@ impl IgvmParamBlock {
                 PhysAddr::from(kernel_base.checked_add(kernel_size as u64)?),
             ),
         )
+    }
+}
+
+impl<'a> IgvmParams<'a> {
+    #[inline]
+    pub fn size(&self) -> usize
+        returns
+            self.igvm_param_block.param_area_size as usize,
+    {
+        // Calculate the total size of the parameter area.  The
+        // parameter area always begins at the kernel base
+        // address.
+        self.igvm_param_block.param_area_size as usize
+    }
+}
+
+impl<'a> WellFormed for IgvmParams<'a> {
+    open spec fn wf(&self) -> bool {
+        &&& self.igvm_param_block.wf()
     }
 }
 

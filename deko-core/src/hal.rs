@@ -12,7 +12,7 @@ use crate::cpu::{register_cpuid_table, DekoCpuCtx, DekoCpuCtxPermission};
 use crate::elf::{ElfFile, ElfLoadSegment};
 use crate::logging::DekoDebug;
 use crate::mm::{init_frame_allocator, DEKO_MAPPING_SPACE};
-use crate::snp::get_igvm_params;
+use crate::snp::get_igvm_params_block;
 use crate::{die, imp, kerror, kinfo, Stage2LaunchInfo};
 
 verus! {
@@ -297,20 +297,55 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
 
     init_early_idt_late(&mut idt);
 
-    let igvm_params = get_igvm_params(&header);
-    imp::init_platform_end(&igvm_params, Tracked(&mut ctx_perm));
+    let igvm_params_block = get_igvm_params_block(&header);
+    imp::init_platform_end(&igvm_params_block, Tracked(&mut ctx_perm));
 
     // now we need to load the kernel into the memory.
     // first we need to find where it is.
-    if let Some((mut kernel_phys_start, kernel_phys_end)) = igvm_params.find_kernel_region() {
+    if let Some((kernel_phys_start, kernel_phys_end)) = igvm_params_block.find_kernel_region() {
         kinfo!("Deko found the kernel physical range:  [",
                 kernel_phys_start.0 => hex, " - ", kernel_phys_end.0 => hex, "]");
         kinfo!("Loading the Deko monitor...");
 
+        let mut loaded_kernel_end = kernel_phys_start;
+
         // Load the ELF file.
-        if let Some(vaddr) = #[verus_spec(with Tracked(&mut ctx_perm))]
-        load_deko_monitor(ctx, &mut kernel_phys_start, header) {
+        if let Some((entry, mut loaded_kernel_vregion)) = #[verus_spec(with Tracked(&mut ctx_perm))]
+        load_deko_monitor(ctx, &mut loaded_kernel_end, header) {
             kinfo!("Deko monitor loaded successfully!");
+            kinfo!("Kernel virtual range:", loaded_kernel_vregion);
+            kinfo!("Kernel entry point at: ", entry.0 => hex,);
+
+            let mut loaded_kernel_pregion = kernel_phys_start..loaded_kernel_end;
+
+            kinfo!("Loaded kernel physical range:", loaded_kernel_pregion);
+
+            if core::intrinsics::unlikely(loaded_kernel_end.0 > kernel_phys_end.0) {
+                crate::die("Deko monitor loading exceeded the allocated kernel physical region!");
+            }
+            // Load the IGVM params, if present. Update loaded region accordingly.
+            // SAFETY: The loaded kernel region was correctly calculated above and
+            // is sized appropriately to include a copy of the IGVM parameters.
+
+            proof {
+                // FIXME: Do it later because we have not (yet) proved
+                // that the mapped region for this will not change
+                // throughout previous operations.
+                assume(ctx_perm.pgtable_perm.mapped(VirtAddr::new(header.igvm_params as u64)));
+            }
+            let igvm_params = #[verus_spec(with Tracked(&ctx_perm))]
+            header.get_igvm_params();
+            let (igvm_vregion, igvm_pregion) = #[verus_spec(with Tracked(&mut ctx_perm))]
+            load_igvm_params(
+                ctx,
+                header,
+                &igvm_params,
+                loaded_kernel_vregion,
+                loaded_kernel_pregion,
+            );
+
+            kinfo!("IGVM params virtual range:", igvm_vregion);
+            kinfo!("IGVM params physical range:", igvm_pregion);
         } else {
             kerror!("Deko failed to load the kernel ELF file! Check if the format is correct.");
         }
@@ -320,6 +355,83 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
 
     loop {
     }
+}
+
+/// Loads the IGVM params at the next contiguous location from the loaded
+/// kernel image. Returns the virtual and physical memory regions hosting the
+/// loaded data.
+#[verus_spec(r =>
+    with
+        Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>
+    requires
+        old(ctx_perm).wf_with(ctx),
+        header.wf_for_loading(old(ctx_perm).pgtable_perm.mapping_space),
+        igvm_params.wf(),
+        loaded_kernel_vregion.wf(),
+        loaded_kernel_pregion.wf(),
+        loaded_kernel_vregion.end@ >= VADDR_UPPER_MASK,
+        loaded_kernel_pregion.start@ % PAGE_SIZE == 0,
+        loaded_kernel_pregion.end@ % PAGE_SIZE == 0,
+        loaded_kernel_vregion.start@ % PAGE_SIZE == 0,
+        loaded_kernel_vregion.end@ % PAGE_SIZE == 0,
+    ensures
+        r.0.wf(),
+        r.1.wf(),
+)]
+fn load_igvm_params(
+    ctx: DekoPPtr<DekoCpuCtx>,
+    header: Stage2LaunchInfo,
+    igvm_params: &IgvmParams,
+    loaded_kernel_vregion: VaddrRange,
+    loaded_kernel_pregion: PaddrRange,
+) -> (r: (VaddrRange, PaddrRange)) {
+    let param_size = igvm_params.size();
+
+    proof {
+        // TODO: The spec for these is non-trivial; we
+        // leave them as assumptions for now and will
+        // revisit later.
+        //
+        // This actually needs us to say:
+        // loaded_kernel_vregion.end == loaded_so_far(header)
+        assume(loaded_kernel_vregion.end@ + param_size <= u64::MAX);
+        assume(loaded_kernel_pregion.end@ + param_size <= u64::MAX);
+
+        assert((loaded_kernel_vregion.end@ + param_size as u64) % PAGE_SIZE as int == 0) by {
+            assert(loaded_kernel_vregion.end@ % PAGE_SIZE == 0);
+            assert(param_size as u64 % PAGE_SIZE == 0);
+            vstd::arithmetic::div_mod::lemma_mod_adds(
+                loaded_kernel_vregion.end@ as int,
+                param_size as int,
+                PAGE_SIZE as int,
+            );
+        }
+    }
+
+    let igvm_vregion_end = loaded_kernel_vregion.end.0 + param_size as u64;
+    let igvm_pregion_end = loaded_kernel_pregion.end.0 + param_size as u64;
+
+    let igvm_vregion = loaded_kernel_vregion.end..VirtAddr(igvm_vregion_end);
+    let igvm_pregion = loaded_kernel_pregion.end..PhysAddr(igvm_pregion_end);
+
+    proof {
+        // Similar to above, we leave these as
+        // assumptions for now.
+        // loaded_kernel_vregion.end == loaded_so_far(header)
+        // just need some extra utility to bridge them together.
+        assume(param_size + igvm_pregion_end < 0x000f_ffff_ffff_f000);
+    }
+
+    #[verus_spec(with Tracked(ctx_perm))]
+    crate::mm::paging::map_and_validate(
+        ctx,
+        header,
+        igvm_vregion.start,
+        igvm_vregion.end,
+        igvm_pregion.start,
+    );
+
+    crate::die("Not implemented yet");
 }
 
 /// Loads the kernel ELF and returns the virtual memory region where it
@@ -334,16 +446,21 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>, ctx_perm: Tracked<DekoCtxPermission>) -
         old(kernel_end).wf(),
         old(kernel_end)@ % PAGE_SIZE == 0,
         header.wf_for_loading(old(ctx_perm).pgtable_perm.mapping_space),
-        header.get_igvm_params_spec().find_kernel_region_spec() matches Some((kstart, _)) ==> kstart == old(kernel_end),
+        header.get_igvm_param_block_spec().find_kernel_region_spec() matches Some((kstart, _)) ==> kstart == old(kernel_end),
     ensures
         ctx_perm.wf_with(ctx),
+        ctx_perm.pgtable_perm.mapping_space == old(ctx_perm).pgtable_perm.mapping_space,
         r matches Some((entry_point, vaddr_range))
             ==> {
                     &&& entry_point.wf()
                     &&& vaddr_range.wf()
+                    &&& kernel_end.wf()
+                    &&& kernel_end@ > old(kernel_end)@
+                    &&& kernel_end@ % PAGE_SIZE == 0
                     &&& entry_point@ % PAGE_SIZE == 0
                     &&& vaddr_range.start@ % PAGE_SIZE == 0
                     &&& vaddr_range.end@ % PAGE_SIZE == 0
+                    &&& vaddr_range.start@ >= VADDR_UPPER_MASK
                 }
 )]
 fn load_deko_monitor(
@@ -371,19 +488,20 @@ fn load_deko_monitor(
     // being taken from the physical memory region, the remaining space will be
     // available as heap space for the kernel. Remember the end of all
     // physical memory occupied by the loaded ELF image.
-    let (vaddr_start, vaddr_end) = elf_file.load_each_segment(ctx, vaddr_alloc_base, kernel_end, header, Tracked(ctx_perm));
+    let (vaddr_start, vaddr_end) = elf_file.load_each_segment(
+        ctx,
+        vaddr_alloc_base,
+        kernel_end,
+        header,
+        Tracked(ctx_perm),
+    );
 
     if core::intrinsics::unlikely(vaddr_start.is_none()) {
         kerror!("No loadable segment in the ELF. Likely broken");
 
         crate::die("");
     }
-
     let vaddr_start = vaddr_start.unwrap();
-
-    proof {
-
-    }
 
     // Apply relocations if any.
     // todo.

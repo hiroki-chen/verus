@@ -85,10 +85,12 @@ pub struct Stage2LaunchInfo {
 }
 
 impl Stage2LaunchInfo {
-    pub uninterp spec fn get_igvm_params_spec(&self) -> IgvmParamBlock;
+    pub uninterp spec fn get_igvm_param_block_spec(&self) -> IgvmParamBlock;
+
+    pub uninterp spec fn get_igvm_params_spec<>(&self) -> IgvmParams<'_>;
 
     pub open spec fn get_elf(&self) -> Option<ElfFile> {
-        if self.get_igvm_params_spec().find_kernel_region_spec() matches Some((kstart, kend)) {
+        if self.get_igvm_param_block_spec().find_kernel_region_spec() matches Some((kstart, kend)) {
             ElfFile::new_spec(
                 PhysAddr(self.kernel_elf_start as u64),
                 PhysAddr(self.kernel_elf_end as u64),
@@ -100,14 +102,31 @@ impl Stage2LaunchInfo {
 
     pub open spec fn wf_for_loading(&self, ms: MappingSpace) -> bool {
         &&& self.wf()
-        &&& self.get_igvm_params_spec().find_kernel_region_spec() matches Some((kstart, kend))
+        &&& self.get_igvm_param_block_spec().find_kernel_region_spec() matches Some((kstart, kend))
             && self.get_elf() matches Some(elf_file) ==> elf_file.wf_with_load_base(kstart)
             && elf_file.wf_with_ms(kstart, ms)
+    }
+
+    #[verifier::external_body]
+    #[verus_spec(r =>
+        with
+            Tracked(ctx_perm): Tracked<&crate::cpu::DekoCpuCtxPermission>
+    )]
+    pub fn get_igvm_params(&self) -> IgvmParams<'_>
+        requires
+            self.wf(),
+            ctx_perm.wf(),
+            ctx_perm.pgtable_perm.mapped(VirtAddr::new(self.igvm_params as u64)),
+        returns
+            self.get_igvm_params_spec(),
+    {
+        let igvm_params_vaddr = VirtAddr::new(self.igvm_params as u64);
+
+        todo!()
     }
 }
 
 impl WellFormed for Stage2LaunchInfo {
-    // FIXME: There are some self-contradictory definitions here.
     open spec fn wf(&self) -> bool {
         // The Stage2LaunchInfo is well-formed if the addresses are aligned.
         &&& self.vtom % 0x1000 == 0
@@ -123,7 +142,8 @@ impl WellFormed for Stage2LaunchInfo {
         &&& self.platform_type matches 0x0001 ==> self.vtom != 0
         &&& self.stage2_end > STAGE2_START
         &&& self.stage2_end <= u32::MAX  // ensures no overflow.
-
+        &&& self.get_igvm_params_spec().wf()
+        &&& self.get_igvm_param_block_spec().wf()
     }
 }
 

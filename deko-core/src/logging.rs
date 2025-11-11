@@ -235,8 +235,8 @@ pub(crate) fn print_hex_dump_readable(bytes: &[u8], start_offset: usize) {
     const BYTES_PER_LINE: usize = 16;
 
     // Print header
-    print_str("       00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F  |ASCII          |\n");
-    print_str("       ────────────────────────────────────────────────  ──────────────────\n");
+    print_str("         00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F  |ASCII           |\n");
+    print_str("       +────────────────────────────────────────────────+──+────────────────+\n");
 
     for (line_idx, chunk) in bytes.chunks(BYTES_PER_LINE).enumerate() {
         let offset = start_offset + (line_idx * BYTES_PER_LINE);
@@ -285,7 +285,7 @@ pub(crate) fn print_hex_dump_readable(bytes: &[u8], start_offset: usize) {
     }
 
     // Print footer
-    print_str("       ────────────────────────────────────────────────  ──────────────────\n");
+    print_str("       +────────────────────────────────────────────────+──+────────────────+\n");
 }
 
 #[verifier::external_body]
