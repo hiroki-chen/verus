@@ -29,6 +29,7 @@
 //! // Address is automatically canonicalized
 //! assert!(vaddr.wf()); // Always true
 //! ```
+use deko_macros::DekoDebug;
 use vstd::prelude::*;
 
 use crate::prelude::*;
@@ -586,9 +587,9 @@ impl MappingSpace {
 /// let from_u32 = VirtAddr::from(0x12345678u32);
 /// let from_ptr = VirtAddr::from(ptr as *const u8);
 /// ```
-#[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Default, DekoDebug)]
 #[repr(transparent)]
-pub struct VirtAddr(pub u64);
+pub struct VirtAddr(#[deko(hex)] pub u64);
 
 impl View for VirtAddr {
     type V = u64;
@@ -787,9 +788,9 @@ impl WellFormed for VirtAddr {
 /// // Direct construction
 /// let paddr2 = PhysAddr(0x1234_5678_9ABC_DEF0);
 /// ```
-#[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Default, DekoDebug)]
 #[repr(transparent)]
-pub struct PhysAddr(pub u64);
+pub struct PhysAddr(#[deko(hex)] pub u64);
 
 impl View for PhysAddr {
     type V = u64;

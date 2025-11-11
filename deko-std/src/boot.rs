@@ -1,3 +1,4 @@
+use deko_macros::DekoDebug;
 use vstd::invariant;
 use vstd::prelude::*;
 
@@ -39,7 +40,7 @@ pub const STAGE2_MAXLEN: u32 = 0x8D0000 - STAGE2_START;
 
 #[allow(non_camel_case_types)]
 #[repr(u16)]
-#[derive(Clone)]
+#[derive(Clone, DekoDebug)]
 pub enum MemoryMapEntryType {
     /// Normal memory.
     MEMORY = 0x0,
@@ -63,7 +64,7 @@ pub enum MemoryMapEntryType {
 }
 
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, DekoDebug)]
 pub struct IgvmVhsMemoryMapEntry {
     /// The starting gpa page number for this range of memory.
     pub starting_gpa_page_number: u64,
@@ -80,6 +81,7 @@ pub struct IgvmVhsMemoryMapEntry {
 /// The IGVM parameter page is an unmeasured page containing individual
 /// parameters that are provided by the host loader.
 #[repr(C, packed)]
+#[derive(Clone, DekoDebug)]
 pub struct IgvmParamPage {
     /// The number of vCPUs that are configured for the guest VM.
     pub cpu_count: u32,
@@ -89,13 +91,14 @@ pub struct IgvmParamPage {
     pub environment_info: u32,
 }
 
-#[derive(Clone)]
 #[repr(C, align(64))]
+#[derive(DekoDebug)]
 pub struct IgvmMemoryMap {
     memory_map: Array<IgvmVhsMemoryMapEntry, 0xAA>,
 }
 
 #[repr(C, packed)]
+#[derive(DekoDebug)]
 pub struct IgvmGuestContext {
     pub cr0: u64,
     pub cr3: u64,
@@ -124,6 +127,7 @@ pub struct IgvmGuestContext {
     pub r15: u64,
 }
 
+#[derive(DekoDebug)]
 pub struct IgvmParams<'a> {
     pub igvm_param_block: &'a IgvmParamBlock,
     pub igvm_param_page: &'a IgvmParamPage,
@@ -133,7 +137,7 @@ pub struct IgvmParams<'a> {
 }
 
 #[repr(C)]
-#[derive(Default)]
+#[derive(Default, DekoDebug)]
 pub tracked struct HeaderRaw {
     /// The version of the boot protocol.
     pub version: u8,
@@ -195,7 +199,7 @@ impl Constant for HeaderRaw {
 /// An entry that represents an area of pre-validated memory defined by the
 /// firmware in the IGVM file.
 #[repr(C, packed)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, DekoDebug)]
 pub struct IgvmParamBlockFwMem {
     /// The base physical address of the prevalidated memory region.
     pub base: u32,
@@ -206,7 +210,7 @@ pub struct IgvmParamBlockFwMem {
 /// The portion of the IGVM parameter block that describes metadata about
 /// the firmware image embedded in the IGVM file.
 #[repr(C, packed)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, DekoDebug)]
 pub struct IgvmParamBlockFwInfo {
     /// The guest physical address of the start of the guest firmware. The
     /// permissions on the pages in the firmware range are adjusted to the guest
@@ -247,6 +251,7 @@ pub struct IgvmParamBlockFwInfo {
 /// builder which describes where the additional IGVM parameter information
 /// has been placed into the guest address space.
 #[repr(C, packed)]
+#[derive(DekoDebug)]
 pub struct IgvmParamBlock {
     /// The total size of the parameter area, beginning with the parameter
     /// block itself and including any additional parameter pages which follow.

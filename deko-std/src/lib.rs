@@ -11,6 +11,8 @@
 #![allow(non_shorthand_field_patterns)]
 #![cfg_attr(feature = "alloc", feature(allocator_api))]
 
+extern crate self as deko_std;
+
 use vstd::prelude::*;
 
 #[cfg(feature = "alloc")]
@@ -21,6 +23,7 @@ pub mod array;
 pub mod bits;
 pub mod boot;
 pub mod cpu;
+pub mod fmt;
 pub mod list;
 pub mod math;
 pub mod mem;
@@ -42,6 +45,7 @@ pub mod prelude {
     #[cfg(feature = "alloc")]
     pub use crate::boxed::*;
     pub use crate::cpu::*;
+    pub use crate::fmt::*;
     pub use crate::list::*;
     pub use crate::math::*;
     pub use crate::mem::*;

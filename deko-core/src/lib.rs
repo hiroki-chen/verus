@@ -121,8 +121,43 @@ impl Stage2LaunchInfo {
             self.get_igvm_params_spec(),
     {
         let igvm_params_vaddr = VirtAddr::new(self.igvm_params as u64);
+        let igvm_params_block = unsafe { &*(igvm_params_vaddr.0 as *const IgvmParamBlock) };
+        let igvm_params_page_vaddr = igvm_params_vaddr.0
+            + igvm_params_block.param_page_offset as u64;
+        let igvm_params_page = unsafe { &*(igvm_params_page_vaddr as *const IgvmParamPage) };
+        let memory_map_vaddr = igvm_params_vaddr.0 + igvm_params_block.memory_map_offset as u64;
+        let memory_map = unsafe { &*(memory_map_vaddr as *const IgvmMemoryMap) };
+        let madt_vaddr = igvm_params_vaddr.0 + igvm_params_block.madt_offset as u64;
+        let madt = if igvm_params_block.madt_size == 0 {
+            Some(
+                unsafe {
+                    core::slice::from_raw_parts(
+                        madt_vaddr as *const u8,
+                        igvm_params_block.madt_size as usize,
+                    )
+                },
+            )
+        } else {
+            None
+        };
+        let guest_context = if igvm_params_block.guest_context_offset != 0 {
+            Some(
+                unsafe {
+                    &*((igvm_params_vaddr.0
+                        + igvm_params_block.guest_context_offset as u64) as *const IgvmGuestContext)
+                },
+            )
+        } else {
+            None
+        };
 
-        todo!()
+        IgvmParams {
+            igvm_param_block: igvm_params_block,
+            igvm_param_page: igvm_params_page,
+            igvm_memory_map: memory_map,
+            igvm_madt: madt,
+            igvm_guest_context: guest_context,
+        }
     }
 }
 

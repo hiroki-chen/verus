@@ -10,7 +10,6 @@ use crate::cpu::idt::{
 };
 use crate::cpu::{register_cpuid_table, DekoCpuCtx, DekoCpuCtxPermission};
 use crate::elf::{ElfFile, ElfLoadSegment};
-use crate::logging::DekoDebug;
 use crate::mm::{init_frame_allocator, DEKO_MAPPING_SPACE};
 use crate::snp::get_igvm_params_block;
 use crate::{die, imp, kerror, kinfo, Stage2LaunchInfo};
@@ -386,6 +385,8 @@ fn load_igvm_params(
     loaded_kernel_pregion: PaddrRange,
 ) -> (r: (VaddrRange, PaddrRange)) {
     let param_size = igvm_params.size();
+
+    kinfo!("Loading IGVM params of size: ", param_size => hex, " bytes");
 
     proof {
         // TODO: The spec for these is non-trivial; we

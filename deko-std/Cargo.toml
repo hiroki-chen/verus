@@ -8,14 +8,25 @@ vstd = { workspace = true }
 verus_builtin = { workspace = true }
 verus_builtin_macros = { workspace = true }
 verus_state_machines_macros = { workspace = true }
+
 paste = "1.0.15"
+itoa = { version = "1.0.15", features = ["no-panic"] }
+ryu = { version = "1.0.20", features = ["no-panic"] }
+lexical-core = { version = "1.0.6", default-features = false, features = [
+  "write-integers",
+  "write-floats",
+  "power-of-two",
+] }
+
+deko-macros = { workspace = true }
 
 [package.metadata.verus]
 verify = true
 
 [features]
 default = ["alloc", "snp"]
-snp = []
-global_alloc = ["alloc"]
-tdx = []
 alloc = ["vstd/alloc"]
+global_alloc = ["alloc"]
+logging = []
+snp = []
+tdx = []
