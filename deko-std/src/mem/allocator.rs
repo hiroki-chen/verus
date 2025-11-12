@@ -211,6 +211,11 @@ impl<V: WellFormed + Heap> DekoBuddyAllocator<V> {
         opens_invariants none
     {
         let p = self.alloc_impl(size, align) as *mut u8;
+
+        unsafe {
+            core::ptr::write_bytes(p, 0, size);
+        }
+
         (p, Tracked::assume_new(), Tracked::assume_new())
     }
 

@@ -3,11 +3,11 @@
 .code32
 
 // Constants for memory layout.
-.equ STAGE2_START, 0x800000      // 8 MB - Stage2 base address
-.equ STAGE2_MAXLEN, 0xD0000      // ~832 KB - Maximum Stage2 length
-.equ LOWMEM_START, 0x0           // Low memory start
-.equ LOWMEM_END, 0xA0000         // 640 KB - End of low memory
-.equ SHARED_BIT, 0x1            // Shared memory bit
+.equ STAGE2_START,    0x808000      // 8 +32(KiB) MB - Stage2 base address
+.equ STAGE2_MAXLEN,   0xC8000       // ~832 KB - Maximum Stage2 length
+.equ LOWMEM_START,    0x0           // Low memory start
+.equ LOWMEM_END,      0xA0000       // 640 KB - End of low memory
+.equ SHARED_BIT,      0x1          // Shared memory bit
 
 .org 0
 .globl startup_32
@@ -260,6 +260,10 @@ startup_64:
 
   // Store Stage2LaunchInfo pointer (offset 0)
   movl %ebp, (%rdi)
+
+  // Get the stage2_end information.
+  xorl %eax, %eax
+  movl 20(%ebp), %eax
   
   // Store page table address (offset 8)
   movq $pgtable, 8(%rdi)
@@ -270,7 +274,7 @@ startup_64:
   // Populate MappingSpace at offset 24
   // kernel: FixedAddressMappingRange (offset 24)
   movq $STAGE2_START, 24(%rdi)              // kernel.virt_start = STAGE2_START
-  movq $(STAGE2_START + STAGE2_MAXLEN), 32(%rdi)  // kernel.virt_end = STAGE2_START + STAGE2_MAXLEN  
+  movq %rax, 32(%rdi)                       // kernel.virt_end 
   movq $STAGE2_START, 40(%rdi)              // kernel.phys_start = STAGE2_START (identity mapped)
   
   // physmap: FixedAddressMappingRange (offset 48)
@@ -337,7 +341,6 @@ deko_bsp_ctx:
   .fill 0x50, 1, 0
   /* Pre-populate the mapping space? */
 deko_bsp_ctx_end:
-
 
 .globl bsp_stack
 bsp_stack:

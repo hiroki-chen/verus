@@ -5,6 +5,7 @@ pub mod irq;
 pub mod msr;
 pub mod types;
 
+use deko_macros::DekoDebug;
 use deko_std::prelude::*;
 use deko_std::snp::ghcb::GuestHostCommucationBlock;
 use vstd::atomic::{PAtomicBool, PAtomicU32, PermissionBool, PermissionU32};
@@ -39,7 +40,7 @@ impl WellFormed for GuestVmsaRef {
 }
 
 #[repr(C, packed(4))]
-#[derive(Debug)]
+#[derive(DekoDebug)]
 pub struct X86Tss {
     reserved0: u32,
     stacks: Array<u64, 3>,
@@ -50,13 +51,19 @@ pub struct X86Tss {
     io_bmp_base: u16,
 }
 
+#[derive(DekoDebug)]
 pub struct PerCpuShared {
     apic_id: u32,  // the id of the local apic
     cpu_index: usize,
+    #[deko(skip)]
     guest_vmsa: RwLockNoPred<GuestVmsaRef>,
+    #[deko(skip)]
     online: (PAtomicBool, Tracked<PermissionBool>),
+    #[deko(skip)]
     ipi_irr: Array<(PAtomicU32, Tracked<PermissionU32>), 8>,
+    #[deko(skip)]
     ipi_pending: (PAtomicBool, Tracked<PermissionBool>),
+    #[deko(skip)]
     nmi_pending: (
         PAtomicBool,
         Tracked<PermissionBool>,
@@ -124,6 +131,7 @@ impl PerCpuShared {
     }
 }
 
+#[derive(DekoDebug)]
 pub struct PerCpuAreas(pub Array<PerCpuShared, CPUID_MAX_COUNT>);
 
 impl WellFormed for PerCpuAreas {
@@ -261,8 +269,10 @@ pub exec static PERCPU_AREAS: RwLock<PerCpuAreas, PerCpuAreasInv>
 ///
 /// [`DekoCpuCore`]: deko_std::cpu::DekoCpuCore
 /// [`DekoCtx`]: crate::cpu::ctx::DekoCtx
+#[derive(DekoDebug)]
 pub struct DekoCpuCtx {
     pub magic: u64,
+    #[deko(hex)]
     pub cpu_id: u64,
     /// The GHCB block for this CPU.
     ghcb: DekoPPtr<GuestHostCommucationBlock>,
@@ -272,8 +282,10 @@ pub struct DekoCpuCtx {
     /// The page table of this CPU.
     pgtable: DekoPPtr<PageTable>,
     /// The private bit of the PTE of this core.
+    #[deko(hex)]
     private_bit: u64,
     /// The shared bit of the PTE of this core.
+    #[deko(hex)]
     shared_bit: u64,
     /// The high-level kernel mapping context for this CPU.
     kernel_mapping: MappingSpace,

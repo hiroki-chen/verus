@@ -1,3 +1,4 @@
+use deko_macros::DekoDebug;
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
@@ -72,13 +73,16 @@ verus! {
 ///
 /// [`DekoCpuCore`]: deko_std::cpu::DekoCpuCore
 /// [`DekoCpuCtx`]: crate::cpu::DekoCpuCtx
+#[derive(DekoDebug)]
 #[repr(C)]
 pub struct DekoCtx {
     pub stage2_launch_info: DekoPPtr<Stage2LaunchInfo>,
     pub pgtable: DekoPPtr<PageTable>,
     pub gdt: DekoPPtr<GlobalDescriptorTable>,
     pub mapping_space: MappingSpace,
+    #[deko(hex)]
     pub private_bit: u64,
+    #[deko(hex)]
     pub shared_bit: u64,
 }
 

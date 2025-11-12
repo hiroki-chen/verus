@@ -21,7 +21,7 @@ verus! {
 /// Allow APs to proceed as the environment is now ready. This
 /// is set by the BSP after all initialization is done.
 #[no_mangle]
-#[link_section = ".ap_section"]
+// #[link_section = ".ap_section"]
 pub exec static AP_FLAG: AtomicBool = AtomicBool::new(false);
 
 #[verifier::external_body]
@@ -300,6 +300,12 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>) -> (__discard: !) {
 
     let igvm_params_block = get_igvm_params_block(&header);
     imp::init_platform_end(&igvm_params_block, Tracked(&mut ctx_perm));
+    {
+        let ctx = ctx.borrow(Tracked(&ctx_perm.ptr_perm));
+        kinfo!("DekoCtx content is:", ctx);
+    }
+
+    kinfo!("header: ", header);
 
     // now we need to load the kernel into the memory.
     // first we need to find where it is.
@@ -636,6 +642,10 @@ fn prepare_heap(
     let heap_pregion = heap_pstart..PhysAddr(heap_pstart.0 + heap_size);
     let heap_vregion = heap_vstart..VirtAddr(heap_vstart.0 + heap_size);
 
+    kinfo!("Setting up kernel heap:");
+    kinfo!("  Heap virtual range: ", heap_vregion);
+    kinfo!("  Heap physical range: ", heap_pregion);
+
     // Map and validate the address range.
     #[verus_spec(with Tracked(ctx_perm))]
     crate::mm::paging::map_and_validate(
@@ -652,6 +662,10 @@ fn prepare_heap(
 /// Finish the boostrapping and jump into the monitor's entry point.
 #[verifier::external_body]
 fn into_deko_monitor(deko_entry: u64, cmd: u64) -> (__discard: !) {
+    let raw_bytes = unsafe { core::slice::from_raw_parts(deko_entry as *const u8, 64) };
+    kinfo!("entry point @ ", deko_entry => hex);
+    kinfo!("entry point raw bytes: ", raw_bytes);
+
     unsafe {
         core::arch::asm!(
             "jmp *%rax",

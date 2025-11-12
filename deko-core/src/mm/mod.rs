@@ -15,6 +15,7 @@ use deko_std::prelude::*;
 use vstd::prelude::*;
 
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
+use crate::kerror;
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
 use crate::mm::paging::{PageTable, PteFlags};
 
@@ -130,10 +131,14 @@ pub fn phys_to_virt(
         ctx_perm.ptr_perm.value().kernel_mapping().kernel.in_range_spec(paddr)
             || ctx_perm.ptr_perm.value().kernel_mapping().physmap.in_range_spec(paddr),
     ensures
-// vaddr.wf(),
-
 {
-    ctx.borrow(Tracked(&ctx_perm.ptr_perm)).kernel_mapping().phys_to_virt(paddr)
+    match ctx.borrow(Tracked(&ctx_perm.ptr_perm)).kernel_mapping().phys_to_virt(paddr) {
+        Some(v) => v,
+        None => {
+            kerror!("phys_to_virt: address not mapped");
+            crate::die("phys_to_virt: address not mapped");
+        },
+    }
 }
 
 pub tracked struct DekoMemoryRegionPermission;

@@ -215,3 +215,28 @@ impl WellFormed for Stage2LaunchInfo {
 }
 
 } // verus!
+#[macro_export]
+macro_rules! kunimplemented {
+    () => {{
+        $crate::kerror!("Unimplemented code at ", core::file!(), ":", core::line!());
+        $crate::die("");
+    }};
+
+    ($msg:tt) => {{
+        $crate::kerror!("Unimplemented code at ", core::file!(), ":", core::line!(), ": ", $msg);
+        $crate::die("");
+    }};
+}
+
+#[macro_export]
+macro_rules! ktodo {
+    () => {{
+        $crate::kerror!("TODO at ", core::file!(), ":", core::line!());
+        $crate::die("");
+    }};
+
+    (($msg:tt)*) => {{
+        $crate::kerror!("TODO at ", core::file!(), ":", core::line!(), ": ", $msg);
+        $crate::die("");
+    }};
+}

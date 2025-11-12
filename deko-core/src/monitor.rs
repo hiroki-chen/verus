@@ -2,6 +2,7 @@
 #![no_main]
 
 use deko_core::cpu::gdt::GLOBAL_GDT;
+use deko_core::kinfo;
 use deko_core::mm::paging::GLOBAL;
 use deko_std::prelude::*;
 use vstd::prelude::*;

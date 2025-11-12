@@ -287,7 +287,7 @@ pub const fn sign_extend(addr: u64) -> (r: u64)
 /// };
 /// let vaddr = mapping_space.phys_to_virt(paddr);
 /// ```
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, DekoDebug)]
 #[repr(C)]
 pub struct MappingSpace {
     pub kernel: FixedAddressMappingRange,
@@ -337,7 +337,7 @@ impl Predicate<MappingSpace> for MappingSpacePred {
 ///     let vaddr = mapping.phys_to_virt(paddr);
 /// }
 /// ```
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, DekoDebug)]
 #[repr(C)]
 pub struct FixedAddressMappingRange {
     pub virt_start: VirtAddr,
@@ -541,26 +541,26 @@ impl MappingSpace {
     /// let mapping_space = MappingSpace { kernel, physmap };
     /// let vaddr = mapping_space.phys_to_virt(paddr);
     /// ```
-    pub fn phys_to_virt(&self, paddr: PhysAddr) -> (vaddr: VirtAddr)
+    pub fn phys_to_virt(&self, paddr: PhysAddr) -> (vaddr: Option<VirtAddr>)
         requires
             self.wf(),
             paddr.wf(),
             self.kernel.in_range_spec(paddr) || self.physmap.in_range_spec(paddr),
         ensures
             vaddr.wf(),
-            vaddr == self.phys_to_virt_spec(paddr),
+            vaddr matches Some(vaddr) && vaddr == self.phys_to_virt_spec(paddr),
     {
         if self.kernel.in_range(paddr) {
-            return self.kernel.phys_to_virt(paddr);
+            return Some(self.kernel.phys_to_virt(paddr));
         } else if self.physmap.in_range(paddr) {
-            return self.physmap.phys_to_virt(paddr);
+            return Some(self.physmap.phys_to_virt(paddr));
         }
         // Never happens here
 
         proof {
             assert(false);
         }
-        vstd::vpanic!("Address not in mapping space");
+        None
     }
 }
 
@@ -758,6 +758,18 @@ impl VirtAddr {
         };
 
         VirtAddr(v)
+    }
+
+    /// Checks if the virtual address is aligned to the given size.
+    #[inline]
+    pub const fn is_aligned_to(&self, size: u64) -> bool
+        requires
+            size > 0,
+            is_power_of_two(size),
+        returns
+            self@ % (size as u64) == 0,
+    {
+        self.0 % (size as u64) == 0
     }
 }
 

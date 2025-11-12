@@ -16,6 +16,24 @@ use crate::prelude::*;
 
 verus! {
 
+/// Defines bidirectional conversion between a high-level type `T` (`Self`)
+/// and its low-level representation `R`.
+///
+/// This trait is used to ensure that type casts between `T` and `R` are safe and valid
+/// when we are playing with the raw memory representation of values since
+/// memories are untyped but we do need to interpret them as typed values.
+pub trait Repr<R: Sized>: Sized {
+    spec fn wf(self) -> bool;
+
+    spec fn to_repr_spec(&self) -> R;
+
+    spec fn from_repr_spec(r: R) -> Self;
+
+    fn to_repr(&self) -> (r: R);
+
+    fn from_repr(r: R) -> (t: Self);
+}
+
 pub type DekoPointsToRaw = PointsToRaw;
 
 /// DekoPPtr (which stands for “permissioned pointer”) is a wrapper around a `PPtr` pointer to a heap-allocated V.
