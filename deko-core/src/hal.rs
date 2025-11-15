@@ -8,11 +8,12 @@ use crate::cpu::gdt::GlobalDescriptorTable;
 use crate::cpu::idt::{
     create_early_idt, stage2_generic_idt_handler, stage2_generic_idt_handler_no_ghcb, Idt,
 };
-use crate::cpu::{register_cpuid_table, DekoCpuCtx, DekoCpuCtxPermission};
+use crate::cpu::{register_cpuid_table, DekoCpuCtx, DekoCpuCtxPermission, PerCpuAreas};
 use crate::elf::{ElfFile, ElfLoadSegment};
+use crate::mm::paging::Page;
 use crate::mm::{init_frame_allocator, DEKO_MAPPING_SPACE};
 use crate::snp::get_igvm_params_block;
-use crate::{die, imp, kerror, kinfo, Stage2LaunchInfo};
+use crate::{die, imp, kerror, kinfo, DekoKernelLaunchInfo, Stage2LaunchInfo};
 
 verus! {
 
@@ -21,7 +22,7 @@ verus! {
 /// Allow APs to proceed as the environment is now ready. This
 /// is set by the BSP after all initialization is done.
 #[no_mangle]
-// #[link_section = ".ap_section"]
+#[link_section = ".ap_section"]
 pub exec static AP_FLAG: AtomicBool = AtomicBool::new(false);
 
 #[verifier::external_body]
@@ -381,8 +382,34 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>) -> (__discard: !) {
                 header,
             );
 
+            let kernel_launch_info = DekoKernelLaunchInfo {
+                kernel_region_phys_start: kernel_phys_start.0,
+                kernel_region_phys_end: kernel_phys_end.0,
+                heap_area_phys_start: heap_pregion.start.0,
+                heap_area_virt_start: heap_vregion.start.0,
+                heap_area_size: (heap_pregion.end.0 - heap_pregion.start.0),
+                kernel_region_virt_start: loaded_kernel_vregion.start.0,
+                kernel_elf_stage2_virt_start: header.kernel_elf_start as u64,
+                kernel_elf_stage2_virt_end: header.kernel_elf_end as u64,
+                kernel_fs_start: header.kernel_fs_start as u64,
+                kernel_fs_end: header.kernel_fs_end as u64,
+                stage2_start: 0x800000,
+                stage2_end: header.stage2_end as u64,
+                cpuid_page: header.cpuid_page as u64,
+                secrets_page: header.secrets_page as u64,
+                stage2_igvm_params_phys_addr: header.igvm_params as u64,
+                stage2_igvm_params_size: igvm_pregion.end.0 - igvm_pregion.start.0,
+                igvm_params_phys_addr: igvm_pregion.start.0,
+                igvm_params_virt_addr: igvm_vregion.start.0,
+                vtom: header.vtom,
+                debug_serial_port: igvm_params_block.debug_serial_port,
+                use_alternate_injection: igvm_params_block.use_alternate_injection != 0,
+                suppress_deko_interrupts: igvm_params_block.suppress_svsm_interrupts_on_snp != 0,
+            };
+
             kinfo!("Deko setup complete. Jumping to kernel entry point...");
-            into_deko_monitor(entry.0, 0xdeadbeef);  // placeholder for now.
+            #[verus_spec(with Tracked(&mut ctx_perm))]
+            into_deko_monitor(ctx, entry.0, addr_of_ref(&kernel_launch_info));
         } else {
             kerror!("Deko failed to load the kernel ELF file! Check if the format is correct.");
         }
@@ -605,6 +632,9 @@ fn load_deko_monitor(
         header.wf_for_loading(old(ctx_perm).pgtable_perm.mapping_space),
         igvm_params.wf(),
     ensures
+        r.0.wf(),
+        r.1.wf(),
+        ctx_perm.wf_with(ctx),
 )]
 fn prepare_heap(
     ctx: DekoPPtr<DekoCpuCtx>,
@@ -661,12 +691,28 @@ fn prepare_heap(
 
 /// Finish the boostrapping and jump into the monitor's entry point.
 #[verifier::external_body]
-fn into_deko_monitor(deko_entry: u64, cmd: u64) -> (__discard: !) {
+#[verus_spec(r =>
+    with
+        Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
+    requires
+        old(ctx_perm).wf_with(ctx),
+)]
+fn into_deko_monitor(ctx: DekoPPtr<DekoCpuCtx>, deko_entry: u64, cmd: u64) -> (__discard: !) {
     let raw_bytes = unsafe { core::slice::from_raw_parts(deko_entry as *const u8, 64) };
     kinfo!("entry point @ ", deko_entry => hex);
     kinfo!("entry point raw bytes: ", raw_bytes);
 
+    let ms = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).kernel_mapping();
+    let private_bit = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).private_bit();
+    let shared_bit = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).shared_bit();
+    let pgtable = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).pgtable();
+
     unsafe {
+        core::ptr::drop_in_place(PERCPU_BASE.0 as *mut DekoCpuCtx);
+
+        Page::unmap_page_4k(pgtable, Tracked(&mut ctx_perm.pgtable_perm), PERCPU_BASE, &ms, private_bit, shared_bit);
+
+        // The entry point is @ `monitor.rs::deko_entry`.
         core::arch::asm!(
             "jmp *%rax",
             in("rax") deko_entry,

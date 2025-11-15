@@ -2306,6 +2306,48 @@ impl Page {
         true
     }
 
+    /// Unmaps a single 4KB page at the given virtual address
+    #[verifier::external_body]
+    pub fn unmap_page_4k(
+        page: DekoPPtr<Page>,
+        Tracked(perm): Tracked<&mut PageTablePermission>,
+        vaddr: VirtAddr,
+        ms: &MappingSpace,
+        private_bit: u64,
+        shared_bit: u64,
+    )
+        // requires
+        //     old(perm).unmap_page_4k_requires(page, vaddr, ms, private_bit, shared_bit),
+        // ensures
+        //     old(perm).unmap_page_4k_ensures(vaddr, private_bit, shared_bit, perm),
+    {
+        let mapping = Page::walk(page, Tracked(perm), vaddr, ms, private_bit, shared_bit);
+
+        match mapping {
+            Mapping::Level0(page, idx) => {
+                // Clear the PTE entry.
+                let new_pte_value = PageTableEntry(PhysAddr(0));
+                let ghost path = PageTablePath::from_vaddr_at_level(vaddr, 0);
+                let ghost parent_path = path.drop_last().normalize();
+
+                let tracked perm_before = &*perm;
+                let tracked mut page_perm = perm.storage.tracked_remove(parent_path);  // we remove and then re-insert later.
+                Page::update_entry_by_ptr(page, Tracked(&mut page_perm.this_page_perm), idx, new_pte_value);
+                proof {
+                    page_is_aligned();
+
+                    // FILL IN LATER.
+                }
+            }
+
+            _ => {
+                // should be already unpresent because we've returned
+                // earlier if not present. BTW this should not be a
+                // huge page.
+            }
+        }
+    }
+
     /// Maps a single 4KB page at the given virtual address to the given physical address
     #[verifier::spinoff_prover]
     pub fn map_page_4k(

@@ -16,6 +16,13 @@ use crate::prelude::*;
 
 verus! {
 
+/// Gets the address of a reference as a u64.
+#[inline(always)]
+#[verifier::external_body]
+pub fn addr_of_ref<T: Sized>(target: &T) -> u64 {
+    target as *const T as u64
+}
+
 /// Defines bidirectional conversion between a high-level type `T` (`Self`)
 /// and its low-level representation `R`.
 ///
