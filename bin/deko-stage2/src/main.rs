@@ -1,12 +1,12 @@
 #![no_std]
 #![no_main]
 
-use deko_core::cpu::ctx::{DekoCtx, DekoCtxPermission};
-use deko_std::prelude::*;
-use deko_std::ptr::{DekoPPtr, DekoPointsTo};
 use vstd::prelude::*;
 
-core::arch::global_asm!(include_str!("stage2.S"), options(att_syntax));
+use deko_std::prelude::*;
+use deko_core::cpu::ctx::{DekoCtx, DekoCtxPermission};
+
+core::arch::global_asm!(include_str!("../stage2.S"), options(att_syntax));
 
 verus! {
 
@@ -30,7 +30,7 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 ///
 /// The parameter `ctx` is obtained from the assembly code where we pass the address
 /// from the `.data` section to here.
-#[no_mangle]
+#[unsafe(no_mangle)]
 // Making this function as `external` is awkward as
 // verus treats imports from `deko_core` as external.
 #[verifier::external]

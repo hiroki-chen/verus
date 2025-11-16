@@ -1,18 +1,6 @@
 use std::process::Command;
 
 fn main() {
-    // Linker arguments
-    println!("cargo:rustc-link-arg-bin=stage2=-nostdlib");
-    println!("cargo:rustc-link-arg-bin=stage2=--build-id=none");
-    println!("cargo:rustc-link-arg-bin=stage2=-T./.cargo/stage2.ld");
-    println!("cargo:rustc-link-arg-bin=stage2=-no-pie");
-
-    println!("cargo:rustc-link-arg-bin=deko=-nostdlib");
-    println!("cargo:rustc-link-arg-bin=deko=--no-relax");
-    println!("cargo:rustc-link-arg-bin=deko=--build-id=none");
-    println!("cargo:rustc-link-arg-bin=deko=-T./.cargo/deko.ld");
-    println!("cargo:rustc-link-arg-bin=deko=-no-pie");
-
     // Capture git commit hash
     let git_hash = Command::new("git")
         .args(&["rev-parse", "--short=8", "HEAD"])
@@ -46,8 +34,6 @@ fn main() {
     // Rebuild if git HEAD changes
     println!("cargo:rerun-if-changed=../.git/HEAD");
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=../.cargo/stage2.ld");
-    println!("cargo:rerun-if-changed=../.cargo/deko.ld");
 }
 
 fn format_timestamp(time: std::time::SystemTime) -> String {

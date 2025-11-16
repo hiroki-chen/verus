@@ -3,13 +3,16 @@ resolver = "2"
 members = [
     "deko-core",
     "deko-logging",
+    "deko-macros",
+    "deko-playground",
     "deko-stage1",
     "deko-std",
-    "deko-playground",
     "xtask",
     "tests/buddy",
     "tests/elf",
-    "deko-macros",
+    # bins
+    "bin/deko-monitor",
+    "bin/deko-stage2",
 ]
 exclude = ["tools/verus"]
 

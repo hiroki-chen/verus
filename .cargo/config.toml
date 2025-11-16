@@ -17,6 +17,8 @@ build-deko-snp-release = "xtask --target-arch snp build --target deko --release"
 build-deko-tdx-debug = "xtask --target-arch tdx build --target deko"
 build-deko-snp-debug = "xtask --target-arch snp build --target deko"
 
+stats = "xtask line-count"
+
 pretty = "xtask pretty"
 
 # TODO: Fork another version. This will download unncessary git submodules recursively.

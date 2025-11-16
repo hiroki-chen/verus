@@ -2,15 +2,15 @@
 name = "deko-core"
 edition = "2021"
 
-[[bin]]
-path = "src/stage2.rs"
-name = "stage2"
-test = false
+# [[bin]]
+# path = "src/stage2.rs"
+# name = "stage2"
+# test = false
 
-[[bin]]
-path = "src/monitor.rs"
-name = "deko"
-test = false
+# [[bin]]
+# path = "src/monitor.rs"
+# name = "deko"
+# test = false
 
 [package.metadata.verus]
 verify = true

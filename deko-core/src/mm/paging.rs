@@ -217,7 +217,7 @@ pub proof fn lemma_private_bit_non_interfering(
         ({
             let addr_after = make_private_address_spec(paddr, private_bit, shared_bit);
             let addr_after_pte = addr_after | (flags.bits() as u64);
-            let pte_flag = from_bits(addr_after_pte & Pte_ALL_BITS);
+            let pte_flag = PteFlags::from_bits(addr_after_pte & Pte_ALL_BITS);
 
             &&& forall|p: Pte| #[trigger] flags@.contains(p) ==> pte_flag.contains(p)
             &&& forall|p: Pte| !#[trigger] flags@.contains(p) ==> !pte_flag.contains(p)
@@ -227,7 +227,7 @@ pub proof fn lemma_private_bit_non_interfering(
     let addr_after_pte = addr_after | (flags.bits() as u64);
     let pte_all = (1u64 << 0) | (1u64 << 1) | (1u64 << 2) | (1u64 << 5) | (1u64 << 6) | (1u64 << 7)
         | (1u64 << 8) | (1u64 << 63);
-    let pte_flag = from_bits(addr_after_pte & pte_all);
+    let pte_flag = PteFlags::from_bits(addr_after_pte & pte_all);
     let flags_bits = flags.bits() as u64;
 
     bit_u64_and_auto();
@@ -1336,7 +1336,7 @@ impl Page {
                 ;
             }
             assert(new_pte_value.is_present_pte_spec() && !new_pte_value.is_huge_pte_spec()) by {
-                assert(flags@ == from_bits(writeable_bits & all));
+                assert(flags@ == PteFlags::from_bits(writeable_bits & all));
 
                 assert(flags@ =~= Set::new(|p: Pte| p.bit() & (writeable_bits & all) != 0));
                 assert(flags@.contains(Pte::PRESENT) && !flags@.contains(Pte::HUGE)) by {
@@ -2316,10 +2316,10 @@ impl Page {
         private_bit: u64,
         shared_bit: u64,
     )
-        // requires
-        //     old(perm).unmap_page_4k_requires(page, vaddr, ms, private_bit, shared_bit),
-        // ensures
-        //     old(perm).unmap_page_4k_ensures(vaddr, private_bit, shared_bit, perm),
+    // requires
+    //     old(perm).unmap_page_4k_requires(page, vaddr, ms, private_bit, shared_bit),
+    // ensures
+    //     old(perm).unmap_page_4k_ensures(vaddr, private_bit, shared_bit, perm),
     {
         let mapping = Page::walk(page, Tracked(perm), vaddr, ms, private_bit, shared_bit);
 
@@ -2332,19 +2332,23 @@ impl Page {
 
                 let tracked perm_before = &*perm;
                 let tracked mut page_perm = perm.storage.tracked_remove(parent_path);  // we remove and then re-insert later.
-                Page::update_entry_by_ptr(page, Tracked(&mut page_perm.this_page_perm), idx, new_pte_value);
+                Page::update_entry_by_ptr(
+                    page,
+                    Tracked(&mut page_perm.this_page_perm),
+                    idx,
+                    new_pte_value,
+                );
                 proof {
                     page_is_aligned();
 
                     // FILL IN LATER.
                 }
-            }
-
+            },
             _ => {
                 // should be already unpresent because we've returned
                 // earlier if not present. BTW this should not be a
                 // huge page.
-            }
+            },
         }
     }
 
@@ -2499,17 +2503,17 @@ impl PageTableEntry {
     }
 
     pub open spec fn is_valid_pte_spec(&self) -> bool {
-        let bits = from_bits(self@.0 & Pte_ALL_BITS);
+        let bits = PteFlags::from_bits(self@.0 & Pte_ALL_BITS);
         bits.contains(Pte::PRESENT) && !bits.contains(Pte::HUGE)
     }
 
     pub open spec fn is_huge_pte_spec(&self) -> bool {
-        let bits = from_bits(self@.0 & Pte_ALL_BITS);
+        let bits = PteFlags::from_bits(self@.0 & Pte_ALL_BITS);
         bits.contains(Pte::HUGE)
     }
 
     pub open spec fn is_present_pte_spec(&self) -> bool {
-        let bits = from_bits(self@.0 & Pte_ALL_BITS);  // bits = set.
+        let bits = PteFlags::from_bits(self@.0 & Pte_ALL_BITS);  // bits = set.
         bits.contains(Pte::PRESENT)
     }
 

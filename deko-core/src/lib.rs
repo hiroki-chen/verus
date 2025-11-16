@@ -214,6 +214,12 @@ impl WellFormed for Stage2LaunchInfo {
     }
 }
 
+impl WellFormed for DekoKernelLaunchInfo {
+    open spec fn wf(&self) -> bool {
+        true
+    }
+}
+
 } // verus!
 #[macro_export]
 macro_rules! kunimplemented {

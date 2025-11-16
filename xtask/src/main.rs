@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -175,6 +175,8 @@ enum Commands {
     BootstrapQemu,
 
     BootstrapOvmf,
+
+    LineCount,
 }
 
 impl Default for FinalQemuConfig {
@@ -432,9 +434,12 @@ impl Builder {
         // Set up environment for verus
         std::env::set_var("VERUS_Z3_PATH", &z3_binary);
 
-        let deko_stage2 = self.config.root.join("deko-core");
-        std::env::set_current_dir(&deko_stage2)
-            .context("Failed to change directory to deko-core")?;
+        // let deko_stage2 = self.config.root.join("deko-core");
+        // std::env::set_current_dir(&deko_stage2)
+        //     .context("Failed to change directory to deko-core")?;
+        let stage2_path = self.config.root.join("bin").join("deko-stage2");
+        std::env::set_current_dir(&stage2_path)
+            .context("Failed to change directory to bin directory")?;
 
         // Build stage2 using discovered verus binary
         let mut cmd = Command::new("cargo");
@@ -453,8 +458,6 @@ impl Builder {
             .arg(self.config.custom_target_json())
             .arg("--features")
             .arg(&self.config.target_arch)
-            .arg("--bin")
-            .arg("stage2")
             .arg("--")
             .arg("--expand-errors");
 
@@ -481,6 +484,10 @@ impl Builder {
 
         println!("{}", "--- Building Deko Monitor ---".bright_cyan().bold());
 
+        let deko_path = self.config.root.join("bin").join("deko-monitor");
+        std::env::set_current_dir(&deko_path)
+            .context("Failed to change directory to deko-monitor bin directory")?;
+
         // Build monitor
         let mut cmd = Command::new("cargo");
         cmd.arg("verus")
@@ -489,8 +496,6 @@ impl Builder {
             .arg(self.config.custom_target_json())
             .arg("--features")
             .arg(&self.config.target_arch)
-            .arg("--bin")
-            .arg("deko")
             .arg("--")
             .arg("--expand-errors");
 
@@ -787,7 +792,109 @@ fn main() -> Result<()> {
         Commands::BootstrapQemu => bootstrap_qemu(),
 
         Commands::BootstrapOvmf => bootstrap_ovmf(),
+
+        Commands::LineCount => line_count(),
     }
+}
+
+fn line_count() -> Result<()> {
+    println!("{} Verus Line Count Tool", "📊".bright_cyan().bold());
+
+    // Step 1: Generate dependency information for deko-core and deko-std
+    println!("{} Generating dependency information...", "🔍".bright_yellow());
+
+    let project_root = project_root();
+    let packages = vec!["deko-core", "deko-std"];
+    // let mut dep_files = Vec::new();
+
+    // Discover required binaries first
+    let builder = Builder::new("snp".to_string()); // Use SNP as default for line counting
+    let verus_binary = builder.find_verus_binary()?;
+    let z3_binary = builder.find_z3_binary()?;
+
+    // Set up environment for verus
+    std::env::set_var("VERUS_Z3_PATH", &z3_binary);
+    if verus_binary != PathBuf::from("verus") {
+        let verus_dir = verus_binary.parent().unwrap_or_else(|| Path::new("."));
+        let current_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", verus_dir.display(), current_path);
+        std::env::set_var("PATH", new_path);
+    }
+
+    for package in &packages {
+        println!("📦 Processing package: {}", package.bright_white());
+
+        // Run cargo verus verify with --emit=dep-info
+        let mut cmd = Command::new("cargo");
+        cmd.arg("verus")
+            .arg("verify")
+            .arg("--lib")
+            .arg("--package")
+            .arg(package)
+            .arg("--")
+            .arg("--emit=dep-info");
+
+        println!("Running: {:?}", cmd);
+
+        let output = cmd
+            .output()
+            .with_context(|| format!("Failed to run cargo verus verify for {}", package))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            println!("❌ Failed to generate dependency info for {}:", package.red());
+            println!("STDOUT: {}", stdout);
+            println!("STDERR: {}", stderr);
+            continue;
+        }
+
+        println!("✓ Generated dependency information for {}", package.green());
+    }
+
+    // Step 2: Parse dep-info files and count lines
+    let dep_path = project_root.join("target").join("debug");
+    for package in &packages {
+        let dep_file = dep_path.join(format!("lib{}.d", package.replace("-", "_")));
+        if !dep_file.exists() {
+            println!("⚠ Dependency file not found for {}: {:?}", package.yellow(), dep_file);
+            continue;
+        }
+
+        println!("📄 Parsing dependency file: {:?}", dep_file);
+
+        let content = fs::read_to_string(&dep_file)
+            .with_context(|| format!("Failed to read dep-info file: {:?}", dep_file))?;
+        let content = content
+            .split(" ")
+            .filter_map(|f| if f.contains(".rs") || f.contains(".rlib") { Some(f) } else { None })
+            .collect::<Vec<_>>();
+        // Now combine content into a single string.
+        let content = content.join(" ");
+
+        // Write back to the original file.
+        let file_handle = fs::File::create(&dep_file)
+            .with_context(|| format!("Failed to open dep-info file for writing: {:?}", dep_file))?;
+        let mut writer = BufWriter::new(file_handle);
+        writer
+            .write_all(content.as_bytes())
+            .with_context(|| format!("Failed to write to dep-info file: {:?}", dep_file))?;
+
+        let mut cmd = Command::new("line_count");
+        cmd.arg(dep_file.display().to_string());
+
+        println!("Running: {:?}", cmd);
+
+        // print the output.
+        let out = cmd.output().with_context(|| {
+            format!("Failed to run line_count tool on dep-info file: {:?}", dep_file)
+        })?;
+
+        io::stdout().write_all(&out.stdout).context("Failed to write line_count output")?;
+        io::stderr().write_all(&out.stderr).context("Failed to write line_count error output")?;
+    }
+
+    Ok(())
 }
 
 fn bootstrap_ovmf() -> Result<()> {

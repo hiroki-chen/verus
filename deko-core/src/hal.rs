@@ -710,14 +710,21 @@ fn into_deko_monitor(ctx: DekoPPtr<DekoCpuCtx>, deko_entry: u64, cmd: u64) -> (_
     unsafe {
         core::ptr::drop_in_place(PERCPU_BASE.0 as *mut DekoCpuCtx);
 
-        Page::unmap_page_4k(pgtable, Tracked(&mut ctx_perm.pgtable_perm), PERCPU_BASE, &ms, private_bit, shared_bit);
+        Page::unmap_page_4k(
+            pgtable,
+            Tracked(&mut ctx_perm.pgtable_perm),
+            PERCPU_BASE,
+            &ms,
+            private_bit,
+            shared_bit,
+        );
 
         // The entry point is @ `monitor.rs::deko_entry`.
         core::arch::asm!(
             "jmp *%rax",
             in("rax") deko_entry,
-            in("rdi") cmd,
-            in("rsi") 0, /* ? */
+            in("rdi") ctx.addr() as u64,
+            in("rsi") cmd, /* ? */
             options(att_syntax),
         );
     }

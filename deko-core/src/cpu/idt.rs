@@ -254,11 +254,14 @@ impl Idt {
 /// Initialize the early IDT used in stage2. This will remain in scope as long as
 /// stage2 is in memory.
 #[verifier::external_body]
-pub fn init_early_idt(early_idt: &mut Idt)
+#[verus_spec(r =>
+    // with Tracked(ctx_perm): Tracked<&crate::cpu::DekoCpuCtxPermission>,
     requires
         old(early_idt).entries.wf(),
     ensures
         early_idt.wf(),
+)]
+pub fn init_early_idt(early_idt: &mut Idt)
 {
     unsafe {
         early_idt.init(

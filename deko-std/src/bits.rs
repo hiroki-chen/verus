@@ -92,10 +92,6 @@ macro_rules! deko_bitflags {
                 }
             }
 
-            pub open spec fn from_bits(bits: $T) -> Set<$name> {
-                vstd::set::Set::new(|flag: $name| flag.bit() & bits != 0)
-            }
-
             impl vstd::view::View for [<$name Flags>] {
                 type V = vstd::set::Set<$name>;
 
@@ -115,7 +111,7 @@ macro_rules! deko_bitflags {
                 pub broadcast proof fn lemma_from_bits_single(flag: $name)
                     ensures
                         #[trigger]
-                        from_bits(flag.bit()) =~= set![flag],
+                        Self::from_bits(flag.bit()) =~= set![flag],
                 {
                     admit();
                 }
@@ -141,10 +137,14 @@ macro_rules! deko_bitflags {
                     [<bit_ $T _and_auto>]();
                 }
 
+                pub open spec fn from_bits(bits: $T) -> Set<$name> {
+                    vstd::set::Set::new(|flag: $name| flag.bit() & bits != 0)
+                }
+
                 pub open spec fn inv(&self) -> bool {
                     &&& forall|flag: $name| #[trigger]
                         self@.contains(flag) <==> (flag.bit() & self.bits() != 0)
-                    &&& self@ =~= from_bits(self.bits())
+                    &&& self@ =~= Self::from_bits(self.bits())
                 }
 
                 pub open spec fn bits_spec(&self) -> $T {
@@ -165,7 +165,7 @@ macro_rules! deko_bitflags {
                 pub open spec fn from_bits_truncate_spec(bits: $T) -> [<$name Flags>] {
                     [<$name Flags>] {
                         bits: bits & [<$name _ALL_BITS>],
-                        flags: Ghost(from_bits(bits & [<$name _ALL_BITS>])),
+                        flags: Ghost(Self::from_bits(bits & [<$name _ALL_BITS>])),
                     }
                 }
 
@@ -185,7 +185,7 @@ macro_rules! deko_bitflags {
                 }
 
                 pub open spec fn contains_spec(&self, flag: $T) -> bool {
-                    from_bits(flag).subset_of(self@)
+                    Self::from_bits(flag).subset_of(self@)
                 }
 
                 #[verifier::spinoff_prover]
@@ -196,13 +196,13 @@ macro_rules! deko_bitflags {
                         self.wf(),
                         flag & [<$name _ALL_BITS>] == flag,  // flag only has valid bits set
                     ensures
-                        r == from_bits(flag).subset_of(self@),
+                        r == Self::from_bits(flag).subset_of(self@),
                 {
                     let res = flag & self.bits == flag;
                     proof {
-                        let ghost other = from_bits(flag);
+                        let ghost other = Self::from_bits(flag);
                         assert(other =~= vstd::set::Set::new(|s: $name| s.bit() & flag != 0));
-                        assert(self@ =~= from_bits(self.bits()));
+                        assert(self@ =~= Self::from_bits(self.bits()));
                         assert(forall |flag: $name| {
                             #[trigger]
                             $(flag.bit() == (1 as $T) << $value)||*
@@ -276,7 +276,7 @@ macro_rules! deko_bitflags {
                             [<bit_ $T _and_auto>]();
                         }
                         // Necessary
-                        assert(vstd::set::Set::empty() =~= from_bits(0));
+                        assert(vstd::set::Set::empty() =~= Self::from_bits(0));
                     }
 
                     [<$name Flags>] { bits: 0, flags: Ghost(vstd::set::Set::empty()) }
@@ -323,17 +323,17 @@ macro_rules! deko_bitflags {
                         flag & [<$name _ALL_BITS>] == flag,
                     ensures
                         self.wf(),
-                        self@ =~= old(self)@.difference(from_bits(flag)),
+                        self@ =~= old(self)@.difference(Self::from_bits(flag)),
                 {
                     // After self.bits & !flag, a bit is set iff it was set before AND *not in flag*
                     self.bits = self.bits & !flag;
-                    self.flags = Ghost(old(self).flags.borrow().difference(from_bits(flag)));
+                    self.flags = Ghost(old(self).flags.borrow().difference(Self::from_bits(flag)));
 
                     // Now we need to prove inv() again.
                     proof {
-                        assert(self@ =~= from_bits(self.bits)) by {
+                        assert(self@ =~= Self::from_bits(self.bits)) by {
                             assert forall|s: $name| #[trigger]
-                                self@.contains(s) <==> from_bits(self.bits).contains(s) by {
+                                self@.contains(s) <==> Self::from_bits(self.bits).contains(s) by {
                                 let sbit = s.bit();
                                 let old_sbit = old(self).bits;
 
@@ -388,7 +388,7 @@ macro_rules! deko_bitflags_quick {
                     $(
                         #[verifier::inline]
                         pub open spec fn [<$bit_name _spec>] () -> Set<$name> {
-                            from_bits( ($($bits)|*) & [<$name _ALL_BITS>] )
+                            Self::from_bits( ($($bits)|*) & [<$name _ALL_BITS>] )
                         }
 
                         #[inline(always)]

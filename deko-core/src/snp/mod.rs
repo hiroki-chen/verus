@@ -1,6 +1,7 @@
 use core::ops::Range;
 use core::sync::atomic::AtomicU32;
 
+use deko_macros::DekoDebug;
 use deko_std::prelude::*;
 use deko_std::snp::ghcb::GuestHostCommucationBlock;
 use vstd::cell::PCell;
@@ -31,15 +32,91 @@ extern "C" {
 
 verus! {
 
-#[verifier::external_body]
+pub const VMPCK_SIZE: usize = 32;
+
+pub const VMPL_MAX: usize = 4;
+
+pub exec static SECRETS_PAGE: RwLockNoPred<SecretsPage>
+    ensures
+        SECRETS_PAGE.wf(),
+{
+    let r = RwLockNoPred::new(SecretsPage::new(), Ghost(TrivialPredicate::new()));
+
+    proof {
+        use_type_invariant(&r);
+    }
+
+    r
+}
+
+#[derive(Copy, Clone, DekoDebug)]
+#[repr(C, packed)]
+pub struct SecretsPage {
+    version: u32,
+    gctxt: u32,
+    fms: u32,
+    #[deko(skip)]
+    reserved_00c: u32,
+    gosvw: [u8; 16],
+    vmpck: [[u8; VMPCK_SIZE]; VMPL_MAX],
+    #[deko(skip)]
+    reserved_0a0: [u8; 96],
+    vmsa_tweak_bmp: [u64; 8],
+    svsm_base: u64,
+    svsm_size: u64,
+    svsm_caa: u64,
+    svsm_max_version: u32,
+    svsm_guest_vmpl: u8,
+    reserved_15d: [u8; 3],
+    tsc_factor: u32,
+    #[deko(skip)]
+    reserved_164: [u8; 3740],
+}
+
+#[verus_verify]
+impl SecretsPage {
+    pub const fn new() -> (r: Self)
+        ensures
+            r.wf(),
+    {
+        SecretsPage {
+            version: 0,
+            gctxt: 0,
+            fms: 0,
+            reserved_00c: 0,
+            gosvw: [0;16],
+            vmpck: [[0;VMPCK_SIZE];VMPL_MAX],
+            reserved_0a0: [0;96],
+            vmsa_tweak_bmp: [0;8],
+            svsm_base: 0,
+            svsm_size: 0,
+            svsm_caa: 0,
+            svsm_max_version: 0,
+            svsm_guest_vmpl: 0,
+            reserved_15d: [0;3],
+            tsc_factor: 0,
+            reserved_164: [0;3740],
+        }
+    }
+}
+
+impl WellFormed for SecretsPage {
+    #[verifier::inline]
+    open spec fn wf(&self) -> bool {
+        true
+    }
+}
+
 #[inline(always)]
-pub fn get_igvm_params_block<'a>(header: &'a Stage2LaunchInfo) -> (r: &'a IgvmParamBlock)
+#[verifier::external_body]
+#[verus_spec(r =>
     requires
         header.wf(),
     ensures
         r.wf(),
         r == header.get_igvm_param_block_spec(),
-{
+)]
+pub fn get_igvm_params_block<'a>(header: &'a Stage2LaunchInfo) -> &'a IgvmParamBlock {
     // Note that this case does NOT include all the fields contained in the
     // `header.igvm_params` structure; we just extract the leading `IgvmParamBlock`
     // here since it is the first part of the structure; this should be safe as long
@@ -494,7 +571,7 @@ impl SnpStatusFlags {
     {
         let bits = read_msr(MSR_SEV_STATUS) as u32;
 
-        SnpStatusFlags { bits, flags: Ghost(from_bits(bits)) }
+        SnpStatusFlags { bits, flags: Ghost(Self::from_bits(bits)) }
     }
 }
 
