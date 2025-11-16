@@ -403,16 +403,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "deko-playground"
-version = "0.1.0"
-dependencies = [
- "deko-std",
- "verus_builtin",
- "verus_builtin_macros",
- "vstd",
-]
-
-[[package]]
 name = "deko-stage1"
 version = "0.1.0"
 dependencies = [

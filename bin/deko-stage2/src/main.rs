@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+#![feature(proc_macro_hygiene)]
+
 use vstd::prelude::*;
 
 use deko_std::prelude::*;
@@ -31,9 +33,7 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 /// The parameter `ctx` is obtained from the assembly code where we pass the address
 /// from the `.data` section to here.
 #[unsafe(no_mangle)]
-// Making this function as `external` is awkward as
-// verus treats imports from `deko_core` as external.
-#[verifier::external]
+#[verifier::external_body]
 #[verus_spec(r =>
     with
         Tracked(ctx_perm): Tracked<DekoCtxPermission>,
@@ -42,6 +42,8 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
         ctx_perm.current_cpu_core.is_bsp(),
 )]
 extern "C" fn deko_main(ctx: DekoPPtr<DekoCtx>) -> (__discard: !) {
+    // Verus does not generate correct symbol for this
+    // so now we mark it as external body.
     deko_core::hal::setup_env(ctx);
 }
 

@@ -151,7 +151,7 @@ impl<'a> WellFormed for ElfLoadSegment<'a> {
 impl<'a> ElfFile<'a> {
     pub uninterp spec fn get_vaddr_alloc_base_spec(&self) -> VirtAddr;
 
-    pub uninterp spec fn new_spec(start_paddr: PhysAddr, end_paddr: PhysAddr) -> Option<Self>;
+    pub uninterp spec fn new_spec(start: u64, end: u64) -> Option<Self>;
 
     pub uninterp spec fn load_segments(&self) -> Seq<ElfLoadSegment>;
 
@@ -239,7 +239,7 @@ impl<'a> ElfFile<'a> {
             end_paddr.wf(),
         ensures
             r.wf(),
-            r == Self::new_spec(start_paddr, end_paddr),
+            r == Self::new_spec(start_paddr@, end_paddr@),
     {
         let bytes = unsafe {
             core::slice::from_raw_parts(
@@ -248,6 +248,14 @@ impl<'a> ElfFile<'a> {
             )
         };
 
+        Some(Self(elf::Elf64File::read(bytes).ok()?))
+    }
+
+    #[verifier::external_body]
+    pub fn read(bytes: &'a [u8]) -> (r: Option<Self>)
+        ensures
+            r.wf(),
+    {
         Some(Self(elf::Elf64File::read(bytes).ok()?))
     }
 

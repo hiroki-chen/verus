@@ -185,7 +185,7 @@ impl GHCBIoPort {
 }
 
 /// Initialize the GHCB logging mechanism.
-pub(crate) fn init_ghcb_logging(serial_port: u16)
+pub fn init_ghcb_logging(serial_port: u16)
     requires
         serial_port + 8 <= u16::MAX,
 {

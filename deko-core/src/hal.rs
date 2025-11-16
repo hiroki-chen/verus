@@ -13,7 +13,7 @@ use crate::elf::{ElfFile, ElfLoadSegment};
 use crate::mm::paging::Page;
 use crate::mm::{init_frame_allocator, DEKO_MAPPING_SPACE};
 use crate::snp::get_igvm_params_block;
-use crate::{die, imp, kerror, kinfo, DekoKernelLaunchInfo, Stage2LaunchInfo};
+use crate::{die, imp, kdebug, kerror, kinfo, DekoKernelLaunchInfo, Stage2LaunchInfo};
 
 verus! {
 
@@ -407,6 +407,8 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>) -> (__discard: !) {
                 suppress_deko_interrupts: igvm_params_block.suppress_svsm_interrupts_on_snp != 0,
             };
 
+            kdebug!("Prepared DekoKernelLaunchInfo:", kernel_launch_info);
+
             kinfo!("Deko setup complete. Jumping to kernel entry point...");
             #[verus_spec(with Tracked(&mut ctx_perm))]
             into_deko_monitor(ctx, entry.0, addr_of_ref(&kernel_launch_info));
@@ -708,16 +710,22 @@ fn into_deko_monitor(ctx: DekoPPtr<DekoCpuCtx>, deko_entry: u64, cmd: u64) -> (_
     let pgtable = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).pgtable();
 
     unsafe {
-        core::ptr::drop_in_place(PERCPU_BASE.0 as *mut DekoCpuCtx);
-
-        Page::unmap_page_4k(
-            pgtable,
-            Tracked(&mut ctx_perm.pgtable_perm),
-            PERCPU_BASE,
-            &ms,
-            private_bit,
-            shared_bit,
+        // core::ptr::drop_in_place(PERCPU_BASE.0 as *mut DekoCpuCtx);
+        // Page::unmap_page_4k(
+        //     pgtable,
+        //     Tracked(&mut ctx_perm.pgtable_perm),
+        //     PERCPU_BASE,
+        //     &ms,
+        //     private_bit,
+        //     shared_bit,
+        // );
+        let mut rip: u64;
+        core::arch::asm!(
+            "lea {rip}, [rip + 0f]",
+            "0:",
+            rip = out(reg) rip,
         );
+        kinfo!("Jumping to deko monitor from RIP=", rip => hex,);
 
         // The entry point is @ `monitor.rs::deko_entry`.
         core::arch::asm!(

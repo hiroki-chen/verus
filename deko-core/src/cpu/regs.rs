@@ -32,6 +32,8 @@ deko_bitflags! {
     }
 }
 
+/// Reads the current value of the CR0 register.
+#[inline]
 #[verifier::external_body]
 #[verus_spec(r =>
     // with Tracked(cpu_core): Tracked<&mut DekoCpuCore>,
@@ -44,14 +46,17 @@ pub fn read_cr0() -> Cr0Flags {
 
     unsafe {
         core::arch::asm!(
-          "mov {}, cr0",
-          out(reg) cr0,
+            "movq %cr0, {}",
+            out(reg) cr0,
+            options(att_syntax)
         );
     }
 
     Cr0Flags::from_bits_truncate(cr0)
 }
 
+/// Reads the current value of the CR4 register.
+#[inline]
 #[verifier::external_body]
 #[verus_spec(r =>
     // with Tracked(cpu_core): Tracked<&mut DekoCpuCore>,
@@ -64,14 +69,19 @@ pub fn read_cr4() -> Cr4Flags {
 
     unsafe {
         core::arch::asm!(
-          "mov {}, cr4",
-          out(reg) cr4,
+            "movq %cr4, {}",
+            out(reg) cr4,
+            options(att_syntax)
         );
     }
 
     Cr4Flags::from_bits_truncate(cr4)
 }
 
+/// Writes the given value to the CR4 register.
+///
+/// We ensure that the incoming bits are valid before writing to CR4.
+#[inline]
 #[verifier::external_body]
 #[verus_spec(r =>
     // with Tracked(cpu_core): Tracked<&mut DekoCpuCore>,
@@ -82,12 +92,17 @@ pub fn read_cr4() -> Cr4Flags {
 pub fn write_cr4(cr4: Cr4Flags) {
     unsafe {
         core::arch::asm!(
-          "mov cr4, {}",
-          in(reg) cr4.bits(),
+            "movq {}, %cr4",
+            in(reg) cr4.bits(),
+            options(att_syntax),
         );
     }
 }
 
+/// Writes the given value to the CR0 register.
+///
+/// We ensure that the incoming bits are valid before writing to CR0.
+#[inline]
 #[verifier::external_body]
 #[verus_spec(r =>
     // with Tracked(cpu_core): Tracked<&mut DekoCpuCore>,
@@ -98,10 +113,37 @@ pub fn write_cr4(cr4: Cr4Flags) {
 pub fn write_cr0(cr0: Cr0Flags) {
     unsafe {
         core::arch::asm!(
-          "mov cr0, {}",
-          in(reg) cr0.bits(),
+            "movq {}, %cr0",
+            in(reg) cr0.bits(),
+            options(att_syntax),
         );
     }
+}
+
+/// This is an extremly unsafe function that loads the given value into CR3 register.
+///
+/// # Safety
+///
+/// This function is unsafe because loading an invalid value into CR3 can cause
+/// the CPU to enter an undefined state, leading to system crashes or data corruption.
+///
+/// It is the caller's responsibility to ensure that the provided value is a valid
+/// physical address of a properly configured page table.
+#[inline]
+#[verifier::external_body]
+#[verus_spec(r =>
+    // with Tracked(cpu_core): Tracked<&mut DekoCpuCore>,
+    requires
+        val.wf(),
+        // val@ <= u32::MAX, ?? some region constraints.
+    ensures
+)]
+pub unsafe fn load_cr3(val: PhysAddr) {
+    core::arch::asm!(
+        "movq {}, %cr3",
+        in(reg) val.0,
+        options(att_syntax),
+    );
 }
 
 /// Initializes the CR0 register.
@@ -129,6 +171,7 @@ pub fn cr0_init() {
     write_cr0(cr0);
 }
 
+/// Initializes the CR4 register.
 #[verus_spec(r =>
     // with Tracked(cpu_core): Tracked<&mut DekoCpuCore>,
     // requires

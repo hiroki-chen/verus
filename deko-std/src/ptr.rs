@@ -23,6 +23,12 @@ pub fn addr_of_ref<T: Sized>(target: &T) -> u64 {
     target as *const T as u64
 }
 
+#[inline(always)]
+#[verifier::external_body]
+pub fn read_bytes<'a, T>(ptr: u64, len: usize) -> &'a [T] {
+    unsafe { core::slice::from_raw_parts(ptr as *const T, len) }
+}
+
 /// Defines bidirectional conversion between a high-level type `T` (`Self`)
 /// and its low-level representation `R`.
 ///
@@ -115,6 +121,13 @@ impl<V: WellFormed> DekoPPtr<V> {
     /// For example, in a multi-core system, we might want to ensure that certain data structures
     /// are only accessed by the CPU core that owns them.
     pub uninterp spec fn bound_cpu_id(&self) -> nat;
+
+    pub fn into_vaddr(&self) -> (r: VirtAddr)
+        returns
+            VirtAddr::new_spec(self.addr() as u64),
+    {
+        VirtAddr::new(self.addr() as u64)
+    }
 
     /// Casts (re-interpret) this pointer into a pointer of another type `T`.
     ///

@@ -57,11 +57,14 @@ pub proof fn tracked_new_seq<A>(len: nat, f: spec_fn(int) -> A) -> (r: Seq<A>)
 }
 
 #[verifier::external_body]
-pub fn early_die()
+pub fn early_die() -> !
     opens_invariants none
 {
     unsafe {
         core::arch::asm!("ud2", options(att_syntax));
+    }
+
+    loop {
     }
 }
 

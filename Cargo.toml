@@ -4,7 +4,6 @@ members = [
     "deko-core",
     "deko-logging",
     "deko-macros",
-    "deko-playground",
     "deko-stage1",
     "deko-std",
     "xtask",

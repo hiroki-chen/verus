@@ -17,7 +17,7 @@ use vstd::prelude::*;
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::kerror;
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
-use crate::mm::paging::{PageTable, PteFlags};
+use crate::mm::paging::{PageTable, PageTablePermission, PteFlags};
 
 verus! {
 
@@ -98,20 +98,20 @@ pub fn init_frame_allocator(heap_start: &VirtAddr, heap_end: &VirtAddr) {
 
 #[inline(always)]
 pub fn virt_to_phys(
-    ctx: DekoPPtr<DekoCpuCtx>,
-    Tracked(ctx_perm): Tracked<&DekoCpuCtxPermission>,
+    private_bit: u64,
+    shared_bit: u64,
     vaddr: VirtAddr,
+    Tracked(pgtable_perm): Tracked<&PageTablePermission>,
 ) -> (paddr: PhysAddr)
     requires
+        private_bit == pgtable_perm.private_bit,
+        shared_bit == pgtable_perm.shared_bit,
+        pgtable_perm.wf(),
         vaddr.wf(),
-        ctx_perm.wf_with(ctx),
     ensures
         paddr.wf(),
 {
-    let private_bit = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).private_bit();
-    let shared_bit = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).shared_bit();
-
-    match PageTable::virt_to_frame(vaddr, private_bit, Tracked(&ctx_perm.pgtable_perm)) {
+    match PageTable::virt_to_frame(vaddr, private_bit, Tracked(pgtable_perm)) {
         Some(v) => v.address(private_bit, shared_bit),
         None => {
             crate::die("virt_to_phys: address not mapped");

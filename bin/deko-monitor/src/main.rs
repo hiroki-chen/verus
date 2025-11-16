@@ -1,20 +1,43 @@
 #![no_std]
 #![no_main]
-
 #![feature(proc_macro_hygiene)]
 
 use deko_core::cpu::gdt::GLOBAL_GDT;
-use deko_core::cpu::idt::{create_early_idt, init_early_idt, Idt};
-use deko_core::cpu::regs::{cr0_init, cr4_init};
+use deko_core::cpu::idt::{Idt, create_early_idt, init_early_idt};
+use deko_core::cpu::regs::{cr0_init, cr4_init, load_cr3};
 use deko_core::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
-use deko_core::mm::paging::GLOBAL;
-use deko_core::{kinfo, DekoKernelLaunchInfo};
+use deko_core::elf::ElfFile;
+use deko_core::mm::paging::{GLOBAL, PageTable, PageTablePermission};
+use deko_core::mm::{DEKO_FRAME_ALLOCATOR, virt_to_phys};
+use deko_core::{DekoKernelLaunchInfo, kinfo};
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
 core::arch::global_asm!(include_str!("../monitor.S"), options(att_syntax));
 
 verus! {
+
+#[verifier::external_body]
+fn init_mem(header: &DekoKernelLaunchInfo) {
+    let heap_start = header.heap_area_virt_start;
+    let heap_size = header.heap_area_size;
+
+    DEKO_FRAME_ALLOCATOR.0.init(heap_start, heap_size)
+}
+
+#[verifier::external_body]
+#[verus_spec(r =>
+    requires
+        header.wf(),
+        elf.wf(),
+)]
+fn init_paging(header: &DekoKernelLaunchInfo, elf: &ElfFile, private_bit: u64, shared_bit: u64) -> (DekoPPtr<PageTable>, PhysAddr, Tracked<PageTablePermission>) {
+    let (new_page_table, paddr, Tracked(perm)) = PageTable::new(private_bit, shared_bit);
+
+    // todo....
+
+    (new_page_table, paddr, Tracked(perm))
+}
 
 /// The "true" entry point of the monitor.
 ///
@@ -36,6 +59,13 @@ extern "C" fn deko_entry(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInf
     loop{}
 }
 
+/// Set up the environment for the DEKO itself. The reason why we
+/// need this function is that the previous stage is just boostrapping
+/// the CPU to a minimal environment and load kernel to the memory.
+/// After that all the resources initialized are not available immediately
+/// inside the kernel address spaces because the statics, page tables, etc.
+/// reside in the lower half memory so we have to allocate/copy them to make
+/// deko monitor work at this stage.
 #[verus_spec(r =>
     with
         Tracked(ctx_perm): Tracked<DekoCpuCtxPermission>,
@@ -56,13 +86,41 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) {
 
     cr0_init();
     cr4_init();
+
+    init_mem(header);
+
+    let kernel_elf_len = header.kernel_elf_stage2_virt_end - header.kernel_elf_stage2_virt_start;
+    let kernel_elf_bytes = deko_std::ptr::read_bytes(header.kernel_elf_stage2_virt_start, kernel_elf_len as usize);
+    let kernel_elf = match ElfFile::read(kernel_elf_bytes) {
+        Some(elf) => elf,
+        None => {
+            kinfo!("Failed to read kernel ELF");
+            early_die();
+        }
+    };
+
+    let private_bit = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).private_bit();
+    let shared_bit = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).shared_bit();
+    let (new_page_table, paddr, Tracked(pgtable_perm)) = init_paging(header, &kernel_elf, private_bit, shared_bit);
+
+    early_dbg();
+    unsafe {
+        // SAFETY: We have ensured that the new page table is valid because
+        // init_paging() returns a valid page table and its permission.
+        load_cr3(paddr);
+    }
+
+    // deko_core::hal::setup_env(ctx);
 }
 
 #[verifier::external]
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    loop {
-    }
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    // Print detailed panic information using the logging system
+    #[cfg(feature = "logging")]
+    deko_core::logging::print_panic_info(info);
+
+    unreachable!();
 }
 
 } // verus!

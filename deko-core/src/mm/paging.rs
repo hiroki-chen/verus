@@ -9,7 +9,7 @@ use vstd::{assert_by_contradiction, prelude::*};
 use super::DEKO_MAPPING_SPACE;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
-use crate::mm::DEKO_FRAME_ALLOCATOR;
+use crate::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR};
 use crate::{kerror, kinfo, kunimplemented, kwarn, Stage2LaunchInfo};
 
 extern "C" {
@@ -425,6 +425,7 @@ deko_bitflags_quick! {
     data: { PRESENT, WRITABLE, USER, ACCESSED, DIRTY, GLOBAL, NX },
     writeable: { PRESENT, USER, WRITABLE, ACCESSED, DIRTY },
     writeable_kernel: { PRESENT, WRITABLE, ACCESSED, DIRTY },
+    nx_kernel: { PRESENT, WRITABLE, ACCESSED, DIRTY, NX },
     read_only: { PRESENT, USER, ACCESSED },
     kernel_code: { PRESENT, GLOBAL },
 }
@@ -930,6 +931,50 @@ impl PageFrame {
             r == self.address_spec(private_bit, shared_bit),
     {
         PhysAddr(strip_shared_address_bits(self.page_frame(private_bit).0, shared_bit))
+    }
+}
+
+impl PageTable {
+    /// Creates a new empty page table at ROOT level.
+    #[verifier::external_body]
+    pub fn new(
+        private_bit: u64,
+        shared_bit: u64,  /* Who is calling */
+    ) -> (r: (DekoPPtr<Self>, PhysAddr, Tracked<PageTablePermission>))
+        ensures
+            r.0.addr() % PAGE_SIZE as usize == 0,
+            r.1@ % PAGE_SIZE == 0,
+            r.1.wf(),
+            r.2@.wf(),
+            r.2@.pgtable_perm.pptr() == r.0@,
+            r.2@.pgtable_perm.is_init(),
+    {
+        let (pgtable, Tracked(perm)) = Box::<PageTable>::new_zeroed(&DEKO_FRAME_ALLOCATOR.0);
+        // Downgrade and forget this box.
+        let (pgtable, Tracked(mut perm)) = pgtable.into_ptr(Tracked(perm));
+
+        // Create the self-referential mapping entry.
+        let paddr = virt_to_phys(
+            private_bit,
+            shared_bit,
+            pgtable.into_vaddr(),
+            Tracked::assume_new(),
+        );
+
+        let flags = PteFlags::nx_kernel();
+        let entry_val = PageTableEntry(
+            PhysAddr(make_private_address(paddr.0, private_bit, shared_bit) | flags.bits() as u64),
+        );
+
+        // Update the PML4 entry for recursive mapping.
+        Page::update_entry_by_ptr(pgtable, Tracked(&mut perm), RECURSIVE_INDEX as usize, entry_val);
+
+        (
+            pgtable,
+            paddr,
+            Tracked::assume_new(),
+        )  /* PageTablePermission::lift_from()?? */
+
     }
 }
 

@@ -90,26 +90,46 @@ pub struct Stage2LaunchInfo {
 #[repr(C)]
 pub struct DekoKernelLaunchInfo {
     /// Start of the kernel in physical memory.
+    #[deko(hex)]
     pub kernel_region_phys_start: u64,
     /// Exclusive end of the kernel in physical memory.
+    #[deko(hex)]
     pub kernel_region_phys_end: u64,
+    #[deko(hex)]
     pub heap_area_phys_start: u64,  // Start of trailing heap area within the physical memory region.
+    #[deko(hex)]
     pub heap_area_size: u64,
+    #[deko(hex)]
     pub kernel_region_virt_start: u64,
+    #[deko(hex)]
     pub heap_area_virt_start: u64,  // Start of virtual heap area mapping.
+    #[deko(hex)]
     pub kernel_elf_stage2_virt_start: u64,  // Virtual address of kernel ELF in Stage2 mapping.
+    #[deko(hex)]
     pub kernel_elf_stage2_virt_end: u64,
+    #[deko(hex)]
     pub kernel_fs_start: u64,
+    #[deko(hex)]
     pub kernel_fs_end: u64,
+    #[deko(hex)]
     pub stage2_start: u64,
+    #[deko(hex)]
     pub stage2_end: u64,
+    #[deko(hex)]
     pub cpuid_page: u64,
+    #[deko(hex)]
     pub secrets_page: u64,
+    #[deko(hex)]
     pub stage2_igvm_params_phys_addr: u64,
+    #[deko(hex)]
     pub stage2_igvm_params_size: u64,
+    #[deko(hex)]
     pub igvm_params_phys_addr: u64,
+    #[deko(hex)]
     pub igvm_params_virt_addr: u64,
+    #[deko(hex)]
     pub vtom: u64,
+    #[deko(hex)]
     pub debug_serial_port: u16,
     pub use_alternate_injection: bool,
     #[deko(enabled)]
@@ -123,10 +143,7 @@ impl Stage2LaunchInfo {
 
     pub open spec fn get_elf(&self) -> Option<ElfFile> {
         if self.get_igvm_param_block_spec().find_kernel_region_spec() matches Some((kstart, kend)) {
-            ElfFile::new_spec(
-                PhysAddr(self.kernel_elf_start as u64),
-                PhysAddr(self.kernel_elf_end as u64),
-            )
+            ElfFile::new_spec(self.kernel_elf_start as u64, self.kernel_elf_end as u64)
         } else {
             None
         }
@@ -196,14 +213,14 @@ impl Stage2LaunchInfo {
 impl WellFormed for Stage2LaunchInfo {
     open spec fn wf(&self) -> bool {
         // The Stage2LaunchInfo is well-formed if the addresses are aligned.
-        &&& self.vtom % 0x1000 == 0
-        &&& self.cpuid_page % 0x1000 == 0
+        &&& self.vtom % PAGE_SIZE == 0
+        &&& self.cpuid_page % PAGE_SIZE as u32 == 0
         &&& self.cpuid_page != 0
-        &&& self.secrets_page % 0x1000 == 0
+        &&& self.secrets_page % PAGE_SIZE as u32 == 0
         &&& self.secrets_page != 0
-        &&& self.stage2_end % 0x1000 == 0
-        &&& self.kernel_elf_start % 0x1000 == 0
-        &&& self.kernel_elf_end % 0x1000 == 0
+        &&& self.stage2_end % PAGE_SIZE as u32 == 0
+        &&& self.kernel_elf_start % PAGE_SIZE as u32 == 0
+        &&& self.kernel_elf_end % PAGE_SIZE as u32 == 0
         &&& self.kernel_elf_start <= self.kernel_elf_end <= u32::MAX
         &&& self.platform_type == 0x0001 || self.platform_type == 0x0002
         &&& self.platform_type matches 0x0001 ==> self.vtom != 0
@@ -216,7 +233,18 @@ impl WellFormed for Stage2LaunchInfo {
 
 impl WellFormed for DekoKernelLaunchInfo {
     open spec fn wf(&self) -> bool {
-        true
+        &&& self.kernel_region_phys_start@ % PAGE_SIZE == 0
+        &&& self.kernel_region_phys_end@ % PAGE_SIZE == 0
+        &&& self.kernel_region_phys_start@ < self.kernel_region_phys_end@
+        &&& self.heap_area_phys_start@ % PAGE_SIZE == 0
+        &&& self.heap_area_size@ % PAGE_SIZE == 0
+        &&& self.heap_area_phys_start@ > self.kernel_region_phys_start@
+        &&& self.heap_area_phys_start@ + self.heap_area_size@ <= self.kernel_region_phys_end@
+        &&& self.kernel_region_virt_start@ % PAGE_SIZE == 0
+        &&& self.heap_area_virt_start@ % PAGE_SIZE == 0
+        &&& self.kernel_elf_stage2_virt_start@ % PAGE_SIZE == 0
+        &&& self.kernel_elf_stage2_virt_end@ % PAGE_SIZE == 0
+        &&& self.kernel_elf_stage2_virt_start@ < self.kernel_elf_stage2_virt_end@
     }
 }
 

@@ -261,8 +261,7 @@ impl Idt {
     ensures
         early_idt.wf(),
 )]
-pub fn init_early_idt(early_idt: &mut Idt)
-{
+pub fn init_early_idt(early_idt: &mut Idt) {
     unsafe {
         early_idt.init(
             &stage2_generic_idt_handler_no_ghcb as *const u8,

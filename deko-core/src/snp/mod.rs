@@ -23,7 +23,7 @@ use crate::{kinfo, Stage2LaunchInfo};
 
 pub mod ghcb;
 
-pub(crate) mod logging;
+pub mod logging;
 
 extern "C" {
     /// A global flag to indicate whether the AP has been started.
