@@ -176,7 +176,7 @@ fn translate_assoc_type<'tcx>(
     )?;
 
     let ai = ctxt.tcx.associated_item(impl_item_id);
-    let assoc_def_id = ai.trait_item_def_id().unwrap();
+    let assoc_def_id = ai.trait_item_def_id.unwrap();
     let bounds = ctxt.tcx.item_bounds(assoc_def_id);
     let assoc_generics = ctxt.tcx.generics_of(assoc_def_id);
     let mut assoc_args: Vec<rustc_middle::ty::GenericArg> =
