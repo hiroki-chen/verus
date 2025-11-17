@@ -422,7 +422,9 @@ pub fn phys_to_virt(ctx: DekoPPtr<DekoCpuCtx>, paddr: PhysAddr) -> Option<VirtAd
 
 deko_bitflags_quick! {
     Pte,
+    exec: { PRESENT, GLOBAL, ACCESSED },
     data: { PRESENT, WRITABLE, USER, ACCESSED, DIRTY, GLOBAL, NX },
+    data_ro: { PRESENT, GLOBAL, NX, ACCESSED },
     writeable: { PRESENT, USER, WRITABLE, ACCESSED, DIRTY },
     writeable_kernel: { PRESENT, WRITABLE, ACCESSED, DIRTY },
     nx_kernel: { PRESENT, WRITABLE, ACCESSED, DIRTY, NX },
@@ -978,6 +980,7 @@ impl PageTable {
     }
 }
 
+#[verus_verify]
 impl Page {
     pub open spec fn get_pte_address_spec(vaddr: VirtAddr) -> (r: VirtAddr) {
         let offset = (vaddr@ & 0x0000_FFFF_FFFF_F000u64) >> 9;
@@ -2171,9 +2174,16 @@ impl Page {
     /// This functions iterates over the virtual address range and maps each page individually.
     /// Note that in the loop we will first check if the page can be 2M mapped.
     #[verifier::spinoff_prover]
-    #[verus_spec(r =>
-        with
-            Tracked(pgtable_perm): Tracked<&mut PageTablePermission>,
+    pub fn map_page_multiple(
+        page: DekoPPtr<Page>,
+        vaddr: VaddrRange,
+        paddr: PhysAddr,
+        flags: PteFlags,
+        ms: &MappingSpace,
+        private_bit: u64,
+        shared_bit: u64,
+        Tracked(pgtable_perm): Tracked<&mut PageTablePermission>,
+    )
         requires
             old(pgtable_perm).map_page_multiple_requires(
                 page,
@@ -2193,16 +2203,7 @@ impl Page {
                 shared_bit,
                 pgtable_perm,
             ),
-    )]
-    pub fn map_page_multiple(
-        page: DekoPPtr<Page>,
-        vaddr: VaddrRange,
-        paddr: PhysAddr,
-        flags: PteFlags,
-        ms: &MappingSpace,
-        private_bit: u64,
-        shared_bit: u64,
-    ) {
+    {
         broadcast use lemma_index_at_level_spec_lt_page_entry_num;
 
         let mut cur_vaddr = vaddr.start.0;
@@ -4717,7 +4718,6 @@ pub(crate) fn map_and_validate(
         paddr,
         vaddr_start..vaddr_end,
     ) && vaddr_end@ + PAGE_SIZE_2M <= u64::MAX);
-    #[verus_spec(with Tracked(&mut ctx_perm.pgtable_perm))]
     PageTable::map_page_multiple(
         pgtable,
         virt_range.clone(),
@@ -4726,6 +4726,7 @@ pub(crate) fn map_and_validate(
         &ms,
         private_bit,
         shared_bit,
+        Tracked(&mut ctx_perm.pgtable_perm),
     );
 
     kinfo!("Mapping done. Now validating...");

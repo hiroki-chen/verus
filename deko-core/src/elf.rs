@@ -438,12 +438,17 @@ impl<'a> ElfFile<'a> {
     }
 }
 
+#[verus_verify]
 impl<'a> ElfLoadSegment<'a> {
     pub uninterp spec fn vaddr_begin(self) -> VirtAddr;
 
     pub uninterp spec fn vaddr_end(self) -> VirtAddr;
 
     pub uninterp spec fn file_contents_len_spec(self) -> usize;
+
+    pub uninterp spec fn exec_spec(self) -> bool;
+
+    pub uninterp spec fn write_spec(self) -> bool;
 
     /// Returns the length of this ELF load segment in bytes.
     #[verifier::inline]
@@ -550,6 +555,28 @@ impl<'a> ElfLoadSegment<'a> {
         ms.kernel.in_range_spec(PhysAddr(start as u64)) && ms.kernel.in_range_spec(
             PhysAddr((end - 1) as u64),
         )
+    }
+
+    #[inline]
+    #[verifier::external_body]
+    pub fn exec(&self) -> bool
+        requires
+            self.wf(),
+        returns
+            self.exec_spec(),
+    {
+        self.0.flags.contains(elf::Elf64PhdrFlags::EXECUTE)
+    }
+    
+    #[inline]
+    #[verifier::external_body]
+    pub fn write(&self) -> bool
+        requires
+            self.wf(),
+        returns
+            self.write_spec(),
+    {
+        self.0.flags.contains(elf::Elf64PhdrFlags::WRITE)
     }
 
     #[verifier::external_body]

@@ -1,5 +1,3 @@
-use std::process::Command;
-
 fn main() {
     println!("cargo:rustc-link-arg-bin=deko=-nostdlib");
     println!("cargo:rustc-link-arg-bin=deko=--no-relax");

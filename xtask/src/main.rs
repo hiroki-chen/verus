@@ -1394,7 +1394,7 @@ fn bootstrap_verus(prefix: &Path, commit: Option<&str>) -> Result<()> {
         std::fs::remove_dir_all(&verus_dir).context("Failed to remove existing verus directory")?;
     }
 
-    let repo_url = "https://github.com/verus-lang/verus.git";
+    let repo_url = "https://github.com/hiroki-chen/verus.git";
     println!("Cloning from: {}", repo_url.bright_blue());
 
     let repo =
@@ -1454,6 +1454,15 @@ fn bootstrap_verus(prefix: &Path, commit: Option<&str>) -> Result<()> {
         "nightly".to_string()
     };
 
+    // Step 2: Change to source directory
+    let source_dir = verus_dir.join("source");
+    if !source_dir.exists() {
+        bail!("Source directory not found at: {:?}", source_dir);
+    }
+
+    println!("\n{} Changing to source directory: {}", "📂".bright_cyan(), source_dir.display());
+    std::env::set_current_dir(&source_dir).context("Failed to change to source directory")?;
+
     let mut cmd = Command::new("rustup");
     cmd.arg("override").arg("set").arg(&rust_version);
     let output = cmd.output().context("Failed to set rustup override")?;
@@ -1468,15 +1477,6 @@ fn bootstrap_verus(prefix: &Path, commit: Option<&str>) -> Result<()> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("rustup check failed:\nSTDERR:\n{}", stderr);
     }
-
-    // Step 2: Change to source directory
-    let source_dir = verus_dir.join("source");
-    if !source_dir.exists() {
-        bail!("Source directory not found at: {:?}", source_dir);
-    }
-
-    println!("\n{} Changing to source directory: {}", "📂".bright_cyan(), source_dir.display());
-    std::env::set_current_dir(&source_dir).context("Failed to change to source directory")?;
 
     // Step 3: Setup Z3
     println!("\n{} Setting up Z3...", "🔧".bright_green());

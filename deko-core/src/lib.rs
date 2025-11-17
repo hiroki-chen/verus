@@ -7,6 +7,7 @@
 #![feature(trait_alias)]
 #![allow(named_asm_labels)]
 #![allow(binary_asm_labels)]
+#![allow(mismatched_lifetime_syntaxes)]
 
 use deko_macros::DekoDebug;
 use deko_std::prelude::*;
@@ -245,6 +246,7 @@ impl WellFormed for DekoKernelLaunchInfo {
         &&& self.kernel_elf_stage2_virt_start@ % PAGE_SIZE == 0
         &&& self.kernel_elf_stage2_virt_end@ % PAGE_SIZE == 0
         &&& self.kernel_elf_stage2_virt_start@ < self.kernel_elf_stage2_virt_end@
+        &&& self.kernel_region_phys_start@ < self.kernel_region_phys_end@ <= 0x000f_ffff_ffff_f000
     }
 }
 

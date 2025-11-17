@@ -9,6 +9,7 @@
 #![allow(unexpected_cfgs)]
 #![allow(unused_macros)]
 #![allow(non_shorthand_field_patterns)]
+#![allow(mismatched_lifetime_syntaxes)]
 #![cfg_attr(feature = "alloc", feature(allocator_api))]
 
 extern crate self as deko_std;

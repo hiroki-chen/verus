@@ -3,13 +3,13 @@
 #![feature(proc_macro_hygiene)]
 
 use deko_core::cpu::gdt::GLOBAL_GDT;
-use deko_core::cpu::idt::{Idt, create_early_idt, init_early_idt};
+use deko_core::cpu::idt::{create_early_idt, init_early_idt, Idt};
 use deko_core::cpu::regs::{cr0_init, cr4_init, load_cr3};
 use deko_core::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use deko_core::elf::ElfFile;
-use deko_core::mm::paging::{GLOBAL, PageTable, PageTablePermission};
-use deko_core::mm::{DEKO_FRAME_ALLOCATOR, virt_to_phys};
-use deko_core::{DekoKernelLaunchInfo, kinfo};
+use deko_core::mm::paging::{PageTable, PageTablePermission, PteFlags, GLOBAL};
+use deko_core::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR};
+use deko_core::{kinfo, DekoKernelLaunchInfo};
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
@@ -25,16 +25,77 @@ fn init_mem(header: &DekoKernelLaunchInfo) {
     DEKO_FRAME_ALLOCATOR.0.init(heap_start, heap_size)
 }
 
-#[verifier::external_body]
 #[verus_spec(r =>
     requires
         header.wf(),
         elf.wf(),
 )]
-fn init_paging(header: &DekoKernelLaunchInfo, elf: &ElfFile, private_bit: u64, shared_bit: u64) -> (DekoPPtr<PageTable>, PhysAddr, Tracked<PageTablePermission>) {
+fn init_paging(
+    header: &DekoKernelLaunchInfo,
+    elf: &ElfFile,
+    ms: &MappingSpace,
+    private_bit: u64,
+    shared_bit: u64,
+) -> (DekoPPtr<PageTable>, PhysAddr, Tracked<PageTablePermission>) {
     let (new_page_table, paddr, Tracked(perm)) = PageTable::new(private_bit, shared_bit);
 
-    // todo....
+    // Now map the kernel ELF sections.
+    let mut phys = header.kernel_region_phys_start;
+    let seg_num = elf.load_segment_num(VirtAddr(header.kernel_region_virt_start));
+    let mut i = 0;
+    while i < seg_num
+        invariant
+            i <= seg_num,
+            seg_num == elf.load_segments().len() as usize,
+            elf.wf(),
+            header.wf(),
+            perm.wf(),
+            phys % PAGE_SIZE == 0,
+            phys <= 0x000f_ffff_ffff_f000,
+            PAGE_SIZE == 0x1000,
+        decreases seg_num - i,
+    {
+        let segment = elf.get_segment(i, VirtAddr(header.kernel_region_virt_start));
+        let vaddr_start = segment.vaddr_range().start;
+        let vaddr_end = segment.vaddr_range().end.page_align_up();
+        let segment_len = vaddr_end.0 - vaddr_start.0;
+
+        let flags = match (segment.exec(), segment.write()) {
+            (true, false) => PteFlags::exec(),
+            (false, true) => PteFlags::data(),
+            _ => PteFlags::data_ro(),
+        };
+
+        proof {
+            assume(perm.map_page_multiple_requires(
+                new_page_table,
+                vaddr_start..vaddr_end,
+                PhysAddr(phys),
+                ms,
+                flags,
+                private_bit,
+                shared_bit,
+            ));
+        }
+
+        PageTable::map_page_multiple(
+            new_page_table,
+            vaddr_start..vaddr_end,
+            PhysAddr(phys),
+            flags,
+            ms,
+            private_bit,
+            shared_bit,
+            Tracked(&mut perm),
+        );
+
+        i += 1;
+        phys += segment_len;
+
+        proof {
+            assume(phys <= 0x000f_ffff_ffff_f000);
+        }
+    }
 
     (new_page_table, paddr, Tracked(perm))
 }
@@ -42,7 +103,7 @@ fn init_paging(header: &DekoKernelLaunchInfo, elf: &ElfFile, private_bit: u64, s
 /// The "true" entry point of the monitor.
 ///
 /// This function does nothing but is just a small trampoline to call [`deko_setup`].
-#[unsafe(no_mangle)]
+#[no_mangle]
 #[verifier::exec_allows_no_decreases_clause]
 #[verus_spec(r =>
     with
@@ -53,10 +114,10 @@ fn init_paging(header: &DekoKernelLaunchInfo, elf: &ElfFile, private_bit: u64, s
 )]
 extern "C" fn deko_entry(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
     #[verus_spec(with Tracked(ctx_perm))]
-    deko_setup(ctx, header)
-    ;
+    deko_setup(ctx, header);
 
-    loop{}
+    loop {
+    }
 }
 
 /// Set up the environment for the DEKO itself. The reason why we
@@ -90,18 +151,28 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) {
     init_mem(header);
 
     let kernel_elf_len = header.kernel_elf_stage2_virt_end - header.kernel_elf_stage2_virt_start;
-    let kernel_elf_bytes = deko_std::ptr::read_bytes(header.kernel_elf_stage2_virt_start, kernel_elf_len as usize);
+    let kernel_elf_bytes = deko_std::ptr::read_bytes(
+        header.kernel_elf_stage2_virt_start,
+        kernel_elf_len as usize,
+    );
     let kernel_elf = match ElfFile::read(kernel_elf_bytes) {
         Some(elf) => elf,
         None => {
             kinfo!("Failed to read kernel ELF");
             early_die();
-        }
+        },
     };
 
     let private_bit = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).private_bit();
     let shared_bit = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).shared_bit();
-    let (new_page_table, paddr, Tracked(pgtable_perm)) = init_paging(header, &kernel_elf, private_bit, shared_bit);
+    let ms = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).kernel_mapping();
+    let (new_page_table, paddr, Tracked(pgtable_perm)) = init_paging(
+        header,
+        &kernel_elf,
+        &ms,
+        private_bit,
+        shared_bit,
+    );
 
     early_dbg();
     unsafe {

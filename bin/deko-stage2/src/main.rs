@@ -1,12 +1,10 @@
 #![no_std]
 #![no_main]
-
 #![feature(proc_macro_hygiene)]
 
-use vstd::prelude::*;
-
-use deko_std::prelude::*;
 use deko_core::cpu::ctx::{DekoCtx, DekoCtxPermission};
+use deko_std::prelude::*;
+use vstd::prelude::*;
 
 core::arch::global_asm!(include_str!("../stage2.S"), options(att_syntax));
 
@@ -32,7 +30,7 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 ///
 /// The parameter `ctx` is obtained from the assembly code where we pass the address
 /// from the `.data` section to here.
-#[unsafe(no_mangle)]
+#[no_mangle]
 #[verifier::external_body]
 #[verus_spec(r =>
     with
