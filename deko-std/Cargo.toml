@@ -9,6 +9,7 @@ verus_builtin = { workspace = true }
 verus_builtin_macros = { workspace = true }
 verus_state_machines_macros = { workspace = true }
 
+cfg-if = { version = "1.0.4", default-features = false }
 itoa = { version = "1.0.15", features = ["no-panic"] }
 lexical-core = { version = "1.0.6", default-features = false, features = [
   "write-integers",
@@ -24,7 +25,7 @@ deko-macros = { workspace = true }
 verify = true
 
 [features]
-default = ["alloc", "snp"]
+default = []
 alloc = ["vstd/alloc"]
 global_alloc = ["alloc"]
 logging = []

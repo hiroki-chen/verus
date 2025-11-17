@@ -4,5 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-deko-std = { workspace = true }
-vstd = { workspace = true, features = ["allow_panic"]}
+deko-std = { workspace = true, default-features = false }
+vstd = { workspace = true }

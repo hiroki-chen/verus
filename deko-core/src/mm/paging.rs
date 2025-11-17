@@ -1051,7 +1051,7 @@ impl Page {
     ///
     /// FIXME: Possibly we need to revisit this.
     #[verifier::external_body]
-    pub fn alloc_new(ms: &MappingSpace) -> (r: (
+    pub fn alloc_new(ms: &MappingSpace, private_bit: u64, shared_bit: u64) -> (r: (
         DekoPPtr<Self>,
         Tracked<DekoPointsTo<Self>>,
         PhysAddr,
@@ -1070,18 +1070,20 @@ impl Page {
             forall|i: int|
                 0 <= i < PAGE_TABLE_ENTRY as int ==> #[trigger] r.1@.value().0@[i]@@ == 0,
     {
+        // Ptr is already the virtual address.
         let (ptr, Tracked(prov), Tracked(dealloc)) = DEKO_FRAME_ALLOCATOR.0.alloc(
             PAGE_SIZE as usize,
             PAGE_SIZE as usize,
         );
-        // lack proof that the ptr is within the physmap range (how should we do this?)
-        let paddr = PhysAddr::from(ptr);
-        let Some(vaddr) = ms.phys_to_virt(paddr) else {
-            kerror!("alloc_new: cannot convert paddr to vaddr");
-            crate::die("");
-        };
 
-        let pptr = DekoPPtr(vstd::simple_pptr::PPtr(vaddr.0 as usize, core::marker::PhantomData));
+        let paddr = virt_to_phys(
+            private_bit,
+            shared_bit,
+            VirtAddr::from(ptr),
+            Tracked::assume_new(),
+        );
+
+        let pptr = DekoPPtr(vstd::simple_pptr::PPtr(ptr as usize, core::marker::PhantomData));
 
         (pptr, Tracked::assume_new(), paddr)
     }
@@ -1172,7 +1174,9 @@ impl Page {
 
         match mapping {
             Mapping::Level0(_, _) | Mapping::Level1(_, _) => mapping,
-            _ => kunimplemented!(),
+            _ => {
+                kunimplemented!("allocate_pte_2m: allocation for 2MB pages not yet implemented");
+            },
         }
     }
 
@@ -1342,7 +1346,11 @@ impl Page {
         }
 
         // Now we allocate a new page and start to insert it.
-        let (new_page, Tracked(new_page_perm), paddr) = Page::alloc_new(ms);
+        let (new_page, Tracked(new_page_perm), paddr) = Page::alloc_new(
+            ms,
+            private_bit,
+            shared_bit,
+        );
         if core::intrinsics::unlikely(new_page.addr() == 0 || paddr.0 == 0) {
             // Heap does not start with 0 so use 0 to indicate OOM
             // is fine; but should we indicate something else here
@@ -1354,7 +1362,6 @@ impl Page {
             PhysAddr(make_private_address(paddr.0, private_bit, shared_bit) | flags.bits() as u64),
         );
         let mapping = Mapping::Level2(new_page, index_at_level::<2>(vaddr));
-
         proof {
             // The below proof is ugly because we have to
             // manually inline everything to convince
@@ -1480,7 +1487,11 @@ impl Page {
             }
         }
 
-        let (new_page, Tracked(new_page_perm), paddr) = Page::alloc_new(ms);
+        let (new_page, Tracked(new_page_perm), paddr) = Page::alloc_new(
+            ms,
+            private_bit,
+            shared_bit,
+        );
         if new_page.addr() == 0 || paddr.0 == 0 {
             // Heap does not start with 0 so use 0 to indicate OOM
             // is fine; but should we indicate something else here
@@ -1545,7 +1556,11 @@ impl Page {
             }
         }
         // Now we allocate a new page and start to insert it.
-        let (new_page, Tracked(new_page_perm), paddr) = Page::alloc_new(ms);
+        let (new_page, Tracked(new_page_perm), paddr) = Page::alloc_new(
+            ms,
+            private_bit,
+            shared_bit,
+        );
         if core::intrinsics::unlikely(new_page.addr() == 0 || paddr.0 == 0) {
             // Heap does not start with 0 so use 0 to indicate OOM
             // is fine; but should we indicate something else here
@@ -1975,7 +1990,11 @@ impl Page {
         }
         let addr_2m = entry.borrow(Tracked(entry_perm)).address(private_bit, shared_bit);
         let mut flags = PteFlags::from_bits_truncate(entry.borrow(Tracked(entry_perm)).0.0);
-        let (new_page, Tracked(new_page_perm), paddr) = Page::alloc_new(ms);
+        let (new_page, Tracked(new_page_perm), paddr) = Page::alloc_new(
+            ms,
+            private_bit,
+            shared_bit,
+        );
         flags.remove(HUGE);
 
         proof {
@@ -2209,8 +2228,6 @@ impl Page {
         let mut cur_vaddr = vaddr.start.0;
         let mut cur_paddr = paddr.0;
         let end_vaddr = vaddr.end.0;
-
-        kinfo!("range: ", vaddr);
 
         while cur_vaddr < end_vaddr
             invariant

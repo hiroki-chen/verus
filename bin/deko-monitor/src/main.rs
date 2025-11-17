@@ -17,12 +17,16 @@ core::arch::global_asm!(include_str!("../monitor.S"), options(att_syntax));
 
 verus! {
 
-#[verifier::external_body]
+#[inline]
+#[verus_spec(r =>
+    requires
+        header.wf(),
+)]
 fn init_mem(header: &DekoKernelLaunchInfo) {
     let heap_start = header.heap_area_virt_start;
     let heap_size = header.heap_area_size;
 
-    DEKO_FRAME_ALLOCATOR.0.init(heap_start, heap_size)
+    DEKO_FRAME_ALLOCATOR.0.init(heap_start, heap_size);
 }
 
 #[verus_spec(r =>
@@ -143,7 +147,7 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) {
     let debug_serial_port = header.debug_serial_port;
     let secrets_page_virt = VirtAddr(header.secrets_page);
 
-    // Copy the secrets page to the safe location.
+    // TODO: Copy the secrets page to the safe location.
 
     cr0_init();
     cr4_init();
@@ -163,9 +167,20 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) {
         },
     };
 
+    // Since now we are inside the different address space we will need to
+    // update the mapping space accordingly or physical addresses <-> virtual
+    // addresses translation will panic.
+    let kernel_mapping = FixedAddressMappingRange::new(
+        VirtAddr(header.heap_area_virt_start),
+        VirtAddr(header.heap_area_virt_start + header.heap_area_size),
+        PhysAddr(header.heap_area_phys_start),
+    );
+
+    let ms = MappingSpace { kernel: kernel_mapping, physmap: Default::default() };
+
     let private_bit = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).private_bit();
     let shared_bit = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).shared_bit();
-    let ms = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).kernel_mapping();
+
     let (new_page_table, paddr, Tracked(pgtable_perm)) = init_paging(
         header,
         &kernel_elf,
@@ -174,7 +189,6 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) {
         shared_bit,
     );
 
-    early_dbg();
     unsafe {
         // SAFETY: We have ensured that the new page table is valid because
         // init_paging() returns a valid page table and its permission.

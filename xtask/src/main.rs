@@ -162,6 +162,13 @@ enum Commands {
         release: bool,
     },
 
+    Test {
+        #[arg(help = "Test suite to run (e.g., 'buddy', 'elf'). If not specified, runs all tests.")]
+        suite: Option<String>,
+        #[arg(short, long, help = "Run tests in release mode")]
+        release: bool,
+    },
+
     Pretty {
         #[arg(short, long)]
         paths: Vec<PathBuf>,
@@ -782,6 +789,8 @@ fn main() -> Result<()> {
 
         Commands::Build { target, release } => builder.build(target, release),
 
+        Commands::Test { suite, release } => test_runner(suite, release),
+
         Commands::Pretty { paths } => pretty(paths),
 
         Commands::BootstrapVerus { commit } => {
@@ -795,6 +804,166 @@ fn main() -> Result<()> {
 
         Commands::LineCount => line_count(),
     }
+}
+
+fn test_runner(suite: Option<String>, release: bool) -> Result<()> {
+    println!("{} Deko Test Runner", "🧪".bright_cyan().bold());
+    
+    let project_root = project_root();
+    let tests_dir = project_root.join("tests");
+    
+    if !tests_dir.exists() {
+        bail!("Tests directory not found at: {:?}", tests_dir);
+    }
+
+    // Discover available test suites
+    let available_suites = fs::read_dir(&tests_dir)?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            if entry.file_type().ok()?.is_dir() {
+                entry.file_name().to_str().map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    
+    if available_suites.is_empty() {
+        println!("⚠ No test suites found in tests directory");
+        return Ok(());
+    }
+
+    let suites_to_run = if let Some(suite_name) = suite {
+        if !available_suites.contains(&suite_name) {
+            println!("❌ Test suite '{}' not found", suite_name.red());
+            println!("Available suites: {}", available_suites.join(", "));
+            bail!("Invalid test suite specified");
+        }
+        vec![suite_name]
+    } else {
+        available_suites
+    };
+
+    println!("📋 Running test suites: {}", suites_to_run.join(", ").bright_white());
+    if release {
+        println!("🚀 Running in release mode");
+    }
+
+    // Set up environment for verus
+    let builder = Builder::new("snp".to_string()); // Use SNP as default for testing
+    let verus_binary = builder.find_verus_binary()?;
+    let z3_binary = builder.find_z3_binary()?;
+
+    std::env::set_var("VERUS_Z3_PATH", &z3_binary);
+    if verus_binary != PathBuf::from("verus") {
+        let verus_dir = verus_binary.parent().unwrap_or_else(|| Path::new("."));
+        let current_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", verus_dir.display(), current_path);
+        std::env::set_var("PATH", new_path);
+    }
+
+    let mut all_passed = true;
+    
+    // Change back to project root for cargo commands
+    std::env::set_current_dir(&project_root)?;
+    
+    for suite in &suites_to_run {
+        println!("\n{} {} {}", "═".repeat(20), format!("Testing {}", suite).bright_cyan().bold(), "═".repeat(20));
+        
+        // Step 1: Build the test binary using cargo verus
+        println!("🔨 Building test binary for '{}'...", suite);
+        
+        let mut cmd = Command::new("cargo");
+        cmd.arg("verus")
+            .arg("build")
+            .arg("--bin")
+            .arg(suite);
+            
+        if release {
+            cmd.arg("--release");
+        }
+
+        println!("Running: {:?}", cmd);
+        
+        let output = cmd.output()
+            .with_context(|| format!("Failed to build test suite: {}", suite))?;
+        
+        if !output.status.success() {
+            println!("✗ Failed to build test suite '{}'", suite);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            
+            if !stdout.is_empty() {
+                println!("{}", "BUILD STDOUT:".bright_yellow());
+                println!("{}", stdout);
+            }
+            
+            if !stderr.is_empty() {
+                println!("{}", "BUILD STDERR:".bright_yellow());
+                println!("{}", stderr);
+            }
+            
+            all_passed = false;
+            continue;
+        }
+        
+        println!("✓ Built test binary for '{}'", suite);
+        
+        // Step 2: Find and execute the compiled binary
+        let profile = if release { "release" } else { "debug" };
+        let target_dir = project_root.join("target").join(profile);
+        let binary_path = target_dir.join(suite);
+        
+        if !binary_path.exists() {
+            println!("✗ Test binary not found at: {:?}", binary_path);
+            all_passed = false;
+            continue;
+        }
+        
+        println!("🚀 Executing test binary: {:?}", binary_path);
+        
+        let mut test_cmd = Command::new(&binary_path);
+        let test_output = test_cmd.output()
+            .with_context(|| format!("Failed to execute test binary: {:?}", binary_path))?;
+        
+        if test_output.status.success() {
+            println!("✓ Test suite '{}' {}", suite, "PASSED".bright_green().bold());
+            
+            // Print output for successful tests too
+            let stdout = String::from_utf8_lossy(&test_output.stdout);
+            if !stdout.is_empty() {
+                println!("{}", stdout);
+            }
+        } else {
+            println!("✗ Test suite '{}' {}", suite, "FAILED".bright_red().bold());
+            all_passed = false;
+            
+            // Print test output for debugging
+            let stdout = String::from_utf8_lossy(&test_output.stdout);
+            let stderr = String::from_utf8_lossy(&test_output.stderr);
+            
+            if !stdout.is_empty() {
+                println!("{}", "TEST STDOUT:".bright_yellow());
+                println!("{}", stdout);
+            }
+            
+            if !stderr.is_empty() {
+                println!("{}", "TEST STDERR:".bright_yellow());
+                println!("{}", stderr);
+            }
+        }
+    }
+
+    // Final summary
+    println!("\n{}", "═".repeat(60));
+    if all_passed {
+        println!("🎉 All tests {} ({})", "PASSED".bright_green().bold(), suites_to_run.len());
+    } else {
+        println!("💥 Some tests {} ({})", "FAILED".bright_red().bold(), suites_to_run.len());
+        bail!("Test execution failed");
+    }
+
+    Ok(())
 }
 
 fn line_count() -> Result<()> {

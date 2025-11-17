@@ -345,6 +345,23 @@ pub struct FixedAddressMappingRange {
     pub phys_start: PhysAddr,
 }
 
+impl Default for FixedAddressMappingRange {
+    fn default() -> Self
+        returns
+            (FixedAddressMappingRange {
+                virt_start: VirtAddr::new(0),
+                virt_end: VirtAddr::new(0),
+                phys_start: PhysAddr(0),
+            }),
+    {
+        FixedAddressMappingRange {
+            virt_start: VirtAddr::new(0),
+            virt_end: VirtAddr::new(0),
+            phys_start: PhysAddr(0),
+        }
+    }
+}
+
 impl WellFormed for FixedAddressMappingRange {
     #[verifier::inline]
     open spec fn wf(&self) -> bool {

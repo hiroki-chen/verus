@@ -61,6 +61,28 @@ pub mod prelude {
 
 verus! {
 
+/// This is a globally accessible flag to indicate whether tracing (some debugging)
+/// is enabled.
+pub exec static TRACE_ON: RwLockNoPred<bool> = RwLockNoPred::new(
+    false,
+    Ghost(TrivialPredicate::new()),
+);
+
+#[verifier::external_body]
+pub fn trace_enable(enabled: bool) {
+    let (_, write_handle) = TRACE_ON.acquire_write();
+    write_handle.release_write(enabled);
+}
+
+#[verifier::external_body]
+pub fn trace_is_enabled() -> bool {
+    let read_handle = TRACE_ON.acquire_read();
+    let enabled = *read_handle.borrow();
+    read_handle.release_read();
+
+    enabled
+}
+
 use crate::prelude::*;
 
 pub trait Predicate<V>: Sized {

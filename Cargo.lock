@@ -415,6 +415,7 @@ dependencies = [
 name = "deko-std"
 version = "0.1.0"
 dependencies = [
+ "cfg-if",
  "deko-macros",
  "itoa",
  "lexical-core",

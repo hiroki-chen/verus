@@ -82,9 +82,14 @@ unsafe impl core::alloc::GlobalAlloc for Allocator {
 
 /// We do not use Rust's global allocator by default so this is just a dummy one.
 /// Any use of the global allocator will panic.
-#[verifier::external]
-#[cfg_attr(feature = "global_alloc", global_allocator)]
-static __DISCARD: Allocator = Allocator;
+/// This is somehow giving us the trouble. comment it now.
+cfg_if::cfg_if!{
+    if #[cfg(feature = "global_alloc")] {
+        #[global_allocator]
+        #[verifier::external]
+        static __: Allocator = Allocator;
+    }
+}
 
 pub uninterp spec fn cr3_value() -> u64;
 

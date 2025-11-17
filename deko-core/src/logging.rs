@@ -176,16 +176,6 @@ pub fn print_panic_info(info: &core::panic::PanicInfo) {
         print_str("Location: <unknown>\n");
     }
 
-    // Print payload information
-    let payload = info.payload();
-    if let Some(s) = payload.downcast_ref::<&str>() {
-        print_str("Payload: \"");
-        print_str(s);
-        print_str("\"\n");
-    } else {
-        print_str("Payload: <non-string>\n");
-    }
-
     print_str("\n");
     print_str(ERROR_COLOR);
     print_str("=== SYSTEM HALTED ===\n");

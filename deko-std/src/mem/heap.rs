@@ -14,6 +14,11 @@ pub type DekoHeapBlockPerm = DekoPointsTo<Node<()>>;
 
 pub const HEAP_ALIGNMENT: u64 = 0x1000;
 
+pub axiom fn node_size<T: Sized + WellFormed>()
+    ensures
+        core::mem::size_of::<Node<T>>() == 16 + core::mem::size_of::<T>(),
+;
+
 /// This function checks if the given parameters for a heap are valid only used for
 /// initialization functions.
 #[verifier::inline]
@@ -153,7 +158,7 @@ pub struct DekoHeap<const ORDER: usize> {
     /// size information is already stored in the pointer and the list
     /// it belongs to. The value is thus a ZST.
     free_list: Array<LinkedList<()>, ORDER>,
-    /// The start address of the heap.
+    /// The start virtual address of the heap.
     heap_base: u64,
     /// The size of the heap.
     heap_size: u64,

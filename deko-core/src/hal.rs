@@ -407,11 +407,15 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>) -> (__discard: !) {
                 suppress_deko_interrupts: igvm_params_block.suppress_svsm_interrupts_on_snp != 0,
             };
 
+            proof {
+                assert(kernel_launch_info.heap_area_size@ % PAGE_SIZE == 0) by (compute);
+            }
+
             kdebug!("Prepared DekoKernelLaunchInfo:", kernel_launch_info);
 
             kinfo!("Deko setup complete. Jumping to kernel entry point...");
             #[verus_spec(with Tracked(&mut ctx_perm))]
-            into_deko_monitor(ctx, entry.0, addr_of_ref(&kernel_launch_info));
+            into_deko_monitor(ctx, entry.0, &kernel_launch_info);
         } else {
             kerror!("Deko failed to load the kernel ELF file! Check if the format is correct.");
         }
@@ -636,6 +640,12 @@ fn load_deko_monitor(
     ensures
         r.0.wf(),
         r.1.wf(),
+        r.0.start@ >= VADDR_UPPER_MASK,
+        r.0.end@ <= u64::MAX,
+        r.0.start@ % PAGE_SIZE == 0,
+        r.0.end@ % PAGE_SIZE == 0,
+        r.1.start@ % PAGE_SIZE == 0,
+        r.1.end@ % PAGE_SIZE == 0,
         ctx_perm.wf_with(ctx),
 )]
 fn prepare_heap(
@@ -698,16 +708,16 @@ fn prepare_heap(
         Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
     requires
         old(ctx_perm).wf_with(ctx),
+        // header.wf(),
 )]
-fn into_deko_monitor(ctx: DekoPPtr<DekoCpuCtx>, deko_entry: u64, cmd: u64) -> (__discard: !) {
+fn into_deko_monitor(
+    ctx: DekoPPtr<DekoCpuCtx>,
+    deko_entry: u64,
+    header: &DekoKernelLaunchInfo,
+) -> (__discard: !) {
     let raw_bytes = unsafe { core::slice::from_raw_parts(deko_entry as *const u8, 64) };
     kinfo!("entry point @ ", deko_entry => hex);
     kinfo!("entry point raw bytes: ", raw_bytes);
-
-    let ms = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).kernel_mapping();
-    let private_bit = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).private_bit();
-    let shared_bit = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).shared_bit();
-    let pgtable = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).pgtable();
 
     unsafe {
         // core::ptr::drop_in_place(PERCPU_BASE.0 as *mut DekoCpuCtx);
@@ -732,7 +742,7 @@ fn into_deko_monitor(ctx: DekoPPtr<DekoCpuCtx>, deko_entry: u64, cmd: u64) -> (_
             "jmp *%rax",
             in("rax") deko_entry,
             in("rdi") ctx.addr() as u64,
-            in("rsi") cmd, /* ? */
+            in("rsi") addr_of_ref(header) as u64,
             options(att_syntax),
         );
     }
@@ -740,4 +750,10 @@ fn into_deko_monitor(ctx: DekoPPtr<DekoCpuCtx>, deko_entry: u64, cmd: u64) -> (_
     unreachable!();
 }
 
+// #[verifier::external_body]
+// fn test_mapping(header: &DekoKernelLaunchInfo) {
+//     let mem = unsafe {
+//         core::slice::from_raw_parts(header.heap_area_virt_start, )
+//     }
+// }
 } // verus!

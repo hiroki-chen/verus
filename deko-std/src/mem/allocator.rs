@@ -115,9 +115,41 @@ pub open spec fn page_start(addr: u64) -> u64 {
 /// Tracks whether a holder is having the permission to read/write the memory region.
 pub tracked struct PermissionDekoMemoryRegion {}
 
-/// The default of the heap that can we manage.
+/// The default heap size configuration for the Deko memory allocator.
 ///
-/// 2 ^ 33 - 1 = 17179869183 bytes (~4 GiB).
+/// This constant defines the size parameter for the buddy allocator's heap management.
+/// The value represents the number of allocation units or blocks that the heap can manage,
+/// not the direct byte size of the heap.
+///
+/// # Usage
+///
+/// This constant is used as a type parameter for [`DekoHeap<HEAP_SIZE>`] and affects:
+/// - The number of allocation blocks the buddy allocator can track
+/// - The internal data structures size for heap management
+/// - The maximum number of concurrent allocations
+///
+/// # Examples
+///
+/// ```rust
+/// // Used in the default heap allocator type
+/// type DefaultDekoHeapAllocator = DekoBuddyAllocator<DekoHeap<HEAP_SIZE>>;
+///
+/// // Used during heap initialization
+/// allocator.init(heap_start, heap_size, HEAP_SIZE as u64);
+/// ```
+///
+/// # Notes
+///
+/// - This is a compile-time constant that affects the heap allocator's capacity
+/// - The actual heap memory size is determined at runtime during initialization
+/// - Increasing this value allows more concurrent allocations but uses more metadata space
+/// - Must be coordinated with the `valid_heap_param` function requirements
+///
+/// # See Also
+///
+/// - [`DekoBuddyAllocator`] - The main heap allocator that uses this constant
+/// - [`DekoHeap`] - The heap implementation parameterized by this size
+/// - [`valid_heap_param`] - Function that validates heap parameters including this size
 pub const HEAP_SIZE: usize = 10;
 
 /// The _true_ global allocator for Deko that manages the physical pages.
