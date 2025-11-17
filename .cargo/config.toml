@@ -24,7 +24,7 @@ pretty = "xtask pretty"
 # TODO: Fork another version. This will download unncessary git submodules recursively.
 install-igvmbuilder = "install --git https://github.com/coconut-svsm/svsm.git igvmbuilder"
 
-bootstrap-verus = "xtask bootstrap-verus --commit a99b6c7"
+bootstrap-verus = "xtask bootstrap-verus"
 bootstrap-qemu = "xtask bootstrap-qemu"
 bootstrap-ovmf = "xtask bootstrap-ovmf"
 
