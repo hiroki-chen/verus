@@ -15,7 +15,7 @@ use rustc_data_structures::fx::FxIndexMap;
 use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_hir::{BindingMode, ByRef, LetStmt, LocalSource, Node};
 use rustc_middle::bug;
-use rustc_middle::middle::region::{self, ScopeCompatibility};
+use rustc_middle::middle::region;
 use rustc_middle::mir::*;
 use rustc_middle::thir::{self, *};
 use rustc_middle::ty::{self, CanonicalUserTypeAnnotation, Ty, ValTree, ValTreeKind};
@@ -27,7 +27,6 @@ use tracing::{debug, instrument};
 use crate::builder::ForGuard::{self, OutsideGuard, RefWithinGuard};
 use crate::builder::expr::as_place::PlaceBuilder;
 use crate::builder::matches::user_ty::ProjectedUserTypesNode;
-use crate::builder::scope::DropKind;
 use crate::builder::{
     BlockAnd, BlockAndExtension, Builder, GuardFrame, GuardFrameLocal, LocalsForNode,
 };
@@ -808,34 +807,34 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         // Although there is almost always scope for given variable in corner cases
         // like #92893 we might get variable with no scope.
         if matches!(schedule_drop, ScheduleDrops::Yes) {
-            let (var_scope, var_scope_compat) = self.region_scope_tree.var_scope(var.0.local_id);
-            if let Some(region_scope) = var_scope {
-                self.schedule_drop(span, region_scope, local_id, DropKind::Storage);
-            }
-            if let ScopeCompatibility::FutureIncompatible { shortens_to } = var_scope_compat {
-                self.schedule_backwards_incompatible_drop(
-                    span,
-                    shortens_to,
-                    local_id,
-                    BackwardIncompatibleDropReason::MacroExtendedScope,
-                );
-            }
+            // let (var_scope, var_scope_compat) = self.region_scope_tree.var_scope(var.0.local_id);
+            // if let Some(region_scope) = var_scope {
+            //     self.schedule_drop(span, region_scope, local_id, DropKind::Storage);
+            // }
+            // if let ScopeCompatibility::FutureIncompatible { shortens_to } = var_scope_compat {
+            //     self.schedule_backwards_incompatible_drop(
+            //         span,
+            //         shortens_to,
+            //         local_id,
+            //         BackwardIncompatibleDropReason::MacroExtendedScope,
+            //     );
+            // }
         }
         Place::from(local_id)
     }
 
     pub(crate) fn schedule_drop_for_binding(
         &mut self,
-        var: LocalVarId,
-        span: Span,
-        for_guard: ForGuard,
+        _var: LocalVarId,
+        _span: Span,
+        _for_guard: ForGuard,
     ) {
-        let local_id = self.var_local_id(var, for_guard);
+        // let local_id = self.var_local_id(var, for_guard);
         // We can ignore the var scope's future-compatibility information since we've already taken
         // it into account when scheduling the storage drop in `storage_live_binding`.
-        if let (Some(region_scope), _) = self.region_scope_tree.var_scope(var.0.local_id) {
-            self.schedule_drop(span, region_scope, local_id, DropKind::Value);
-        }
+        // if let (Some(region_scope), _) = self.region_scope_tree.var_scope(var.0.local_id) {
+        //     self.schedule_drop(span, region_scope, local_id, DropKind::Value);
+        // }
     }
 
     /// Visits all of the "primary" bindings in a pattern, i.e. the leftmost

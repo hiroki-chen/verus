@@ -85,7 +85,7 @@ use std::mem;
 
 use interpret::ErrorHandled;
 use rustc_data_structures::fx::FxHashMap;
-use rustc_hir::{self as hir, HirId};
+use rustc_hir::HirId;
 use rustc_index::{IndexSlice, IndexVec};
 use rustc_middle::middle::region;
 use rustc_middle::mir::{self, *};
@@ -149,7 +149,7 @@ struct Scope {
     cached_coroutine_drop_block: Option<DropIdx>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct DropData {
     /// The `Span` where drop obligation was incurred (typically where place was
     /// declared)
@@ -162,7 +162,7 @@ struct DropData {
     kind: DropKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Hash)]
 pub(crate) enum DropKind {
     Value,
     Storage,
@@ -419,8 +419,8 @@ impl DropTree {
     ) {
         for (drop_idx, drop_node) in self.drop_nodes.iter_enumerated().rev() {
             let Some(block) = blocks[drop_idx] else { continue };
-            match drop_node.data.kind {
-                DropKind::Value => {
+            match &drop_node.data.kind {
+                &DropKind::Value => {
                     let terminator = TerminatorKind::Drop {
                         target: blocks[drop_node.next].unwrap(),
                         // The caller will handle this if needed.
@@ -437,7 +437,7 @@ impl DropTree {
                         drop_node.data.source_info,
                         StatementKind::BackwardIncompatibleDropHint {
                             place: Box::new(drop_node.data.local.into()),
-                            reason,
+                            reason: reason.clone(),
                         },
                     );
                     cfg.push(block, stmt);
@@ -454,8 +454,8 @@ impl DropTree {
                     }
                 }
                 // Root nodes don't correspond to a drop.
-                DropKind::Storage if drop_idx == ROOT_NODE => {}
-                DropKind::Storage => {
+                &DropKind::Storage if drop_idx == ROOT_NODE => {}
+                &DropKind::Storage => {
                     let stmt = Statement::new(
                         drop_node.data.source_info,
                         StatementKind::StorageDead(drop_node.data.local),
@@ -818,7 +818,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         let mut drop_idx = ROOT_NODE;
         for scope in &self.scopes.scopes[scope_index + 1..] {
             for drop in &scope.drops {
-                drop_idx = drops.add_drop(*drop, drop_idx);
+                drop_idx = drops.add_drop(drop.clone(), drop_idx);
             }
         }
         drops.add_entry_point(block, drop_idx);
@@ -1012,7 +1012,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         let drop_idx = self.scopes.scopes[scope_index + 1..]
             .iter()
             .flat_map(|scope| &scope.drops)
-            .fold(ROOT_NODE, |drop_idx, &drop| drops.add_drop(drop, drop_idx));
+            .fold(ROOT_NODE, |drop_idx, drop| drops.add_drop(drop.clone(), drop_idx));
 
         drops.add_entry_point(imaginary_target, drop_idx);
 
@@ -1025,7 +1025,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         let drop_idx = self.scopes.scopes[scope_index + 1..]
             .iter()
             .flat_map(|scope| &scope.drops)
-            .fold(ROOT_NODE, |drop_idx, &drop| drops.add_drop(drop, drop_idx));
+            .fold(ROOT_NODE, |drop_idx, drop| drops.add_drop(drop.clone(), drop_idx));
 
         drops.add_entry_point(drop_and_continue_block, drop_idx);
 
@@ -1062,7 +1062,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         let drops = &mut if_then_scope.else_drops;
         for scope in &self.scopes.scopes[scope_index + 1..] {
             for drop in &scope.drops {
-                drop_idx = drops.add_drop(*drop, drop_idx);
+                drop_idx = drops.add_drop(drop.clone(), drop_idx);
             }
         }
         drops.add_entry_point(block, drop_idx);
@@ -1122,7 +1122,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     continue;
                 }
 
-                match drop_data.kind {
+                match &drop_data.kind {
                     DropKind::Value => {
                         // `unwind_to` should drop the value that we're about to
                         // schedule. If dropping this value panics, then we continue
@@ -1140,7 +1140,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                         let mut unwind_entry_point = unwind_to;
 
                         // the tail call arguments must be dropped if any of these drops panic
-                        for drop in arg_drops.iter().copied() {
+                        for drop in arg_drops.iter().cloned() {
                             unwind_entry_point = unwind_drops.add_drop(drop, unwind_entry_point);
                         }
 
@@ -1168,7 +1168,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                                 source_info,
                                 StatementKind::BackwardIncompatibleDropHint {
                                     place: Box::new(local.into()),
-                                    reason,
+                                    reason: reason.clone(),
                                 },
                             ),
                         );
@@ -1487,6 +1487,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     /// Schedule emission of a backwards incompatible drop lint hint.
     /// Applicable only to temporary values for now.
     #[instrument(level = "debug", skip(self))]
+    #[allow(dead_code)]
     pub(crate) fn schedule_backwards_incompatible_drop(
         &mut self,
         span: Span,
@@ -1502,16 +1503,17 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             if scope.region_scope == region_scope {
                 // We'll be using this span in diagnostics, so let's make sure it points to the end
                 // end of the block, not just the end of the tail expression.
-                let region_scope_span = if reason
-                    == BackwardIncompatibleDropReason::MacroExtendedScope
-                    && let Some(scope_hir_id) = region_scope.hir_id(self.region_scope_tree)
-                    && let hir::Node::Expr(expr) = self.tcx.hir_node(scope_hir_id)
-                    && let hir::Node::Block(blk) = self.tcx.parent_hir_node(expr.hir_id)
-                {
-                    blk.span
-                } else {
-                    region_scope.span(self.tcx, self.region_scope_tree)
-                };
+                // let region_scope_span = if reason
+                //     == BackwardIncompatibleDropReason::MacroExtendedScope
+                //     && let Some(scope_hir_id) = region_scope.hir_id(self.region_scope_tree)
+                //     && let hir::Node::Expr(expr) = self.tcx.hir_node(scope_hir_id)
+                //     && let hir::Node::Block(blk) = self.tcx.parent_hir_node(expr.hir_id)
+                // {
+                //     blk.span
+                // } else {
+                //     region_scope.span(self.tcx, self.region_scope_tree)
+                // };
+                let region_scope_span = region_scope.span(self.tcx, self.region_scope_tree);
                 let scope_end = self.tcx.sess.source_map().end_point(region_scope_span);
 
                 scope.drops.push(DropData {
@@ -1624,7 +1626,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         for scope in &mut self.scopes.scopes[uncached_scope..=target] {
             for drop in &scope.drops {
                 if is_coroutine || drop.kind == DropKind::Value {
-                    cached_drop = self.scopes.unwind_drops.add_drop(*drop, cached_drop);
+                    cached_drop = self.scopes.unwind_drops.add_drop(drop.clone(), cached_drop);
                 }
             }
             scope.cached_unwind_block = Some(cached_drop);
@@ -1685,7 +1687,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 
         for scope in &mut self.scopes.scopes[uncached_scope..=target] {
             for drop in &scope.drops {
-                cached_drop = self.scopes.coroutine_drops.add_drop(*drop, cached_drop);
+                cached_drop = self.scopes.coroutine_drops.add_drop(drop.clone(), cached_drop);
             }
             scope.cached_coroutine_drop_block = Some(cached_drop);
         }
@@ -1866,7 +1868,7 @@ where
         let source_info = drop_data.source_info;
         let local = drop_data.local;
 
-        match drop_data.kind {
+        match &drop_data.kind {
             DropKind::Value => {
                 // `unwind_to` should drop the value that we're about to
                 // schedule. If dropping this value panics, then we continue
@@ -1943,7 +1945,7 @@ where
                         source_info,
                         StatementKind::BackwardIncompatibleDropHint {
                             place: Box::new(local.into()),
-                            reason,
+                            reason: reason.clone(),
                         },
                     ),
                 );
@@ -2002,7 +2004,7 @@ impl<'a, 'tcx: 'a> Builder<'a, 'tcx> {
                             let unwind_drop = self
                                 .scopes
                                 .unwind_drops
-                                .add_drop(drop_node.data, unwind_indices[drop_node.next]);
+                                .add_drop(drop_node.data.clone(), unwind_indices[drop_node.next]);
                             unwind_indices.push(unwind_drop);
                         } else {
                             unwind_indices.push(unwind_indices[drop_node.next]);
@@ -2012,7 +2014,7 @@ impl<'a, 'tcx: 'a> Builder<'a, 'tcx> {
                         let unwind_drop = self
                             .scopes
                             .unwind_drops
-                            .add_drop(drop_node.data, unwind_indices[drop_node.next]);
+                            .add_drop(drop_node.data.clone(), unwind_indices[drop_node.next]);
                         self.scopes.unwind_drops.add_entry_point(
                             blocks[drop_idx].unwrap(),
                             unwind_indices[drop_node.next],
@@ -2034,7 +2036,7 @@ impl<'a, 'tcx: 'a> Builder<'a, 'tcx> {
                 let coroutine_drop = self
                     .scopes
                     .coroutine_drops
-                    .add_drop(drop_data.data, dropline_indices[drop_data.next]);
+                    .add_drop(drop_data.data.clone(), dropline_indices[drop_data.next]);
                 match drop_data.data.kind {
                     DropKind::Storage | DropKind::ForLint(_) => {}
                     DropKind::Value => {
