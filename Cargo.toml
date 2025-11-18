@@ -16,10 +16,10 @@ members = [
 exclude = ["tools/verus"]
 
 [workspace.dependencies]
-vstd = { git = "https://github.com/hiroki-chen/verus.git", default-features = false, branch = "nightly-rust" }
-verus_builtin = { git = "https://github.com/hiroki-chen/verus.git", branch = "nightly-rust" }
-verus_builtin_macros = { git = "https://github.com/hiroki-chen/verus.git", branch = "nightly-rust" }
-verus_state_machines_macros = { git = "https://github.com/hiroki-chen/verus.git", branch = "nightly-rust" }
+vstd = { git = "https://github.com/verus-lang/verus.git", default-features = false, rev = "45993a4" }
+verus_builtin = { git = "https://github.com/verus-lang/verus.git", rev = "45993a4" }
+verus_builtin_macros = { git = "https://github.com/verus-lang/verus.git", rev = "45993a4" }
+verus_state_machines_macros = { git = "https://github.com/verus-lang/verus.git", rev = "45993a4" }
 
 syn_verus = { git = "https://github.com/ziqiaozhou/verus", rev = "7c4a5274a4d74522f3965eb038bb7e22fa5eebef", features = [
     "full",

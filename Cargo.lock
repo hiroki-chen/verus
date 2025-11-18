@@ -2185,12 +2185,12 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "verus_builtin"
 version = "0.0.0-2025-08-12-1837"
-source = "git+https://github.com/hiroki-chen/verus.git?branch=nightly-rust#eea4df73ceb8b7324acb94c3c7e8ab84ab99c3ad"
+source = "git+https://github.com/verus-lang/verus.git?rev=45993a4#45993a4fa49f8961c7d67bcfc657c73d79d8c3bf"
 
 [[package]]
 name = "verus_builtin_macros"
 version = "0.0.0-2025-11-16-0050"
-source = "git+https://github.com/hiroki-chen/verus.git?branch=nightly-rust#eea4df73ceb8b7324acb94c3c7e8ab84ab99c3ad"
+source = "git+https://github.com/verus-lang/verus.git?rev=45993a4#45993a4fa49f8961c7d67bcfc657c73d79d8c3bf"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2203,7 +2203,7 @@ dependencies = [
 [[package]]
 name = "verus_prettyplease"
 version = "0.0.0-2025-11-16-0050"
-source = "git+https://github.com/hiroki-chen/verus.git?branch=nightly-rust#eea4df73ceb8b7324acb94c3c7e8ab84ab99c3ad"
+source = "git+https://github.com/verus-lang/verus.git?rev=45993a4#45993a4fa49f8961c7d67bcfc657c73d79d8c3bf"
 dependencies = [
  "proc-macro2",
  "verus_syn",
@@ -2212,7 +2212,7 @@ dependencies = [
 [[package]]
 name = "verus_state_machines_macros"
 version = "0.0.0-2025-11-16-0050"
-source = "git+https://github.com/hiroki-chen/verus.git?branch=nightly-rust#eea4df73ceb8b7324acb94c3c7e8ab84ab99c3ad"
+source = "git+https://github.com/verus-lang/verus.git?rev=45993a4#45993a4fa49f8961c7d67bcfc657c73d79d8c3bf"
 dependencies = [
  "indexmap 1.9.3",
  "proc-macro2",
@@ -2223,7 +2223,7 @@ dependencies = [
 [[package]]
 name = "verus_syn"
 version = "0.0.0-2025-11-16-0050"
-source = "git+https://github.com/hiroki-chen/verus.git?branch=nightly-rust#eea4df73ceb8b7324acb94c3c7e8ab84ab99c3ad"
+source = "git+https://github.com/verus-lang/verus.git?rev=45993a4#45993a4fa49f8961c7d67bcfc657c73d79d8c3bf"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2239,7 +2239,7 @@ checksum = "442887c63f2c839b346c192d047a7c87e73d0689c9157b00b53dcc27dd5ea793"
 [[package]]
 name = "vstd"
 version = "0.0.0-2025-11-16-0050"
-source = "git+https://github.com/hiroki-chen/verus.git?branch=nightly-rust#eea4df73ceb8b7324acb94c3c7e8ab84ab99c3ad"
+source = "git+https://github.com/verus-lang/verus.git?rev=45993a4#45993a4fa49f8961c7d67bcfc657c73d79d8c3bf"
 dependencies = [
  "verus_builtin",
  "verus_builtin_macros",

@@ -104,54 +104,83 @@ fn init_paging(
     }
 
     // We then map the IGVM parameters.
-    if header.igvm_params_virt_addr != 0 {
-        proof {
-            assume(
-                VirtAddr(header.igvm_params_virt_addr).wf()
-            );
-            assume(ctx_perm.wf());
-            assume(ctx_perm.pgtable_perm.mapped(VirtAddr(header.igvm_params_virt_addr)));
+    // if header.igvm_params_virt_addr != 0 {
+    //     proof {
+    //         assume(
+    //             VirtAddr(header.igvm_params_virt_addr).wf()
+    //         );
+    //         assume(ctx_perm.wf());
+    //         assume(ctx_perm.pgtable_perm.mapped(VirtAddr(header.igvm_params_virt_addr)));
 
-        }
+    //     }
 
-        let igvms = #[verus_spec(with Tracked(ctx_perm))] deko_core::get_igvm_params(VirtAddr(header.igvm_params_virt_addr));
-        let igvm_params_vaddr_start = VirtAddr(header.igvm_params_virt_addr);
-        let igvm_size = igvms.size();
-        proof {
-            assume(header.igvm_params_virt_addr +igvm_size as u64 <= u64::MAX);
-            assume(
-                VirtAddr((header.igvm_params_virt_addr + igvm_size) as u64).page_align_up_requires()
-            );
-        }
+    //     let igvms = #[verus_spec(with Tracked(ctx_perm))] deko_core::get_igvm_params(VirtAddr(header.igvm_params_virt_addr));
+    //     let igvm_params_vaddr_start = VirtAddr(header.igvm_params_virt_addr);
+    //     let igvm_size = igvms.size();
+    //     proof {
+    //         assume(header.igvm_params_virt_addr +igvm_size as u64 <= u64::MAX);
+    //         assume(
+    //             VirtAddr((header.igvm_params_virt_addr + igvm_size) as u64).page_align_up_requires()
+    //         );
+    //     }
 
-        let igvm_params_vaddr_end =
-            VirtAddr(header.igvm_params_virt_addr + igvms.size() as u64).page_align_up();
-        let igvm_params_phys_start = PhysAddr(header.igvm_params_phys_addr);
-        let flags = PteFlags::data();
+    //     let igvm_params_vaddr_end =
+    //         VirtAddr(header.igvm_params_virt_addr + igvms.size() as u64).page_align_up();
+    //     let igvm_params_phys_start = PhysAddr(header.igvm_params_phys_addr);
+    //     let flags = PteFlags::data();
 
-        proof {
-            assume(perm.map_page_multiple_requires(
-                new_page_table,
-                igvm_params_vaddr_start..igvm_params_vaddr_end,
-                igvm_params_phys_start,
-                ms,
-                flags,
-                private_bit,
-                shared_bit,
-            ));
-        }
+    //     proof {
+    //         assume(perm.map_page_multiple_requires(
+    //             new_page_table,
+    //             igvm_params_vaddr_start..igvm_params_vaddr_end,
+    //             igvm_params_phys_start,
+    //             ms,
+    //             flags,
+    //             private_bit,
+    //             shared_bit,
+    //         ));
+    //     }
 
-        PageTable::map_page_multiple(
+    //     PageTable::map_page_multiple(
+    //         new_page_table,
+    //         igvm_params_vaddr_start..igvm_params_vaddr_end,
+    //         igvm_params_phys_start,
+    //         flags,
+    //         ms,
+    //         private_bit,
+    //         shared_bit,
+    //         Tracked(&mut perm),
+    //     );
+    // }
+
+    // Map the rest of the heap regions.
+    let heap_vaddr_start = VirtAddr(header.heap_area_virt_start);
+    let heap_vaddr_end = VirtAddr(header.heap_area_virt_start + header.heap_area_size).page_align_up();
+    let heap_phys_start = PhysAddr(header.heap_area_phys_start);
+    let flags = PteFlags::data();
+
+    proof {
+        assume(perm.map_page_multiple_requires(
             new_page_table,
-            igvm_params_vaddr_start..igvm_params_vaddr_end,
-            igvm_params_phys_start,
-            flags,
+            heap_vaddr_start..heap_vaddr_end,
+            heap_phys_start,
             ms,
+            flags,
             private_bit,
             shared_bit,
-            Tracked(&mut perm),
-        );
+        ));
     }
+
+    PageTable::map_page_multiple(
+        new_page_table,
+        heap_vaddr_start..heap_vaddr_end,
+        heap_phys_start,
+        flags,
+        ms,
+        private_bit,
+        shared_bit,
+        Tracked(&mut perm),
+    );
 
     (new_page_table, paddr, Tracked(perm))
 }
@@ -242,10 +271,11 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) {
         shared_bit,
     );
 
+    early_dbg();
     unsafe {
         // SAFETY: We have ensured that the new page table is valid because
         // init_paging() returns a valid page table and its permission.
-        load_cr3(paddr);
+        // load_cr3(paddr);
     }
 
     // deko_core::hal::setup_env(ctx);

@@ -17,7 +17,7 @@ pub const HEAP_ALIGNMENT: u64 = 0x1000;
 pub axiom fn node_size<T: Sized + WellFormed>()
     ensures
         core::mem::size_of::<Node<T>>() == 16 + core::mem::size_of::<T>(),
-;
+    ;
 
 /// This function checks if the given parameters for a heap are valid only used for
 /// initialization functions.
