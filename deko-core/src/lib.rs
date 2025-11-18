@@ -156,59 +156,6 @@ impl Stage2LaunchInfo {
             && self.get_elf() matches Some(elf_file) ==> elf_file.wf_with_load_base(kstart)
             && elf_file.wf_with_ms(kstart, ms)
     }
-
-    #[verifier::external_body]
-    #[verus_spec(r =>
-        with
-            Tracked(ctx_perm): Tracked<&crate::cpu::DekoCpuCtxPermission>
-    )]
-    pub fn get_igvm_params(&self) -> IgvmParams<'_>
-        requires
-            self.wf(),
-            ctx_perm.wf(),
-            ctx_perm.pgtable_perm.mapped(VirtAddr::new(self.igvm_params as u64)),
-        returns
-            self.get_igvm_params_spec(),
-    {
-        let igvm_params_vaddr = VirtAddr::new(self.igvm_params as u64);
-        let igvm_params_block = unsafe { &*(igvm_params_vaddr.0 as *const IgvmParamBlock) };
-        let igvm_params_page_vaddr = igvm_params_vaddr.0
-            + igvm_params_block.param_page_offset as u64;
-        let igvm_params_page = unsafe { &*(igvm_params_page_vaddr as *const IgvmParamPage) };
-        let memory_map_vaddr = igvm_params_vaddr.0 + igvm_params_block.memory_map_offset as u64;
-        let memory_map = unsafe { &*(memory_map_vaddr as *const IgvmMemoryMap) };
-        let madt_vaddr = igvm_params_vaddr.0 + igvm_params_block.madt_offset as u64;
-        let madt = if igvm_params_block.madt_size == 0 {
-            Some(
-                unsafe {
-                    core::slice::from_raw_parts(
-                        madt_vaddr as *const u8,
-                        igvm_params_block.madt_size as usize,
-                    )
-                },
-            )
-        } else {
-            None
-        };
-        let guest_context = if igvm_params_block.guest_context_offset != 0 {
-            Some(
-                unsafe {
-                    &*((igvm_params_vaddr.0
-                        + igvm_params_block.guest_context_offset as u64) as *const IgvmGuestContext)
-                },
-            )
-        } else {
-            None
-        };
-
-        IgvmParams {
-            igvm_param_block: igvm_params_block,
-            igvm_param_page: igvm_params_page,
-            igvm_memory_map: memory_map,
-            igvm_madt: madt,
-            igvm_guest_context: guest_context,
-        }
-    }
 }
 
 impl WellFormed for Stage2LaunchInfo {
@@ -250,6 +197,56 @@ impl WellFormed for DekoKernelLaunchInfo {
         &&& self.kernel_elf_stage2_virt_start@ < self.kernel_elf_stage2_virt_end@
         &&& self.kernel_region_phys_start@ < self.kernel_region_phys_end@ <= 0x000f_ffff_ffff_f000
         &&& valid_heap_param(self.heap_area_virt_start@, self.heap_area_size@, HEAP_SIZE as u64)
+    }
+}
+
+#[verifier::external_body]
+#[verus_spec(r =>
+    with
+        Tracked(ctx_perm): Tracked<&crate::cpu::DekoCpuCtxPermission>,
+    requires
+        igvm_params_vaddr.wf(),
+        ctx_perm.wf(),
+        ctx_perm.pgtable_perm.mapped(igvm_params_vaddr),
+    ensures
+        r.wf(),
+)]
+pub fn get_igvm_params<'a>(igvm_params_vaddr: VirtAddr) -> IgvmParams<'a> {
+    let igvm_params_block = unsafe { &*(igvm_params_vaddr.0 as *const IgvmParamBlock) };
+    let igvm_params_page_vaddr = igvm_params_vaddr.0 + igvm_params_block.param_page_offset as u64;
+    let igvm_params_page = unsafe { &*(igvm_params_page_vaddr as *const IgvmParamPage) };
+    let memory_map_vaddr = igvm_params_vaddr.0 + igvm_params_block.memory_map_offset as u64;
+    let memory_map = unsafe { &*(memory_map_vaddr as *const IgvmMemoryMap) };
+    let madt_vaddr = igvm_params_vaddr.0 + igvm_params_block.madt_offset as u64;
+    let madt = if igvm_params_block.madt_size == 0 {
+        Some(
+            unsafe {
+                core::slice::from_raw_parts(
+                    madt_vaddr as *const u8,
+                    igvm_params_block.madt_size as usize,
+                )
+            },
+        )
+    } else {
+        None
+    };
+    let guest_context = if igvm_params_block.guest_context_offset != 0 {
+        Some(
+            unsafe {
+                &*((igvm_params_vaddr.0
+                    + igvm_params_block.guest_context_offset as u64) as *const IgvmGuestContext)
+            },
+        )
+    } else {
+        None
+    };
+
+    IgvmParams {
+        igvm_param_block: igvm_params_block,
+        igvm_param_page: igvm_params_page,
+        igvm_memory_map: memory_map,
+        igvm_madt: madt,
+        igvm_guest_context: guest_context,
     }
 }
 

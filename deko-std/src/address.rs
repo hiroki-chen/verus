@@ -842,17 +842,34 @@ impl WellFormed for PhysAddr {
     }
 }
 
+impl vstd::std_specs::convert::FromSpecImpl<u64> for VirtAddr {
+    open spec fn obeys_from_spec() -> bool {
+        true
+    }
+
+    open spec fn from_spec(value: u64) -> VirtAddr {
+        VirtAddr::new_spec(value)
+    }
+}
+
 impl From<u64> for VirtAddr {
     /// Creates a canonical virtual address from a 64-bit value.
     ///
     /// The input value is automatically canonicalized to ensure x86-64 compatibility.
+    #[inline]
     fn from(value: u64) -> (r: Self)
-        ensures
-            r.wf(),
-            r == Self::new_spec(value),
-            sign_extend_ensures(value, r@),
     {
         VirtAddr::new(value)
+    }
+}
+
+impl vstd::std_specs::convert::FromSpecImpl<u32> for VirtAddr {
+    open spec fn obeys_from_spec() -> bool {
+        true
+    }
+
+    open spec fn from_spec(value: u32) -> VirtAddr {
+        VirtAddr::new_spec(value as u64)
     }
 }
 
@@ -860,8 +877,20 @@ impl From<u32> for VirtAddr {
     /// Creates a canonical virtual address from a 32-bit value.
     ///
     /// The 32-bit value is zero-extended to 64 bits, then canonicalized.
-    fn from(value: u32) -> (r: Self) {
+    #[inline]
+    fn from(value: u32) -> (r: Self)
+    {
         VirtAddr::new(value as u64)
+    }
+}
+
+impl vstd::std_specs::convert::FromSpecImpl<u64> for PhysAddr {
+    open spec fn obeys_from_spec() -> bool {
+        true
+    }
+
+    open spec fn from_spec(value: u64) -> PhysAddr {
+        PhysAddr(value)
     }
 }
 
@@ -870,10 +899,18 @@ impl From<u64> for PhysAddr {
     ///
     /// Physical addresses don't require canonicalization and use the full 64-bit range.
     fn from(value: u64) -> (r: Self)
-        ensures
-            r@ === value,
     {
         PhysAddr(value)
+    }
+}
+
+impl vstd::std_specs::convert::FromSpecImpl<u32> for PhysAddr {
+    open spec fn obeys_from_spec() -> bool {
+        true
+    }
+
+    open spec fn from_spec(value: u32) -> PhysAddr {
+        PhysAddr(value as u64)
     }
 }
 
@@ -889,6 +926,16 @@ impl From<u32> for PhysAddr {
     }
 }
 
+impl<T> vstd::std_specs::convert::FromSpecImpl<*const T> for VirtAddr {
+    open spec fn obeys_from_spec() -> bool {
+        true
+    }
+
+    open spec fn from_spec(value: *const T) -> VirtAddr {
+        VirtAddr::new_spec(value as u64)
+    }
+}
+
 impl<T> From<*const T> for VirtAddr {
     /// Creates a canonical virtual address from a const pointer.
     ///
@@ -898,12 +945,32 @@ impl<T> From<*const T> for VirtAddr {
     }
 }
 
+impl<T> vstd::std_specs::convert::FromSpecImpl<*const T> for PhysAddr {
+    open spec fn obeys_from_spec() -> bool {
+        true
+    }
+
+    open spec fn from_spec(value: *const T) -> PhysAddr {
+        PhysAddr(value as u64)
+    }
+}
+
 impl<T> From<*const T> for PhysAddr {
     /// Creates a physical address from a const pointer.
     ///
     /// The pointer is cast directly to u64 without canonicalization.
     fn from(value: *const T) -> Self {
         PhysAddr(value as u64)
+    }
+}
+
+impl<T> vstd::std_specs::convert::FromSpecImpl<*mut T> for VirtAddr {
+    open spec fn obeys_from_spec() -> bool {
+        true
+    }
+
+    open spec fn from_spec(value: *mut T) -> VirtAddr {
+        VirtAddr::new_spec(value as u64)
     }
 }
 
@@ -918,6 +985,16 @@ impl<T> From<*mut T> for VirtAddr {
             sign_extend_ensures(value as u64, r@),
     {
         VirtAddr::new(value as u64)
+    }
+}
+
+impl<T> vstd::std_specs::convert::FromSpecImpl<*mut T> for PhysAddr {
+    open spec fn obeys_from_spec() -> bool {
+        true
+    }
+
+    open spec fn from_spec(value: *mut T) -> PhysAddr {
+        PhysAddr(value as u64)
     }
 }
 

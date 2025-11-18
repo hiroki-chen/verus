@@ -229,9 +229,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.5.51"
+version = "4.5.52"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c26d721170e0295f191a69bd9a1f93efcdb0aff38684b61ab5750468972e5f5"
+checksum = "aa8120877db0e5c011242f96806ce3c94e0737ab8108532a76a3300a01db2ab8"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -239,9 +239,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.5.51"
+version = "4.5.52"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75835f0c7bf681bfd05abe44e965760fea999a5286c6eb2d59883634fd02011a"
+checksum = "02576b399397b659c26064fbc92a75fede9d18ffd5f80ca1cd74ddab167016e1"
 dependencies = [
  "anstream",
  "anstyle",
@@ -2185,12 +2185,12 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "verus_builtin"
 version = "0.0.0-2025-08-12-1837"
-source = "git+https://github.com/verus-lang/verus.git#ff586a43ec0b56938d7a9e771dd95fc40f28ef47"
+source = "git+https://github.com/hiroki-chen/verus.git?branch=nightly-rust#eea4df73ceb8b7324acb94c3c7e8ab84ab99c3ad"
 
 [[package]]
 name = "verus_builtin_macros"
 version = "0.0.0-2025-11-16-0050"
-source = "git+https://github.com/verus-lang/verus.git#ff586a43ec0b56938d7a9e771dd95fc40f28ef47"
+source = "git+https://github.com/hiroki-chen/verus.git?branch=nightly-rust#eea4df73ceb8b7324acb94c3c7e8ab84ab99c3ad"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2203,7 +2203,7 @@ dependencies = [
 [[package]]
 name = "verus_prettyplease"
 version = "0.0.0-2025-11-16-0050"
-source = "git+https://github.com/verus-lang/verus.git#ff586a43ec0b56938d7a9e771dd95fc40f28ef47"
+source = "git+https://github.com/hiroki-chen/verus.git?branch=nightly-rust#eea4df73ceb8b7324acb94c3c7e8ab84ab99c3ad"
 dependencies = [
  "proc-macro2",
  "verus_syn",
@@ -2212,7 +2212,7 @@ dependencies = [
 [[package]]
 name = "verus_state_machines_macros"
 version = "0.0.0-2025-11-16-0050"
-source = "git+https://github.com/verus-lang/verus.git#ff586a43ec0b56938d7a9e771dd95fc40f28ef47"
+source = "git+https://github.com/hiroki-chen/verus.git?branch=nightly-rust#eea4df73ceb8b7324acb94c3c7e8ab84ab99c3ad"
 dependencies = [
  "indexmap 1.9.3",
  "proc-macro2",
@@ -2223,7 +2223,7 @@ dependencies = [
 [[package]]
 name = "verus_syn"
 version = "0.0.0-2025-11-16-0050"
-source = "git+https://github.com/verus-lang/verus.git#ff586a43ec0b56938d7a9e771dd95fc40f28ef47"
+source = "git+https://github.com/hiroki-chen/verus.git?branch=nightly-rust#eea4df73ceb8b7324acb94c3c7e8ab84ab99c3ad"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2239,7 +2239,7 @@ checksum = "442887c63f2c839b346c192d047a7c87e73d0689c9157b00b53dcc27dd5ea793"
 [[package]]
 name = "vstd"
 version = "0.0.0-2025-11-16-0050"
-source = "git+https://github.com/verus-lang/verus.git#ff586a43ec0b56938d7a9e771dd95fc40f28ef47"
+source = "git+https://github.com/hiroki-chen/verus.git?branch=nightly-rust#eea4df73ceb8b7324acb94c3c7e8ab84ab99c3ad"
 dependencies = [
  "verus_builtin",
  "verus_builtin_macros",

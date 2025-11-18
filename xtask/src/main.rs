@@ -177,6 +177,8 @@ enum Commands {
     BootstrapVerus {
         #[arg(short, long)]
         commit: Option<String>,
+        #[arg(short, long)]
+        branch: Option<String>,
     },
 
     BootstrapQemu,
@@ -793,9 +795,9 @@ fn main() -> Result<()> {
 
         Commands::Pretty { paths } => pretty(paths),
 
-        Commands::BootstrapVerus { commit } => {
+        Commands::BootstrapVerus { commit, branch } => {
             let default_prefix = project_root().join("/tmp");
-            bootstrap_verus(&default_prefix, commit.as_deref())
+            bootstrap_verus(&default_prefix, commit.as_deref(), branch.as_deref())
         }
 
         Commands::BootstrapQemu => bootstrap_qemu(),
@@ -1546,7 +1548,7 @@ fn bootstrap_qemu() -> Result<()> {
     Ok(())
 }
 
-fn bootstrap_verus(prefix: &Path, commit: Option<&str>) -> Result<()> {
+fn bootstrap_verus(prefix: &Path, commit: Option<&str>, branch: Option<&str>) -> Result<()> {
     println!("{} Bootstrapping Verus from source...", "→".bright_cyan());
     println!("Installation prefix: {}", prefix.display().to_string().bright_white());
 
@@ -1569,14 +1571,53 @@ fn bootstrap_verus(prefix: &Path, commit: Option<&str>) -> Result<()> {
     let repo =
         Repository::clone(repo_url, &verus_dir).context("Failed to clone Verus repository")?;
 
-    // Checkout specific commit if provided
-    if let Some(commit_hash) = commit {
-        println!("Checking out commit: {}", commit_hash.bright_yellow());
-        let (object, _) = repo
-            .revparse_ext(commit_hash)
-            .with_context(|| format!("Failed to find commit {}", commit_hash))?;
-        repo.checkout_tree(&object, None).context("Failed to checkout commit")?;
-        repo.set_head_detached(object.id()).context("Failed to set HEAD to commit")?;
+    // Checkout specific commit or branch if provided
+    match (commit, branch) {
+        (Some(commit_hash), None) => {
+            println!("Checking out commit: {}", commit_hash.bright_yellow());
+            let (object, _) = repo
+                .revparse_ext(commit_hash)
+                .with_context(|| format!("Failed to find commit {}", commit_hash))?;
+            repo.checkout_tree(&object, None).context("Failed to checkout commit")?;
+            repo.set_head_detached(object.id()).context("Failed to set HEAD to commit")?;
+        }
+        (None, Some(branch_name)) => {
+            println!("Checking out branch: {}", branch_name.bright_green());
+            
+            // First fetch all remotes to ensure we have the latest branch info
+            let mut remote = repo.find_remote("origin").context("Failed to find origin remote")?;
+            remote
+                .fetch(&["refs/heads/*:refs/remotes/origin/*"], None, None)
+                .context("Failed to fetch from origin")?;
+
+            // Try to find the remote branch
+            let remote_branch_name = format!("origin/{}", branch_name);
+            let (object, _) = repo
+                .revparse_ext(&remote_branch_name)
+                .with_context(|| format!("Failed to find remote branch {}", remote_branch_name))?;
+
+            // Checkout the remote branch
+            repo.checkout_tree(&object, None)?;
+
+            // Check if local branch already exists and handle accordingly
+            let branch_ref_name = format!("refs/heads/{}", branch_name);
+            if let Ok(_existing_ref) = repo.find_reference(&branch_ref_name) {
+                // Local branch exists, just set HEAD to it
+                repo.set_head(&branch_ref_name)?;
+            } else {
+                // Create local branch tracking the remote branch
+                repo.reference(&branch_ref_name, object.id(), false, "checkout remote branch")?;
+                repo.set_head(&branch_ref_name)?;
+            }
+
+            println!("✓ Checked out branch: {}", branch_name);
+        }
+        (Some(_), Some(_)) => {
+            bail!("Cannot specify both commit and branch - please choose one");
+        }
+        (None, None) => {
+            println!("✓ Using default branch");
+        }
     }
 
     println!("✓ Repository cloned successfully!");

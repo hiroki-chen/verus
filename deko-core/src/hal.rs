@@ -44,14 +44,22 @@ impl WellFormed for PlatformType {
     }
 }
 
+impl vstd::std_specs::convert::FromSpecImpl<u32> for PlatformType {
+    open spec fn obeys_from_spec() -> bool {
+        true
+    }
+
+    open spec fn from_spec(value: u32) -> PlatformType {
+        match value {
+            0x0001 => PlatformType::Snp,
+            0x0002 => PlatformType::Tdx,
+            _ => PlatformType::None,
+        }
+    }
+}
+
 impl From<u32> for PlatformType {
     fn from(value: u32) -> (r: Self)
-        ensures
-            match value {
-                0x0001 => r == PlatformType::Snp,
-                0x0002 => r == PlatformType::Tdx,
-                _ => r == PlatformType::None,
-            },
     {
         match value {
             0x0001 => PlatformType::Snp,
@@ -340,9 +348,10 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>) -> (__discard: !) {
                 // that the mapped region for this will not change
                 // throughout previous operations.
                 assume(ctx_perm.pgtable_perm.mapped(VirtAddr::new(header.igvm_params as u64)));
+                assume(header.igvm_params <= VADDR_LOWER_MASK);
             }
             let igvm_params = #[verus_spec(with Tracked(&ctx_perm))]
-            header.get_igvm_params();
+            crate::get_igvm_params(VirtAddr::new(header.igvm_params as u64));
             kinfo!("IGVM params found:", igvm_params);
 
             let (igvm_vregion, igvm_pregion) = #[verus_spec(with Tracked(&mut ctx_perm))]

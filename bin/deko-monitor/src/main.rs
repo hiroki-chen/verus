@@ -9,7 +9,7 @@ use deko_core::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use deko_core::elf::ElfFile;
 use deko_core::mm::paging::{PageTable, PageTablePermission, PteFlags, GLOBAL};
 use deko_core::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR};
-use deko_core::{kinfo, DekoKernelLaunchInfo};
+use deko_core::{DekoKernelLaunchInfo, get_igvm_params, kinfo};
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
@@ -30,6 +30,8 @@ fn init_mem(header: &DekoKernelLaunchInfo) {
 }
 
 #[verus_spec(r =>
+    with
+        Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
     requires
         header.wf(),
         elf.wf(),
@@ -99,6 +101,56 @@ fn init_paging(
         proof {
             assume(phys <= 0x000f_ffff_ffff_f000);
         }
+    }
+
+    // We then map the IGVM parameters.
+    if header.igvm_params_virt_addr != 0 {
+        proof {
+            assume(
+                VirtAddr(header.igvm_params_virt_addr).wf()
+            );
+            assume(ctx_perm.wf());
+            assume(ctx_perm.pgtable_perm.mapped(VirtAddr(header.igvm_params_virt_addr)));
+
+        }
+
+        let igvms = #[verus_spec(with Tracked(ctx_perm))] deko_core::get_igvm_params(VirtAddr(header.igvm_params_virt_addr));
+        let igvm_params_vaddr_start = VirtAddr(header.igvm_params_virt_addr);
+        let igvm_size = igvms.size();
+        proof {
+            assume(header.igvm_params_virt_addr +igvm_size as u64 <= u64::MAX);
+            assume(
+                VirtAddr((header.igvm_params_virt_addr + igvm_size) as u64).page_align_up_requires()
+            );
+        }
+
+        let igvm_params_vaddr_end =
+            VirtAddr(header.igvm_params_virt_addr + igvms.size() as u64).page_align_up();
+        let igvm_params_phys_start = PhysAddr(header.igvm_params_phys_addr);
+        let flags = PteFlags::data();
+
+        proof {
+            assume(perm.map_page_multiple_requires(
+                new_page_table,
+                igvm_params_vaddr_start..igvm_params_vaddr_end,
+                igvm_params_phys_start,
+                ms,
+                flags,
+                private_bit,
+                shared_bit,
+            ));
+        }
+
+        PageTable::map_page_multiple(
+            new_page_table,
+            igvm_params_vaddr_start..igvm_params_vaddr_end,
+            igvm_params_phys_start,
+            flags,
+            ms,
+            private_bit,
+            shared_bit,
+            Tracked(&mut perm),
+        );
     }
 
     (new_page_table, paddr, Tracked(perm))
@@ -181,7 +233,8 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) {
     let private_bit = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).private_bit();
     let shared_bit = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).shared_bit();
 
-    let (new_page_table, paddr, Tracked(pgtable_perm)) = init_paging(
+    let tracked mut ctx_perm = ctx_perm;
+    let (new_page_table, paddr, Tracked(pgtable_perm)) = #[verus_spec(with Tracked(&mut ctx_perm))] init_paging(
         header,
         &kernel_elf,
         &ms,

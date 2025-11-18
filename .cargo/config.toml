@@ -27,7 +27,7 @@ test-buddy = "xtest buddy"
 # TODO: Fork another version. This will download unncessary git submodules recursively.
 install-igvmbuilder = "install --git https://github.com/coconut-svsm/svsm.git igvmbuilder"
 
-bootstrap-verus = "xtask bootstrap-verus"
+bootstrap-verus = "xtask bootstrap-verus --branch nightly-rust"
 bootstrap-qemu = "xtask bootstrap-qemu"
 bootstrap-ovmf = "xtask bootstrap-ovmf"
 
