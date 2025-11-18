@@ -1,0 +1,13 @@
+[package]
+name = "verus_spec_cross_crate_consumer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vstd = { path = "../../../../../vstd" }
+verus_spec_cross_crate_lib = { path = "../verus_spec_cross_crate_lib" }
+
+[package.metadata.verus]
+verify = true
+
+[workspace]
