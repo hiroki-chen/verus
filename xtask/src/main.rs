@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::{self, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -163,7 +163,9 @@ enum Commands {
     },
 
     Test {
-        #[arg(help = "Test suite to run (e.g., 'buddy', 'elf'). If not specified, runs all tests.")]
+        #[arg(
+            help = "Test suite to run (e.g., 'buddy', 'elf'). If not specified, runs all tests."
+        )]
         suite: Option<String>,
         #[arg(short, long, help = "Run tests in release mode")]
         release: bool,
@@ -811,10 +813,10 @@ fn main() -> Result<()> {
 
 fn test_runner(suite: Option<String>, release: bool) -> Result<()> {
     println!("{} Deko Test Runner", "🧪".bright_cyan().bold());
-    
+
     let project_root = project_root();
     let tests_dir = project_root.join("tests");
-    
+
     if !tests_dir.exists() {
         bail!("Tests directory not found at: {:?}", tests_dir);
     }
@@ -830,7 +832,7 @@ fn test_runner(suite: Option<String>, release: bool) -> Result<()> {
             }
         })
         .collect::<Vec<_>>();
-    
+
     if available_suites.is_empty() {
         println!("⚠ No test suites found in tests directory");
         return Ok(());
@@ -866,72 +868,75 @@ fn test_runner(suite: Option<String>, release: bool) -> Result<()> {
     }
 
     let mut all_passed = true;
-    
+
     // Change back to project root for cargo commands
     std::env::set_current_dir(&project_root)?;
-    
+
     for suite in &suites_to_run {
-        println!("\n{} {} {}", "═".repeat(20), format!("Testing {}", suite).bright_cyan().bold(), "═".repeat(20));
-        
+        println!(
+            "\n{} {} {}",
+            "═".repeat(20),
+            format!("Testing {}", suite).bright_cyan().bold(),
+            "═".repeat(20)
+        );
+
         // Step 1: Build the test binary using cargo verus
         println!("🔨 Building test binary for '{}'...", suite);
-        
+
         let mut cmd = Command::new("cargo");
-        cmd.arg("verus")
-            .arg("build")
-            .arg("--bin")
-            .arg(suite);
-            
+        cmd.arg("verus").arg("build").arg("--bin").arg(suite);
+
         if release {
             cmd.arg("--release");
         }
 
         println!("Running: {:?}", cmd);
-        
-        let output = cmd.output()
-            .with_context(|| format!("Failed to build test suite: {}", suite))?;
-        
+
+        let output =
+            cmd.output().with_context(|| format!("Failed to build test suite: {}", suite))?;
+
         if !output.status.success() {
             println!("✗ Failed to build test suite '{}'", suite);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
-            
+
             if !stdout.is_empty() {
                 println!("{}", "BUILD STDOUT:".bright_yellow());
                 println!("{}", stdout);
             }
-            
+
             if !stderr.is_empty() {
                 println!("{}", "BUILD STDERR:".bright_yellow());
                 println!("{}", stderr);
             }
-            
+
             all_passed = false;
             continue;
         }
-        
+
         println!("✓ Built test binary for '{}'", suite);
-        
+
         // Step 2: Find and execute the compiled binary
         let profile = if release { "release" } else { "debug" };
         let target_dir = project_root.join("target").join(profile);
         let binary_path = target_dir.join(suite);
-        
+
         if !binary_path.exists() {
             println!("✗ Test binary not found at: {:?}", binary_path);
             all_passed = false;
             continue;
         }
-        
+
         println!("🚀 Executing test binary: {:?}", binary_path);
-        
+
         let mut test_cmd = Command::new(&binary_path);
-        let test_output = test_cmd.output()
+        let test_output = test_cmd
+            .output()
             .with_context(|| format!("Failed to execute test binary: {:?}", binary_path))?;
-        
+
         if test_output.status.success() {
             println!("✓ Test suite '{}' {}", suite, "PASSED".bright_green().bold());
-            
+
             // Print output for successful tests too
             let stdout = String::from_utf8_lossy(&test_output.stdout);
             if !stdout.is_empty() {
@@ -940,16 +945,16 @@ fn test_runner(suite: Option<String>, release: bool) -> Result<()> {
         } else {
             println!("✗ Test suite '{}' {}", suite, "FAILED".bright_red().bold());
             all_passed = false;
-            
+
             // Print test output for debugging
             let stdout = String::from_utf8_lossy(&test_output.stdout);
             let stderr = String::from_utf8_lossy(&test_output.stderr);
-            
+
             if !stdout.is_empty() {
                 println!("{}", "TEST STDOUT:".bright_yellow());
                 println!("{}", stdout);
             }
-            
+
             if !stderr.is_empty() {
                 println!("{}", "TEST STDERR:".bright_yellow());
                 println!("{}", stderr);
@@ -972,6 +977,28 @@ fn test_runner(suite: Option<String>, release: bool) -> Result<()> {
 fn line_count() -> Result<()> {
     println!("{} Verus Line Count Tool", "📊".bright_cyan().bold());
 
+    // Check if `line_count` has been installed.
+    if which::which("line_count").is_err() {
+        println!(
+            "{} `line_count` not found, installing it from Verus...", "❌".bright_cyan());
+        let mut cmd = Command::new("cargo");
+        cmd.arg("install")
+            .arg("line_count")
+            .arg("--git")
+            .arg("https://github.com/verus-lang/verus");
+
+        println!("Running: {:?}", cmd);
+        let output = cmd.output().context("Failed to install line_count tool")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            println!("❌ Failed to install line_count:");
+            println!("STDOUT: {}", stdout);
+            println!("STDERR: {}", stderr);
+            bail!("line_count installation failed");
+        }
+    }
+
     // Step 1: Generate dependency information for deko-core and deko-std
     println!("{} Generating dependency information...", "🔍".bright_yellow());
 
@@ -986,6 +1013,8 @@ fn line_count() -> Result<()> {
 
     // Set up environment for verus
     std::env::set_var("VERUS_Z3_PATH", &z3_binary);
+    std::env::set_var("RUSTC_BOOTSTRAP", "1");
+
     if verus_binary != PathBuf::from("verus") {
         let verus_dir = verus_binary.parent().unwrap_or_else(|| Path::new("."));
         let current_path = std::env::var("PATH").unwrap_or_default();
@@ -1003,6 +1032,8 @@ fn line_count() -> Result<()> {
             .arg("--lib")
             .arg("--package")
             .arg(package)
+            .arg("--features")
+            .arg("snp, vstd/allow_panic, vstd/alloc, deko-std/alloc")
             .arg("--")
             .arg("--emit=dep-info");
 
@@ -1051,6 +1082,7 @@ fn line_count() -> Result<()> {
         writer
             .write_all(content.as_bytes())
             .with_context(|| format!("Failed to write to dep-info file: {:?}", dep_file))?;
+        writer.flush().with_context(|| format!("Failed to flush dep-info file: {:?}", dep_file))?;
 
         let mut cmd = Command::new("line_count");
         cmd.arg(dep_file.display().to_string());
@@ -1062,8 +1094,17 @@ fn line_count() -> Result<()> {
             format!("Failed to run line_count tool on dep-info file: {:?}", dep_file)
         })?;
 
-        io::stdout().write_all(&out.stdout).context("Failed to write line_count output")?;
-        io::stderr().write_all(&out.stderr).context("Failed to write line_count error output")?;
+        // Store into /target/debug/line_count_output_<package>.txt
+        let output_file_path = project_root
+            .join("target")
+            .join("debug")
+            .join(format!("line_count_output_{}.txt", package.replace("-", "_")));
+        let mut output_file = fs::File::create(&output_file_path).with_context(|| {
+            format!("Failed to create line count output file: {:?}", output_file_path)
+        })?;
+        output_file.write_all(&out.stdout).with_context(|| {
+            format!("Failed to write to line count output file: {:?}", output_file_path)
+        })?;
     }
 
     Ok(())
@@ -1584,7 +1625,7 @@ fn bootstrap_verus(prefix: &Path, commit: Option<&str>, branch: Option<&str>) ->
         }
         (None, Some(branch_name)) => {
             println!("Checking out branch: {}", branch_name.bright_green());
-            
+
             // First fetch all remotes to ensure we have the latest branch info
             let mut remote = repo.find_remote("origin").context("Failed to find origin remote")?;
             remote
