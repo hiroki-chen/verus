@@ -442,6 +442,7 @@ impl Builder {
 
         // Set up environment for verus
         std::env::set_var("VERUS_Z3_PATH", &z3_binary);
+        std::env::set_var("RUSTC_BOOTSTRAP", "1");
 
         // let deko_stage2 = self.config.root.join("deko-core");
         // std::env::set_current_dir(&deko_stage2)
