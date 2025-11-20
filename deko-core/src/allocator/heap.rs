@@ -2,7 +2,4 @@
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
-verus! {
-
-
-} // verus!
+verus! {} // verus!

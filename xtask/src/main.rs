@@ -979,8 +979,7 @@ fn line_count() -> Result<()> {
 
     // Check if `line_count` has been installed.
     if which::which("line_count").is_err() {
-        println!(
-            "{} `line_count` not found, installing it from Verus...", "❌".bright_cyan());
+        println!("{} `line_count` not found, installing it from Verus...", "❌".bright_cyan());
         let mut cmd = Command::new("cargo");
         cmd.arg("install")
             .arg("line_count")

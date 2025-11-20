@@ -216,6 +216,7 @@ pub fn validate_memory(
 ) -> (r: bool)
     requires
         old(ctx_perm).wf(),
+        old(ctx_perm).pgtable_perm.mapped_region(VirtAddr(heap_start)..VirtAddr(heap_end)),
         heap_end > heap_start,
         heap_start % PAGE_SIZE == 0,
         heap_end % PAGE_SIZE == 0,
@@ -230,7 +231,7 @@ pub fn validate_memory(
 
     while cur < heap_end
         invariant
-            cur <= heap_end,
+            heap_start <= cur <= heap_end,
             ctx_perm.wf(),
             cur % PAGE_SIZE == 0,
             heap_start % PAGE_SIZE == 0,
@@ -240,6 +241,8 @@ pub fn validate_memory(
             old(ctx_perm).deko_ctx_ptr_perm.pptr() === ctx_perm.deko_ctx_ptr_perm.pptr(),
             old(ctx_perm).private_bit() == ctx_perm.private_bit(),
             old(ctx_perm).shared_bit() == ctx_perm.shared_bit(),
+            old(ctx_perm).pgtable_perm == ctx_perm.pgtable_perm,
+            old(ctx_perm).pgtable_perm.mapped_region(VirtAddr(heap_start)..VirtAddr(heap_end)),
         decreases heap_end - cur,
     {
         // check if this address is aligned with 2MB page?
@@ -478,8 +481,6 @@ pub fn pvalidate(
         pgtable_perm.wf(),
         // old(pgtable_perm).private_bit() == pgtable_perm.private_bit(),
         // old(pgtable_perm).shared_bit() == pgtable_perm.shared_bit(),
-        forall|vaddr: VirtAddr| #[trigger]
-            old(pgtable_perm).mapped(vaddr) ==> pgtable_perm.mapped(vaddr),
         old(pgtable_perm) == pgtable_perm,
 {
     let rax = vaddr;

@@ -115,6 +115,12 @@ impl<V: WellFormed> Copy for DekoPPtr<V> {
 
 }
 
+impl<V: WellFormed> WellFormed for DekoPPtr<V> {
+    open spec fn wf(&self) -> bool {
+        true
+    }
+}
+
 impl<V: WellFormed> DekoPPtr<V> {
     /// Returns the CPU ID that this pointer is bound to.
     /// This is useful for ensuring that certain pointers are only accessed by specific CPU cores.
@@ -122,9 +128,16 @@ impl<V: WellFormed> DekoPPtr<V> {
     /// are only accessed by the CPU core that owns them.
     pub uninterp spec fn bound_cpu_id(&self) -> nat;
 
+    pub open spec fn into_vaddr_spec(&self) -> VirtAddr {
+        VirtAddr::new_spec(self.addr() as u64)
+    }
+
+    #[inline]
+    #[verifier::when_used_as_spec(into_vaddr_spec)]
     pub fn into_vaddr(&self) -> (r: VirtAddr)
-        returns
-            VirtAddr::new_spec(self.addr() as u64),
+        ensures
+            r == self.into_vaddr_spec(),
+            r.wf(),
     {
         VirtAddr::new(self.addr() as u64)
     }

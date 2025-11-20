@@ -111,6 +111,10 @@ pub fn virt_to_phys(
         vaddr.wf(),
     ensures
         paddr.wf(),
+        pgtable_perm.virt_to_frame_spec(vaddr) matches Some(frame) && paddr == frame.address_spec(
+            private_bit,
+            shared_bit,
+        ),
 {
     match PageTable::virt_to_frame(vaddr, private_bit, Tracked(pgtable_perm)) {
         Some(v) => v.address(private_bit, shared_bit),

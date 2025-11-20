@@ -21,18 +21,19 @@ verus! {
     with
         Tracked(pgtable_perm): Tracked<PageTablePermission>,
     requires
+        pgtable_perm.private_bit == private_bit,
+        pgtable_perm.shared_bit == shared_bit,
+        pgtable_perm.mapping_space == kernel_mapping,
+        kernel_mapping.wf(),
         pgtable_perm.wf(),
         pgtable_perm.pgtable_perm.pptr() == init_pgtable@,
 )]
-fn setup_bsp_cpu(init_pgtable: DekoPPtr<PageTable>) {
-    // let bsp_cpu_ptr = {
-    //     let read_handle = PERCPU_AREAS.acquire_read();
-    //     // The permission is discarded; you can only obtain this permission
-    //     // if you own this.
-    //     let (ptr, _) = read_handle.borrow().0.index_as_ptr(0);
-    //     read_handle.release_read();
-    //     ptr
-    // };
+fn setup_bsp_cpu(
+    init_pgtable: DekoPPtr<PageTable>,
+    private_bit: u64,
+    shared_bit: u64,
+    kernel_mapping: MappingSpace,
+) {
     // We first allocate a new CPU context for the BSP.
     let (bsp_ctx_ptr, Tracked(ctx_perm)) = {
         let (bsp_ctx_ptr, Tracked(ctx_perm)) = Box::<DekoCpuCtx>::new_zeroed(
@@ -41,6 +42,11 @@ fn setup_bsp_cpu(init_pgtable: DekoPPtr<PageTable>) {
         bsp_ctx_ptr.into_ptr(Tracked(ctx_perm))
     };
 
+    // First step is to map itself.
+    let vaddr = bsp_ctx_ptr.into_vaddr();
+    let paddr = virt_to_phys(private_bit, shared_bit, vaddr, Tracked(&pgtable_perm));
+
+    // let deko_cpu_ctx = DekoCpuCtx::new(pgtable, shared_area, ghcb, cpu_id, shared_bit, private_bit, kernel_mapping);
 }
 
 #[inline]
@@ -132,14 +138,14 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
         PhysAddr(header.heap_area_phys_start),
     );
 
-    let ms = MappingSpace { kernel: kernel_mapping, physmap: Default::default() };
+    let ms = MappingSpace { kernel: kernel_mapping, physmap: FixedAddressMappingRange::dummy() };
 
     let private_bit = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).private_bit();
     let shared_bit = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).shared_bit();
 
     let tracked mut ctx_perm = ctx_perm;
 
-    let (new_page_table, paddr, pgtable_perm) = #[verus_spec(with Tracked(&mut ctx_perm))]
+    let (new_page_table, paddr, Tracked(pgtable_perm)) = #[verus_spec(with Tracked(&mut ctx_perm))]
     deko_core::mm::paging::init_monitor_paging(header, &kernel_elf, &ms, private_bit, shared_bit);
 
     unsafe {
@@ -149,7 +155,8 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
     }
 
     // Prepare the BSP CPU context.
-    setup_bsp_cpu();
+    #[verus_spec(with Tracked(pgtable_perm))]
+    setup_bsp_cpu(new_page_table, private_bit, shared_bit, ms);
 
     loop {
     }

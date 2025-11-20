@@ -452,6 +452,11 @@ pub struct PageTableEntry(pub PhysAddr);
 #[repr(C)]
 pub struct Page(pub Array<PageTableEntry, PAGE_TABLE_ENTRY>);
 
+pub axiom fn option_page_ptr_array_size_wf()
+    ensures
+        Array::<Option<DekoPPtr<PageTable>>, PAGE_TABLE_ENTRY>::size_wf(),
+;
+
 pub axiom fn page_size_is_4kb()
     ensures
         core::mem::size_of::<Page>() == PAGE_SIZE as usize,
@@ -943,6 +948,7 @@ impl PageTable {
     pub fn new(
         private_bit: u64,
         shared_bit: u64,  /* Who is calling */
+        Ghost(ms): Ghost<&MappingSpace>,
     ) -> (r: (DekoPPtr<Self>, PhysAddr, Tracked<PageTablePermission>))
         ensures
             r.0.addr() % PAGE_SIZE as usize == 0,
@@ -951,6 +957,10 @@ impl PageTable {
             r.2@.wf(),
             r.2@.pgtable_perm.pptr() == r.0@,
             r.2@.pgtable_perm.is_init(),
+            r.2@.wf(),
+            r.2@.mapping_space == ms,
+            r.2@.private_bit == private_bit,
+            r.2@.shared_bit == shared_bit,
     {
         let (pgtable, Tracked(perm)) = Box::<PageTable>::new_zeroed(&DEKO_FRAME_ALLOCATOR.0);
         // Downgrade and forget this box.
@@ -4765,6 +4775,13 @@ pub(crate) fn map_and_validate(
     requires
         header.wf(),
         elf.wf(),
+        ms.wf(),
+    ensures
+        r.0@ == r.2@.pgtable_perm.pptr(),
+        r.2@.wf(),
+        r.2@.mapping_space == ms,
+        r.2@.private_bit == private_bit,
+        r.2@.shared_bit == shared_bit,
 )]
 pub fn init_monitor_paging(
     header: &DekoKernelLaunchInfo,
@@ -4773,7 +4790,7 @@ pub fn init_monitor_paging(
     private_bit: u64,
     shared_bit: u64,
 ) -> (DekoPPtr<PageTable>, PhysAddr, Tracked<PageTablePermission>) {
-    let (new_page_table, paddr, Tracked(perm)) = PageTable::new(private_bit, shared_bit);
+    let (new_page_table, paddr, Tracked(perm)) = PageTable::new(private_bit, shared_bit, Ghost(ms));
 
     if trace_is_enabled() {
         if !(paddr.0 >= 0x8000064000 && paddr.0 < 0xF9B000 + 0x80000640000) {

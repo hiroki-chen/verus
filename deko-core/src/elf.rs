@@ -567,7 +567,7 @@ impl<'a> ElfLoadSegment<'a> {
     {
         self.0.flags.contains(elf::Elf64PhdrFlags::EXECUTE)
     }
-    
+
     #[inline]
     #[verifier::external_body]
     pub fn write(&self) -> bool

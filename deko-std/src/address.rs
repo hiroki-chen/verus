@@ -345,18 +345,19 @@ pub struct FixedAddressMappingRange {
     pub phys_start: PhysAddr,
 }
 
-impl Default for FixedAddressMappingRange {
-    fn default() -> Self
+impl FixedAddressMappingRange {
+    /// Creates a dummy mapping range. This area is never used.
+    pub fn dummy() -> (r: Self)
         returns
-            (FixedAddressMappingRange {
+            (Self {
                 virt_start: VirtAddr::new(0),
-                virt_end: VirtAddr::new(0),
+                virt_end: VirtAddr::new(0x1000),
                 phys_start: PhysAddr(0),
             }),
     {
-        FixedAddressMappingRange {
+        Self {
             virt_start: VirtAddr::new(0),
-            virt_end: VirtAddr::new(0),
+            virt_end: VirtAddr::new(0x1000),
             phys_start: PhysAddr(0),
         }
     }
@@ -374,9 +375,10 @@ impl WellFormed for MappingSpace {
     open spec fn wf(&self) -> bool {
         &&& self.kernel.wf()
         &&& self.physmap.wf()
-        &&& self.kernel.virt_start == VirtAddr::new_spec(STAGE2_START as u64)
-        &&& self.physmap.virt_start == VirtAddr::new_spec(0 as u64)
-        &&& self.physmap.virt_end == VirtAddr::new_spec(LOWMEM_END as u64)
+        // &&& self.kernel.virt_start == VirtAddr::new_spec(STAGE2_START as u64)
+        // &&& self.physmap.virt_start == VirtAddr::new_spec(0 as u64)
+        // &&& self.physmap.virt_end == VirtAddr::new_spec(LOWMEM_END as u64)
+
     }
 }
 

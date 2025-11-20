@@ -62,13 +62,13 @@ pub trait DekoWriter {
 }
 
 /// Custom debug trait for Verus-compatible debugging `without` heap allocation.
-/// 
+///
 /// It is important to note that in Deko, one should always use heap-free formatting
 /// (i.e., no [`alloc::string::String`] or [`alloc::format!`]) within the kernel or
 /// low-level components. The primary reason is that heap objects are implicitly
 /// allocated through the global allocator which we deliberately disable by panics.
-/// 
-/// Also [`vstd::vpanic!`] should be avoided as this will create a string for 
+///
+/// Also [`vstd::vpanic!`] should be avoided as this will create a string for
 /// [`core::fmt::Arguments`] which implicitly allocates on the heap as well. Thus,
 /// if you call [`vstd::vpanic!`] inside the kernel, panic itself will panic, and
 /// no meaningful panic information will be printed.
@@ -77,7 +77,7 @@ pub trait DekoDebug {
     fn deko_debug<W: DekoWriter>(&self, writer: &W);
 
     /// Print debug information in hexadecimal format.
-    /// 
+    ///
     /// If the implementee does not have a specific hex format, this method
     /// will serve as the fallback to the normal debug format.
     fn deko_debug_hex<W: DekoWriter>(&self, writer: &W) {
@@ -85,7 +85,7 @@ pub trait DekoDebug {
     }
 
     /// Print debug information in octal format.
-    /// 
+    ///
     /// If the implementee does not have a specific octal format, this method
     /// will serve as the fallback to the normal debug format.
     fn deko_debug_oct<W: DekoWriter>(&self, writer: &W) {

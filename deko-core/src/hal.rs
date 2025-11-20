@@ -236,6 +236,7 @@ fn init_early_idt_late(idt: &mut Idt) {
     requires
         ctx_perm@.wf_with(ctx),
         ctx_perm@.current_cpu_core.is_bsp(),
+        ctx_perm@.pgtable_perm.mapped_region(VirtAddr(0)..VirtAddr(LOWMEM_END as u64)),
     ensures
 )]
 pub fn setup_env(ctx: DekoPPtr<DekoCtx>) -> (__discard: !) {

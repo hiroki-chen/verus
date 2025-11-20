@@ -1,0 +1,12 @@
+---
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-pretty
+        name: Cargo Pretty (Code Formatting)
+        entry: sh -c 'cargo pretty && cargo fmt'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+        verbose: true

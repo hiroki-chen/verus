@@ -38,6 +38,7 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     requires
         ctx_perm.wf_with(ctx),
         ctx_perm.current_cpu_core.is_bsp(),
+        ctx_perm.pgtable_perm.mapped_region(VirtAddr(0)..VirtAddr(LOWMEM_END as u64)),
 )]
 extern "C" fn deko_main(ctx: DekoPPtr<DekoCtx>) -> (__discard: !) {
     // Verus does not generate correct symbol for this
