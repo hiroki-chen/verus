@@ -276,3 +276,20 @@ macro_rules! ktodo {
         $crate::die("");
     }};
 }
+
+#[macro_export]
+macro_rules! kpanic_if {
+    ($cond:expr, $($msg:expr)+) => {
+        if $cond {
+            $crate::kerror!("Panic at ", core::file!(), ":", core::line!(), ": ", $($msg)+);
+            $crate::die("");
+        }
+    };
+
+    ($cond:expr) => {
+        if $cond {
+            $crate::kerror!("Panic at ", core::file!(), ":", core::line!());
+            $crate::die("");
+        }
+    };
+}

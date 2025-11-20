@@ -138,9 +138,10 @@ pub fn write_cr0(cr0: Cr0Flags) {
         // val@ <= u32::MAX, ?? some region constraints.
     ensures
 )]
+#[no_mangle]
 pub unsafe fn load_cr3(val: PhysAddr) {
     core::arch::asm!(
-        "movq {}, %cr3",
+        "mov {}, %cr3; hlt",
         in(reg) val.0,
         options(att_syntax),
     );

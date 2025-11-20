@@ -675,6 +675,10 @@ impl VirtAddr {
         }
     }
 
+    pub open spec fn pfn_spec(&self) -> u64 {
+        self@ >> 12
+    }
+
     /// Creates a canonical virtual address from any 64-bit value.
     ///
     /// This function converts any 64-bit input to a canonical x86-64 virtual address.
@@ -715,6 +719,17 @@ impl VirtAddr {
         }
 
         Self(ret)
+    }
+
+    #[inline]
+    #[verifier::when_used_as_spec(pfn_spec)]
+    pub fn pfn(&self) -> (r: u64)
+        requires
+            self.wf(),
+        ensures
+            r == self.pfn_spec(),
+    {
+        self.0 >> 12
     }
 
     /// Specification for the primary constructor.
@@ -857,8 +872,7 @@ impl From<u64> for VirtAddr {
     ///
     /// The input value is automatically canonicalized to ensure x86-64 compatibility.
     #[inline]
-    fn from(value: u64) -> (r: Self)
-    {
+    fn from(value: u64) -> (r: Self) {
         VirtAddr::new(value)
     }
 }
@@ -878,8 +892,7 @@ impl From<u32> for VirtAddr {
     ///
     /// The 32-bit value is zero-extended to 64 bits, then canonicalized.
     #[inline]
-    fn from(value: u32) -> (r: Self)
-    {
+    fn from(value: u32) -> (r: Self) {
         VirtAddr::new(value as u64)
     }
 }
@@ -898,8 +911,7 @@ impl From<u64> for PhysAddr {
     /// Creates a physical address from a 64-bit value.
     ///
     /// Physical addresses don't require canonicalization and use the full 64-bit range.
-    fn from(value: u64) -> (r: Self)
-    {
+    fn from(value: u64) -> (r: Self) {
         PhysAddr(value)
     }
 }

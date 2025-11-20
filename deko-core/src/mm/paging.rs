@@ -9,8 +9,9 @@ use vstd::{assert_by_contradiction, prelude::*};
 use super::DEKO_MAPPING_SPACE;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
+use crate::elf::ElfFile;
 use crate::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR};
-use crate::{kerror, kinfo, kunimplemented, kwarn, Stage2LaunchInfo};
+use crate::{kerror, kinfo, kunimplemented, kwarn, DekoKernelLaunchInfo, Stage2LaunchInfo};
 
 extern "C" {
     #[link_name = "pgtable"]
@@ -423,7 +424,7 @@ pub fn phys_to_virt(ctx: DekoPPtr<DekoCpuCtx>, paddr: PhysAddr) -> Option<VirtAd
 deko_bitflags_quick! {
     Pte,
     exec: { PRESENT, GLOBAL, ACCESSED },
-    data: { PRESENT, WRITABLE, USER, ACCESSED, DIRTY, GLOBAL, NX },
+    data: { PRESENT, GLOBAL, WRITABLE, NX, ACCESSED, DIRTY},
     data_ro: { PRESENT, GLOBAL, NX, ACCESSED },
     writeable: { PRESENT, USER, WRITABLE, ACCESSED, DIRTY },
     writeable_kernel: { PRESENT, WRITABLE, ACCESSED, DIRTY },
@@ -4753,6 +4754,175 @@ pub(crate) fn map_and_validate(
     crate::imp::validate_vaddr_region(virt_range, true);
 
     assume(ctx_perm.wf_with(ctx));  // need more so here we postpone
+}
+
+/// Initializes a new page table for the kernel with mappings for the kernel ELF,
+/// IGVM parameters, and heap regions as specified in the launch header for the
+/// new CPU context in the deko monitor bootstrapping.
+#[verus_spec(r =>
+    with
+        Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
+    requires
+        header.wf(),
+        elf.wf(),
+)]
+pub fn init_monitor_paging(
+    header: &DekoKernelLaunchInfo,
+    elf: &ElfFile,
+    ms: &MappingSpace,
+    private_bit: u64,
+    shared_bit: u64,
+) -> (DekoPPtr<PageTable>, PhysAddr, Tracked<PageTablePermission>) {
+    let (new_page_table, paddr, Tracked(perm)) = PageTable::new(private_bit, shared_bit);
+
+    if trace_is_enabled() {
+        if !(paddr.0 >= 0x8000064000 && paddr.0 < 0xF9B000 + 0x80000640000) {
+            early_dbg();
+        }
+    }
+    // Now map the kernel ELF sections.
+
+    let mut phys = header.kernel_region_phys_start;
+    let seg_num = elf.load_segment_num(VirtAddr(header.kernel_region_virt_start));
+    let mut i = 0;
+    while i < seg_num
+        invariant
+            i <= seg_num,
+            seg_num == elf.load_segments().len() as usize,
+            elf.wf(),
+            header.wf(),
+            perm.wf(),
+            phys % PAGE_SIZE == 0,
+            phys <= 0x000f_ffff_ffff_f000,
+            PAGE_SIZE == 0x1000,
+        decreases seg_num - i,
+    {
+        let segment = elf.get_segment(i, VirtAddr(header.kernel_region_virt_start));
+        let vaddr_start = segment.vaddr_range().start;
+        let vaddr_end = segment.vaddr_range().end.page_align_up();
+        let segment_len = vaddr_end.0 - vaddr_start.0;
+
+        let flags = if segment.exec() {
+            PteFlags::exec()
+        } else if segment.write() {
+            PteFlags::data()
+        } else {
+            PteFlags::data_ro()
+        };
+
+        proof {
+            assume(perm.map_page_multiple_requires(
+                new_page_table,
+                vaddr_start..vaddr_end,
+                PhysAddr(phys),
+                ms,
+                flags,
+                private_bit,
+                shared_bit,
+            ));
+        }
+
+        PageTable::map_page_multiple(
+            new_page_table,
+            vaddr_start..vaddr_end,
+            PhysAddr(phys),
+            flags,
+            ms,
+            private_bit,
+            shared_bit,
+            Tracked(&mut perm),
+        );
+
+        i += 1;
+        phys += segment_len;
+
+        proof {
+            assume(phys <= 0x000f_ffff_ffff_f000);
+        }
+    }
+
+    // We then map the IGVM parameters.
+    if header.igvm_params_virt_addr != 0 {
+        proof {
+            assume(VirtAddr(header.igvm_params_virt_addr).wf());
+            assume(ctx_perm.wf());
+            assume(ctx_perm.pgtable_perm.mapped(VirtAddr(header.igvm_params_virt_addr)));
+
+        }
+
+        let igvms = #[verus_spec(with Tracked(ctx_perm))]
+        crate::get_igvm_params(VirtAddr(header.igvm_params_virt_addr));
+        let igvm_params_vaddr_start = VirtAddr(header.igvm_params_virt_addr);
+        let igvm_size = igvms.size();
+        proof {
+            assume(header.igvm_params_virt_addr + igvm_size as u64 <= u64::MAX);
+            assume(VirtAddr(
+                (header.igvm_params_virt_addr + igvm_size) as u64,
+            ).page_align_up_requires());
+        }
+
+        let igvm_params_vaddr_end = VirtAddr(
+            header.igvm_params_virt_addr + igvms.size() as u64,
+        ).page_align_up();
+        let igvm_params_phys_start = PhysAddr(header.igvm_params_phys_addr);
+        let flags = PteFlags::data();
+
+        proof {
+            assume(perm.map_page_multiple_requires(
+                new_page_table,
+                igvm_params_vaddr_start..igvm_params_vaddr_end,
+                igvm_params_phys_start,
+                ms,
+                flags,
+                private_bit,
+                shared_bit,
+            ));
+        }
+
+        PageTable::map_page_multiple(
+            new_page_table,
+            igvm_params_vaddr_start..igvm_params_vaddr_end,
+            igvm_params_phys_start,
+            flags,
+            ms,
+            private_bit,
+            shared_bit,
+            Tracked(&mut perm),
+        );
+    }
+    // Map the rest of the heap regions.
+
+    let heap_vaddr_start = VirtAddr(header.heap_area_virt_start);
+    let heap_vaddr_end = VirtAddr(
+        header.heap_area_virt_start + header.heap_area_size,
+    ).page_align_up();
+    let heap_phys_start = PhysAddr(header.heap_area_phys_start);
+    let flags = PteFlags::data();
+
+    proof {
+        assume(perm.map_page_multiple_requires(
+            new_page_table,
+            heap_vaddr_start..heap_vaddr_end,
+            heap_phys_start,
+            ms,
+            flags,
+            private_bit,
+            shared_bit,
+        ));
+    }
+
+    PageTable::map_page_multiple(
+        new_page_table,
+        heap_vaddr_start..heap_vaddr_end,
+        heap_phys_start,
+        flags,
+        ms,
+        private_bit,
+        shared_bit,
+        Tracked(&mut perm),
+    );
+
+    (new_page_table, paddr, Tracked(perm))
 }
 
 } // verus!

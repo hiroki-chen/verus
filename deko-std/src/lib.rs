@@ -129,3 +129,11 @@ pub type OnceLockNoPred<V> = OnceLock<V, TrivialPredicate<V>>;
 pub type RwLockNoPred<V> = RwLock<V, TrivialPredicate<V>>;
 
 } // verus!
+#[macro_export]
+macro_rules! trace {
+    ($($tt:tt)*) => {
+        $crate::trace_enable(true);
+        $($tt)*
+        $crate::trace_enable(false);
+    }
+}

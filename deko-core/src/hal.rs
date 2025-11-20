@@ -59,8 +59,7 @@ impl vstd::std_specs::convert::FromSpecImpl<u32> for PlatformType {
 }
 
 impl From<u32> for PlatformType {
-    fn from(value: u32) -> (r: Self)
-    {
+    fn from(value: u32) -> (r: Self) {
         match value {
             0x0001 => PlatformType::Snp,
             0x0002 => PlatformType::Tdx,
