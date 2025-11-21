@@ -5,4 +5,5 @@ edition = "2024"
 
 [dependencies]
 deko-std = { workspace = true, default-features = false }
+proptest = { workspace = true }
 vstd = { workspace = true }

@@ -1,44 +1,308 @@
+//! As it is really hard to debug the memory allocation before the logging system
+//! is up, we create a simple test here to verify the buddy allocator works as expected.
+//!
+//! Why does formal verification not cover this?
+//!
+//! 1. The buddy allocator assumes a lot of `unsafe` code and low-level system details
+//!    that are hard to model in Verus.
+//! 2. Some Rust trait creates "hidden" connection between allocation and high-level
+//!    data structures like [`alloc::vec::Vec`] that are not easy to specify formally.
+//!
+//! For example, consider we created a heap from `[0x0, 0x1000]` which is invalid
+//! memory region in real system. Then we allocate a `Vec` from this heap. Even if
+//! the heap itself is formally verified to be correct, the `Vec` will try to
+//! dereference the pointer returned from the heap which leads to undefined behavior
+//! in real system as we _assume_ this memory makes sense.
+//!
+//! This test suite is designed to capture such edge cases where the formal verification
+//! might miss, by running the buddy allocator in a controlled environment and checking
+//! its behavior with real memory allocations.
 use deko_std::mem::{DekoHeap, DekoHeapPredicate, Heap};
+use proptest::prelude::*;
 use vstd::prelude::*;
+
+// Strategy for generating allocation sizes (powers of 2, typical for buddy)
+fn alloc_size_strategy() -> impl Strategy<Value = u64> {
+    prop_oneof![
+        Just(0x1000u64),  // 4KB
+        Just(0x2000u64),  // 8KB
+        Just(0x4000u64),  // 16KB
+        Just(0x8000u64),  // 32KB
+        Just(0x10000u64), // 64KB
+        Just(0x20000u64), // 128KB
+    ]
+}
+
+// Strategy for alignment (also powers of 2)
+fn align_strategy() -> impl Strategy<Value = u64> {
+    prop_oneof![Just(0x1000u64), Just(0x2000u64), Just(0x4000u64),]
+}
+
+// Generate a sequence of allocation operations
+fn alloc_ops_strategy() -> impl Strategy<Value = Vec<AllocOp>> {
+    prop::collection::vec(
+        prop_oneof![
+            // 70% chance of allocation
+            7 => (alloc_size_strategy(), align_strategy())
+                .prop_map(|(size, align)| AllocOp::Alloc { size, align }),
+            // 30% chance of free
+            3 => any::<u64>()
+                .prop_map(|index| AllocOp::Free { index }),
+        ],
+        10..100, // Generate 10-100 operations
+    )
+}
+
+/// Align an address up to the specified alignment
+fn align_up(addr: u64, align: u64) -> u64 { (addr + align - 1) & !(align - 1) }
+
+/// Create an aligned heap buffer
+/// Returns (buffer, aligned_start, aligned_length)
+fn create_aligned_heap(size: usize, alignment: usize) -> (Vec<u8>, u64, u64) {
+    // Allocate extra space to ensure we can find an aligned region
+    let total_size = size + alignment;
+    let mut buffer = vec![0u8; total_size];
+
+    let raw_start = buffer.as_ptr() as u64;
+    let aligned_start = align_up(raw_start, alignment as u64);
+
+    // Calculate how much usable space we have after alignment
+    let offset = (aligned_start - raw_start) as usize;
+    let aligned_length = (total_size - offset) as u64;
+
+    // Make sure we have at least the requested size
+    assert!(
+        aligned_length >= size as u64,
+        "Not enough space after alignment: got {:#x}, need {:#x}",
+        aligned_length,
+        size
+    );
+
+    (buffer, aligned_start, aligned_length.min(size as u64))
+}
+
+// Define allocation operations
+#[derive(Debug, Clone)]
+enum AllocOp {
+    Alloc { size: u64, align: u64 },
+    Free { index: u64 },
+}
 
 verus! {
 
 #[verifier::external_body]
 fn main() {
-    buddy_test_1();
-    buddy_test_2();
+    // Run proptest manually or via cargo test
+    test_random_alloc_free();
+    test_no_overlap();
+    test_memory_reuse();
+    test_out_of_memory();
+    test_fragmentation();
 }
 
-#[verifier::external_body]
-fn buddy_test_1() {
-    let v = vec![0u8; 0xa0000 - 0x10000];
-    let heap_start = v.as_ptr() as usize;
-    let heap_end = heap_start + v.len();
-
-    println!("Heap start: 0x{:x}, end: 0x{:x}", heap_start,  heap_end);
-
-    let mut allocator = DekoHeap::<10>::new(Ghost(DekoHeapPredicate {}));
-    allocator.init(heap_start as _, v.len() as _ , 10);
-
-    let a = allocator.allocate(0x1000, 0x1000);
-
-    println!("Allocated at address: 0x{:x}", a);
 }
 
-#[verifier::external_body]
-fn buddy_test_2() {
-    let v = vec![0u8; 0xF9B000];
-    let heap_start = v.as_ptr() as usize;
-    let heap_end = heap_start + v.len();
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 10000,  // More test cases
+        max_shrink_iters: 100000,
+        .. ProptestConfig::default()
+    })]
 
-    println!("Heap start: 0x{:x}, end: 0x{:x}", heap_start,  heap_end);
+    fn test_random_alloc_free(ops in alloc_ops_strategy()) {
+        const HEAP_SIZE: usize = 0x1000000; // 16MB heap
+        const HEAP_ALIGN: usize = 0x10000;  // 64KB alignment (typical page size)
 
-    let mut allocator = DekoHeap::<10>::new(Ghost(DekoHeapPredicate {}));
-    allocator.init(heap_start as _, v.len() as _ , 10);
+        let (_buffer, heap_start, heap_len) = create_aligned_heap(HEAP_SIZE, HEAP_ALIGN);
 
-    let a = allocator.allocate(0x1000, 0x1000);
+        // Verify the heap is properly aligned
+        prop_assert_eq!(
+            heap_start % (HEAP_ALIGN as u64),
+            0,
+            "Heap start not aligned: {:#x}",
+            heap_start
+        );
 
-    println!("Allocated at address: 0x{:x}", a);
-}
+        let mut allocator = DekoHeap::<10>::new(Ghost::assume_new());
+        allocator.init(heap_start, heap_len, 10);
+
+        let mut allocations: Vec<(u64, u64, u64)> = Vec::new();
+
+        for op in ops {
+            match op {
+                AllocOp::Alloc { size, align } => {
+                    let addr = allocator.allocate(size, align);
+                    if addr != 0 {
+                        // Verify alignment
+                        prop_assert_eq!(
+                            addr % align,
+                            0,
+                            "Allocation not properly aligned: addr={:#x}, align={:#x}",
+                            addr, align
+                        );
+                        // Verify it's within heap bounds
+                        prop_assert!(
+                            addr >= heap_start && addr + size <= heap_start + heap_len,
+                            "Allocation outside heap bounds: addr={:#x}, size={:#x}, heap=[{:#x}, {:#x})",
+                            addr, size, heap_start, heap_start + heap_len
+                        );
+                        allocations.push((addr, size, align));
+                    }
+                }
+                AllocOp::Free { index } => {
+                    if !allocations.is_empty() {
+                        let idx = (index as usize) % allocations.len();
+                        let (addr, size, align) = allocations.remove(idx);
+                        allocator.deallocate(addr, size, align);
+                    }
+                }
+            }
+        }
+
+        // Cleanup: free all remaining allocations
+        for (addr, size, align) in allocations {
+            allocator.deallocate(addr, size, align);
+        }
+    }
+
+    fn test_no_overlap(ops in alloc_ops_strategy()) {
+        const HEAP_SIZE: usize = 0x2000000; // 32MB heap for overlap test
+        const HEAP_ALIGN: usize = 0x10000;  // 64KB alignment
+
+        let (_buffer, heap_start, heap_len) = create_aligned_heap(HEAP_SIZE, HEAP_ALIGN);
+
+        let mut allocator = DekoHeap::<10>::new(Ghost::assume_new());
+        allocator.init(heap_start, heap_len, 10);
+
+        let mut allocations: Vec<(u64, u64, u64)> = Vec::new();
+
+        for op in ops {
+            match op {
+                AllocOp::Alloc { size, align } => {
+                    let addr = allocator.allocate(size, align);
+                    if addr != 0 {
+                        // Check no overlap with existing allocations
+                        for &(existing_addr, existing_size, _) in &allocations {
+                            let new_end = addr + size;
+                            let existing_end = existing_addr + existing_size;
+                            let overlap = !(new_end <= existing_addr || existing_end <= addr);
+
+                            prop_assert!(
+                                !overlap,
+                                "Allocation overlaps: new=[{:#x}, {:#x}), existing=[{:#x}, {:#x})",
+                                addr, new_end, existing_addr, existing_end
+                            );
+                        }
+                        allocations.push((addr, size, align));
+                    }
+                }
+                AllocOp::Free { index } => {
+                    if !allocations.is_empty() {
+                        let idx = (index as usize) % allocations.len();
+                        let (addr, size, align) = allocations.remove(idx);
+                        allocator.deallocate(addr, size, align);
+                    }
+                }
+            }
+        }
+
+        for (addr, size, align) in allocations {
+            allocator.deallocate(addr, size, align);
+        }
+    }
+
+    fn test_memory_reuse(
+        size in alloc_size_strategy(),
+        align in align_strategy(),
+    ) {
+        const HEAP_SIZE: usize = 0x200000;
+        const HEAP_ALIGN: usize = 0x10000;
+
+        let (_buffer, heap_start, heap_len) = create_aligned_heap(HEAP_SIZE, HEAP_ALIGN);
+
+        let mut allocator = DekoHeap::<10>::new(Ghost::assume_new());
+        allocator.init(heap_start, heap_len, 10);
+
+        // First allocation
+        let addr1 = allocator.allocate(size, align);
+        prop_assert_ne!(addr1, 0, "Initial allocation failed");
+
+        // Free it
+        allocator.deallocate(addr1, size, align);
+
+        // Allocate again with same size - should reuse the same block
+        let addr2 = allocator.allocate(size, align);
+        prop_assert_eq!(
+            addr1,
+            addr2,
+            "Freed memory not reused: first={:#x}, second={:#x}",
+            addr1,
+            addr2
+        );
+
+        allocator.deallocate(addr2, size, align);
+    }
+
+    fn test_out_of_memory(_ in alloc_ops_strategy()) {
+        const HEAP_SIZE: usize = 0x10000; // Small heap
+        const HEAP_ALIGN: usize = 0x10000;
+
+        let (_buffer, heap_start, heap_len) = create_aligned_heap(HEAP_SIZE, HEAP_ALIGN);
+        let mut allocator = DekoHeap::<10>::new(Ghost::assume_new());
+        allocator.init(heap_start, heap_len, 10);
+
+        // Fill the heap
+        let addr1 = allocator.allocate(0x8000, 0x1000);
+        assert_ne!(addr1, 0);
+
+        let addr2 = allocator.allocate(0x8000, 0x1000);
+        assert_ne!(addr2, 0);
+
+        // This should fail
+        let addr3 = allocator.allocate(0x1000, 0x1000);
+        assert_eq!(addr3, 0, "Expected allocation to fail when heap is full");
+
+        // Cleanup
+        allocator.deallocate(addr1, 0x8000, 0x1000);
+        allocator.deallocate(addr2, 0x8000, 0x1000);
+    }
+
+    fn test_fragmentation(_ in alloc_ops_strategy()) {
+        const HEAP_SIZE: usize = 0x100000;
+        const HEAP_ALIGN: usize = 0x10000;
+
+        let (_buffer, heap_start, heap_len) = create_aligned_heap(HEAP_SIZE, HEAP_ALIGN);
+        let mut allocator = DekoHeap::<10>::new(Ghost::assume_new());
+        allocator.init(heap_start, heap_len, 10);
+
+        // Allocate alternating sizes to fragment memory
+        let mut allocs = Vec::new();
+        for i in 0..10 {
+            let size = if i % 2 == 0 { 0x1000 } else { 0x2000 };
+            let addr = allocator.allocate(size, 0x1000);
+            if addr != 0 {
+                allocs.push((addr, size));
+            }
+        }
+
+        // Free every other allocation
+        for i in (0..allocs.len()).step_by(2) {
+            let (addr, size) = allocs[i];
+            allocator.deallocate(addr, size, 0x1000);
+        }
+
+        // Try to allocate a large block (should fail or succeed based on coalescing)
+        let large_addr = allocator.allocate(0x10000, 0x1000);
+
+        // Cleanup
+        for (i, &(addr, size)) in allocs.iter().enumerate() {
+            if i % 2 != 0 {
+                allocator.deallocate(addr, size, 0x1000);
+            }
+        }
+        if large_addr != 0 {
+            allocator.deallocate(large_addr, 0x10000, 0x1000);
+        }
+    }
 
 }
