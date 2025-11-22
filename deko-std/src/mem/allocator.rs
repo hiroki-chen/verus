@@ -9,111 +9,26 @@ use crate::prelude::*;
 
 verus! {
 
-// 4096 bytes
-pub const PAGE_MASK: u64 = !(PAGE_SIZE - 1);
-
-/// The implementer of this trait must guarantee that the `allocate_frame`
-/// method returns only unique unused frames. Otherwise, undefined behavior
-/// may result from two callers modifying or deallocating the same frame.
-pub trait FrameAllocator: WellFormed {
-    /// Allocates single physical frame and returns its physical address.
-    fn allocate_frame_single(&self) -> (r: PhysAddr)
-        requires
-            self.wf(),
-        ensures
-            r.wf(),
-    ;
-
-    fn deallocate_frame(&self, frame: PhysAddr)
-        requires
-            self.wf(),
-            frame.wf(),
-    ;
-}
-
-// 0xFFFFF000
-/// A trait to describe the memory manager.
-pub trait MemoryManager: WellFormed {
-    /// Allocates a region of memory from the memory manager's managed page table.
-    fn map();
-
-    /// Unmap a region of memory from the memory manager's managed page table.
-    fn unmap();
-
-    /// Handles a page fault.
-    fn page_fault(&self);
-}
-
-/// Deko's memory manager object that manages the memory regions and page tables.
-/// This is only used to manage the memory for low-privileged Linux kernel.
-pub struct DekoMemoryManager {
-    /// A list of memories managed by this memory manager equivalent to
-    /// `free_list` in the Linux kernel.
-    memories: (),
-    /// The page table backend for this memory manager.
-    page_table: (),
-    /// The heap ending point.
-    heap_end: Option<u64>,
-}
-
-pub enum MemoryRegionType {
-    /// The memory region is a normal memory region.
-    Normal,
-    // In case we need more.
-}
-
-pub struct MemoryManagerPredicate;
-
-impl Predicate<DekoMemoryManager> for MemoryManagerPredicate {
-    open spec fn inv(self, mm: DekoMemoryManager) -> bool {
-        true
-    }
-}
-
-/// An abstraction over a _slice_ of memories on the physical machine.
-///
-/// This provides good abstraction over the memory owned by the L2 VM.
-#[verifier::reject_recursive_types(MM)]
-pub struct DekoMemory<MM: MemoryManager> {
-    /// The start address of the memory region. (virtual)
-    range: (u64, u64),
-    /// manager for this memory region. You can think of it as a
-    /// memory callback that is used to allocate and deallocate memory.
-    ///
-    /// We do not apply an explicit lock on this allocator.
-    mamanger: BoxWithPred<MM, MemoryManagerPredicate>,
-    /// The type of the memory region.
-    ty: MemoryRegionType,
-}
-
-impl<MM: MemoryManager> View for DekoMemory<MM> {
-    type V = (u64, u64);
-
-    closed spec fn view(&self) -> Self::V {
-        self.range
-    }
-}
-
-impl<MM: MemoryManager> DekoMemory<MM> {
-    #[verifier::inline]
-    pub open spec fn contains(&self, addr: u64) -> bool {
-        self@.0 <= addr < self@.1
+/// The adapter that allows using `DekoHeap` as an allocator.
+#[verifier::external]
+unsafe impl<V: WellFormed + Heap> core::alloc::Allocator for DekoBuddyAllocator<V> {
+    fn allocate(&self, layout: core::alloc::Layout) -> Result<
+        core::ptr::NonNull<[u8]>,
+        core::alloc::AllocError,
+    > {
+        match self.alloc_impl(layout.size(), layout.align()) {
+            ptr if ptr != 0 => {
+                let slice_ptr = core::ptr::slice_from_raw_parts_mut(ptr as *mut u8, layout.size());
+                core::ptr::NonNull::new(slice_ptr).ok_or(core::alloc::AllocError)
+            },
+            _ => Err(core::alloc::AllocError),
+        }
     }
 
-    #[verifier::inline]
-    pub open spec fn subset_of(&self, other: (u64, u64)) -> bool {
-        &&& page_start(self@.0) <= page_start(other.0)
-        &&& page_start(self@.1) >= page_start(other.1)
+    unsafe fn deallocate(&self, ptr: core::ptr::NonNull<u8>, layout: core::alloc::Layout) {
+        self.dealloc_impl(ptr.as_ptr(), layout.size(), layout.align());
     }
 }
-
-#[verifier::inline]
-pub open spec fn page_start(addr: u64) -> u64 {
-    addr & PAGE_MASK
-}
-
-/// Tracks whether a holder is having the permission to read/write the memory region.
-pub tracked struct PermissionDekoMemoryRegion {}
 
 /// The default heap size configuration for the Deko memory allocator.
 ///

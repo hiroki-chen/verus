@@ -9,6 +9,9 @@
 #![allow(binary_asm_labels)]
 #![allow(mismatched_lifetime_syntaxes)]
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
+
 use deko_macros::DekoDebug;
 use deko_std::prelude::*;
 use elf::ElfFile;
@@ -20,8 +23,9 @@ compile_error!("Cannot be compiled against non x86_64 architecture!");
 #[cfg(all(feature = "tdx", feature = "snp"))]
 compile_error!("Cannot enable both TDX and SEV features at the same time!");
 
-pub mod allocator;
 pub mod boot;
+#[cfg(feature = "alloc")]
+pub mod collections;
 pub mod cpu;
 pub mod elf;
 pub mod hal;

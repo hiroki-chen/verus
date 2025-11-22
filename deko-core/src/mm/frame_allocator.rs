@@ -3,6 +3,8 @@ use deko_std::prelude::*;
 use vstd::prelude::*;
 use vstd::raw_ptr::PointsToRaw;
 
+use crate::mm::DEKO_FRAME_ALLOCATOR;
+
 verus! {
 
 /// A simple page frame allocator that allocates physical pages. This just holds a
@@ -42,20 +44,21 @@ impl WellFormed for DekoPageFrameAllocator {
     }
 }
 
-impl FrameAllocator for DekoPageFrameAllocator {
-    fn allocate_frame_single(&self) -> (r: PhysAddr) {
-        proof {
-            assert(vstd::layout::is_power_2(0x8)) by (compute);
-        }
+pub struct DekoAllocatorApi;
 
-        let (ptr, Tracked(raw_perm), Tracked(dealloc)) = self.0.alloc(PAGE_SIZE as _, 0x8);  // 8-byte aligned
-
-        // TODO: Modify the return value to expose provenance and other permission-related stuff.
-        PhysAddr(ptr.addr() as _)
+#[verifier::external]
+unsafe impl core::alloc::Allocator for DekoAllocatorApi {
+    #[inline]
+    fn allocate(&self, layout: core::alloc::Layout) -> Result<
+        core::ptr::NonNull<[u8]>,
+        core::alloc::AllocError,
+    > {
+        DEKO_FRAME_ALLOCATOR.0.allocate(layout)
     }
 
-    fn deallocate_frame(&self, frame: PhysAddr) {
-        crate::die("todo")
+    #[inline]
+    unsafe fn deallocate(&self, ptr: core::ptr::NonNull<u8>, layout: core::alloc::Layout) {
+        DEKO_FRAME_ALLOCATOR.0.deallocate(ptr, layout);
     }
 }
 

@@ -257,7 +257,7 @@ impl Idt {
 #[verus_spec(r =>
     // with Tracked(ctx_perm): Tracked<&crate::cpu::DekoCpuCtxPermission>,
     requires
-        old(early_idt).entries.wf(),
+        old(early_idt).entries. wf(),
     ensures
         early_idt.wf(),
 )]

@@ -22,6 +22,29 @@ use crate::mm::paging::{PageTable, PageTablePermission, PteFlags};
 
 verus! {
 
+struct Allocator;
+
+/// Forbidden global allocator implementation to avoid accidental usage.
+///
+/// If you really want to use heap allocator for [`alloc`] crate, please use
+/// explicit APIs like [`alloc::vec::Vec::new_in`] with a proper allocator
+/// such as [`DekoHeapAllocator`].
+#[verifier::external]
+unsafe impl core::alloc::GlobalAlloc for Allocator {
+    unsafe fn alloc(&self, _layout: core::alloc::Layout) -> *mut u8 {
+        panic!("No global allocator configured; please use explicit allocators like DekoHeapAllocator.");
+    }
+
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {
+        panic!("No global allocator configured; please use explicit allocators like DekoHeapAllocator.");
+    }
+}
+
+#[cfg(feature = "global_alloc_api")]
+#[verifier::external]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: Allocator = Allocator;
+
 pub exec static DEKO_MAPPING_SPACE: OnceCell<MappingSpace, MappingSpacePred>
     ensures
         DEKO_MAPPING_SPACE.wf(),

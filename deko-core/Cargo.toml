@@ -22,7 +22,7 @@ verus_builtin_macros = { workspace = true }
 
 deko-logging = { workspace = true, optional = true }
 deko-macros = { workspace = true }
-deko-std = { workspace = true, features = ["alloc", "global_alloc"] }
+deko-std = { workspace = true, features = ["alloc"] }
 elf = { workspace = true }
 paste = "1.0.15"
 
@@ -30,7 +30,9 @@ paste = "1.0.15"
 default = [
   "snp",
   "logging",
+  "alloc",
 ] # Note that logging should be off for production-ready builds.
+alloc = ["deko-std/alloc"]
 tdx = []
 snp = ["deko-std/snp"]
 # Enable logging?

@@ -12,6 +12,9 @@
 #![allow(mismatched_lifetime_syntaxes)]
 #![cfg_attr(feature = "alloc", feature(allocator_api))]
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
+
 extern crate self as deko_std;
 
 use vstd::prelude::*;

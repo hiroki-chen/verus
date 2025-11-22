@@ -860,6 +860,7 @@ fn test_runner(suite: Option<String>, release: bool) -> Result<()> {
     let z3_binary = builder.find_z3_binary()?;
 
     std::env::set_var("VERUS_Z3_PATH", &z3_binary);
+    std::env::set_var("RUSTC_BOOTSTRAP", "1");
     if verus_binary != PathBuf::from("verus") {
         let verus_dir = verus_binary.parent().unwrap_or_else(|| Path::new("."));
         let current_path = std::env::var("PATH").unwrap_or_default();

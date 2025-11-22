@@ -125,7 +125,6 @@ proptest! {
 
         let mut allocator = DekoHeap::<10>::new(Ghost::assume_new());
         allocator.init(heap_start, heap_len, 10);
-
         let mut allocations: Vec<(u64, u64, u64)> = Vec::new();
 
         for op in ops {

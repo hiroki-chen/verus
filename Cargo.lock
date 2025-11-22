@@ -284,6 +284,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1d728cc89cf3aee9ff92b05e62b19ee65a02b5702cff7d5a377e32c6ae29d8d"
 
 [[package]]
+name = "collections"
+version = "0.1.0"
+dependencies = [
+ "deko-core",
+ "proptest",
+ "vstd",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -508,13 +517,6 @@ source = "git+https://github.com/hiroki-chen/elf-rs.git#216a5b9a4a5689eeacc62551
 dependencies = [
  "bitflags 2.10.0",
  "heapless",
-]
-
-[[package]]
-name = "elf-test"
-version = "0.1.0"
-dependencies = [
- "elf",
 ]
 
 [[package]]

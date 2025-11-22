@@ -66,31 +66,6 @@ use crate::FixedAddressMappingRange;
 
 verus! {
 
-struct Allocator;
-
-#[verifier::external]
-#[cfg(feature = "global_alloc")]
-unsafe impl core::alloc::GlobalAlloc for Allocator {
-    unsafe fn alloc(&self, _layout: core::alloc::Layout) -> *mut u8 {
-        panic!("DekoHeapAllocator is not used as the global allocator by default. Use DekoHeapAllocator::alloc instead.");
-    }
-
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {
-        panic!("DekoHeapAllocator is not used as the global allocator by default. Use DekoHeapAllocator::dealloc instead.");
-    }
-}
-
-/// We do not use Rust's global allocator by default so this is just a dummy one.
-/// Any use of the global allocator will panic.
-/// This is somehow giving us the trouble. comment it now.
-cfg_if::cfg_if!{
-    if #[cfg(feature = "global_alloc")] {
-        #[global_allocator]
-        #[verifier::external]
-        static __: Allocator = Allocator;
-    }
-}
-
 pub uninterp spec fn cr3_value() -> u64;
 
 /// Gets the initial page table's value for system initialization.

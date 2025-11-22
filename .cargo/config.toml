@@ -23,6 +23,7 @@ stats = "xtask line-count"
 pretty = "xtask pretty"
 
 test-buddy = "xtest buddy"
+test-collections = "xtest collections"
 
 # TODO: Fork another version. This will download unncessary git submodules recursively.
 install-igvmbuilder = "install --git https://github.com/coconut-svsm/svsm.git igvmbuilder"

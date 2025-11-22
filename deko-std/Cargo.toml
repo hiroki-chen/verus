@@ -27,7 +27,6 @@ verify = true
 [features]
 default = []
 alloc = ["vstd/alloc"]
-global_alloc = ["alloc"]
 logging = []
 snp = []
 tdx = []

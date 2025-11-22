@@ -8,7 +8,7 @@ members = [
     "deko-std",
     "xtask",
     "tests/buddy",
-    "tests/elf",
+    "tests/collections",
     # bins
     "bin/deko-monitor",
     "bin/deko-stage2",

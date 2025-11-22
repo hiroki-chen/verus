@@ -111,8 +111,21 @@ Deko is organized as a Rust workspace with multiple crates, each serving a speci
 | **`deko-meta`** | Boot header metadata |
 | **`deko-logging`** | Serial port logger for debugging |
 | **`deko-macros`** | Procedural macros for generating proofs and specifications |
-| **`deko-playground`** | Testing and experimentation environment |
 | **`xtask`** | Build automation and tooling |
+
+### Binary Crates
+
+| Binary | Description |
+|--------|-------------|
+| **`bin/deko-monitor`** | Main monitor binary executable |
+| **`bin/deko-stage2`** | Stage 2 bootloader for monitor initialization |
+
+### Test Crates
+
+| Test Crate | Description |
+|------------|-------------|
+| **`tests/buddy`** | Buddy allocator testing and verification |
+| **`tests/elf`** | ELF loader and parsing tests |
 
 ### Hardware Abstraction
 
@@ -155,11 +168,17 @@ cargo verus build
 ### Testing
 
 ```bash
-# Run tests
-cargo test
+$ cargo test-buddy
 
-# Run tests in the playground
-cd deko-playground && cargo test
+════════════════════ Testing buddy ════════════════════
+🔨 Building test binary for 'buddy'...
+Running: "cargo" "verus" "build" "--bin" "buddy"
+✓ Built test binary for 'buddy'
+🚀 Executing test binary: "/home/.../cage-sev/target/debug/buddy"
+✓ Test suite 'buddy' PASSED
+
+════════════════════════════════════════════════════════════
+🎉 All tests PASSED (1)
 ```
 
 ## Acknowledgements

@@ -4,7 +4,10 @@ use deko_macros::DekoDebug;
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
+use super::frame_allocator::DekoAllocatorApi;
+use crate::collections::Vec;
 use crate::mm::paging::{PageTable, PageTablePermission, PteFlags, Pte_ALL_BITS};
+use crate::{kunimplemented, vec};
 
 verus! {
 
@@ -30,17 +33,20 @@ pub struct VirtualMemoryRegion {
     #[deko(skip)]
     pub pt_flags: PteFlags,
     /// All the virtual memory areas managed by this region.
+    ///
+    /// FIXME: This data structure is not efficient for lookups. We may need to change it to
+    /// an interval tree or other more efficient data structures but not verification-friendly.
     #[deko(skip)]
-    pub areas: LinkedList<VirtualMemory>,
+    pub areas: Vec<VirtualMemory>,
     /// The top-level page tables for this region.
-    pub pgtables: Array<Option<DekoPPtr<PageTable>>, PAGE_TABLE_ENTRY>,
+    pub pgtable: DekoPPtr<PageTable>,
 }
 
 /// Tracks the corresponding permissions for a virtual memory region if there is
 /// a need to read/modify this struct.
 pub tracked struct VirtualMemoryRegionPermission {
     /// A collection of page table permissions for each top-level page table.
-    pub pgtable_perms: Seq<Option<PageTablePermission>>,
+    pub pgtable_perm: PageTablePermission,
 }
 
 /// This struct manages one piece of virtual memory covered by the [`VirtualMemoryRegion`].
@@ -55,6 +61,10 @@ pub struct VirtualMemory {
     // pub ptr: RwLockNoPred<ReprPtr<M>>, ??? possibly with some generics.
     // but this requires some transformation techniques.
 }
+
+/// Tracks the corresponding permissions for a virtual memory if there is
+/// a need to read/modify this struct.
+pub tracked struct VirtualMemoryPermission {}
 
 impl WellFormed for VirtualMemoryRegion {
     open spec fn wf(&self) -> bool {
@@ -80,14 +90,8 @@ impl WellFormed for VirtualMemory {
 #[verus_verify]
 impl VirtualMemoryRegion {
     pub open spec fn wf_with(&self, perm: &VirtualMemoryRegionPermission) -> bool {
-        &&& perm.pgtable_perms.len() == self.pgtables@.len()
-        &&& forall|i: int|
-            #![trigger self.pgtables@[i], perm.pgtable_perms[i]]
-            0 <= i < self.pgtables@.len() ==> (match self.pgtables@[i] {
-                None => perm.pgtable_perms[i] == None::<PageTablePermission>,
-                Some(ptr) => perm.pgtable_perms[i] matches Some(pg_perm) && ptr@
-                    == pg_perm.pgtable_perm.pptr(),
-            })
+        &&& perm.pgtable_perm.wf()
+        &&& perm.pgtable_perm.pgtable_perm.pptr() == self.pgtable@
     }
 
     pub open spec fn pgtable_consistent(&self) -> bool {
@@ -106,7 +110,12 @@ impl VirtualMemoryRegion {
         ensures
             r.wf(),
     )]
-    pub fn new(start_addr: VirtAddr, end_addr: VirtAddr, pt_flags: PteFlags) -> Self {
+    pub fn new(
+        start_addr: VirtAddr,
+        end_addr: VirtAddr,
+        pt_flags: PteFlags,
+        pgtable: DekoPPtr<PageTable>,
+    ) -> Self {
         proof {
             let start = start_addr@;
             let end = end_addr@;
@@ -131,15 +140,16 @@ impl VirtualMemoryRegion {
             start_pfn: start_addr.pfn(),
             end_pfn: end_addr.pfn(),
             pt_flags,
-            areas: LinkedList::new(),
-            // This will populate later.
-            pgtables: Array::fill(None),
+            areas: vec![],
+            pgtable,
         }
     }
 }
 
 #[verus_verify]
 impl VirtualMemory {
+    pub uninterp spec fn parent_vmm_region(&self) -> VirtualMemoryRegion;
+
     pub open spec fn contains_addr_spec(&self, addr: VirtAddr) -> bool {
         self.range.start@ <= addr@ < self.range.end@
     }
@@ -207,6 +217,42 @@ impl VirtualMemory {
     )]
     pub fn disjoint_with(&self, other: &VirtualMemory) -> bool {
         !self.overlap_with(other)
+    }
+
+    /// Maps this virtual memory region into the given page table.
+    #[verus_spec(
+        with
+            Tracked(region_perm): Tracked<&mut VirtualMemoryPermission>,
+            Tracked(pgtable_perm): Tracked<&mut PageTablePermission>,
+        requires
+            self.wf(),
+            ptr@ == self.parent_vmm_region().pgtable@,
+            old(pgtable_perm).wf(),
+            !old(pgtable_perm).mapped_region(self.range),
+        ensures
+            pgtable_perm.wf(),
+            pgtable_perm.mapped_region(self.range),
+    )]
+    pub fn map(&self, ptr: DekoPPtr<PageTable>) {
+        kunimplemented!()
+    }
+
+    /// Unmaps this virtual memory region from the given page table.
+    #[verus_spec(
+        with
+            Tracked(region_perm): Tracked<&mut VirtualMemoryPermission>,
+            Tracked(pgtable_perm): Tracked<&mut PageTablePermission>,
+        requires
+            self.wf(),
+            ptr@ == self.parent_vmm_region().pgtable@,
+            old(pgtable_perm).wf(),
+            old(pgtable_perm).mapped_region(self.range),
+        ensures
+            pgtable_perm.wf(),
+            !pgtable_perm.mapped_region(self.range),
+    )]
+    pub fn unmap(&self, ptr: DekoPPtr<PageTable>) {
+        kunimplemented!()
     }
 }
 

@@ -586,7 +586,7 @@ impl<'a> ElfLoadSegment<'a> {
         ensures
             r.start == self.vaddr_begin(),
             r.end == self.vaddr_end(),
-            r.start@ % PAGE_MASK == 0,
+            r.start@ % PAGE_SIZE == 0,
             r.start@ < r.end@ < u64::MAX,
             r.end.page_align_up_spec()@ - r.start@ < u32::MAX,
     {
