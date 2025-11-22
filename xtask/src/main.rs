@@ -885,7 +885,13 @@ fn test_runner(suite: Option<String>, release: bool) -> Result<()> {
         println!("🔨 Building test binary for '{}'...", suite);
 
         let mut cmd = Command::new("cargo");
-        cmd.arg("verus").arg("build").arg("--bin").arg(suite);
+        let suite_path = tests_dir.join(suite).join("Cargo.toml");
+        if !suite_path.exists() {
+            println!("✗ Test suite directory not found: {:?}", suite_path);
+            all_passed = false;
+            continue;
+        }
+        cmd.arg("verus").arg("build").arg("--manifest-path").arg(suite_path);
 
         if release {
             cmd.arg("--release");

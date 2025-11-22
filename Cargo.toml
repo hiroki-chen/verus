@@ -7,13 +7,15 @@ members = [
     "deko-stage1",
     "deko-std",
     "xtask",
-    "tests/buddy",
-    "tests/collections",
     # bins
     "bin/deko-monitor",
     "bin/deko-stage2",
 ]
-exclude = ["tools/verus"]
+# Unfortunately due to `Cargo`'s default feature unification, we need to
+# exclude some crates that have conflicting default features like global
+# allocator API in tests.
+exclude = ["tools/verus", "tests/buddy", "tests/collections"]
+feature-unification = "package"
 
 [workspace.dependencies]
 vstd = { git = "https://github.com/hiroki-chen/verus.git", default-features = false }
@@ -33,8 +35,6 @@ deko-logging = { path = "deko-logging" }
 deko-macros = { path = "deko-macros" }
 deko-std = { path = "deko-std", default-features = false }
 elf = { git = "https://github.com/hiroki-chen/elf-rs.git" }
-
-proptest = "1.9.0"
 
 # the profile used for `cargo build`
 [profile.dev]

@@ -8,7 +8,7 @@ vstd = { workspace = true, features = ["allow_panic"] }
 verus_builtin = { workspace = true }
 verus_builtin_macros = { workspace = true }
 
-deko-core = { workspace = true, features = ["alloc"] }
+deko-core = { workspace = true, features = ["alloc", "global_alloc_api"] }
 deko-std = { workspace = true, features = ["alloc"] }
 
 [package.metadata.verus]

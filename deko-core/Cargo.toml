@@ -33,6 +33,7 @@ default = [
   "alloc",
 ] # Note that logging should be off for production-ready builds.
 alloc = ["deko-std/alloc"]
+global_alloc_api = ["alloc"]
 tdx = []
 snp = ["deko-std/snp"]
 # Enable logging?

@@ -15,7 +15,7 @@ Use this_page_perm itself to reason about the finer-grained properties is no goo
 We need to change to `this_page` which is a verification-only struct. 
 
 
-`#[verus_spec]` is somehow unstable.
+`#[verus_spec]` is heavily unstable so we avoid using it on the main branch.
 
 
 Buddy allocator should take as input the virtual addresses, physical addresses and size to do the proper conversion between virtual addresses and physical addresses!

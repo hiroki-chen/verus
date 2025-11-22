@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-deko-core = { workspace = true, features = ["alloc"] }
-vstd = { workspace = true, features = ["alloc"] }
-proptest = { workspace = true }
+deko-core = { path = "../../deko-core", features = ["alloc"] }
+vstd = { git = "https://github.com/hiroki-chen/verus.git", default-features = false, features = [
+  "alloc",
+] }
+proptest = "1.9.0"
