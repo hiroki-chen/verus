@@ -15,7 +15,6 @@ members = [
 # exclude some crates that have conflicting default features like global
 # allocator API in tests.
 exclude = ["tools/verus", "tests/buddy", "tests/collections"]
-feature-unification = "package"
 
 [workspace.dependencies]
 vstd = { git = "https://github.com/hiroki-chen/verus.git", default-features = false }

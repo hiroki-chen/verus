@@ -606,7 +606,7 @@ impl MappingSpace {
 /// let from_u32 = VirtAddr::from(0x12345678u32);
 /// let from_ptr = VirtAddr::from(ptr as *const u8);
 /// ```
-#[derive(PartialEq, Eq, Clone, Copy, Debug, Default, DekoDebug)]
+#[derive(PartialEq, Eq, Clone, Default, Copy, DekoDebug)]
 #[repr(transparent)]
 pub struct VirtAddr(
     #[deko(hex)]

@@ -1,11 +1,13 @@
+use core::cmp::Ordering;
 use core::ops::{Range, RangeBounds};
 
 use deko_macros::DekoDebug;
 use deko_std::prelude::*;
 use vstd::prelude::*;
+use vstd::std_specs::cmp::*;
 
 use super::frame_allocator::DekoAllocatorApi;
-use crate::collections::Vec;
+use crate::collections::{is_sorted_spec, Vec};
 use crate::mm::paging::{PageTable, PageTablePermission, PteFlags, Pte_ALL_BITS};
 use crate::{kunimplemented, vec};
 
@@ -47,6 +49,8 @@ pub struct VirtualMemoryRegion {
 pub tracked struct VirtualMemoryRegionPermission {
     /// A collection of page table permissions for each top-level page table.
     pub pgtable_perm: PageTablePermission,
+    /// A list of virtual memory permissions managed by this region.
+    pub vm_perms: Ghost<Seq<VirtualMemoryPermission>>,
 }
 
 /// This struct manages one piece of virtual memory covered by the [`VirtualMemoryRegion`].
@@ -74,6 +78,17 @@ impl WellFormed for VirtualMemoryRegion {
         &&& self.pt_flags.wf()
         &&& self.pt_flags.bits() & Pte_ALL_BITS == self.pt_flags.bits()
         &&& self.pgtable_consistent()
+        &&& forall|i: int|
+            #![trigger self.areas@[i]]
+            0 <= i < self.areas@.len() as int
+                ==> self.areas@[i].wf()
+        // Ensure no overlapping areas.
+        &&& forall|i: int|
+            #![trigger self.areas@[i]]
+            0 <= i < self.areas@.len() - 1 as int ==> {
+                &&& self.areas@[i].range.end@ <= self.areas@[i + 1].range.start@
+            }
+        &&& is_sorted_spec(self.areas@)
     }
 }
 
@@ -87,11 +102,60 @@ impl WellFormed for VirtualMemory {
     }
 }
 
+impl PartialEq for VirtualMemory {
+    #[verifier::external_body]
+    fn eq(&self, other: &Self) -> bool {
+        self.range.start.0 == other.range.start.0 && self.range.end.0 == other.range.end.0
+    }
+}
+
+impl PartialOrd for VirtualMemory {
+    // Verus has some problem dealing with this.
+    #[verifier::external_body]
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        if self.range.start.0 < other.range.start.0 {
+            Some(core::cmp::Ordering::Less)
+        } else if self.range.start.0 > other.range.start.0 {
+            Some(core::cmp::Ordering::Greater)
+        } else {
+            Some(core::cmp::Ordering::Equal)
+        }
+    }
+}
+
+impl PartialEqSpecImpl for VirtualMemory {
+    closed spec fn obeys_eq_spec() -> bool {
+        true
+    }
+
+    open spec fn eq_spec(&self, other: &Self) -> bool {
+        &&& self.range.start.0 == other.range.start.0
+        &&& self.range.end.0 == other.range.end.0
+    }
+}
+
+impl PartialOrdSpecImpl for VirtualMemory {
+    closed spec fn obeys_partial_cmp_spec() -> bool {
+        true
+    }
+
+    open spec fn partial_cmp_spec(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        if self.range.start@ < other.range.start@ {
+            Some(core::cmp::Ordering::Less)
+        } else if self.range.start@ > other.range.start@ {
+            Some(core::cmp::Ordering::Greater)
+        } else {
+            Some(core::cmp::Ordering::Equal)
+        }
+    }
+}
+
 #[verus_verify]
 impl VirtualMemoryRegion {
     pub open spec fn wf_with(&self, perm: &VirtualMemoryRegionPermission) -> bool {
         &&& perm.pgtable_perm.wf()
         &&& perm.pgtable_perm.pgtable_perm.pptr() == self.pgtable@
+        &&& perm.vm_perms@.len() == self.areas@.len()
     }
 
     pub open spec fn pgtable_consistent(&self) -> bool {
@@ -143,6 +207,79 @@ impl VirtualMemoryRegion {
             areas: vec![],
             pgtable,
         }
+    }
+
+    /// Inserts a new VM block [`VirtualMemory`] at the given virtual address.
+    /// Note that this method checks if the block will overlap with any of the
+    /// current blocks in this region.
+    ///
+    /// This will consumes [`VirtualMemoryRegionPermission`] since now the owner-
+    /// ship has been transferred to the newly inserted block.
+    #[verus_spec(r =>
+        with
+            Tracked(perm): Tracked<&mut VirtualMemoryRegionPermission>,
+            Tracked(vm_block_perm): Tracked<VirtualMemoryPermission>,
+        requires
+            old(self).wf_with(old(perm)),
+            vaddr.wf(),
+            vaddr@ >= VADDR_UPPER_MASK,
+            vm_block.wf(),
+    )]
+    pub fn insert_at(&mut self, vaddr: VirtAddr, vm_block: VirtualMemory) {
+        kunimplemented!()
+    }
+
+    /// Removes the mapping from a given base address from the region.
+    ///
+    /// If the given address is not found then we return [`Option::None`].
+    #[verus_spec(r =>
+        with
+            Tracked(perm): Tracked<&mut VirtualMemoryRegionPermission>,
+                -> vm_perm: Tracked<Option<VirtualMemoryPermission>>,
+            requires
+                old(self).wf(),
+                old(self).wf_with(old(perm)),
+                vaddr.wf(),
+                vaddr@ >= VADDR_UPPER_MASK,
+    )]
+    pub fn remove(&mut self, vaddr: VirtAddr) -> Option<VirtualMemory> {
+        broadcast use crate::collections::group_vec_axioms;
+
+        let pfn = vaddr.pfn();
+        let f = |mm: &VirtualMemory| -> (r: Ordering)
+            requires
+                mm.wf(),
+        // ensures
+        //     r == mm.range.start.pfn().cmp_spec(&pfn),
+
+            { mm.range.start.pfn().cmp(&pfn) };
+
+        match self.areas.binary_search_by(f) {
+            Ok(idx) => {
+                let vm = self.areas.remove(idx);
+
+                // Then we unmap it.
+                // #[verus_spec(with Tracked(&mut perm))]
+                // vm.unmap(self.pgtable);
+
+                Some(vm)
+            },
+            Err(_) => None,
+        };
+
+        kunimplemented!()
+    }
+
+    /// Notify the region that we have encountered a page fault at the given address.
+    /// This function will return true if the page fault is handled successfully.
+    ///
+    /// This method does _not_ create the mapping.
+    #[verus_spec(r =>
+        requires
+            vaddr.wf(),
+    )]
+    pub fn handle_page_fault(&self, vaddr: VirtAddr) -> bool {
+        kunimplemented!()
     }
 }
 

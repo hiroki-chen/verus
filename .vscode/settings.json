@@ -1,4 +1,5 @@
 {
   "rust-analzyer.server.path": "~/.local/bin/verus-analyzer-x86_64-unknown-linux-gnu",
-  "rust-analyzer.inlayHints.lifetimeElisionHints.enable": "always"
+  "rust-analyzer.inlayHints.lifetimeElisionHints.enable": "always",
+  "verus-analyzer.cargo.features": ["alloc", "snp"]
 }

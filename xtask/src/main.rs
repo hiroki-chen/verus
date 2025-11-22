@@ -1613,7 +1613,7 @@ fn bootstrap_verus(prefix: &Path, commit: Option<&str>, branch: Option<&str>) ->
         std::fs::remove_dir_all(&verus_dir).context("Failed to remove existing verus directory")?;
     }
 
-    let repo_url = "https://github.com/hiroki-chen/verus.git";
+    let repo_url = "https://github.com/verus-lang/verus.git";
     println!("Cloning from: {}", repo_url.bright_blue());
 
     let repo =
@@ -1670,37 +1670,14 @@ fn bootstrap_verus(prefix: &Path, commit: Option<&str>, branch: Option<&str>) ->
 
     println!("✓ Repository cloned successfully!");
 
-    // Copy our project's rust-toolchain.toml to verus directory to ensure same nightly version
-    println!("\n{} Synchronizing Rust toolchain with project...", "🔄".bright_yellow());
-    let project_toolchain_path = project_root().join("rust-toolchain.toml");
     let verus_toolchain_path = verus_dir.join("rust-toolchain.toml");
-
-    if project_toolchain_path.exists() {
-        let toolchain_content = std::fs::read_to_string(&project_toolchain_path)
-            .context("Failed to read project's rust-toolchain.toml")?;
-        std::fs::write(&verus_toolchain_path, &toolchain_content)
-            .context("Failed to write Verus rust-toolchain.toml")?;
-        println!("✓ Copied project's rust-toolchain.toml to Verus directory");
-
-        // Extract the channel version for display
-        let rust_version = toolchain_content
-            .lines()
-            .find(|line| line.trim_start().starts_with("channel"))
-            .and_then(|line| line.split('=').nth(1))
-            .map(|s| s.trim().trim_matches('"'))
-            .unwrap_or("unknown");
-        println!("✓ Using Rust toolchain: {}", rust_version.bright_white());
-    } else {
-        println!("⚠ No project rust-toolchain.toml found, using Verus default");
-    }
-
     // Enter the verus directory
     std::env::set_current_dir(&verus_dir).context("Failed to change to verus directory")?;
     println!("✓ Changed to verus directory: {}", verus_dir.display().to_string().bright_white());
 
     // Extract rust version from the toolchain content for rustup override
-    let rust_version = if project_toolchain_path.exists() {
-        let toolchain_content = std::fs::read_to_string(&project_toolchain_path)
+    let rust_version = if verus_toolchain_path.exists() {
+        let toolchain_content = std::fs::read_to_string(&verus_toolchain_path)
             .context("Failed to read project's rust-toolchain.toml")?;
         toolchain_content
             .lines()
