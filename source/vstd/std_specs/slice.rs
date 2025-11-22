@@ -1,12 +1,49 @@
 use super::super::prelude::*;
+use super::cmp::*;
 use super::core::IndexSetTrustedSpec;
 use super::core::TrustedSpecSealed;
+use verus_builtin::*;
 
+use core::cmp::Ordering;
 use core::slice::Iter;
 
 use verus as verus_;
 
 verus_! {
+
+pub open spec fn spec_slice_is_sorted<T: PartialOrd>(s: &[T]) -> bool {
+    forall |i: int, j: int|
+        #![trigger s@[i], s@[j]]
+            0 <= i < j < s@.len() ==> s@[i].partial_cmp_spec(&s@[j]) == Some(Ordering::Less,)
+}
+
+#[verifier::when_used_as_spec(spec_slice_is_sorted)]
+pub assume_specification<T: PartialOrd> [ <[T]>::is_sorted ] (s: &[T]) -> (r: bool)
+    ensures
+        r == spec_slice_is_sorted(s),
+;
+
+pub assume_specification<T: Ord> [ <[T]>::binary_search ] (s: &[T], x: &T) -> (r: Result<usize, usize>)
+    ensures
+        s.is_sorted() ==>
+            match r {
+                Ok(index) => 0 <= index < s@.len() && s@[index as int] == *x,
+                Err(index) => 0 <= index <= s@.len() &&
+                    (index == 0 || s@[index - 1].cmp_spec(x) == Ordering::Less) &&
+                    (index == s@.len() || s@[index as int].cmp_spec(x) == Ordering::Greater),
+            }
+        ,
+;
+
+pub assume_specification<'a, T, F> [ <[T]>::binary_search_by ] (s: &'a [T], mut f: F) -> (r: Result<usize, usize>)
+    where
+        F: FnMut(&'a T) -> Ordering,
+    ensures
+        match r {
+            Ok(index) => 0 <= index < s@.len(),
+            Err(index) => 0 <= index <= s@.len() 
+        }
+;
 
 impl<T, const N: usize> TrustedSpecSealed for [T; N] {}
 
@@ -31,11 +68,6 @@ impl<T> IndexSetTrustedSpec<usize> for [T] {
         new_container@ == self@.update(index as int, val)
     }
 }
-
-pub assume_specification[ core::hint::unreachable_unchecked ]() -> !
-    requires
-        false,
-;
 
 // The `iter` method of a `<T>` returns an iterator of type `Iter<'_, T>`,
 // so we specify that type here.

@@ -63,6 +63,11 @@ pub assume_specification<T, E, F: From<E>>[ Result::<T, F>::from_residual ](
         },
 ;
 
+pub assume_specification[ core::hint::unreachable_unchecked ]() -> !
+    requires
+        false,
+;
+
 pub broadcast group group_control_flow_axioms {
     spec_from_blanket_identity,
 }
