@@ -7,7 +7,7 @@ pub(crate) mod imp;
 ///
 /// Supports field-level attributes:
 /// - `#[deko(hex)]` - Format as hexadecimal
-/// - `#[deko(bin)]` - Format as binary  
+/// - `#[deko(bin)]` - Format as binary
 /// - `#[deko(oct)]` - Format as octal
 /// - `#[deko(size)]` - Format as size (bytes/KB/MB/GB)
 /// - `#[deko(enabled)]` - Format boolean as enabled/disabled
@@ -20,7 +20,7 @@ pub(crate) mod imp;
 /// struct MyStruct {
 ///     #[deko(hex)]
 ///     address: u64,
-///     #[deko(size)]  
+///     #[deko(size)]
 ///     length: usize,
 ///     #[deko(enabled)]
 ///     active: bool,

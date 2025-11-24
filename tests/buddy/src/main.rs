@@ -100,8 +100,7 @@ fn main() {
     test_fragmentation();
 }
 
-}
-
+} // verus!
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 10000,  // More test cases

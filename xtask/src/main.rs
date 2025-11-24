@@ -216,7 +216,7 @@ impl Builder {
 
     /// Find the verus binary using fallback strategy:
     /// 1. Look if it exists in PATH
-    /// 2. If not, check if VERUS_PATH environment variable is set  
+    /// 2. If not, check if VERUS_PATH environment variable is set
     /// 3. If not, check if tools/verus exists
     fn find_verus_binary(&self) -> Result<PathBuf> {
         // First check if verus is in PATH
@@ -263,7 +263,7 @@ impl Builder {
     /// Find the z3 binary using fallback strategy:
     /// 1. Look if it exists in PATH
     /// 2. If not, check if VERUS_Z3_PATH environment variable is set
-    /// 3. If not, check if tools/z3 exists  
+    /// 3. If not, check if tools/z3 exists
     fn find_z3_binary(&self) -> Result<PathBuf> {
         // First check if z3 is in PATH
         if let Ok(output) = Command::new("which").arg("z3").output() {

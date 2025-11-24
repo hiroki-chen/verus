@@ -54,6 +54,7 @@ pub type DekoPointsToRaw = PointsToRaw;
 /// In order to access (read or write) the value behind the pointer, the user needs a special ghost permission token
 /// `DekoPointsTo<V>`.
 #[repr(C, align(8))]
+#[allow(improper_ctypes)]
 pub struct DekoPPtr<V: WellFormed>(pub PPtr<V>);
 
 pub struct DekoPointsTo<V: WellFormed> {

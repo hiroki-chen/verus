@@ -31,6 +31,7 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 /// The parameter `ctx` is obtained from the assembly code where we pass the address
 /// from the `.data` section to here.
 #[no_mangle]
+#[allow(improper_ctypes)]
 #[verifier::external_body]
 #[verus_spec(r =>
     with

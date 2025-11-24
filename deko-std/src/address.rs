@@ -118,6 +118,29 @@ pub open spec fn sign_extend_spec(addr: u64) -> u64
     }
 }
 
+pub broadcast proof fn lemma_aligned_vaddr_pfn_preserves_order(lhs: VirtAddr, rhs: VirtAddr)
+    requires
+        lhs.wf(),
+        rhs.wf(),
+        lhs@ % PAGE_SIZE == 0,
+        rhs@ % PAGE_SIZE == 0,
+    ensures
+        #![trigger lhs.pfn(), rhs.pfn()]
+        lhs@ <= rhs@ ==> lhs.pfn() <= rhs.pfn(),
+{
+    if lhs@ <= rhs@ {
+        let lhs = lhs@;
+        let rhs = rhs@;
+
+        assert(lhs >> 12 <= rhs >> 12) by (bit_vector)
+            requires
+                lhs % PAGE_SIZE == 0,
+                rhs % PAGE_SIZE == 0,
+                lhs <= rhs,
+        ;
+    }
+}
+
 /// Proves that sign extension always produces canonical addresses.
 ///
 /// This lemma establishes that any result from sign extension will be in one of the

@@ -2,8 +2,8 @@
 
 use std::sync::Once;
 
-use deko_core::mm::DEKO_FRAME_ALLOCATOR;
 use deko_core::mm::frame_allocator::DekoAllocatorApi;
+use deko_core::mm::DEKO_FRAME_ALLOCATOR;
 use proptest::prelude::*;
 
 static INIT: Once = Once::new();

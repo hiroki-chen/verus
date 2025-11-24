@@ -2182,12 +2182,12 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "verus_builtin"
 version = "0.0.0-2025-08-12-1837"
-source = "git+https://github.com/hiroki-chen/verus.git#01c63f53adde9c6699604cca9f4483acfd362f0f"
+source = "git+https://github.com/hiroki-chen/verus.git#d54af5c7a094011d86eac59172f956b3899c260e"
 
 [[package]]
 name = "verus_builtin_macros"
-version = "0.0.0-2025-11-16-0050"
-source = "git+https://github.com/hiroki-chen/verus.git#01c63f53adde9c6699604cca9f4483acfd362f0f"
+version = "0.0.0-2025-11-23-0016"
+source = "git+https://github.com/hiroki-chen/verus.git#d54af5c7a094011d86eac59172f956b3899c260e"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2200,7 +2200,7 @@ dependencies = [
 [[package]]
 name = "verus_prettyplease"
 version = "0.0.0-2025-11-16-0050"
-source = "git+https://github.com/hiroki-chen/verus.git#01c63f53adde9c6699604cca9f4483acfd362f0f"
+source = "git+https://github.com/hiroki-chen/verus.git#d54af5c7a094011d86eac59172f956b3899c260e"
 dependencies = [
  "proc-macro2",
  "verus_syn",
@@ -2209,7 +2209,7 @@ dependencies = [
 [[package]]
 name = "verus_state_machines_macros"
 version = "0.0.0-2025-11-16-0050"
-source = "git+https://github.com/hiroki-chen/verus.git#01c63f53adde9c6699604cca9f4483acfd362f0f"
+source = "git+https://github.com/hiroki-chen/verus.git#d54af5c7a094011d86eac59172f956b3899c260e"
 dependencies = [
  "indexmap 1.9.3",
  "proc-macro2",
@@ -2220,7 +2220,7 @@ dependencies = [
 [[package]]
 name = "verus_syn"
 version = "0.0.0-2025-11-16-0050"
-source = "git+https://github.com/hiroki-chen/verus.git#01c63f53adde9c6699604cca9f4483acfd362f0f"
+source = "git+https://github.com/hiroki-chen/verus.git#d54af5c7a094011d86eac59172f956b3899c260e"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2235,8 +2235,8 @@ checksum = "442887c63f2c839b346c192d047a7c87e73d0689c9157b00b53dcc27dd5ea793"
 
 [[package]]
 name = "vstd"
-version = "0.0.0-2025-11-16-0050"
-source = "git+https://github.com/hiroki-chen/verus.git#01c63f53adde9c6699604cca9f4483acfd362f0f"
+version = "0.0.0-2025-11-23-0016"
+source = "git+https://github.com/hiroki-chen/verus.git#d54af5c7a094011d86eac59172f956b3899c260e"
 dependencies = [
  "verus_builtin",
  "verus_builtin_macros",

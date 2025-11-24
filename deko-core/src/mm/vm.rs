@@ -7,7 +7,10 @@ use vstd::prelude::*;
 use vstd::std_specs::cmp::*;
 
 use super::frame_allocator::DekoAllocatorApi;
-use crate::collections::{is_sorted_spec, Vec};
+use crate::collections::{
+    binary_search_by_spec, comparator_consistent_spec, is_sorted_spec, lemma_cmp_pivot_monotonic,
+    Vec,
+};
 use crate::mm::paging::{PageTable, PageTablePermission, PteFlags, Pte_ALL_BITS};
 use crate::{kunimplemented, vec};
 
@@ -72,7 +75,7 @@ pub tracked struct VirtualMemoryPermission {}
 
 impl WellFormed for VirtualMemoryRegion {
     open spec fn wf(&self) -> bool {
-        &&& self.start_pfn < self.end_pfn
+        &&& self.start_pfn < self.end_pfn <= u64::MAX / PAGE_SIZE
         &&& self.start_pfn % VMR_GRANULE == 0
         &&& self.end_pfn % VMR_GRANULE == 0
         &&& self.pt_flags.wf()
@@ -162,11 +165,38 @@ impl VirtualMemoryRegion {
         true
     }
 
+    pub open spec fn compatible_spec(&self, vm_block: &VirtualMemory) -> bool {
+        &&& vm_block.range.start@ >= self.start_pfn * PAGE_SIZE
+        &&& vm_block.range.end@ <= self.end_pfn * PAGE_SIZE
+    }
+
+    pub open spec fn nonoverlapping_block(&self, vm_block: &VirtualMemory) -> bool {
+        forall|i: int|
+            #![trigger self.areas@[i]]
+            0 <= i < self.areas@.len() as int ==> { !self.areas@[i].overlap_with_spec(vm_block) }
+    }
+
+    /// Checks if a given `vm_block` is compatible within this virtual memory region.
+    ///
+    /// This method returns true if the `vm_block` is within the range of this region.
+    #[inline]
+    #[verus_spec(r =>
+        requires
+            self.wf(),
+            vm_block.wf(),
+        returns
+            self.compatible_spec(vm_block),
+    )]
+    pub fn compatible(&self, vm_block: &VirtualMemory) -> bool {
+        vm_block.range.start.0 >= self.start_pfn * PAGE_SIZE && vm_block.range.end.0 <= self.end_pfn
+            * PAGE_SIZE
+    }
+
     #[verus_spec(r =>
         requires
             start_addr@ >= VADDR_UPPER_MASK,
             end_addr@ >= VADDR_UPPER_MASK,
-            start_addr@ < end_addr@,
+            start_addr@ < end_addr@ <= u64::MAX,
             start_addr.pfn() % VMR_GRANULE == 0,
             end_addr.pfn() % VMR_GRANULE == 0,
             pt_flags.wf(),
@@ -194,6 +224,12 @@ impl VirtualMemoryRegion {
                     start_pfn % VMR_GRANULE == 0,
                     end_pfn % VMR_GRANULE == 0,
             ;
+
+            assert(end_pfn <= u64::MAX / PAGE_SIZE) by (bit_vector)
+                requires
+                    end <= u64::MAX,
+                    end_pfn == end >> 12,
+            ;
         }
 
         proof {
@@ -220,12 +256,42 @@ impl VirtualMemoryRegion {
             Tracked(perm): Tracked<&mut VirtualMemoryRegionPermission>,
             Tracked(vm_block_perm): Tracked<VirtualMemoryPermission>,
         requires
+            old(self).wf(),
             old(self).wf_with(old(perm)),
-            vaddr.wf(),
-            vaddr@ >= VADDR_UPPER_MASK,
+            old(self).compatible_spec(&vm_block),
+            old(self).nonoverlapping_block(&vm_block),
             vm_block.wf(),
+        ensures
+            self.wf_with(perm),
     )]
-    pub fn insert_at(&mut self, vaddr: VirtAddr, vm_block: VirtualMemory) {
+    pub fn insert_at(&mut self, vm_block: VirtualMemory) {
+        let size = vm_block.range.end.0 - vm_block.range.start.0;
+        let start_addr = &vm_block.range.start;
+        let end_addr = &vm_block.range.end;
+
+        // Now let's find the proper position to insert.
+        let f = |mm: &VirtualMemory| -> (r: Ordering)
+            requires
+                mm.wf(),
+            ensures
+                r == vstd::std_specs::cmp::OrdSpec::cmp_spec(
+                    &mm.range.start.pfn(),
+                    &start_addr.pfn(),
+                ),
+            { mm.range.start.pfn().cmp(&start_addr.pfn()) };
+
+        proof {
+            self.lemma_areas_comparator_consistent(*start_addr, f);
+        }
+
+        let idx = self.areas.binary_search_by(f);
+
+        proof {
+            assert(idx.is_err()) by {
+                self.lemma_areas_non_overlap_returns_err(*start_addr, f, idx);
+            }
+        }
+
         kunimplemented!()
     }
 
@@ -249,10 +315,13 @@ impl VirtualMemoryRegion {
         let f = |mm: &VirtualMemory| -> (r: Ordering)
             requires
                 mm.wf(),
-        // ensures
-        //     r == mm.range.start.pfn().cmp_spec(&pfn),
-
+            ensures
+                r == vstd::std_specs::cmp::OrdSpec::cmp_spec(&mm.range.start.pfn(), &pfn),
             { mm.range.start.pfn().cmp(&pfn) };
+
+        proof {
+            self.lemma_areas_comparator_consistent(vaddr, f);
+        }
 
         match self.areas.binary_search_by(f) {
             Ok(idx) => {
@@ -280,6 +349,113 @@ impl VirtualMemoryRegion {
     )]
     pub fn handle_page_fault(&self, vaddr: VirtAddr) -> bool {
         kunimplemented!()
+    }
+
+    /// Lemma proving that when areas are non-overlapping and we search for a new address,
+    /// the binary search will return an error (indicating the address is not found).
+    pub proof fn lemma_areas_non_overlap_returns_err<F>(
+        &self,
+        start_addr: VirtAddr,
+        f: F,
+        r: Result<usize, usize>,
+    ) where F: FnMut(&VirtualMemory) -> Ordering
+        requires
+            self.wf(),
+            is_sorted_spec(self.areas@),
+            forall|i: int|
+                #![trigger self.areas@[i]]
+                0 <= i < self.areas@.len() ==> self.areas@[i].wf(),
+            forall|i: int, r: Ordering|
+                #![trigger self.areas@[i], f.ensures((&self.areas@[i],), r)]
+                0 <= i < self.areas@.len() && f.ensures((&self.areas@[i],), r) ==> r
+                    == vstd::std_specs::cmp::OrdSpec::cmp_spec(
+                    &self.areas@[i].range.start.pfn(),
+                    &start_addr.pfn(),
+                ),
+            binary_search_by_spec(self.areas@, f, r),
+        ensures
+            r.is_err(),
+    {
+        broadcast use crate::collections::group_vec_axioms;
+        broadcast use deko_std::address::lemma_aligned_vaddr_pfn_preserves_order;
+        // The proof goes by contradiction: assume r.is_ok(), then we have found an index
+        // where the area overlaps with the given start_addr that contradicts the non-overlapping
+        // property.
+
+        if r.is_ok() {
+            let idx = r.unwrap();
+            assert(0 <= idx < self.areas@.len());
+            // From binary_search_by_spec postcondition for Ok case:
+            // There exists ord where f.ensures((&self.areas@[idx],), ord) && ord == Equal
+            // We know what ord SHOULD be from the comparator spec
+            let computed_ord = vstd::std_specs::cmp::OrdSpec::cmp_spec(
+                &self.areas@[idx as int].range.start.pfn(),
+                &start_addr.pfn(),
+            );
+
+            // The comparator spec says f.ensures this
+            assert(f.ensures((&self.areas@[idx as int],), computed_ord));
+
+            assert(false);
+        }
+    }
+
+    /// Lemma to show that the comparator used in binary search is consistent with
+    /// the ordering of the areas.
+    pub proof fn lemma_areas_comparator_consistent<F>(&self, start_addr: VirtAddr, f: F) where
+        F: FnMut(&VirtualMemory) -> Ordering,
+
+        requires
+            self.wf(),
+            is_sorted_spec(self.areas@),
+            forall|i: int|
+                #![trigger self.areas@[i]]
+                0 <= i < self.areas@.len() ==> self.areas@[i].wf(),
+            forall|i: int, r: Ordering|
+                #![trigger self.areas@[i], f.ensures((&self.areas@[i],), r)]
+                0 <= i < self.areas@.len() && f.ensures((&self.areas@[i],), r) ==> r
+                    == vstd::std_specs::cmp::OrdSpec::cmp_spec(
+                    &self.areas@[i].range.start.pfn(),
+                    &start_addr.pfn(),
+                ),
+        ensures
+            comparator_consistent_spec(self.areas@, f),
+    {
+        broadcast use crate::collections::group_vec_axioms;
+        broadcast use deko_std::address::lemma_aligned_vaddr_pfn_preserves_order;
+
+        assert(comparator_consistent_spec(self.areas@, f)) by {
+            assert forall|i: int, j: int, ord1: Ordering, ord2: Ordering|
+                0 <= i < j < self.areas@.len() && f.ensures((&self.areas@[i],), ord1) && f.ensures(
+                    (&self.areas@[j],),
+                    ord2,
+                ) implies vstd::std_specs::cmp::OrdSpec::cmp_spec(&ord1, &ord2)
+                != Ordering::Greater by {
+                let area_i = &self.areas@[i];
+                let area_j = &self.areas@[j];
+                // From f's specification
+                assert(ord1 == vstd::std_specs::cmp::OrdSpec::cmp_spec(
+                    &area_i.range.start.pfn(),
+                    &start_addr.pfn(),
+                ));
+                assert(ord2 == vstd::std_specs::cmp::OrdSpec::cmp_spec(
+                    &area_j.range.start.pfn(),
+                    &start_addr.pfn(),
+                ));
+                // From is_sorted_spec
+                let cmp_result = vstd::std_specs::cmp::PartialOrdSpec::partial_cmp_spec(
+                    area_i,
+                    area_j,
+                );
+                assert(cmp_result == Some(Ordering::Less) || cmp_result == Some(Ordering::Equal));
+
+                lemma_cmp_pivot_monotonic(
+                    area_i.range.start.pfn(),
+                    area_j.range.start.pfn(),
+                    start_addr.pfn(),
+                );
+            }
+        }
     }
 }
 
