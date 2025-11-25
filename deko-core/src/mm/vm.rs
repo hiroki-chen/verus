@@ -3,15 +3,15 @@ use core::ops::{Range, RangeBounds};
 
 use deko_macros::DekoDebug;
 use deko_std::prelude::*;
+use deko_std::std_extra::cmp::{
+    comparator_consistent_spec, is_sorted_spec, lemma_cmp_pivot_monotonic,
+};
 use vstd::pervasive::arbitrary;
 use vstd::prelude::*;
 use vstd::std_specs::cmp::*;
 
 use super::frame_allocator::DekoAllocatorApi;
-use crate::collections::{
-    binary_search_by_spec, comparator_consistent_spec, is_sorted_spec, lemma_cmp_pivot_monotonic,
-    Vec,
-};
+use crate::collections::Vec;
 use crate::mm::paging::{PageTable, PageTablePermission, PteFlags, Pte_ALL_BITS};
 use crate::mm::vm;
 use crate::{kpanic_if, kunimplemented, vec};
@@ -109,6 +109,7 @@ impl WellFormed for VirtualMemory {
         &&& self.range.wf()
         &&& self.range.start@ % PAGE_SIZE == 0
         &&& self.range.end@ % PAGE_SIZE == 0
+        &&& self.range.end@ <= u64::MAX
         &&& self.flags.bits() & Pte_ALL_BITS == self.flags.bits()
         &&& self.flags.wf()
     }
@@ -308,7 +309,7 @@ impl VirtualMemoryRegion {
     )]
     #[verifier::spinoff_prover]
     pub fn insert_at(&mut self, vm_block: VirtualMemory) {
-        broadcast use crate::collections::group_vec_axioms;
+        broadcast use vstd::std_specs::vec::group_vec_axioms;
         broadcast use deko_std::address::lemma_aligned_vaddr_pfn_preserves_order;
 
         let size = vm_block.range.end.0 - vm_block.range.start.0;
@@ -387,7 +388,7 @@ impl VirtualMemoryRegion {
                 }
     )]
     pub fn remove(&mut self, vaddr: VirtAddr) -> Option<VirtualMemory> {
-        broadcast use crate::collections::group_vec_axioms;
+        broadcast use vstd::std_specs::vec::group_vec_axioms;
 
         let pfn = vaddr.pfn();
         let f = |mm: &VirtualMemory| -> (r: Ordering)
@@ -459,7 +460,7 @@ impl VirtualMemoryRegion {
         ensures
             comparator_consistent_spec(self.areas@, f),
     {
-        broadcast use crate::collections::group_vec_axioms;
+        broadcast use vstd::std_specs::vec::group_vec_axioms;
         broadcast use deko_std::address::lemma_aligned_vaddr_pfn_preserves_order;
 
         assert(comparator_consistent_spec(self.areas@, f)) by {
@@ -599,6 +600,24 @@ impl VirtualMemory {
             pgtable_perm.mapped_region(self.range),
     )]
     pub fn map(&self, ptr: DekoPPtr<PageTable>) {
+        let mut offset = 0;
+        let size = self.range.end.0 - self.range.start.0;
+
+        #[verus_spec(
+            invariant
+                offset <= size <= u64::MAX,
+                size == self.range.end@ - self.range.start@,
+                self.range.start@ % PAGE_SIZE == 0,
+                self.range.end@ % PAGE_SIZE == 0,
+                offset % PAGE_SIZE == 0,
+                PAGE_SIZE == 0x1000,
+            decreases
+                size - offset,
+        )]
+        while offset < size {
+            offset += PAGE_SIZE;
+        }
+
         kunimplemented!()
     }
 

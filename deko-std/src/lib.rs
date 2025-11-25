@@ -34,6 +34,7 @@ pub mod mem;
 pub mod misc;
 pub mod proofs;
 pub mod ptr;
+pub mod std_extra;
 pub mod sync;
 pub mod wf;
 
@@ -57,6 +58,7 @@ pub mod prelude {
     pub use crate::ptr::*;
     #[cfg(feature = "snp")]
     pub use crate::snp::*;
+    pub use crate::std_extra::*;
     pub use crate::sync::*;
     pub use crate::wf::*;
     pub use crate::*;

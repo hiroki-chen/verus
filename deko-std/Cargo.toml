@@ -18,15 +18,21 @@ lexical-core = { version = "1.0.6", default-features = false, features = [
 ] }
 paste = "1.0.15"
 ryu = { version = "1.0.20", features = ["no-panic"] }
+hashbrown = { version = "0.16.1", optional = true, default-features = false, features = [
+  "default-hasher",
+  "inline-more",
+  "allocator-api2",
+] }
 
 deko-macros = { workspace = true }
+allocator-api2 = { version = "=0.2.9", default-features = false, features = ["alloc"] }
 
 [package.metadata.verus]
 verify = true
 
 [features]
 default = []
-alloc = ["vstd/alloc"]
+alloc = ["vstd/alloc", "hashbrown"]
 logging = []
 snp = []
 tdx = []
