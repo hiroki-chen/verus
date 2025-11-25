@@ -245,6 +245,46 @@ impl PartialEqSpecImpl for bool {
     }
 }
 
+impl PartialEqSpecImpl for Ordering {
+    open spec fn obeys_eq_spec() -> bool {
+        true
+    }
+
+    open spec fn eq_spec(&self, other: &Ordering) -> bool {
+        *self == *other
+    }
+}
+
+impl PartialOrdSpecImpl for Ordering {
+    open spec fn obeys_partial_cmp_spec() -> bool {
+        true
+    }
+
+    open spec fn partial_cmp_spec(&self, other: &Ordering) -> Option<Ordering> {
+        match (*self, *other) {
+            (Ordering::Less, Ordering::Less) => Some(Ordering::Equal),
+            (Ordering::Less, Ordering::Equal) => Some(Ordering::Less),
+            (Ordering::Less, Ordering::Greater) => Some(Ordering::Less),
+            (Ordering::Equal, Ordering::Less) => Some(Ordering::Greater),
+            (Ordering::Equal, Ordering::Equal) => Some(Ordering::Equal),
+            (Ordering::Equal, Ordering::Greater) => Some(Ordering::Less),
+            (Ordering::Greater, Ordering::Less) => Some(Ordering::Greater),
+            (Ordering::Greater, Ordering::Equal) => Some(Ordering::Greater),
+            (Ordering::Greater, Ordering::Greater) => Some(Ordering::Equal),
+        }
+    }
+}
+
+impl OrdSpecImpl for Ordering {
+    open spec fn obeys_cmp_spec() -> bool {
+        true
+    }
+
+    open spec fn cmp_spec(&self, other: &Ordering) -> Ordering {
+        <Self as PartialOrdSpec>::partial_cmp_spec(self, other).unwrap()
+    }
+}
+
 pub assume_specification[ <bool as PartialEq<bool>>::eq ](x: &bool, y: &bool) -> bool;
 
 pub assume_specification[ <bool as PartialEq<bool>>::ne ](x: &bool, y: &bool) -> bool;
