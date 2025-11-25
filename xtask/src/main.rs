@@ -937,35 +937,18 @@ fn test_runner(suite: Option<String>, release: bool) -> Result<()> {
         println!("🚀 Executing test binary: {:?}", binary_path);
 
         let mut test_cmd = Command::new(&binary_path);
-        let test_output = test_cmd
-            .output()
+        // Let the test process inherit stdout/stderr so progress bars are visible
+        test_cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+
+        let test_status = test_cmd
+            .status()
             .with_context(|| format!("Failed to execute test binary: {:?}", binary_path))?;
 
-        if test_output.status.success() {
+        if test_status.success() {
             println!("✓ Test suite '{}' {}", suite, "PASSED".bright_green().bold());
-
-            // Print output for successful tests too
-            let stdout = String::from_utf8_lossy(&test_output.stdout);
-            if !stdout.is_empty() {
-                println!("{}", stdout);
-            }
         } else {
             println!("✗ Test suite '{}' {}", suite, "FAILED".bright_red().bold());
             all_passed = false;
-
-            // Print test output for debugging
-            let stdout = String::from_utf8_lossy(&test_output.stdout);
-            let stderr = String::from_utf8_lossy(&test_output.stderr);
-
-            if !stdout.is_empty() {
-                println!("{}", "TEST STDOUT:".bright_yellow());
-                println!("{}", stdout);
-            }
-
-            if !stderr.is_empty() {
-                println!("{}", "TEST STDERR:".bright_yellow());
-                println!("{}", stderr);
-            }
         }
     }
 

@@ -5,6 +5,7 @@ use std::sync::Once;
 use deko_core::mm::frame_allocator::DekoAllocatorApi;
 use deko_core::mm::DEKO_FRAME_ALLOCATOR;
 use proptest::prelude::*;
+use indicatif::{ProgressBar, ProgressStyle};
 
 static INIT: Once = Once::new();
 static mut HEAP_BUFFER: Option<Vec<u8>> = None;
@@ -103,6 +104,32 @@ fn main() {
 
 proptest! {
     fn test_vec_random_ops(ops in vec_ops_strategy(any::<i32>(), 10..200)) {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        static mut PROGRESS_BAR: Option<ProgressBar> = None;
+        static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+        // Initialize progress bar once
+        INIT.call_once(|| {
+            let pb = ProgressBar::new(256);  // Default proptest cases
+            pb.set_style(ProgressStyle::with_template(
+                "[{bar:40.green/blue}] {pos:>7}/{len:7} Vector random ops {msg}"
+            ).unwrap().progress_chars("##-"));
+            pb.set_message("Running...");
+            unsafe { PROGRESS_BAR = Some(pb); }
+        });
+
+        // Increment counter and update progress
+        let current = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        unsafe {
+            if let Some(ref pb) = PROGRESS_BAR {
+                pb.set_position(current as u64);
+                if current >= 255 {
+                    pb.finish_with_message("✓ Complete");
+                }
+            }
+        }
+
         setup_allocator();
 
         let mut v_deko = Vec::<i32, _>::new_in(DekoAllocatorApi {});

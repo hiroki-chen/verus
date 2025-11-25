@@ -20,6 +20,9 @@
 use deko_std::mem::{DekoHeap, DekoHeapPredicate, Heap};
 use proptest::prelude::*;
 use vstd::prelude::*;
+use indicatif::{ProgressBar, ProgressStyle};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 // Strategy for generating allocation sizes (powers of 2, typical for buddy)
 fn alloc_size_strategy() -> impl Strategy<Value = u64> {
@@ -109,6 +112,32 @@ proptest! {
     })]
 
     fn test_random_alloc_free(ops in alloc_ops_strategy()) {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        static mut PROGRESS_BAR: Option<ProgressBar> = None;
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+        // Initialize progress bar once
+        INIT.call_once(|| {
+            let pb = ProgressBar::new(10000);
+            pb.set_style(ProgressStyle::with_template(
+                "[{bar:40.cyan/blue}] {pos:>7}/{len:7} Random alloc/free tests {msg}"
+            ).unwrap().progress_chars("##-"));
+            pb.set_message("Running...");
+            unsafe { PROGRESS_BAR = Some(pb); }
+        });
+
+        // Increment counter and update progress
+        let current = COUNTER.fetch_add(1, Ordering::Relaxed);
+        unsafe {
+            if let Some(ref pb) = PROGRESS_BAR {
+                pb.set_position(current as u64);
+                if current == 9999 {
+                    pb.finish_with_message("✓ Complete");
+                }
+            }
+        }
+
         const HEAP_SIZE: usize = 0x1000000; // 16MB heap
         const HEAP_ALIGN: usize = 0x10000;  // 64KB alignment (typical page size)
 
@@ -164,6 +193,32 @@ proptest! {
     }
 
     fn test_no_overlap(ops in alloc_ops_strategy()) {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        static mut PROGRESS_BAR: Option<ProgressBar> = None;
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+        // Initialize progress bar once
+        INIT.call_once(|| {
+            let pb = ProgressBar::new(10000);
+            pb.set_style(ProgressStyle::with_template(
+                "[{bar:40.yellow/blue}] {pos:>7}/{len:7} No overlap verification {msg}"
+            ).unwrap().progress_chars("##-"));
+            pb.set_message("Running...");
+            unsafe { PROGRESS_BAR = Some(pb); }
+        });
+
+        // Increment counter and update progress
+        let current = COUNTER.fetch_add(1, Ordering::Relaxed);
+        unsafe {
+            if let Some(ref pb) = PROGRESS_BAR {
+                pb.set_position(current as u64);
+                if current == 9999 {
+                    pb.finish_with_message("✓ Complete");
+                }
+            }
+        }
+
         const HEAP_SIZE: usize = 0x2000000; // 32MB heap for overlap test
         const HEAP_ALIGN: usize = 0x10000;  // 64KB alignment
 
@@ -213,6 +268,32 @@ proptest! {
         size in alloc_size_strategy(),
         align in align_strategy(),
     ) {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        static mut PROGRESS_BAR: Option<ProgressBar> = None;
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+        // Initialize progress bar once (smaller case count for parameterized tests)
+        INIT.call_once(|| {
+            let pb = ProgressBar::new(360); // 6 sizes * 6 aligns * 10 iterations 
+            pb.set_style(ProgressStyle::with_template(
+                "[{bar:40.green/blue}] {pos:>7}/{len:7} Memory reuse patterns {msg}"
+            ).unwrap().progress_chars("##-"));
+            pb.set_message("Running...");
+            unsafe { PROGRESS_BAR = Some(pb); }
+        });
+
+        // Increment counter and update progress
+        let current = COUNTER.fetch_add(1, Ordering::Relaxed);
+        unsafe {
+            if let Some(ref pb) = PROGRESS_BAR {
+                pb.set_position(current as u64);
+                if current >= 359 {
+                    pb.finish_with_message("✓ Complete");
+                }
+            }
+        }
+
         const HEAP_SIZE: usize = 0x200000;
         const HEAP_ALIGN: usize = 0x10000;
 
@@ -242,6 +323,32 @@ proptest! {
     }
 
     fn test_out_of_memory(_ in alloc_ops_strategy()) {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        static mut PROGRESS_BAR: Option<ProgressBar> = None;
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+        // Initialize progress bar once
+        INIT.call_once(|| {
+            let pb = ProgressBar::new(10000);
+            pb.set_style(ProgressStyle::with_template(
+                "[{bar:40.red/blue}] {pos:>7}/{len:7} Out of memory tests {msg}"
+            ).unwrap().progress_chars("##-"));
+            pb.set_message("Running...");
+            unsafe { PROGRESS_BAR = Some(pb); }
+        });
+
+        // Increment counter and update progress
+        let current = COUNTER.fetch_add(1, Ordering::Relaxed);
+        unsafe {
+            if let Some(ref pb) = PROGRESS_BAR {
+                pb.set_position(current as u64);
+                if current == 9999 {
+                    pb.finish_with_message("✓ Complete");
+                }
+            }
+        }
+
         const HEAP_SIZE: usize = 0x10000; // Small heap
         const HEAP_ALIGN: usize = 0x10000;
 
@@ -266,6 +373,32 @@ proptest! {
     }
 
     fn test_fragmentation(_ in alloc_ops_strategy()) {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        static mut PROGRESS_BAR: Option<ProgressBar> = None;
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+        // Initialize progress bar once
+        INIT.call_once(|| {
+            let pb = ProgressBar::new(10000);
+            pb.set_style(ProgressStyle::with_template(
+                "[{bar:40.magenta/blue}] {pos:>7}/{len:7} Fragmentation tests {msg}"
+            ).unwrap().progress_chars("##-"));
+            pb.set_message("Running...");
+            unsafe { PROGRESS_BAR = Some(pb); }
+        });
+
+        // Increment counter and update progress
+        let current = COUNTER.fetch_add(1, Ordering::Relaxed);
+        unsafe {
+            if let Some(ref pb) = PROGRESS_BAR {
+                pb.set_position(current as u64);
+                if current == 9999 {
+                    pb.finish_with_message("✓ Complete");
+                }
+            }
+        }
+
         const HEAP_SIZE: usize = 0x100000;
         const HEAP_ALIGN: usize = 0x10000;
 

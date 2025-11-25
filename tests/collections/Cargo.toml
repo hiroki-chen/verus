@@ -9,3 +9,4 @@ vstd = { git = "https://github.com/hiroki-chen/verus.git", default-features = fa
   "alloc",
 ] }
 proptest = "1.9.0"
+indicatif = "0.17.8"

@@ -127,6 +127,7 @@ pub broadcast proof fn lemma_aligned_vaddr_pfn_preserves_order(lhs: VirtAddr, rh
     ensures
         #![trigger lhs.pfn(), rhs.pfn()]
         lhs@ <= rhs@ ==> lhs.pfn() <= rhs.pfn(),
+        lhs@ > rhs@ ==> lhs.pfn() > rhs.pfn(),
 {
     if lhs@ <= rhs@ {
         let lhs = lhs@;
@@ -137,6 +138,17 @@ pub broadcast proof fn lemma_aligned_vaddr_pfn_preserves_order(lhs: VirtAddr, rh
                 lhs % PAGE_SIZE == 0,
                 rhs % PAGE_SIZE == 0,
                 lhs <= rhs,
+        ;
+    }
+    if lhs@ > rhs@ {
+        let lhs = lhs@;
+        let rhs = rhs@;
+
+        assert(lhs >> 12 > rhs >> 12) by (bit_vector)
+            requires
+                lhs % PAGE_SIZE == 0,
+                rhs % PAGE_SIZE == 0,
+                lhs > rhs,
         ;
     }
 }

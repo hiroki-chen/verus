@@ -3,6 +3,7 @@ use core::ops::{Range, RangeBounds};
 
 use deko_macros::DekoDebug;
 use deko_std::prelude::*;
+use vstd::pervasive::arbitrary;
 use vstd::prelude::*;
 use vstd::std_specs::cmp::*;
 
@@ -12,7 +13,8 @@ use crate::collections::{
     Vec,
 };
 use crate::mm::paging::{PageTable, PageTablePermission, PteFlags, Pte_ALL_BITS};
-use crate::{kunimplemented, vec};
+use crate::mm::vm;
+use crate::{kpanic_if, kunimplemented, vec};
 
 verus! {
 
@@ -30,6 +32,8 @@ pub const VMR_NAME_MAX_LEN: usize = 32;
 /// to write to it.
 #[derive(DekoDebug)]
 pub struct VirtualMemoryRegion {
+    #[deko(skip)]
+    pub id: Ghost<int>,
     /// Start address of this range as virtual PFN (VirtAddr >> PAGE_SHIFT).
     pub start_pfn: u64,
     /// End address of this range as virtual PFN (VirtAddr >> PAGE_SHIFT)
@@ -50,6 +54,7 @@ pub struct VirtualMemoryRegion {
 /// Tracks the corresponding permissions for a virtual memory region if there is
 /// a need to read/modify this struct.
 pub tracked struct VirtualMemoryRegionPermission {
+    pub id: int,
     /// A collection of page table permissions for each top-level page table.
     pub pgtable_perm: PageTablePermission,
     /// A list of virtual memory permissions managed by this region.
@@ -71,7 +76,11 @@ pub struct VirtualMemory {
 
 /// Tracks the corresponding permissions for a virtual memory if there is
 /// a need to read/modify this struct.
-pub tracked struct VirtualMemoryPermission {}
+pub tracked struct VirtualMemoryPermission {
+    pub parent_id: int,
+    /// Ghost state: The virtual address range this permission governs
+    pub range: Range<VirtAddr>,
+}
 
 impl WellFormed for VirtualMemoryRegion {
     open spec fn wf(&self) -> bool {
@@ -159,6 +168,10 @@ impl VirtualMemoryRegion {
         &&& perm.pgtable_perm.wf()
         &&& perm.pgtable_perm.pgtable_perm.pptr() == self.pgtable@
         &&& perm.vm_perms@.len() == self.areas@.len()
+        &&& forall|i: int|
+            0 <= i < self.areas@.len() ==> #[trigger] self.areas@[i].wf_with(&perm.vm_perms@[i])
+        &&& forall|i: int|
+            0 <= i < self.areas@.len() ==> #[trigger] perm.vm_perms@[i].parent_id == self.id
     }
 
     pub open spec fn pgtable_consistent(&self) -> bool {
@@ -170,10 +183,36 @@ impl VirtualMemoryRegion {
         &&& vm_block.range.end@ <= self.end_pfn * PAGE_SIZE
     }
 
-    pub open spec fn nonoverlapping_block(&self, vm_block: &VirtualMemory) -> bool {
+    pub open spec fn disjoint_blocks(&self, vm_block: &VirtualMemory) -> bool {
         forall|i: int|
             #![trigger self.areas@[i]]
-            0 <= i < self.areas@.len() as int ==> { !self.areas@[i].overlap_with_spec(vm_block) }
+            0 <= i < self.areas@.len() as int ==> { self.areas@[i].disjoint_with(vm_block) }
+    }
+
+    pub proof fn lemma_disjoint_blocks_implies_ne(&self, vm_block: &VirtualMemory)
+        requires
+            self.wf(),
+            self.disjoint_blocks(vm_block),
+            vm_block.wf(),
+            vm_block.range.start@ % PAGE_SIZE == 0,
+            vm_block.range.end@ % PAGE_SIZE == 0,
+        ensures
+            forall|i: int|
+                #![trigger self.areas@[i]]
+                0 <= i < self.areas@.len() as int ==> self.areas@[i].range.start.pfn()
+                    != vm_block.range.start.pfn(),
+    {
+        broadcast use deko_std::address::lemma_aligned_vaddr_pfn_preserves_order;
+
+        assert forall|i: int|
+            #![trigger self.areas@[i]]
+            0 <= i < self.areas@.len() as int implies self.areas@[i].range.start.pfn()
+            != vm_block.range.start.pfn() by {
+            assert(!self.areas@[i].overlap_with_spec(vm_block));
+            assert(self.areas@[i].range.start@ >= vm_block.range.end@ || self.areas@[i].range.end@
+                <= vm_block.range.start@);
+            assert(self.areas@[i].wf() && vm_block.wf());
+        }
     }
 
     /// Checks if a given `vm_block` is compatible within this virtual memory region.
@@ -237,6 +276,7 @@ impl VirtualMemoryRegion {
         }
 
         Self {
+            id: Ghost(arbitrary()),
             start_pfn: start_addr.pfn(),
             end_pfn: end_addr.pfn(),
             pt_flags,
@@ -259,12 +299,18 @@ impl VirtualMemoryRegion {
             old(self).wf(),
             old(self).wf_with(old(perm)),
             old(self).compatible_spec(&vm_block),
-            old(self).nonoverlapping_block(&vm_block),
+            old(self).disjoint_blocks(&vm_block),
             vm_block.wf(),
+            vm_block.wf_with(&vm_block_perm),
+            vm_block_perm.parent_id == old(self).id,
         ensures
             self.wf_with(perm),
     )]
+    #[verifier::spinoff_prover]
     pub fn insert_at(&mut self, vm_block: VirtualMemory) {
+        broadcast use crate::collections::group_vec_axioms;
+        broadcast use deko_std::address::lemma_aligned_vaddr_pfn_preserves_order;
+
         let size = vm_block.range.end.0 - vm_block.range.start.0;
         let start_addr = &vm_block.range.start;
         let end_addr = &vm_block.range.end;
@@ -288,11 +334,37 @@ impl VirtualMemoryRegion {
 
         proof {
             assert(idx.is_err()) by {
-                self.lemma_areas_non_overlap_returns_err(*start_addr, f, idx);
+                self.lemma_disjoint_blocks_implies_ne(&vm_block);
             }
         }
 
-        kunimplemented!()
+        // Verified, but to ensure safety at runtime as well.
+        kpanic_if!(
+            core::intrinsics::unlikely(idx.is_ok()),
+            "Trying to inserting overlapping virtual memory block into region",
+        );
+
+        let idx_unwrapped = idx.unwrap_err();
+        proof {
+            if idx_unwrapped < self.areas@.len() - 1 {
+                assert(vm_block.range.end@ <= self.areas@[idx_unwrapped + 1].range.start@) by {
+                    if vm_block.range.start@ >= self.areas@[idx_unwrapped + 1].range.end@ {
+                        assert(self.areas@[idx_unwrapped + 1].range.end@ > self.areas@[idx_unwrapped
+                            + 1].range.start@);
+                        assert(vm_block.range.start@ > self.areas@[idx_unwrapped + 1].range.start@);
+                    }
+                }
+            }
+        }
+
+        // We first map the new block.
+        // map_vm_block(self.pgtable, &vm_block, vm_block_perm);
+        // Finally, we can insert the new block.
+        self.areas.insert(idx_unwrapped, vm_block);
+        proof {
+            perm.vm_perms = Ghost(perm.vm_perms@.insert(idx_unwrapped as int, vm_block_perm));
+        }
+
     }
 
     /// Removes the mapping from a given base address from the region.
@@ -301,12 +373,18 @@ impl VirtualMemoryRegion {
     #[verus_spec(r =>
         with
             Tracked(perm): Tracked<&mut VirtualMemoryRegionPermission>,
-                -> vm_perm: Tracked<Option<VirtualMemoryPermission>>,
+                -> vm_perm: Ghost<Option<VirtualMemoryPermission>>,
             requires
                 old(self).wf(),
                 old(self).wf_with(old(perm)),
                 vaddr.wf(),
                 vaddr@ >= VADDR_UPPER_MASK,
+            ensures
+                self.wf_with(perm),
+                r matches Some(vm) ==> {
+                    &&& vm.wf()
+                    &&& vm_perm@ matches Some(vm_perm_val) && vm.wf_with(&vm_perm_val) && vm_perm_val.parent_id == self.id
+                }
     )]
     pub fn remove(&mut self, vaddr: VirtAddr) -> Option<VirtualMemory> {
         broadcast use crate::collections::group_vec_axioms;
@@ -327,16 +405,25 @@ impl VirtualMemoryRegion {
             Ok(idx) => {
                 let vm = self.areas.remove(idx);
 
-                // Then we unmap it.
+                // Then we unmap it; remove it.
                 // #[verus_spec(with Tracked(&mut perm))]
                 // vm.unmap(self.pgtable);
 
+                let ghost vm_perm = perm.vm_perms@.index(idx as int);
+
+                proof {
+                    // remove it.
+                    perm.vm_perms = Ghost(perm.vm_perms@.remove(idx as int));
+                }
+
+                proof_with!(|= Ghost(Some(vm_perm)));
                 Some(vm)
             },
-            Err(_) => None,
-        };
-
-        kunimplemented!()
+            Err(_) => {
+                proof_with!(|= Ghost(None));
+                None
+            },
+        }
     }
 
     /// Notify the region that we have encountered a page fault at the given address.
@@ -349,55 +436,6 @@ impl VirtualMemoryRegion {
     )]
     pub fn handle_page_fault(&self, vaddr: VirtAddr) -> bool {
         kunimplemented!()
-    }
-
-    /// Lemma proving that when areas are non-overlapping and we search for a new address,
-    /// the binary search will return an error (indicating the address is not found).
-    pub proof fn lemma_areas_non_overlap_returns_err<F>(
-        &self,
-        start_addr: VirtAddr,
-        f: F,
-        r: Result<usize, usize>,
-    ) where F: FnMut(&VirtualMemory) -> Ordering
-        requires
-            self.wf(),
-            is_sorted_spec(self.areas@),
-            forall|i: int|
-                #![trigger self.areas@[i]]
-                0 <= i < self.areas@.len() ==> self.areas@[i].wf(),
-            forall|i: int, r: Ordering|
-                #![trigger self.areas@[i], f.ensures((&self.areas@[i],), r)]
-                0 <= i < self.areas@.len() && f.ensures((&self.areas@[i],), r) ==> r
-                    == vstd::std_specs::cmp::OrdSpec::cmp_spec(
-                    &self.areas@[i].range.start.pfn(),
-                    &start_addr.pfn(),
-                ),
-            binary_search_by_spec(self.areas@, f, r),
-        ensures
-            r.is_err(),
-    {
-        broadcast use crate::collections::group_vec_axioms;
-        broadcast use deko_std::address::lemma_aligned_vaddr_pfn_preserves_order;
-        // The proof goes by contradiction: assume r.is_ok(), then we have found an index
-        // where the area overlaps with the given start_addr that contradicts the non-overlapping
-        // property.
-
-        if r.is_ok() {
-            let idx = r.unwrap();
-            assert(0 <= idx < self.areas@.len());
-            // From binary_search_by_spec postcondition for Ok case:
-            // There exists ord where f.ensures((&self.areas@[idx],), ord) && ord == Equal
-            // We know what ord SHOULD be from the comparator spec
-            let computed_ord = vstd::std_specs::cmp::OrdSpec::cmp_spec(
-                &self.areas@[idx as int].range.start.pfn(),
-                &start_addr.pfn(),
-            );
-
-            // The comparator spec says f.ensures this
-            assert(f.ensures((&self.areas@[idx as int],), computed_ord));
-
-            assert(false);
-        }
     }
 
     /// Lemma to show that the comparator used in binary search is consistent with
@@ -461,7 +499,9 @@ impl VirtualMemoryRegion {
 
 #[verus_verify]
 impl VirtualMemory {
-    pub uninterp spec fn parent_vmm_region(&self) -> VirtualMemoryRegion;
+    pub open spec fn wf_with(&self, perm: &VirtualMemoryPermission) -> bool {
+        &&& self.range == perm.range
+    }
 
     pub open spec fn contains_addr_spec(&self, addr: VirtAddr) -> bool {
         self.range.start@ <= addr@ < self.range.end@
@@ -473,8 +513,11 @@ impl VirtualMemory {
     }
 
     pub open spec fn overlap_with_spec(&self, other: &VirtualMemory) -> bool {
-        &&& self.range.start@ < other.range.end@
-        &&& self.range.end@ > other.range.start@
+        !self.disjoint_with_spec(other)
+    }
+
+    pub open spec fn disjoint_with_spec(&self, other: &VirtualMemory) -> bool {
+        self.range.end@ <= other.range.start@ || self.range.start@ >= other.range.end@
     }
 
     /// Checks if a given `vaddr` is contained within this virtual memory region.
@@ -506,6 +549,11 @@ impl VirtualMemory {
     }
 
     /// Checks if the range is overlapped with another virtual memory.
+    ///
+    /// [       ]
+    ///     [        ]
+    /// [       ]
+    ///    []
     #[inline]
     #[verus_spec(r =>
         requires
@@ -516,20 +564,23 @@ impl VirtualMemory {
     )]
     #[verifier::when_used_as_spec(overlap_with_spec)]
     pub fn overlap_with(&self, other: &VirtualMemory) -> bool {
-        self.range.start.0 < other.range.end.0 && self.range.end.0 > other.range.start.0
+        !self.disjoint_with(other)
     }
 
     /// Checks if two virtual memory regions are disjoint.
+    ///
+    /// [     ] [      ]
     #[inline]
     #[verus_spec(r =>
         requires
             self.wf(),
             other.wf(),
         returns
-            !self.overlap_with_spec(other),
+            self.disjoint_with_spec(other),
     )]
+    #[verifier::when_used_as_spec(disjoint_with_spec)]
     pub fn disjoint_with(&self, other: &VirtualMemory) -> bool {
-        !self.overlap_with(other)
+        self.range.end.0 <= other.range.start.0 || self.range.start.0 >= other.range.end.0
     }
 
     /// Maps this virtual memory region into the given page table.
@@ -539,7 +590,8 @@ impl VirtualMemory {
             Tracked(pgtable_perm): Tracked<&mut PageTablePermission>,
         requires
             self.wf(),
-            ptr@ == self.parent_vmm_region().pgtable@,
+            self.wf_with(old(region_perm)),
+            ptr@ == old(pgtable_perm).pgtable_perm.pptr(),
             old(pgtable_perm).wf(),
             !old(pgtable_perm).mapped_region(self.range),
         ensures
@@ -557,7 +609,8 @@ impl VirtualMemory {
             Tracked(pgtable_perm): Tracked<&mut PageTablePermission>,
         requires
             self.wf(),
-            ptr@ == self.parent_vmm_region().pgtable@,
+            self.wf_with(old(region_perm)),
+            ptr@ == old(pgtable_perm).pgtable_perm.pptr(),
             old(pgtable_perm).wf(),
             old(pgtable_perm).mapped_region(self.range),
         ensures

@@ -121,6 +121,7 @@ pub assume_specification<T: Ord>[ <[T]>::binary_search ](s: &[T], x: &T) -> (r: 
         binary_search_spec(s@, x, r),
 ;
 
+/// Note that this function is used in pre-condition so we keep `f.ensures ==> x`.
 pub open spec fn comparator_consistent_spec<'a, T: 'a, F>(s: vstd::seq::Seq<T>, f: F) -> bool where
     F: FnMut(&'a T) -> Ordering,
  {
@@ -138,16 +139,13 @@ pub open spec fn binary_search_by_spec<'a, T: 'a, F>(
     match r {
         Ok(idx) => {
             &&& 0 <= idx < s.len()
-            &&& forall|ord: Ordering| f.ensures((&s[idx as int],), ord) ==> ord == Ordering::Equal
+            &&& f.ensures((&s[idx as int],), Ordering::Equal)
         },
         Err(idx) => {
             &&& 0 <= idx <= s.len()
-            &&& forall|i: int, ord: Ordering|
-                #![trigger s[i], f.ensures((&s[i],), ord)]
-                0 <= i < idx && f.ensures((&s[i],), ord) ==> ord != Ordering::Greater
-            &&& forall|i: int, ord: Ordering|
-                #![trigger s[i], f.ensures((&s[i],), ord)]
-                idx <= i < s.len() && f.ensures((&s[i],), ord) ==> ord != Ordering::Less
+            &&& forall|i: int| 0 <= i < idx ==> f.ensures((#[trigger] &s[i],), Ordering::Less)
+            &&& forall|i: int|
+                idx <= i < s.len() ==> f.ensures((#[trigger] &s[i],), Ordering::Greater)
         },
     }
 }
