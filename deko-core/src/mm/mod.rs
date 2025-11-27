@@ -134,13 +134,23 @@ pub fn virt_to_phys(
         vaddr.wf(),
     ensures
         paddr.wf(),
-        pgtable_perm.virt_to_frame_spec(vaddr) matches Some(frame) && paddr == frame.address_spec(
+        pgtable_perm.virt_to_frame_spec(vaddr) matches Some(frame) && paddr@ == frame.address_spec(
             private_bit,
             shared_bit,
-        ),
+        )@ & !0xfff,
+        paddr@ % PAGE_SIZE == 0,
 {
     match PageTable::virt_to_frame(vaddr, private_bit, Tracked(pgtable_perm)) {
-        Some(v) => v.address(private_bit, shared_bit),
+        Some(v) => {
+            let v = v.address(private_bit, shared_bit);
+
+            proof {
+                let v = v@;
+                assert((v & !0xfff) % PAGE_SIZE == 0) by (bit_vector);
+            }
+
+            PhysAddr(v.0 & !0xfff)
+        },
         None => {
             crate::die("virt_to_phys: address not mapped");
         },

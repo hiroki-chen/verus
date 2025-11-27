@@ -213,6 +213,26 @@ impl VirtualMemoryRegion {
             0 <= i < self.areas@.len() as int ==> { self.areas@[i].disjoint_with(vm_block) }
     }
 
+    pub open spec fn new_spec(
+        start_addr: VirtAddr,
+        end_addr: VirtAddr,
+        pt_flags: PteFlags,
+        pgtable: DekoPPtr<PageTable>,
+        ms: MappingSpace,
+        private_bit: u64,
+        shared_bit: u64,
+        s: Self,
+    ) -> bool {
+        &&& s.start_pfn == start_addr.pfn()@
+        &&& s.end_pfn == end_addr.pfn()@
+        &&& s.pt_flags == pt_flags
+        &&& s.areas@ == Seq::<VirtualMemory>::empty()
+        &&& s.pgtable == pgtable
+        &&& s.ms == ms
+        &&& s.private_bit == private_bit
+        &&& s.shared_bit == shared_bit
+    }
+
     pub proof fn lemma_disjoint_blocks_implies_ne(&self, vm_block: &VirtualMemory)
         requires
             self.wf(),
@@ -223,15 +243,15 @@ impl VirtualMemoryRegion {
         ensures
             forall|i: int|
                 #![trigger self.areas@[i]]
-                0 <= i < self.areas@.len() as int ==> self.areas@[i].range.start.pfn()
-                    != vm_block.range.start.pfn(),
+                0 <= i < self.areas@.len() as int ==> self.areas@[i].range.start.pfn()@
+                    != vm_block.range.start.pfn()@,
     {
         broadcast use deko_std::address::lemma_aligned_vaddr_pfn_preserves_order;
 
         assert forall|i: int|
             #![trigger self.areas@[i]]
-            0 <= i < self.areas@.len() as int implies self.areas@[i].range.start.pfn()
-            != vm_block.range.start.pfn() by {
+            0 <= i < self.areas@.len() as int implies self.areas@[i].range.start.pfn()@
+            != vm_block.range.start.pfn()@ by {
             assert(!self.areas@[i].overlap_with_spec(vm_block));
             assert(self.areas@[i].range.start@ >= vm_block.range.end@ || self.areas@[i].range.end@
                 <= vm_block.range.start@);
@@ -263,6 +283,16 @@ impl VirtualMemoryRegion {
         ensures
             r.wf(),
             r.wf_with(&vmr_perm@),
+            Self::new_spec(
+                start_addr,
+                end_addr,
+                pt_flags,
+                pgtable,
+                ms,
+                private_bit,
+                shared_bit,
+                r,
+            ),
     )]
     pub fn new(
         start_addr: VirtAddr,
@@ -276,8 +306,8 @@ impl VirtualMemoryRegion {
         proof {
             let start = start_addr@;
             let end = end_addr@;
-            let start_pfn = start_addr.pfn();
-            let end_pfn = end_addr.pfn();
+            let start_pfn = start_addr.pfn()@;
+            let end_pfn = end_addr.pfn()@;
 
             assert(start_pfn < end_pfn) by (bit_vector)
                 requires
@@ -318,8 +348,8 @@ impl VirtualMemoryRegion {
         );
         Self {
             id: Ghost(id),
-            start_pfn: start_addr.pfn(),
-            end_pfn: end_addr.pfn(),
+            start_pfn: start_addr.pfn().0,
+            end_pfn: end_addr.pfn().0,
             pt_flags,
             areas: vec![],
             pgtable,
@@ -365,10 +395,10 @@ impl VirtualMemoryRegion {
                 mm.wf(),
             ensures
                 r == vstd::std_specs::cmp::OrdSpec::cmp_spec(
-                    &mm.range.start.pfn(),
-                    &start_addr.pfn(),
+                    &mm.range.start.pfn()@,
+                    &start_addr.pfn()@,
                 ),
-            { mm.range.start.pfn().cmp(&start_addr.pfn()) };
+            { mm.range.start.pfn().0.cmp(&start_addr.pfn().0) };
 
         proof {
             self.lemma_areas_comparator_consistent(*start_addr, f);
@@ -439,8 +469,8 @@ impl VirtualMemoryRegion {
             requires
                 mm.wf(),
             ensures
-                r == vstd::std_specs::cmp::OrdSpec::cmp_spec(&mm.range.start.pfn(), &pfn),
-            { mm.range.start.pfn().cmp(&pfn) };
+                r == vstd::std_specs::cmp::OrdSpec::cmp_spec(&mm.range.start.pfn()@, &pfn@),
+            { mm.range.start.pfn().0.cmp(&pfn.0) };
 
         proof {
             self.lemma_areas_comparator_consistent(vaddr, f);
@@ -498,8 +528,8 @@ impl VirtualMemoryRegion {
                 #![trigger self.areas@[i], f.ensures((&self.areas@[i],), r)]
                 0 <= i < self.areas@.len() && f.ensures((&self.areas@[i],), r) ==> r
                     == vstd::std_specs::cmp::OrdSpec::cmp_spec(
-                    &self.areas@[i].range.start.pfn(),
-                    &start_addr.pfn(),
+                    &self.areas@[i].range.start.pfn()@,
+                    &start_addr.pfn()@,
                 ),
         ensures
             comparator_consistent_spec(self.areas@, f),
@@ -518,12 +548,12 @@ impl VirtualMemoryRegion {
                 let area_j = &self.areas@[j];
                 // From f's specification
                 assert(ord1 == vstd::std_specs::cmp::OrdSpec::cmp_spec(
-                    &area_i.range.start.pfn(),
-                    &start_addr.pfn(),
+                    &area_i.range.start.pfn()@,
+                    &start_addr.pfn()@,
                 ));
                 assert(ord2 == vstd::std_specs::cmp::OrdSpec::cmp_spec(
-                    &area_j.range.start.pfn(),
-                    &start_addr.pfn(),
+                    &area_j.range.start.pfn()@@,
+                    &start_addr.pfn()@@,
                 ));
                 // From is_sorted_spec
                 let cmp_result = vstd::std_specs::cmp::PartialOrdSpec::partial_cmp_spec(
@@ -533,9 +563,9 @@ impl VirtualMemoryRegion {
                 assert(cmp_result == Some(Ordering::Less) || cmp_result == Some(Ordering::Equal));
 
                 lemma_cmp_pivot_monotonic(
-                    area_i.range.start.pfn(),
-                    area_j.range.start.pfn(),
-                    start_addr.pfn(),
+                    area_i.range.start.pfn()@,
+                    area_j.range.start.pfn()@,
+                    start_addr.pfn()@,
                 );
             }
         }

@@ -126,8 +126,8 @@ pub broadcast proof fn lemma_aligned_vaddr_pfn_preserves_order(lhs: VirtAddr, rh
         rhs@ % PAGE_SIZE == 0,
     ensures
         #![trigger lhs.pfn(), rhs.pfn()]
-        lhs@ <= rhs@ ==> lhs.pfn() <= rhs.pfn(),
-        lhs@ > rhs@ ==> lhs.pfn() > rhs.pfn(),
+        lhs@ <= rhs@ ==> lhs.pfn()@ <= rhs.pfn()@,
+        lhs@ > rhs@ ==> lhs.pfn()@ > rhs.pfn()@,
 {
     if lhs@ <= rhs@ {
         let lhs = lhs@;
@@ -690,6 +690,49 @@ impl VirtAddr {
         ;
     }
 
+    pub broadcast proof fn lemma_page_shift_le_max(&self)
+        requires
+            self@ <= u64::MAX,
+        ensures
+            #[trigger] self@ >> 12 <= u64::MAX >> 12,
+    {
+        let v = self@;
+
+        assert(v >> 12 <= u64::MAX >> 12) by (bit_vector)
+            requires
+                v <= u64::MAX,
+        ;
+    }
+
+    pub broadcast proof fn lemma_page_size_eq_shifts(&self)
+        requires
+            self@ <= u64::MAX >> 12,
+        ensures
+            #[trigger] self@ * PAGE_SIZE == self@ << 12,
+    {
+        let v = self@;
+
+        assert(v * PAGE_SIZE == v << 12) by (bit_vector)
+            requires
+                v <= u64::MAX >> 12,
+        ;
+    }
+
+    pub broadcast proof fn lemma_pfn_roundtrip(&self)
+        requires
+            self.wf(),
+            self@ % PAGE_SIZE == 0,
+        ensures
+            #[trigger] self.pfn()@ << 12 == self@,
+    {
+        let v = self@;
+
+        assert(v >> 12 << 12 == v) by (bit_vector)
+            requires
+                v % PAGE_SIZE == 0,
+        ;
+    }
+
     /// Specification for canonical address creation.
     ///
     /// This specification function defines how a 64-bit value should be converted
@@ -721,8 +764,8 @@ impl VirtAddr {
         }
     }
 
-    pub open spec fn pfn_spec(&self) -> u64 {
-        self@ >> 12
+    pub open spec fn pfn_spec(&self) -> VirtAddr {
+        VirtAddr(self@ >> 12)
     }
 
     /// Creates a canonical virtual address from any 64-bit value.
@@ -769,13 +812,13 @@ impl VirtAddr {
 
     #[inline]
     #[verifier::when_used_as_spec(pfn_spec)]
-    pub fn pfn(&self) -> (r: u64)
+    pub const fn pfn(&self) -> (r: Self)
         requires
             self.wf(),
         ensures
             r == self.pfn_spec(),
     {
-        self.0 >> 12
+        VirtAddr(self.0 >> 12)
     }
 
     /// Specification for the primary constructor.

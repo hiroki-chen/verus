@@ -8,8 +8,8 @@ use deko_core::cpu::regs::{cr0_init, cr4_init, load_cr3};
 use deko_core::cpu::{DekoCpuCtx, DekoCpuCtxPermission, PERCPU_AREAS};
 use deko_core::elf::ElfFile;
 use deko_core::mm::paging::{
-    bit_not_in_addr_region, bit_not_overlapping, PageTable, PageTablePermission, PteFlags,
-    Pte_ALL_BITS, GLOBAL,
+    all_in_range_paddrs, bit_not_in_addr_region, bit_not_overlapping, index_at_level_spec,
+    PageTable, PageTablePath, PageTablePermission, PteFlags, Pte_ALL_BITS, GLOBAL, RECURSIVE_INDEX,
 };
 use deko_core::mm::vm::{VirtualMemory, VirtualMemoryPermission, VirtualMemoryRegion, VMR_GRANULE};
 use deko_core::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR};
@@ -46,6 +46,9 @@ fn setup_bsp_cpu(
 ) {
     broadcast use PteFlags::lemma_each_bit_is_valid;
     broadcast use PteFlags::lemma_from_bits_single;
+    broadcast use VirtAddr::lemma_page_size_eq_shifts;
+    broadcast use VirtAddr::lemma_page_shift_le_max;
+    broadcast use VirtAddr::lemma_pfn_roundtrip;
 
     let shared_area_ptr = {
         let read_handle = PERCPU_AREAS.acquire_read();
@@ -89,6 +92,8 @@ fn setup_bsp_cpu(
 
         assert(0xFFFFFF8000000000 as u64 % VMR_GRANULE == 0 && 0xFFFFFF0000000000 as u64
             % VMR_GRANULE == 0) by (bit_vector);
+        assert(0xFFFFFF8000000000 as u64 % PAGE_SIZE == 0 && 0xFFFFFF0000000000 as u64 % PAGE_SIZE
+            == 0) by (bit_vector);
         assert(cpu_flags.bits() & Pte_ALL_BITS == cpu_flags.bits() && cpu_self_flags.bits()
             & Pte_ALL_BITS == cpu_self_flags.bits()) by {
             bit_u64_and_auto();
@@ -108,18 +113,42 @@ fn setup_bsp_cpu(
 
     // Create a mapping for the CPU area itself.
     let vm_block_for_self = VirtualMemory {
-        range: cpu_start..cpu_end,
+        range: cpu_start..VirtAddr(cpu_start.0 + PAGE_SIZE),
         paddr,
         flags: cpu_self_flags,
     };
+
+    proof {
+        assert(vm_block_for_self.range.end@ % PAGE_SIZE == 0) by (compute);
+        assert(index_at_level_spec(3, VirtAddr(0xFFFFFF0000000000)) != RECURSIVE_INDEX)
+            by (compute);
+        assert(index_at_level_spec(3, VirtAddr(0xFFFFFF0000001000)) != RECURSIVE_INDEX)
+            by (compute);
+        assert forall|vaddr: VirtAddr|
+            #![auto]
+            vm_block_for_self.range.start@ <= vaddr@ < vm_block_for_self.range.end@ && vaddr@
+                % PAGE_SIZE == 0 ==> {
+                &&& PageTablePath::from_vaddr(vaddr).is_normalized()
+                &&& PageTablePath::from_vaddr(vaddr).wf()
+            } by {
+            broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
+
+        };
+
+        // Currently we do not have a good way for reasoning about this so
+        // mark these two assumptions here.
+        assume(paddr@ + PAGE_SIZE < 0x000f_ffff_ffff_f000);
+        assume(all_in_range_paddrs(&vm_region.ms, paddr, vm_block_for_self.range));
+    }
+
     let tracked vm_block_perm = VirtualMemoryPermission {
         parent_id: vm_region.id@,
-        range: cpu_start..cpu_end,
+        range: cpu_start..VirtAddr((cpu_start.0 + PAGE_SIZE) as u64),
     };
 
-    // TODO: There are some proofs. Insert into the region.
-    // proof_with!(Tracked(&mut vm_perm), Tracked(vm_block_perm));
-    // vm_region.insert(vm_block_for_self);
+    // There are some proofs. Insert into the region.
+    proof_with!(Tracked(&mut vm_perm), Tracked(vm_block_perm));
+    vm_region.insert(vm_block_for_self);
 
     let cpu_ctx = DekoCpuCtx::new(
         init_pgtable,
