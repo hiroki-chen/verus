@@ -310,6 +310,17 @@ impl<T: DekoDebug> DekoDebug for Option<T> {
     }
 }
 
+impl<T1: DekoDebug, T2: DekoDebug> DekoDebug for (T1, T2) {
+    #[verifier::external_body]
+    fn deko_debug<W: DekoWriter>(&self, writer: &W) {
+        writer.write_str("(");
+        self.0.deko_debug(writer);
+        writer.write_str(", ");
+        self.1.deko_debug(writer);
+        writer.write_str(")");
+    }
+}
+
 impl<T: DekoDebug, E: DekoDebug> DekoDebug for Result<T, E> {
     #[verifier::external_body]
     fn deko_debug<W: DekoWriter>(&self, writer: &W) {

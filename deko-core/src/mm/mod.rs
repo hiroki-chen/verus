@@ -8,6 +8,7 @@
 //! - A memory manager that manages the page tables and memory regions.
 pub mod frame_allocator;
 pub mod paging;
+pub mod stack;
 pub mod vm;
 
 use core::ops::Range;

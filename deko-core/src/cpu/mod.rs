@@ -18,6 +18,7 @@ use crate::mm::paging::{
     bit_not_in_addr_region, bit_not_overlapping, Mapping, Page, PageTable, PageTablePermission,
     PteFlags,
 };
+use crate::mm::stack::DekoKernelStack;
 use crate::mm::virt_to_phys;
 use crate::mm::vm::{VirtualMemoryRegion, VirtualMemoryRegionPermission};
 
@@ -283,6 +284,8 @@ pub struct DekoCpuCtx {
     shared_area: DekoPPtr<PerCpuShared>,
     /// The page table of this CPU.
     pgtable: DekoPPtr<PageTable>,
+    /// The stack for doing context switches.
+    ctx_switch_stack: Option<DekoPPtr<DekoKernelStack>>,
     /// The private bit of the PTE of this core.
     #[deko(hex)]
     private_bit: u64,
@@ -331,6 +334,7 @@ impl WellFormed for DekoCpuCtxPermission {
         &&& self.ptr_perm.is_init()
         &&& self.ptr_perm.wf()
         &&& self.ptr_perm.value().kernel_mapping().wf()
+        // &&& self.ptr_perm.value().ctx_switch_stack().wf()
         &&& self.pgtable_perm.wf()
         &&& self.pgtable_perm.pgtable_perm.pptr() == self.ptr_perm.value().pgtable_spec()@
         &&& self.pgtable_perm.mapping_space === self.ptr_perm.value().kernel_mapping_spec()
@@ -491,6 +495,14 @@ impl DekoCpuCtx {
         self.pgtable
     }
 
+    pub closed spec fn kernel_mapping_spec(&self) -> MappingSpace {
+        self.kernel_mapping
+    }
+
+    pub closed spec fn ctx_switch_stack_spec(&self) -> Option<DekoPPtr<DekoKernelStack>> {
+        self.ctx_switch_stack
+    }
+
     #[verifier::when_used_as_spec(shared_bit_spec)]
     #[inline]
     pub fn shared_bit(&self) -> (r: u64)
@@ -513,10 +525,6 @@ impl DekoCpuCtx {
         self.private_bit
     }
 
-    pub closed spec fn kernel_mapping_spec(&self) -> MappingSpace {
-        self.kernel_mapping
-    }
-
     #[verifier::when_used_as_spec(kernel_mapping_spec)]
     #[inline]
     pub fn kernel_mapping(&self) -> (r: MappingSpace)
@@ -537,6 +545,17 @@ impl DekoCpuCtx {
             r == self.vm_region_spec(),
     {
         &self.vm_region
+    }
+
+    #[verifier::when_used_as_spec(ctx_switch_stack_spec)]
+    #[inline]
+    pub fn ctx_switch_stack(&self) -> (r: Option<DekoPPtr<DekoKernelStack>>)
+        requires
+            self.wf(),
+        ensures
+            r == self.ctx_switch_stack_spec(),
+    {
+        self.ctx_switch_stack
     }
 
     #[inline]
@@ -565,6 +584,7 @@ impl DekoCpuCtx {
         private_bit: u64,
         kernel_mapping: MappingSpace,
         vm_region: Option<VirtualMemoryRegion>,
+        ctx_switch_stack: Option<DekoPPtr<DekoKernelStack>>,
     ) -> (r: Self)
         requires
             cpu_id < CPUID_MAX_COUNT as u64,
@@ -592,6 +612,7 @@ impl DekoCpuCtx {
             shared_bit,
             kernel_mapping,
             vm_region,
+            ctx_switch_stack,
         }
     }
 

@@ -11,6 +11,7 @@ use deko_core::mm::paging::{
     all_in_range_paddrs, bit_not_in_addr_region, bit_not_overlapping, index_at_level_spec,
     PageTable, PageTablePath, PageTablePermission, PteFlags, Pte_ALL_BITS, GLOBAL, RECURSIVE_INDEX,
 };
+use deko_core::mm::stack::DekoKernelStack;
 use deko_core::mm::vm::{VirtualMemory, VirtualMemoryPermission, VirtualMemoryRegion, VMR_GRANULE};
 use deko_core::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR};
 use deko_core::{get_igvm_params, kinfo, DekoKernelLaunchInfo};
@@ -62,19 +63,18 @@ fn setup_bsp_cpu(
     };
 
     // We first allocate a new CPU context for the BSP.
-    let (bsp_ctx_ptr, Tracked(ctx_perm)) = {
-        let (bsp_ctx_ptr, Tracked(ctx_perm)) = Box::<DekoCpuCtx>::new_zeroed(
-            &DEKO_FRAME_ALLOCATOR.0,
-        );
-        bsp_ctx_ptr.into_ptr(Tracked(ctx_perm))
-    };
+    let (bsp_ctx_ptr, Tracked(ctx_perm)) = boxed_ptr!(DekoCpuCtx, &DEKO_FRAME_ALLOCATOR.0);
+    let (ghcb, Tracked(ghch_perm)) = boxed_ptr!(GuestHostCommucationBlock, &DEKO_FRAME_ALLOCATOR.0);
 
-    let (ghcb, Tracked(ghch_perm)) = {
-        let (ghcb_ptr, Tracked(ghcb_perm)) = Box::<GuestHostCommucationBlock>::new_zeroed(
-            &DEKO_FRAME_ALLOCATOR.0,
-        );
-        ghcb_ptr.into_ptr(Tracked(ghcb_perm))
-    };
+    // Allocate a stack for performing the context switches,
+    let (ctx_switch_stack, Tracked(stack_perm)) =
+        boxed_ptr!(DekoKernelStack, &DEKO_FRAME_ALLOCATOR.0);
+    let ctx_switch_stack_paddr = virt_to_phys(
+        private_bit,
+        shared_bit,
+        ctx_switch_stack.into_vaddr(),
+        Tracked(&pgtable_perm),
+    );
 
     // First step is to map itself.
     let vaddr = bsp_ctx_ptr.into_vaddr();
@@ -141,14 +141,38 @@ fn setup_bsp_cpu(
         assume(all_in_range_paddrs(&vm_region.ms, paddr, vm_block_for_self.range));
     }
 
-    let tracked vm_block_perm = VirtualMemoryPermission {
+    let tracked vm_block_for_cpu_perm = VirtualMemoryPermission {
         parent_id: vm_region.id@,
         range: cpu_start..VirtAddr((cpu_start.0 + PAGE_SIZE) as u64),
     };
 
     // There are some proofs. Insert into the region.
-    proof_with!(Tracked(&mut vm_perm), Tracked(vm_block_perm));
+    proof_with!(Tracked(&mut vm_perm), Tracked(vm_block_for_cpu_perm));
     vm_region.insert(vm_block_for_self);
+
+    let cpu_stack = DekoKernelStack::new_with_size(0x8000, false);
+    let top_of_the_stack = VirtAddr(cpu_stack.stack_top() + CONTEXT_SWITCH_STACK.0);
+    // Create a new vm_block for the stack and then map it.
+    let vm_block_for_stack = VirtualMemory {
+        range: VirtAddr(top_of_the_stack.0 - 0x8000)..top_of_the_stack,
+        paddr: ctx_switch_stack_paddr,
+        flags: PteFlags::nx_kernel(),
+    };
+
+    let tracked vm_block_for_stack_perm = VirtualMemoryPermission {
+        parent_id: vm_region.id@,
+        range: VirtAddr((top_of_the_stack.0 - 0x8000) as u64)..top_of_the_stack,
+    };
+
+    proof {
+        assume(vm_block_for_stack.wf());
+        // The same proofs.
+        assume(vm_region.compatible_spec(&vm_block_for_stack));
+        assume(vm_region.disjoint_blocks(&vm_block_for_stack));
+    }
+
+    proof_with!(Tracked(&mut vm_perm), Tracked(vm_block_for_stack_perm));
+    vm_region.insert(vm_block_for_stack);
 
     let cpu_ctx = DekoCpuCtx::new(
         init_pgtable,
@@ -159,6 +183,7 @@ fn setup_bsp_cpu(
         private_bit,
         kernel_mapping,
         Some(vm_region),
+        Some(ctx_switch_stack),
     );
 
     // Finally we write the CPU context to the memory.

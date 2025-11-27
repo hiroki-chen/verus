@@ -378,6 +378,7 @@ impl VirtualMemoryRegion {
             vm_block.wf_with(&vm_block_perm),
             vm_block_perm.parent_id == old(self).id,
         ensures
+            self.wf(),
             self.wf_with(perm),
     )]
     #[verifier::spinoff_prover]
@@ -439,7 +440,6 @@ impl VirtualMemoryRegion {
         vm_block.map(self.pgtable, &self.ms, self.private_bit, self.shared_bit);
         // Finally, we can insert the new block.
         self.areas.insert(idx_unwrapped, vm_block);
-
     }
 
     /// Removes the mapping from a given base address from the region.
