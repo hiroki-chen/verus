@@ -322,11 +322,20 @@ pub const fn sign_extend(addr: u64) -> (r: u64)
 /// };
 /// let vaddr = mapping_space.phys_to_virt(paddr);
 /// ```
-#[derive(Clone, Copy, DekoDebug)]
+#[derive(Copy, DekoDebug)]
 #[repr(C)]
 pub struct MappingSpace {
     pub kernel: FixedAddressMappingRange,
     pub physmap: FixedAddressMappingRange,
+}
+
+impl Clone for MappingSpace {
+    fn clone(&self) -> (r: Self)
+        returns
+            *self,
+    {
+        *self
+    }
 }
 
 /// Predicate for verifying MappingSpace well-formedness.

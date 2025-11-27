@@ -431,6 +431,7 @@ deko_bitflags_quick! {
     nx_kernel: { PRESENT, WRITABLE, ACCESSED, DIRTY, NX },
     read_only: { PRESENT, USER, ACCESSED },
     kernel_code: { PRESENT, GLOBAL },
+    kernel_data: { PRESENT, GLOBAL, WRITABLE },
 }
 
 /// Another wrapper over DekoPPtr for handling page tables.

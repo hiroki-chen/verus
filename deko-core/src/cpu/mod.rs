@@ -19,6 +19,7 @@ use crate::mm::paging::{
     PteFlags,
 };
 use crate::mm::virt_to_phys;
+use crate::mm::vm::{VirtualMemoryRegion, VirtualMemoryRegionPermission};
 
 verus! {
 
@@ -290,6 +291,9 @@ pub struct DekoCpuCtx {
     shared_bit: u64,
     /// The high-level kernel mapping context for this CPU.
     kernel_mapping: MappingSpace,
+    /// The virtual memory region used for per-cpu area.
+    /// At stage2 this is [`Option::None`].
+    vm_region: Option<VirtualMemoryRegion>,
 }
 
 with_permission! {
@@ -297,6 +301,7 @@ with_permission! {
     ptr_perm: DekoPointsTo<DekoCpuCtx>,
     pgtable_perm: PageTablePermission,
     ghcb_perm: DekoPointsTo<GuestHostCommucationBlock>,
+    vm_region_perm: Option<VirtualMemoryRegionPermission>,
 }
 
 impl DekoCpuCtxPermission {
@@ -310,6 +315,13 @@ impl DekoCpuCtxPermission {
 
     pub open spec fn wf_with(&self, cpu_data: DekoPPtr<DekoCpuCtx>) -> bool {
         &&& self.ptr_perm.pptr() == cpu_data@
+        &&& self.ptr_perm.value().vm_region() matches Some(vm) ==> self.vm_region_perm matches Some(
+            perm,
+        ) && {
+            &&& perm.pgtable_perm.wf()
+            &&& perm.vm_perms.wf()
+            &&& vm.wf_with(&perm)
+        }
         &&& self.wf()
     }
 }
@@ -463,6 +475,10 @@ impl X86Tss {
 impl DekoCpuCtx {
     uninterp spec fn addr(&self) -> u64;
 
+    pub closed spec fn vm_region_spec(&self) -> &Option<VirtualMemoryRegion> {
+        &self.vm_region
+    }
+
     pub closed spec fn shared_bit_spec(&self) -> u64 {
         self.shared_bit
     }
@@ -512,6 +528,17 @@ impl DekoCpuCtx {
         self.kernel_mapping
     }
 
+    #[verifier::when_used_as_spec(vm_region_spec)]
+    #[inline]
+    pub fn vm_region(&self) -> (r: &Option<VirtualMemoryRegion>)
+        requires
+            self.wf(),
+        ensures
+            r == self.vm_region_spec(),
+    {
+        &self.vm_region
+    }
+
     #[inline]
     #[verifier::external_body]
     pub fn this_cpu() -> (r: (DekoPPtr<Self>, Tracked<DekoCpuCtxPermission>))
@@ -537,6 +564,7 @@ impl DekoCpuCtx {
         shared_bit: u64,
         private_bit: u64,
         kernel_mapping: MappingSpace,
+        vm_region: Option<VirtualMemoryRegion>,
     ) -> (r: Self)
         requires
             cpu_id < CPUID_MAX_COUNT as u64,
@@ -563,6 +591,7 @@ impl DekoCpuCtx {
             private_bit,
             shared_bit,
             kernel_mapping,
+            vm_region,
         }
     }
 

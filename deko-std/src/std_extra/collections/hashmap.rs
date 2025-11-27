@@ -2,11 +2,13 @@
 use core::hash::Hash;
 use core::ops::Deref;
 
+use deko_macros::DekoDebug;
 use hashbrown::DefaultHashBuilder;
 use vstd::map::Map;
 use vstd::prelude::*;
 
 use crate::std_extra::allocator::AllocatorWrapper;
+use crate::DekoDebug;
 
 verus! {
 
@@ -37,6 +39,27 @@ type HashMapInner<K, V, A> = hashbrown::HashMap<K, V, DefaultHashBuilder, Alloca
 #[verifier::reject_recursive_types(V)]
 #[verifier::reject_recursive_types(A)]
 pub struct HashMap<K, V, A: core::alloc::Allocator>(HashMapInner<K, V, A>);
+
+impl<K: DekoDebug, V: DekoDebug, A: core::alloc::Allocator> DekoDebug for HashMap<K, V, A> where
+    K: DekoDebug,
+    V: DekoDebug,
+ {
+    #[verifier::external_body]
+    fn deko_debug<W: crate::DekoWriter>(&self, writer: &W) {
+        writer.write_str("HashMap ");
+        writer.write_str("len = ");
+        self.0.len().deko_debug(writer);
+        writer.write_str(" {\n");
+        for (key, value) in self.0.iter() {
+            writer.write_str("K: ");
+            key.deko_debug(writer);
+            writer.write_str(", V: ");
+            value.deko_debug(writer);
+            writer.write_str("\n");
+        }
+        writer.write_str("}");
+    }
+}
 
 impl<K, VV, A: core::alloc::Allocator> View for HashMap<K, VV, A> {
     type V = Map<K, VV>;
@@ -79,11 +102,21 @@ impl<K: Eq + Hash, V, A: core::alloc::Allocator> HashMap<K, V, A> {
     #[verifier::external_body]
     #[verus_spec(r =>
         ensures
-            self@ =~= old(self)@.remove(key),
-            r == old(self)@.get(key),
+            self@ =~= old(self)@.remove(*key),
+            r == old(self)@.get(*key),
     )]
     pub fn remove(&mut self, key: &K) -> Option<V> {
         self.0.remove(key)
+    }
+
+    #[inline]
+    #[verifier::external_body]
+    #[verus_spec(r =>
+        ensures
+            r == self@.len(),
+    )]
+    pub fn len(&self) -> usize {
+        self.0.len()
     }
 }
 

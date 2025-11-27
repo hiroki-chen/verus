@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![allow(improper_ctypes_definitions)]
 #![feature(proc_macro_hygiene)]
 
 use deko_core::cpu::ctx::{DekoCtx, DekoCtxPermission};
@@ -10,6 +11,7 @@ core::arch::global_asm!(include_str!("../stage2.S"), options(att_syntax));
 
 verus! {
 
+#[allow(unreachable_code)]
 #[verifier::external]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
@@ -31,7 +33,6 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 /// The parameter `ctx` is obtained from the assembly code where we pass the address
 /// from the `.data` section to here.
 #[no_mangle]
-#[allow(improper_ctypes)]
 #[verifier::external_body]
 #[verus_spec(r =>
     with

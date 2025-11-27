@@ -365,6 +365,7 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
         ctx.borrow(Tracked(&ctx_perm.deko_ctx_ptr_perm)).shared_bit,
         ctx.borrow(Tracked(&ctx_perm.deko_ctx_ptr_perm)).private_bit,
         ctx.borrow(Tracked(&ctx_perm.deko_ctx_ptr_perm)).mapping_space,
+        None,  // vm_region
     );
     bsp_percpu_ptr.write(Tracked(&mut bsp_percpu_perm), bsp_percpu);
 
@@ -372,6 +373,7 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
         ptr_perm: bsp_percpu_perm,
         pgtable_perm: ctx_perm.pgtable_perm,
         ghcb_perm,
+        vm_region_perm: None,
     };
 
     // TODO: CONSTRUCT THE PAIR.

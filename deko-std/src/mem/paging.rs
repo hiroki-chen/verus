@@ -55,14 +55,11 @@ pub const GLOBAL_BASE: VirtAddr = VirtAddr(0xFF8000000000);
 pub const GLOBAL_MAPPING_SIZE: u64 = 256 * SIZE_1G;
 
 /// Shared mappings region start
-pub const GLOBAL_MAPPING_BASE: VirtAddr = VirtAddr(GLOBAL_BASE.0 + GLOBAL_MAPPING_SIZE);
-
+// pub const GLOBAL_MAPPING_BASE: VirtAddr = VirtAddr(GLOBAL_BASE.0 + GLOBAL_MAPPING_SIZE);
 /// Shared mappings region end
-pub const GLOBAL_MAPPING_END: VirtAddr = VirtAddr(GLOBAL_MAPPING_BASE.0 + (SIZE_1G));
-
+// pub const GLOBAL_MAPPING_END: VirtAddr = VirtAddr(GLOBAL_MAPPING_BASE.0 + (SIZE_1G));
 /// Mapping address for Hyper-V hypercall page.
-pub const HYPERCALL_CODE_PAGE: VirtAddr = VirtAddr(GLOBAL_MAPPING_BASE.0 - PAGE_SIZE);
-
+// pub const HYPERCALL_CODE_PAGE: VirtAddr = VirtAddr(GLOBAL_MAPPING_BASE.0 - PAGE_SIZE);
 /// PerCPU mappings level 3 index
 pub const PGTABLE_LVL3_IDX_PERCPU: u64 = 510;
 
@@ -72,7 +69,7 @@ pub const PGTABLE_LVL3_IDX_PERCPU: u64 = 510;
 pub const PERCPU_BASE: VirtAddr = VirtAddr(0xFFFF_FF00_0000_0000);
 
 /// End Address of per-cpu memory region
-pub const PERCPU_END: VirtAddr = VirtAddr(PERCPU_BASE.0 + (SIZE_LEVEL3));
+pub const PERCPU_END: VirtAddr = VirtAddr(0xFFFF_FF80_0000_0000);
 
 /// PerCPU CAA mappings
 pub const PERCPU_CAA_BASE: VirtAddr = VirtAddr(PERCPU_BASE.0 + (2 * SIZE_LEVEL0));

@@ -7,10 +7,15 @@ use deko_core::cpu::idt::{create_early_idt, init_early_idt, Idt};
 use deko_core::cpu::regs::{cr0_init, cr4_init, load_cr3};
 use deko_core::cpu::{DekoCpuCtx, DekoCpuCtxPermission, PERCPU_AREAS};
 use deko_core::elf::ElfFile;
-use deko_core::mm::paging::{PageTable, PageTablePermission, PteFlags, GLOBAL};
+use deko_core::mm::paging::{
+    bit_not_in_addr_region, bit_not_overlapping, PageTable, PageTablePermission, PteFlags,
+    Pte_ALL_BITS, GLOBAL,
+};
+use deko_core::mm::vm::{VirtualMemory, VirtualMemoryPermission, VirtualMemoryRegion, VMR_GRANULE};
 use deko_core::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR};
 use deko_core::{get_igvm_params, kinfo, DekoKernelLaunchInfo};
 use deko_std::prelude::*;
+use deko_std::snp::ghcb::GuestHostCommucationBlock;
 use vstd::prelude::*;
 
 core::arch::global_asm!(include_str!("../monitor.S"), options(att_syntax));
@@ -27,6 +32,11 @@ verus! {
         kernel_mapping.wf(),
         pgtable_perm.wf(),
         pgtable_perm.pgtable_perm.pptr() == init_pgtable@,
+        bit_not_in_addr_region(private_bit),
+        bit_not_in_addr_region(shared_bit),
+        bit_not_overlapping(private_bit),
+        bit_not_overlapping(shared_bit),
+        kernel_mapping == pgtable_perm.mapping_space,
 )]
 fn setup_bsp_cpu(
     init_pgtable: DekoPPtr<PageTable>,
@@ -34,6 +44,20 @@ fn setup_bsp_cpu(
     shared_bit: u64,
     kernel_mapping: MappingSpace,
 ) {
+    broadcast use PteFlags::lemma_each_bit_is_valid;
+    broadcast use PteFlags::lemma_from_bits_single;
+
+    let shared_area_ptr = {
+        let read_handle = PERCPU_AREAS.acquire_read();
+        // The permission is discarded; you can only obtain this permission
+        // if you own this.
+        let (ptr, _) = read_handle.borrow().0.index_as_ptr(0);
+
+        read_handle.release_read();
+
+        ptr
+    };
+
     // We first allocate a new CPU context for the BSP.
     let (bsp_ctx_ptr, Tracked(ctx_perm)) = {
         let (bsp_ctx_ptr, Tracked(ctx_perm)) = Box::<DekoCpuCtx>::new_zeroed(
@@ -42,11 +66,74 @@ fn setup_bsp_cpu(
         bsp_ctx_ptr.into_ptr(Tracked(ctx_perm))
     };
 
+    let (ghcb, Tracked(ghch_perm)) = {
+        let (ghcb_ptr, Tracked(ghcb_perm)) = Box::<GuestHostCommucationBlock>::new_zeroed(
+            &DEKO_FRAME_ALLOCATOR.0,
+        );
+        ghcb_ptr.into_ptr(Tracked(ghcb_perm))
+    };
+
     // First step is to map itself.
     let vaddr = bsp_ctx_ptr.into_vaddr();
     let paddr = virt_to_phys(private_bit, shared_bit, vaddr, Tracked(&pgtable_perm));
 
-    // let deko_cpu_ctx = DekoCpuCtx::new(pgtable, shared_area, ghcb, cpu_id, shared_bit, private_bit, kernel_mapping);
+    let cpu_start = PERCPU_BASE;
+    // We resort to constants as somehow verus has issues dealing with large ranges.
+    let cpu_end = PERCPU_END;
+    let cpu_flags = PteFlags::kernel_code();  // P | G
+    let cpu_self_flags = PteFlags::kernel_data();  // P | G | W
+
+    proof {
+        let cpu_start = cpu_start@;
+        let cpu_end = cpu_end@;
+
+        assert(0xFFFFFF8000000000 as u64 % VMR_GRANULE == 0 && 0xFFFFFF0000000000 as u64
+            % VMR_GRANULE == 0) by (bit_vector);
+        assert(cpu_flags.bits() & Pte_ALL_BITS == cpu_flags.bits() && cpu_self_flags.bits()
+            & Pte_ALL_BITS == cpu_self_flags.bits()) by {
+            bit_u64_and_auto();
+        }
+    }
+
+    proof_with!(Tracked(pgtable_perm) => Tracked(vm_perm));
+    let mut vm_region = VirtualMemoryRegion::new(
+        cpu_start,
+        cpu_end,
+        cpu_flags,
+        init_pgtable,
+        kernel_mapping.clone(),
+        private_bit,
+        shared_bit,
+    );
+
+    // Create a mapping for the CPU area itself.
+    let vm_block_for_self = VirtualMemory {
+        range: cpu_start..cpu_end,
+        paddr,
+        flags: cpu_self_flags,
+    };
+    let tracked vm_block_perm = VirtualMemoryPermission {
+        parent_id: vm_region.id@,
+        range: cpu_start..cpu_end,
+    };
+
+    // TODO: There are some proofs. Insert into the region.
+    // proof_with!(Tracked(&mut vm_perm), Tracked(vm_block_perm));
+    // vm_region.insert(vm_block_for_self);
+
+    let cpu_ctx = DekoCpuCtx::new(
+        init_pgtable,
+        shared_area_ptr,
+        ghcb,
+        0,
+        shared_bit,
+        private_bit,
+        kernel_mapping,
+        Some(vm_region),
+    );
+
+    // Finally we write the CPU context to the memory.
+    bsp_ctx_ptr.write(Tracked(&mut ctx_perm), cpu_ctx);
 }
 
 #[inline]
@@ -65,6 +152,7 @@ fn init_mem(header: &DekoKernelLaunchInfo) {
 ///
 /// This function does nothing but is just a small trampoline to call [`deko_setup`].
 #[no_mangle]
+#[allow(unreachable_code)]
 #[verifier::exec_allows_no_decreases_clause]
 #[verus_spec(r =>
     with

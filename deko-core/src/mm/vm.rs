@@ -12,7 +12,10 @@ use vstd::std_specs::cmp::*;
 
 use super::frame_allocator::DekoAllocatorApi;
 use crate::collections::Vec;
-use crate::mm::paging::{PageTable, PageTablePermission, PteFlags, Pte_ALL_BITS};
+use crate::mm::paging::{
+    all_in_range_paddrs, all_normalized_vaddrs, bit_not_in_addr_region, bit_not_overlapping,
+    PageTable, PageTablePermission, PteFlags, Pte_ALL_BITS, PRESENT,
+};
 use crate::mm::vm;
 use crate::{kpanic_if, kunimplemented, vec};
 
@@ -49,12 +52,18 @@ pub struct VirtualMemoryRegion {
     pub areas: Vec<VirtualMemory>,
     /// The top-level page tables for this region.
     pub pgtable: DekoPPtr<PageTable>,
+    /// The mapping space this region belongs to.
+    pub ms: MappingSpace,
+    /// Private bit for this region.
+    pub private_bit: u64,
+    /// Shared bit for this region.
+    pub shared_bit: u64,
 }
 
 /// Tracks the corresponding permissions for a virtual memory region if there is
 /// a need to read/modify this struct.
 pub tracked struct VirtualMemoryRegionPermission {
-    pub id: int,
+    pub ghost id: int,
     /// A collection of page table permissions for each top-level page table.
     pub pgtable_perm: PageTablePermission,
     /// A list of virtual memory permissions managed by this region.
@@ -66,6 +75,8 @@ pub tracked struct VirtualMemoryRegionPermission {
 pub struct VirtualMemory {
     /// The range of virtual addresses covered by this region.
     pub range: Range<VirtAddr>,
+    /// The physical address of this region.
+    pub paddr: PhysAddr,
     /// The page table entry flags for this region.
     #[deko(skip)]
     pub flags: PteFlags,
@@ -77,7 +88,7 @@ pub struct VirtualMemory {
 /// Tracks the corresponding permissions for a virtual memory if there is
 /// a need to read/modify this struct.
 pub tracked struct VirtualMemoryPermission {
-    pub parent_id: int,
+    pub ghost parent_id: int,
     /// Ghost state: The virtual address range this permission governs
     pub range: Range<VirtAddr>,
 }
@@ -85,8 +96,8 @@ pub tracked struct VirtualMemoryPermission {
 impl WellFormed for VirtualMemoryRegion {
     open spec fn wf(&self) -> bool {
         &&& self.start_pfn < self.end_pfn <= u64::MAX / PAGE_SIZE
-        &&& self.start_pfn % VMR_GRANULE == 0
-        &&& self.end_pfn % VMR_GRANULE == 0
+        &&& (self.start_pfn << 12) % VMR_GRANULE == 0
+        &&& (self.end_pfn << 12) % VMR_GRANULE == 0
         &&& self.pt_flags.wf()
         &&& self.pt_flags.bits() & Pte_ALL_BITS == self.pt_flags.bits()
         &&& self.pgtable_consistent()
@@ -101,6 +112,11 @@ impl WellFormed for VirtualMemoryRegion {
                 &&& self.areas@[i].range.end@ <= self.areas@[i + 1].range.start@
             }
         &&& is_sorted_spec(self.areas@)
+        &&& self.ms.wf()
+        &&& bit_not_overlapping(self.private_bit)
+        &&& bit_not_in_addr_region(self.private_bit)
+        &&& bit_not_overlapping(self.shared_bit)
+        &&& bit_not_in_addr_region(self.shared_bit)
     }
 }
 
@@ -109,7 +125,10 @@ impl WellFormed for VirtualMemory {
         &&& self.range.wf()
         &&& self.range.start@ % PAGE_SIZE == 0
         &&& self.range.end@ % PAGE_SIZE == 0
-        &&& self.range.end@ <= u64::MAX
+        &&& self.range.end@ + PAGE_SIZE_2M <= u64::MAX
+        &&& all_normalized_vaddrs(self.range)
+        &&& self.paddr@ % PAGE_SIZE == 0
+        &&& self.paddr@ + (self.range.end@ - self.range.start@) < 0x000f_ffff_ffff_f000
         &&& self.flags.bits() & Pte_ALL_BITS == self.flags.bits()
         &&& self.flags.wf()
     }
@@ -166,6 +185,9 @@ impl PartialOrdSpecImpl for VirtualMemory {
 #[verus_verify]
 impl VirtualMemoryRegion {
     pub open spec fn wf_with(&self, perm: &VirtualMemoryRegionPermission) -> bool {
+        &&& self.ms == perm.pgtable_perm.mapping_space
+        &&& self.private_bit == perm.pgtable_perm.private_bit
+        &&& self.shared_bit == perm.pgtable_perm.shared_bit
         &&& perm.pgtable_perm.wf()
         &&& perm.pgtable_perm.pgtable_perm.pptr() == self.pgtable@
         &&& perm.vm_perms@.len() == self.areas@.len()
@@ -182,6 +204,7 @@ impl VirtualMemoryRegion {
     pub open spec fn compatible_spec(&self, vm_block: &VirtualMemory) -> bool {
         &&& vm_block.range.start@ >= self.start_pfn * PAGE_SIZE
         &&& vm_block.range.end@ <= self.end_pfn * PAGE_SIZE
+        &&& all_in_range_paddrs(&self.ms, vm_block.paddr, vm_block.range)
     }
 
     pub open spec fn disjoint_blocks(&self, vm_block: &VirtualMemory) -> bool {
@@ -216,39 +239,39 @@ impl VirtualMemoryRegion {
         }
     }
 
-    /// Checks if a given `vm_block` is compatible within this virtual memory region.
-    ///
-    /// This method returns true if the `vm_block` is within the range of this region.
-    #[inline]
     #[verus_spec(r =>
-        requires
-            self.wf(),
-            vm_block.wf(),
-        returns
-            self.compatible_spec(vm_block),
-    )]
-    pub fn compatible(&self, vm_block: &VirtualMemory) -> bool {
-        vm_block.range.start.0 >= self.start_pfn * PAGE_SIZE && vm_block.range.end.0 <= self.end_pfn
-            * PAGE_SIZE
-    }
-
-    #[verus_spec(r =>
+        with
+            Tracked(pgtable_perm): Tracked<PageTablePermission>,
+                -> vmr_perm: Tracked<VirtualMemoryRegionPermission>,
         requires
             start_addr@ >= VADDR_UPPER_MASK,
-            end_addr@ >= VADDR_UPPER_MASK,
             start_addr@ < end_addr@ <= u64::MAX,
-            start_addr.pfn() % VMR_GRANULE == 0,
-            end_addr.pfn() % VMR_GRANULE == 0,
+            start_addr@ % VMR_GRANULE == 0,
+            end_addr@ % VMR_GRANULE == 0,
             pt_flags.wf(),
             pt_flags.bits() & Pte_ALL_BITS == pt_flags.bits(),
+            ms.wf(),
+            ms == pgtable_perm.mapping_space,
+            private_bit == pgtable_perm.private_bit,
+            shared_bit == pgtable_perm.shared_bit,
+            pgtable_perm.wf(),
+            pgtable_perm.pgtable_perm.pptr() == pgtable@,
+            bit_not_overlapping(private_bit),
+            bit_not_in_addr_region(private_bit),
+            bit_not_overlapping(shared_bit),
+            bit_not_in_addr_region(shared_bit),
         ensures
             r.wf(),
+            r.wf_with(&vmr_perm@),
     )]
     pub fn new(
         start_addr: VirtAddr,
         end_addr: VirtAddr,
         pt_flags: PteFlags,
         pgtable: DekoPPtr<PageTable>,
+        ms: MappingSpace,
+        private_bit: u64,
+        shared_bit: u64,
     ) -> Self {
         proof {
             let start = start_addr@;
@@ -261,8 +284,8 @@ impl VirtualMemoryRegion {
                     VADDR_UPPER_MASK <= start < end,
                     start_pfn == start >> 12,
                     end_pfn == end >> 12,
-                    start_pfn % VMR_GRANULE == 0,
-                    end_pfn % VMR_GRANULE == 0,
+                    start % VMR_GRANULE == 0,
+                    end % VMR_GRANULE == 0,
             ;
 
             assert(end_pfn <= u64::MAX / PAGE_SIZE) by (bit_vector)
@@ -270,19 +293,39 @@ impl VirtualMemoryRegion {
                     end <= u64::MAX,
                     end_pfn == end >> 12,
             ;
+
+            assert((((start >> 12u64) << 12u64) % VMR_GRANULE == 0) && (((end >> 12u64) << 12u64)
+                % VMR_GRANULE == 0)) by (bit_vector)
+                requires
+                    start % VMR_GRANULE == 0,
+                    end % VMR_GRANULE == 0,
+                    start < end <= u64::MAX,
+            ;
         }
 
         proof {
             super::paging::option_page_ptr_array_size_wf();
         }
 
+        let ghost id = arbitrary();
+
+        proof_with!(|=
+            Tracked(VirtualMemoryRegionPermission {
+                id,
+                pgtable_perm,
+                vm_perms: Ghost(Seq::empty()),
+            })
+        );
         Self {
-            id: Ghost(arbitrary()),
+            id: Ghost(id),
             start_pfn: start_addr.pfn(),
             end_pfn: end_addr.pfn(),
             pt_flags,
             areas: vec![],
             pgtable,
+            ms,
+            private_bit,
+            shared_bit,
         }
     }
 
@@ -308,7 +351,7 @@ impl VirtualMemoryRegion {
             self.wf_with(perm),
     )]
     #[verifier::spinoff_prover]
-    pub fn insert_at(&mut self, vm_block: VirtualMemory) {
+    pub fn insert(&mut self, vm_block: VirtualMemory) {
         broadcast use vstd::std_specs::vec::group_vec_axioms;
         broadcast use deko_std::address::lemma_aligned_vaddr_pfn_preserves_order;
 
@@ -358,13 +401,14 @@ impl VirtualMemoryRegion {
             }
         }
 
-        // We first map the new block.
-        // map_vm_block(self.pgtable, &vm_block, vm_block_perm);
-        // Finally, we can insert the new block.
-        self.areas.insert(idx_unwrapped, vm_block);
         proof {
             perm.vm_perms = Ghost(perm.vm_perms@.insert(idx_unwrapped as int, vm_block_perm));
         }
+        // We first map the new block.
+        proof_with!(Tracked(perm), Ghost(idx_unwrapped as int));
+        vm_block.map(self.pgtable, &self.ms, self.private_bit, self.shared_bit);
+        // Finally, we can insert the new block.
+        self.areas.insert(idx_unwrapped, vm_block);
 
     }
 
@@ -587,38 +631,58 @@ impl VirtualMemory {
     /// Maps this virtual memory region into the given page table.
     #[verus_spec(
         with
-            Tracked(region_perm): Tracked<&mut VirtualMemoryPermission>,
-            Tracked(pgtable_perm): Tracked<&mut PageTablePermission>,
+            Tracked(parent_perm): Tracked<&mut VirtualMemoryRegionPermission>,
+            Ghost(idx): Ghost<int>,
         requires
             self.wf(),
-            self.wf_with(old(region_perm)),
-            ptr@ == old(pgtable_perm).pgtable_perm.pptr(),
-            old(pgtable_perm).wf(),
-            !old(pgtable_perm).mapped_region(self.range),
+            self.wf_with(&old(parent_perm).vm_perms@.index(idx)),
+            ptr@ == old(parent_perm).pgtable_perm.pgtable_perm.pptr(),
+            old(parent_perm).pgtable_perm.wf(),
+            old(parent_perm).pgtable_perm.mapping_space == ms,
+            old(parent_perm).pgtable_perm.private_bit == private_bit,
+            old(parent_perm).pgtable_perm.shared_bit == shared_bit,
+            ms.wf(),
+            bit_not_overlapping(private_bit),
+            bit_not_in_addr_region(private_bit),
+            bit_not_overlapping(shared_bit),
+            bit_not_in_addr_region(shared_bit),
+            all_in_range_paddrs(ms, self.paddr, self.range),
         ensures
-            pgtable_perm.wf(),
-            pgtable_perm.mapped_region(self.range),
+            parent_perm.pgtable_perm.wf(),
+            parent_perm.pgtable_perm.mapped_region(self.range),
+            parent_perm.pgtable_perm.mapping_space == ms,
+            parent_perm.pgtable_perm.private_bit == private_bit,
+            parent_perm.pgtable_perm.shared_bit == shared_bit,
+            parent_perm.pgtable_perm.pgtable_perm.pptr() == old(parent_perm).pgtable_perm.pgtable_perm.pptr(),
+            parent_perm.vm_perms == old(parent_perm).vm_perms,
     )]
-    pub fn map(&self, ptr: DekoPPtr<PageTable>) {
-        let mut offset = 0;
-        let size = self.range.end.0 - self.range.start.0;
+    pub fn map(
+        &self,
+        ptr: DekoPPtr<PageTable>,
+        ms: &MappingSpace,
+        private_bit: u64,
+        shared_bit: u64,
+    ) {
+        broadcast use crate::mm::paging::PteFlags::lemma_each_bit_is_valid;
 
-        #[verus_spec(
-            invariant
-                offset <= size <= u64::MAX,
-                size == self.range.end@ - self.range.start@,
-                self.range.start@ % PAGE_SIZE == 0,
-                self.range.end@ % PAGE_SIZE == 0,
-                offset % PAGE_SIZE == 0,
-                PAGE_SIZE == 0x1000,
-            decreases
-                size - offset,
-        )]
-        while offset < size {
-            offset += PAGE_SIZE;
+        let flags = PteFlags::from_bits_truncate(self.flags.bits() | PRESENT);
+
+        proof {
+            assert(flags.bits() & Pte_ALL_BITS == flags.bits() && flags.wf()) by {
+                bit_u64_and_auto();
+            }
         }
 
-        kunimplemented!()
+        PageTable::map_page_multiple(
+            ptr,
+            self.range.clone(),
+            self.paddr,
+            flags,
+            ms,
+            private_bit,
+            shared_bit,
+            Tracked(&mut parent_perm.pgtable_perm),
+        );
     }
 
     /// Unmaps this virtual memory region from the given page table.
