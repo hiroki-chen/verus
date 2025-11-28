@@ -352,7 +352,7 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>) -> (__discard: !) {
             }
             let igvm_params = #[verus_spec(with Tracked(&ctx_perm))]
             crate::get_igvm_params(VirtAddr::new(header.igvm_params as u64));
-            kinfo!("IGVM params found:", igvm_params);
+            // kinfo!("IGVM params found:", igvm_params);
 
             let (igvm_vregion, igvm_pregion) = #[verus_spec(with Tracked(&mut ctx_perm))]
             load_igvm_params(

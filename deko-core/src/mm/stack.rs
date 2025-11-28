@@ -1,6 +1,8 @@
+use deko_macros::DekoDebug;
 use deko_std::address::{PhysAddr, VirtAddr};
 use deko_std::fmt::DekoDebug;
 use deko_std::mem::PAGE_SIZE;
+use deko_std::ptr::DekoPPtr;
 use deko_std::wf::WellFormed;
 use vstd::prelude::*;
 
@@ -9,6 +11,14 @@ use crate::collections::Vec;
 use crate::{kunimplemented, vec};
 
 verus! {
+
+#[derive(DekoDebug)]
+pub struct DekoIstStack {
+    /// Double fault stack.
+    pub df_stack: Option<DekoPPtr<DekoKernelStack>>,
+    /// DF shadow stack.
+    pub df_ss: Option<DekoPPtr<DekoKernelStack>>,
+}
 
 /// A mapping that is used as the kernel stack.
 pub struct DekoKernelStack {
@@ -34,6 +44,12 @@ impl DekoDebug for DekoKernelStack {
         }
 
         writer.write_str("\n}");
+    }
+}
+
+impl WellFormed for DekoIstStack {
+    open spec fn wf(&self) -> bool {
+        true
     }
 }
 

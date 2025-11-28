@@ -5,27 +5,32 @@
 use deko_core::cpu::gdt::GLOBAL_GDT;
 use deko_core::cpu::idt::{create_early_idt, init_early_idt, Idt};
 use deko_core::cpu::regs::{cr0_init, cr4_init, load_cr3};
-use deko_core::cpu::{DekoCpuCtx, DekoCpuCtxPermission, PERCPU_AREAS};
+use deko_core::cpu::{DekoCpuCtx, DekoCpuCtxPermission, IST_DF, PERCPU_AREAS};
 use deko_core::elf::ElfFile;
 use deko_core::mm::paging::{
     all_in_range_paddrs, bit_not_in_addr_region, bit_not_overlapping, index_at_level_spec,
     PageTable, PageTablePath, PageTablePermission, PteFlags, Pte_ALL_BITS, GLOBAL, RECURSIVE_INDEX,
 };
-use deko_core::mm::stack::DekoKernelStack;
+use deko_core::mm::stack::{DekoIstStack, DekoKernelStack};
 use deko_core::mm::vm::{VirtualMemory, VirtualMemoryPermission, VirtualMemoryRegion, VMR_GRANULE};
 use deko_core::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR};
+use deko_core::snp::ghcb::GuestHostCommucationBlock;
+use deko_core::snp::logging::init_ghcb_logging;
+use deko_core::snp::{init_guest_host, setup_apic};
 use deko_core::{get_igvm_params, kinfo, DekoKernelLaunchInfo};
 use deko_std::prelude::*;
-use deko_std::snp::ghcb::GuestHostCommucationBlock;
 use vstd::prelude::*;
 
 core::arch::global_asm!(include_str!("../monitor.S"), options(att_syntax));
 
 verus! {
 
+axiom fn dummy_perm() -> tracked DekoCpuCtxPermission;
+
 #[verus_spec(r =>
     with
         Tracked(pgtable_perm): Tracked<PageTablePermission>,
+            -> cpu_perm: Tracked<DekoCpuCtxPermission>,
     requires
         pgtable_perm.private_bit == private_bit,
         pgtable_perm.shared_bit == shared_bit,
@@ -44,7 +49,7 @@ fn setup_bsp_cpu(
     private_bit: u64,
     shared_bit: u64,
     kernel_mapping: MappingSpace,
-) {
+) -> DekoPPtr<DekoCpuCtx> {
     broadcast use PteFlags::lemma_each_bit_is_valid;
     broadcast use PteFlags::lemma_from_bits_single;
     broadcast use VirtAddr::lemma_page_size_eq_shifts;
@@ -73,6 +78,14 @@ fn setup_bsp_cpu(
         private_bit,
         shared_bit,
         ctx_switch_stack.into_vaddr(),
+        Tracked(&pgtable_perm),
+    );
+    let (cpu_ist_stack, Tracked(ist_stack_perm)) =
+        boxed_ptr!(DekoKernelStack, &DEKO_FRAME_ALLOCATOR.0);
+    let cpu_ist_stack_paddr = virt_to_phys(
+        private_bit,
+        shared_bit,
+        cpu_ist_stack.into_vaddr(),
         Tracked(&pgtable_perm),
     );
 
@@ -164,15 +177,41 @@ fn setup_bsp_cpu(
         range: VirtAddr((top_of_the_stack.0 - 0x8000) as u64)..top_of_the_stack,
     };
 
+    ctx_switch_stack.write(Tracked(&mut stack_perm), cpu_stack);
+
     proof {
         assume(vm_block_for_stack.wf());
         // The same proofs.
         assume(vm_region.compatible_spec(&vm_block_for_stack));
         assume(vm_region.disjoint_blocks(&vm_block_for_stack));
     }
-
     proof_with!(Tracked(&mut vm_perm), Tracked(vm_block_for_stack_perm));
     vm_region.insert(vm_block_for_stack);
+
+    // Allocate a stack for interrupt service routines.
+    let ist_df_stack = DekoKernelStack::new_with_size(0x8000, false);
+    let top_of_ist_stack = VirtAddr(ist_df_stack.stack_top() + STACK_IST_DF_BASE.0);
+    let vm_block_for_ist_stack = VirtualMemory {
+        range: VirtAddr(top_of_ist_stack.0 - 0x8000)..top_of_ist_stack,
+        paddr: cpu_ist_stack_paddr,
+        flags: PteFlags::nx_kernel(),
+    };
+    let tracked vm_block_for_ist_stack_perm = VirtualMemoryPermission {
+        parent_id: vm_region.id@,
+        range: VirtAddr((top_of_ist_stack.0 - 0x8000) as u64)..top_of_ist_stack,
+    };
+    cpu_ist_stack.write(Tracked(&mut ist_stack_perm), ist_df_stack);
+    proof {
+        assume(vm_block_for_ist_stack.wf());
+        // The same proofs.
+        assume(vm_region.compatible_spec(&vm_block_for_ist_stack));
+        assume(vm_region.disjoint_blocks(&vm_block_for_ist_stack));
+    }
+
+    proof_with!(Tracked(&mut vm_perm), Tracked(vm_block_for_ist_stack_perm));
+    vm_region.insert(vm_block_for_ist_stack);
+
+    let cpu_ist_stack = DekoIstStack { df_stack: Some(cpu_ist_stack), df_ss: None };
 
     let cpu_ctx = DekoCpuCtx::new(
         init_pgtable,
@@ -184,10 +223,25 @@ fn setup_bsp_cpu(
         kernel_mapping,
         Some(vm_region),
         Some(ctx_switch_stack),
+        Some(cpu_ist_stack),
     );
+
+    cpu_ctx.set_ist_stack_tss(IST_DF, top_of_ist_stack);
 
     // Finally we write the CPU context to the memory.
     bsp_ctx_ptr.write(Tracked(&mut ctx_perm), cpu_ctx);
+
+    // let cpu_ctx_perm = Tracked(DekoCpuCtxPermission {
+    //     ptr_perm: ctx_perm,
+    //     pgtable_perm: dummy_pgtable_perm(),
+    //     ghcb_perm: ghch_perm,
+    //     ctx_switch_stack_perm: Some(stack_perm),
+    //     vm_region_perm: Some(vm_perm),
+    // });
+    let tracked cpu_ctx_perm = dummy_perm();
+
+    proof_with!(|= Tracked(cpu_ctx_perm));
+    bsp_ctx_ptr
 }
 
 #[inline]
@@ -297,8 +351,20 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
     }
 
     // Prepare the BSP CPU context.
-    #[verus_spec(with Tracked(pgtable_perm))]
-    setup_bsp_cpu(new_page_table, private_bit, shared_bit, ms);
+    proof_with!(Tracked(pgtable_perm) => Tracked(cpu_ctx_perm));
+    let bst_cpu_ptr = setup_bsp_cpu(new_page_table, private_bit, shared_bit, ms);
+
+    proof {
+        // do it later.
+        assume(cpu_ctx_perm.wf_with(bst_cpu_ptr));
+    }
+
+    init_guest_host(bst_cpu_ptr, Tracked(&mut cpu_ctx_perm));
+
+    init_ghcb_logging(debug_serial_port);
+    print_banner();
+
+    setup_apic(bst_cpu_ptr, Tracked(&mut cpu_ctx_perm));
 
     loop {
     }
@@ -314,6 +380,14 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     deko_core::logging::print_panic_info(info);
 
     unreachable!();
+}
+
+fn print_banner() {
+    kinfo!("----------------------------------------");
+    kinfo!("|      DEKO Monitor is starting       |");
+    kinfo!("|    Secure Encrypted Virtualization  |");
+    kinfo!("|          (c) 2025 Hiroki Chen       |");
+    kinfo!("----------------------------------------");
 }
 
 } // verus!

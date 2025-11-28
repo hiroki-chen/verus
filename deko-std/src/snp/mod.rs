@@ -1,5 +1,3 @@
-pub mod ghcb;
-
 use vstd::prelude::*;
 
 verus! {

@@ -7,8 +7,6 @@
 //! to use logging. Also notice that logging is extremely dangerous as this could
 //! interfere with information flow control. So it should only be enabled on debug.
 use deko_std::prelude::*;
-#[cfg(feature = "logging")]
-use deko_std::snp::ghcb::*;
 use vstd::prelude::*;
 
 use crate::snp::ghcb::current_ghcb;
@@ -189,7 +187,7 @@ pub fn init_ghcb_logging(serial_port: u16)
     requires
         serial_port + 8 <= u16::MAX,
 {
-    let v = GHCBIoPort::new(0x3f8);
+    let v = GHCBIoPort::new(serial_port);
     v.init();
 
     GHCB_IO_PORT.init(v);

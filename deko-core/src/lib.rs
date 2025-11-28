@@ -201,6 +201,7 @@ impl WellFormed for DekoKernelLaunchInfo {
         &&& self.kernel_elf_stage2_virt_start@ < self.kernel_elf_stage2_virt_end@
         &&& self.kernel_region_phys_start@ < self.kernel_region_phys_end@ <= 0x000f_ffff_ffff_f000
         &&& valid_heap_param(self.heap_area_virt_start@, self.heap_area_size@, HEAP_SIZE as u64)
+        &&& self.debug_serial_port + 8 <= u16::MAX
     }
 }
 

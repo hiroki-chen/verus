@@ -1018,7 +1018,6 @@ fn line_count() -> Result<()> {
         let mut cmd = Command::new("cargo");
         cmd.arg("verus")
             .arg("verify")
-            .arg("--lib")
             .arg("--package")
             .arg(package)
             .arg("--features")

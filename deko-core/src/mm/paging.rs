@@ -4793,13 +4793,7 @@ pub fn init_monitor_paging(
 ) -> (DekoPPtr<PageTable>, PhysAddr, Tracked<PageTablePermission>) {
     let (new_page_table, paddr, Tracked(perm)) = PageTable::new(private_bit, shared_bit, Ghost(ms));
 
-    if trace_is_enabled() {
-        if !(paddr.0 >= 0x8000064000 && paddr.0 < 0xF9B000 + 0x80000640000) {
-            early_dbg();
-        }
-    }
     // Now map the kernel ELF sections.
-
     let mut phys = header.kernel_region_phys_start;
     let seg_num = elf.load_segment_num(VirtAddr(header.kernel_region_virt_start));
     let mut i = 0;

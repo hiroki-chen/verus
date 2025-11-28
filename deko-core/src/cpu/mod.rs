@@ -8,7 +8,6 @@ pub mod types;
 
 use deko_macros::DekoDebug;
 use deko_std::prelude::*;
-use deko_std::snp::ghcb::GuestHostCommucationBlock;
 use vstd::atomic::{PAtomicBool, PAtomicU32, PermissionBool, PermissionU32};
 use vstd::cell::{PCell, PointsTo};
 use vstd::prelude::*;
@@ -18,11 +17,14 @@ use crate::mm::paging::{
     bit_not_in_addr_region, bit_not_overlapping, Mapping, Page, PageTable, PageTablePermission,
     PteFlags,
 };
-use crate::mm::stack::DekoKernelStack;
+use crate::mm::stack::{DekoIstStack, DekoKernelStack};
 use crate::mm::virt_to_phys;
 use crate::mm::vm::{VirtualMemoryRegion, VirtualMemoryRegionPermission};
+use crate::snp::ghcb::GuestHostCommucationBlock;
 
 verus! {
+
+pub const IST_DF: usize = 0;
 
 pub const CPUID_MAX_COUNT: usize = 128;
 
@@ -279,13 +281,15 @@ pub struct DekoCpuCtx {
     pub cpu_id: u64,
     /// The GHCB block for this CPU.
     ghcb: DekoPPtr<GuestHostCommucationBlock>,
-    tss: X86Tss,
+    pub tss: X86Tss,
     /// The page table for this CPU.
     shared_area: DekoPPtr<PerCpuShared>,
     /// The page table of this CPU.
     pgtable: DekoPPtr<PageTable>,
     /// The stack for doing context switches.
     ctx_switch_stack: Option<DekoPPtr<DekoKernelStack>>,
+    /// The stack for handling interrupts.
+    ist_stack: Option<DekoIstStack>,
     /// The private bit of the PTE of this core.
     #[deko(hex)]
     private_bit: u64,
@@ -304,6 +308,7 @@ with_permission! {
     ptr_perm: DekoPointsTo<DekoCpuCtx>,
     pgtable_perm: PageTablePermission,
     ghcb_perm: DekoPointsTo<GuestHostCommucationBlock>,
+    ctx_switch_stack_perm: Option<DekoPointsTo<DekoKernelStack>>,
     vm_region_perm: Option<VirtualMemoryRegionPermission>,
 }
 
@@ -473,7 +478,26 @@ impl WellFormed for DekoCpuCtx {
 }
 
 impl X86Tss {
-
+    /// Set the IST stack pointer for the given index.
+    #[verifier::external_body]
+    pub fn set_ist_stack(&self, index: usize, stack_top: VirtAddr)
+        requires
+            index < 7,
+            stack_top.wf(),
+        ensures
+            self.wf(),
+    {
+        unsafe {
+            // The target address might be unaligned and we cannot
+            // use any safe Rust code here.
+            core::arch::asm!(
+                "movq {0}, ({1})",
+                in(reg) stack_top.0,
+                in(reg) core::ptr::addr_of!(self.ist_stacks.0[index]),
+                options(att_syntax),
+            )
+        }
+    }
 }
 
 impl DekoCpuCtx {
@@ -585,6 +609,7 @@ impl DekoCpuCtx {
         kernel_mapping: MappingSpace,
         vm_region: Option<VirtualMemoryRegion>,
         ctx_switch_stack: Option<DekoPPtr<DekoKernelStack>>,
+        ist_stack: Option<DekoIstStack>,
     ) -> (r: Self)
         requires
             cpu_id < CPUID_MAX_COUNT as u64,
@@ -613,6 +638,7 @@ impl DekoCpuCtx {
             kernel_mapping,
             vm_region,
             ctx_switch_stack,
+            ist_stack,
         }
     }
 
@@ -729,6 +755,15 @@ impl DekoCpuCtx {
             r == self.pgtable_spec(),
     {
         self.pgtable
+    }
+
+    pub fn set_ist_stack_tss(&self, index: usize, stack_top: VirtAddr)
+        requires
+            self.wf(),
+            index < 7,
+            stack_top.wf(),
+    {
+        self.tss.set_ist_stack(index, stack_top);
     }
 }
 

@@ -3,7 +3,6 @@ use core::sync::atomic::AtomicU32;
 
 use deko_macros::DekoDebug;
 use deko_std::prelude::*;
-use deko_std::snp::ghcb::GuestHostCommucationBlock;
 use vstd::cell::PCell;
 use vstd::invariant;
 use vstd::prelude::*;
@@ -18,7 +17,7 @@ use crate::mm::{
     phys_to_virt, virt_to_phys, PageEncryptionMasks, DEKO_FRAME_ALLOCATOR, FEATURE_MASK,
     MAX_PHYS_ADDR, PHYS_ADDR_SIZE, PTE_MASK_PRIVATE, PTE_MASK_SHARED,
 };
-use crate::snp::ghcb::msr_register_ghcb_gpa;
+use crate::snp::ghcb::{msr_register_ghcb_gpa, GuestHostCommucationBlock};
 use crate::{kinfo, Stage2LaunchInfo};
 
 pub mod ghcb;
@@ -278,7 +277,10 @@ pub const RMP_NO_WRITE: u8 = RMP_READ | RMP_USER_EXE | RMP_KERN_EXE;
 pub const RMP_RWX: u8 = RMP_NO_WRITE | RMP_WRITE;
 
 /// Set up the GHCB pages and other necessary state for SNP operation.
-fn init_guest_host(ctx: DekoPPtr<DekoCpuCtx>, Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>)
+pub fn init_guest_host(
+    ctx: DekoPPtr<DekoCpuCtx>,
+    Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
+)
     requires
         old(ctx_perm).wf_with(ctx),
     ensures
@@ -367,6 +369,7 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
         ctx.borrow(Tracked(&ctx_perm.deko_ctx_ptr_perm)).mapping_space,
         None,  // vm_region
         None,  // ctx_switch_stack
+        None,  // ist_stack
     );
     bsp_percpu_ptr.write(Tracked(&mut bsp_percpu_perm), bsp_percpu);
 
@@ -374,10 +377,10 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
         ptr_perm: bsp_percpu_perm,
         pgtable_perm: ctx_perm.pgtable_perm,
         ghcb_perm,
+        ctx_switch_stack_perm: None,
         vm_region_perm: None,
     };
 
-    // TODO: CONSTRUCT THE PAIR.
     assume(cpu_ctx_perm.wf_with(bsp_percpu_ptr));
 
     // 4. This maps the PERCPU_BASE addr to the percpu area so `this_cpu` workds.
@@ -540,6 +543,15 @@ pub fn rmpadjust(vaddr: u64, psize: u64, Tracked(perm): Tracked<&mut DekoCtxPerm
     }
 
     ret
+}
+
+/// Sets up the local APIC for the current CPU.
+pub fn setup_apic(ctx: DekoPPtr<DekoCpuCtx>, Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>)
+    requires
+        old(ctx_perm).wf_with(ctx),
+    ensures
+        ctx_perm.wf_with(ctx),
+{
 }
 
 } // verus!
