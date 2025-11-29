@@ -6,6 +6,12 @@ use crate::prelude::*;
 
 verus! {
 
+pub assume_specification<T, U, const N: usize>[ <[T; N] as core::cmp::PartialEq<[U; N]>>::eq ](
+    _0: &[T; N],
+    _1: &[U; N],
+) -> bool where T: core::cmp::PartialEq<U>
+;
+
 /// A fixed-size array wrapper over Rust's raw array type `[T; N]`.
 #[repr(C)]
 #[verifier::external_body]

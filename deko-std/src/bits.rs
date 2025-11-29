@@ -3,6 +3,22 @@ use vstd::arithmetic::power2::*;
 use vstd::bits::*;
 use vstd::prelude::*;
 
+/// A macro wrapper for quickly defining bitflags with verified
+/// properties in Verus.
+///
+/// # Example
+///
+/// ```rust,norun
+/// deko_bitflags! {
+///    pub struct MyFlags: u32 {
+///         const FLAG_A = 0;
+///         const FLAG_B = 1;
+///    }
+/// }
+/// ```
+///
+/// Please note that the consts defined inside the macro are bit positions
+/// not their actual bit values which are computed as `(1 << position)`.
 #[macro_export]
 #[verusfmt::skip]
 macro_rules! deko_bitflags {

@@ -4,9 +4,10 @@
 
 use deko_core::cpu::gdt::GLOBAL_GDT;
 use deko_core::cpu::idt::{create_early_idt, init_early_idt, Idt};
-use deko_core::cpu::regs::{cr0_init, cr4_init, load_cr3};
+use deko_core::cpu::regs::{cr0_init, cr4_init, load_cr3, sse_init};
 use deko_core::cpu::{DekoCpuCtx, DekoCpuCtxPermission, IST_DF, PERCPU_AREAS};
 use deko_core::elf::ElfFile;
+use deko_core::logging::print_banner;
 use deko_core::mm::paging::{
     all_in_range_paddrs, bit_not_in_addr_region, bit_not_overlapping, index_at_level_spec,
     PageTable, PageTablePath, PageTablePermission, PteFlags, Pte_ALL_BITS, GLOBAL, RECURSIVE_INDEX,
@@ -341,8 +342,14 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
 
     let tracked mut ctx_perm = ctx_perm;
 
-    let (new_page_table, paddr, Tracked(pgtable_perm)) = #[verus_spec(with Tracked(&mut ctx_perm))]
-    deko_core::mm::paging::init_monitor_paging(header, &kernel_elf, &ms, private_bit, shared_bit);
+    proof_with!(Tracked(&mut ctx_perm));
+    let (new_page_table, paddr, Tracked(pgtable_perm)) = deko_core::mm::paging::init_monitor_paging(
+        header,
+        &kernel_elf,
+        &ms,
+        private_bit,
+        shared_bit,
+    );
 
     unsafe {
         // SAFETY: We have ensured that the new page table is valid because
@@ -366,10 +373,20 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
 
     setup_apic(bst_cpu_ptr, Tracked(&mut cpu_ctx_perm));
 
-    loop {
-    }
+    // Assign "deko_main" to the BSP CPU context so that it will
+    // start executing from there.
 
+    sse_init();
+
+    loop {
+        // should never reach here
+        // early_die();
+    }
     // deko_core::hal::setup_env(ctx);
+}
+
+/// The "main" function scheduled after the monitor is fully set up.
+fn deko_main() {
 }
 
 #[verifier::external]
@@ -380,14 +397,6 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     deko_core::logging::print_panic_info(info);
 
     unreachable!();
-}
-
-fn print_banner() {
-    kinfo!("----------------------------------------");
-    kinfo!("|      DEKO Monitor is starting       |");
-    kinfo!("|    Secure Encrypted Virtualization  |");
-    kinfo!("|          (c) 2025 Hiroki Chen       |");
-    kinfo!("----------------------------------------");
 }
 
 } // verus!

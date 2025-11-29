@@ -27,6 +27,7 @@ deko_bitflags! {
         const PGE = 7; // Page Global Enable
         const OSFXSR = 9; // OS Support for FXSAVE and FXRSTOR instructions
         const OSXMMEXCPT = 10; // OS Support for Unmasked SIMD Floating-Point Exceptions
+        const OSXSAVE = 18; // XSAVE and Processor Extended States Enable
         const SMEP = 20; // Supervisor Mode Execution Protection
         const SMAP = 21; // Supervisor Mode Access Prevention
     }
@@ -189,6 +190,72 @@ pub fn cr4_init() {
     }
 
     write_cr4(cr4);
+}
+
+#[verus_spec(r =>
+    // with Tracked(cpu_core): Tracked<&mut DekoCpuCore>,
+    // requires
+    // ensures
+)]
+pub fn osfxsr_init() {
+    let mut cr4 = read_cr4();
+    cr4 = Cr4Flags::from_bits_truncate(cr4.bits() | OSFXSR);
+
+    proof {
+        assert(cr4.bits() & Cr4_ALL_BITS == cr4.bits()) by {
+            bit_u64_and_auto();
+        }
+    }
+
+    write_cr4(cr4);
+}
+
+pub fn sse_cr0_init() {
+    let mut cr0 = read_cr0();
+    cr0 = Cr0Flags::from_bits_truncate(cr0.bits() & !(EM | TS) | MP);
+    proof {
+        assert(cr0.bits() & Cr0_ALL_BITS == cr0.bits()) by {
+            bit_u64_and_auto();
+        }
+    }
+
+    write_cr0(cr0);
+}
+
+pub fn xsave_init() {
+    let mut cr4 = read_cr4();
+    cr4 = Cr4Flags::from_bits_truncate(cr4.bits() | OSXSAVE);
+    proof {
+        assert(cr4.bits() & Cr4_ALL_BITS == cr4.bits()) by {
+            bit_u64_and_auto();
+        }
+    }
+
+    write_cr4(cr4);
+}
+
+#[verifier::external_body]
+#[verus_spec(r =>
+    // with Tracked(cpu_core): Tracked<&mut DekoCpuCore>,
+    // requires
+    // ensures
+)]
+pub fn xcr0_init() {
+    unsafe {
+        core::arch::x86_64::_xsetbv(0, 0b111);  // Enable x87, SSE, AVX
+    }
+}
+
+#[verus_spec(r =>
+    // with Tracked(cpu_core): Tracked<&mut DekoCpuCore>,
+    // requires
+    // ensures
+)]
+pub fn sse_init() {
+    osfxsr_init();
+    sse_cr0_init();
+    xsave_init();
+    xcr0_init();
 }
 
 } // verus!

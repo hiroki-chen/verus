@@ -304,9 +304,6 @@ pub fn init_platform_end(
     let debug_console_port = igvm_params.debug_serial_port as u16;
     crate::snp::logging::init_ghcb_logging(debug_console_port);
 
-    // Print the Deko banner with build information
-    crate::logging::print_banner();
-
     // Print IGVM parameter information for debugging
     kinfo!("IGVM Parameters\n\t", igvm_params);
 }

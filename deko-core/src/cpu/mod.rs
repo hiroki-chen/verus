@@ -4,6 +4,7 @@ pub mod idt;
 pub mod irq;
 pub mod msr;
 pub mod regs;
+pub mod task;
 pub mod types;
 
 use deko_macros::DekoDebug;
