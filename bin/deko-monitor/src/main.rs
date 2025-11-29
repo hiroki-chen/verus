@@ -396,7 +396,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     #[cfg(feature = "logging")]
     deko_core::logging::print_panic_info(info);
 
-    unreachable!();
+    loop {
+    }
 }
 
 } // verus!

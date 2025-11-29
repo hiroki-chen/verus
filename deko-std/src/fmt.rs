@@ -43,7 +43,7 @@ macro_rules! debug_packed_field {
 verus! {
 
 /// Writer trait for custom formatting output.
-pub trait DekoWriter {
+pub trait DekoWriter: Sized {
     fn write_str(&self, s: &str);
 
     #[verifier::external_body]
@@ -307,6 +307,13 @@ impl<T: DekoDebug> DekoDebug for Option<T> {
             }
             None => writer.write_str("None"),
         }
+    }
+}
+
+impl DekoDebug for () {
+    #[verifier::external_body]
+    fn deko_debug<W: DekoWriter>(&self, writer: &W) {
+        writer.write_str("()");
     }
 }
 

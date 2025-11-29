@@ -117,6 +117,8 @@ impl<V: WellFormed> LinkedList<V> {
     pub const fn new() -> (s: Self)
         ensures
             s.wf(),
+            s.is_empty(),
+            s@.len() == 0,
     {
         Self {
             head: None,

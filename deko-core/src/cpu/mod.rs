@@ -1,3 +1,4 @@
+pub mod apic;
 pub mod ctx;
 pub mod gdt;
 pub mod idt;
@@ -13,6 +14,7 @@ use vstd::atomic::{PAtomicBool, PAtomicU32, PermissionBool, PermissionU32};
 use vstd::cell::{PCell, PointsTo};
 use vstd::prelude::*;
 
+use crate::cpu::apic::X86Apic;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
 use crate::mm::paging::{
     bit_not_in_addr_region, bit_not_overlapping, Mapping, Page, PageTable, PageTablePermission,
@@ -302,6 +304,8 @@ pub struct DekoCpuCtx {
     /// The virtual memory region used for per-cpu area.
     /// At stage2 this is [`Option::None`].
     vm_region: Option<VirtualMemoryRegion>,
+    /// APIC interface for this CPU.
+    apic: X86Apic,
 }
 
 with_permission! {
@@ -528,6 +532,21 @@ impl DekoCpuCtx {
         self.ctx_switch_stack
     }
 
+    pub closed spec fn apic_spec(&self) -> &X86Apic {
+        &self.apic
+    }
+
+    #[verifier::when_used_as_spec(apic_spec)]
+    #[inline]
+    pub fn apic(&self) -> (r: &X86Apic)
+        requires
+            self.wf(),
+        ensures
+            r == self.apic_spec(),
+    {
+        &self.apic
+    }
+
     #[verifier::when_used_as_spec(shared_bit_spec)]
     #[inline]
     pub fn shared_bit(&self) -> (r: u64)
@@ -640,6 +659,7 @@ impl DekoCpuCtx {
             vm_region,
             ctx_switch_stack,
             ist_stack,
+            apic: X86Apic {  },
         }
     }
 

@@ -17,6 +17,8 @@ use deko_std::prelude::*;
 use elf::ElfFile;
 use vstd::prelude::*;
 
+use crate::cpu::apic::Apic;
+
 #[cfg(not(target_arch = "x86_64"))]
 compile_error!("Cannot be compiled against non x86_64 architecture!");
 
@@ -284,9 +286,9 @@ macro_rules! ktodo {
 
 #[macro_export]
 macro_rules! kpanic_if {
-    ($cond:expr, $($msg:expr,)+) => {
+    ($cond:expr, $($msg:expr),* $(,)?) => {
         if $cond {
-            $crate::kerror!("Panic at ", core::file!(), ":", core::line!(), ": ", $($msg)+);
+            $crate::kerror!("Panic at ", core::file!(), ":", core::line!(), ": ", $($msg,)*);
             $crate::die("");
         }
     };

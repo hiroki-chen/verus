@@ -7,6 +7,7 @@ use vstd::cell::PCell;
 use vstd::invariant;
 use vstd::prelude::*;
 
+use crate::cpu::apic::Apic;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
 use crate::cpu::{
     DekoCpuCtx, DekoCpuCtxPermission, PerCpuAreas, PerCpuShared, CPUID_MAX_COUNT, CPU_AREA_MAGIC,
@@ -17,7 +18,7 @@ use crate::mm::{
     phys_to_virt, virt_to_phys, PageEncryptionMasks, DEKO_FRAME_ALLOCATOR, FEATURE_MASK,
     MAX_PHYS_ADDR, PHYS_ADDR_SIZE, PTE_MASK_PRIVATE, PTE_MASK_SHARED,
 };
-use crate::snp::ghcb::{msr_register_ghcb_gpa, GuestHostCommucationBlock};
+use crate::snp::ghcb::{current_ghcb, msr_register_ghcb_gpa, GuestHostCommucationBlock};
 use crate::{kinfo, Stage2LaunchInfo};
 
 pub mod ghcb;
@@ -542,6 +543,23 @@ pub fn rmpadjust(vaddr: u64, psize: u64, Tracked(perm): Tracked<&mut DekoCtxPerm
     ret
 }
 
+pub fn rdmsr(msr: u32) -> u64 {
+    let (ghcb, Tracked(perm)) = current_ghcb();
+
+    let (high, low, _) = GuestHostCommucationBlock::rdmsr(ghcb, Tracked(perm), msr);
+
+    ((high as u64) << 32) | (low as u64)
+}
+
+pub fn wrmsr(msr: u32, value: u64) {
+    let (ghcb, Tracked(perm)) = current_ghcb();
+
+    let low = (value & 0xffff_ffff) as u32;
+    let high = (value >> 32) as u32;
+
+    GuestHostCommucationBlock::wrmsr(ghcb, Tracked(perm), msr, high, low);
+}
+
 /// Sets up the local APIC for the current CPU.
 pub fn setup_apic(ctx: DekoPPtr<DekoCpuCtx>, Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>)
     requires
@@ -549,6 +567,10 @@ pub fn setup_apic(ctx: DekoPPtr<DekoCpuCtx>, Tracked(ctx_perm): Tracked<&mut Dek
     ensures
         ctx_perm.wf_with(ctx),
 {
+    let apic = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).apic();
+
+    // Enable x2APIC mode
+    apic.enable();
 }
 
 } // verus!

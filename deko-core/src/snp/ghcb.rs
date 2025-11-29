@@ -16,11 +16,11 @@ use vstd::atomic::{
 };
 use vstd::prelude::*;
 
-use crate::bits;
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::paging::{PageTable, PteFlags};
 use crate::mm::{virt_to_phys, virt_to_phys_checked};
 use crate::prelude::*;
+use crate::{bits, kpanic_if};
 
 verus! {
 
@@ -469,7 +469,7 @@ impl GuestHostCommucationBlock {
         let Tracked(perm) = Self::set_exit_info_2(ptr, Tracked(perm), info_2);
 
         let ghcb_pa = virt_to_phys_checked(
-            1 << 51,
+            1 << 51, // fix it later.
             1 << 0,
             VirtAddr(ptr.addr() as u64),
             Tracked::assume_new(),
@@ -484,9 +484,8 @@ impl GuestHostCommucationBlock {
         raw_vmgexit();
 
         let sw_exit_info_1 = Self::get_exit_info_1(ptr, Tracked(&perm));
-        if sw_exit_info_1 != 0 {
-            vstd::vpanic!("GHCB VMGEXIT failed: {}", sw_exit_info_1);
-        }
+        kpanic_if!((sw_exit_info_1 != 0), "GHCB VMGEXIT failed: ", sw_exit_info_1);
+
         Tracked(perm)
     }
 
@@ -540,6 +539,34 @@ impl GuestHostCommucationBlock {
         let edx = Self::get_rdx(ptr, Tracked(&perm)) & 0xffff_ffff;
 
         (eax as u32, edx as u32, Tracked(perm))
+    }
+
+    pub fn wrmsr(
+        ptr: DekoPPtr<Self>,
+        Tracked(perm): Tracked<DekoPointsTo<Self>>,
+        msr_index: u32,
+        high: u32,
+        low: u32,
+    ) -> (r: Tracked<DekoPointsTo<Self>>)
+        requires
+            perm.wf(),
+            perm.is_init(),
+            perm.pptr() == ptr@,
+        ensures
+            r@.wf(),
+            r@.is_init(),
+            r@.pptr() == ptr@,
+    {
+        let val_high = high as u64;
+        let val_low = low as u64;
+
+        let Tracked(perm) = Self::clear(ptr, Tracked(perm));
+        let Tracked(perm) = Self::set_rcx(ptr, Tracked(perm), msr_index as _);
+        let Tracked(perm) = Self::set_rax(ptr, Tracked(perm), val_high);
+        let Tracked(perm) = Self::set_rdx(ptr, Tracked(perm), val_low);
+        let Tracked(perm) = Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::MSR, 1, 0);
+
+        Tracked(perm)
     }
 
     pub fn rdtsc(ptr: DekoPPtr<Self>, Tracked(perm): Tracked<DekoPointsTo<Self>>) -> (r: (
