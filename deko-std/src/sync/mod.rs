@@ -5,6 +5,7 @@ pub mod lazy;
 pub mod mutex;
 pub mod once;
 pub mod rwlock;
+pub mod spin;
 
 use vstd::prelude::*;
 

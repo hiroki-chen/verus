@@ -5,6 +5,7 @@
 use deko_core::cpu::gdt::GLOBAL_GDT;
 use deko_core::cpu::idt::{create_early_idt, init_early_idt, Idt};
 use deko_core::cpu::regs::{cr0_init, cr4_init, load_cr3, sse_init};
+use deko_core::cpu::task::DekoRunQueue;
 use deko_core::cpu::{DekoCpuCtx, DekoCpuCtxPermission, IST_DF, PERCPU_AREAS};
 use deko_core::elf::ElfFile;
 use deko_core::logging::print_banner;
@@ -213,6 +214,8 @@ fn setup_bsp_cpu(
     vm_region.insert(vm_block_for_ist_stack);
 
     let cpu_ist_stack = DekoIstStack { df_stack: Some(cpu_ist_stack), df_ss: None };
+    proof_with!(=> Tracked(run_queue_perm));
+    let run_queue = DekoRunQueue::new();
 
     let cpu_ctx = DekoCpuCtx::new(
         init_pgtable,
@@ -225,6 +228,7 @@ fn setup_bsp_cpu(
         Some(vm_region),
         Some(ctx_switch_stack),
         Some(cpu_ist_stack),
+        Some(run_queue),
     );
 
     cpu_ctx.set_ist_stack_tss(IST_DF, top_of_ist_stack);
@@ -373,10 +377,12 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
 
     setup_apic(bst_cpu_ptr, Tracked(&mut cpu_ctx_perm));
 
+    sse_init();
+
     // Assign "deko_main" to the BSP CPU context so that it will
     // start executing from there.
-
-    sse_init();
+    assume(cpu_ctx_perm.run_queue_perm.is_some());
+    DekoCpuCtx::setup_idle_task(bst_cpu_ptr, Tracked(&mut cpu_ctx_perm), 114514);
 
     loop {
         // should never reach here

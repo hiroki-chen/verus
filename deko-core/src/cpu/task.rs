@@ -10,7 +10,8 @@ use deko_std::with_permission;
 use vstd::prelude::*;
 use vstd::std_specs::cmp::{PartialEqSpec, PartialEqSpecImpl, PartialOrdSpecImpl};
 
-use crate::cpu::DekoCpuCtx;
+use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
+use crate::kunimplemented;
 use crate::mm::paging::PageTable;
 
 verus! {
@@ -28,8 +29,10 @@ verus! {
 /// - Add new runnable tasks to the execution queue
 /// - Select the next task to run based on scheduling policies
 /// - Track the currently executing task for context switching
+#[derive(DekoDebug)]
 pub struct DekoRunQueue {
     /// The list of runnable tasks queued for execution.
+    #[deko(skip)]
     pub run_list: LinkedList<DekoPPtr<DekoRunnable>>,
     /// The currently running task.
     pub current: Option<DekoPPtr<DekoRunnable>>,
@@ -108,6 +111,27 @@ impl DekoRunQueue {
         ));
         DekoRunQueue { run_list: LinkedList::new(), current: None, idle: None, terminated: None }
     }
+
+    /// Sets the idle task of the run queue; if there was a previous idle task,
+    /// the task pointer is returned.
+    #[verus_spec(r =>
+        with
+            Tracked(perm): Tracked<&mut DekoRunQueuePermission>,
+        requires
+            old(self).wf_with(*old(perm)),
+        ensures
+            self.wf_with(*perm),
+            match old(self).idle {
+                None => r == None::<DekoPPtr<DekoRunnable>>,
+                Some(old_idle) => r == Some(old_idle),
+            },
+            self.idle == Some(idle),
+    )]
+    pub fn set_idle_task(&mut self, idle: DekoPPtr<DekoRunnable>) -> Option<
+        DekoPPtr<DekoRunnable>,
+    > {
+        self.idle.replace(idle)
+    }
 }
 
 /// A `[DekoRunnable`]` represents a task that can be scheduled by the
@@ -126,9 +150,31 @@ pub struct DekoRunnable {
     pub pgtable: DekoPPtr<PageTable>,
 }
 
+// todo: design this struct.
+with_permission!(
+    DekoRunnable,
+);
+
 #[verus_verify]
 impl DekoRunnable {
-
+    /// Creates a new runnable task on the given CPU.
+    #[verus_spec(r =>
+        with
+            Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
+                -> runnable_perm: Tracked<DekoRunnablePermission>,
+        requires
+            old(ctx_perm).wf_with(cpu),
+        ensures
+            ctx_perm.wf_with(cpu),
+    )]
+    pub fn new(
+        cpu: DekoPPtr<DekoCpuCtx>,
+        entry: u64,
+        parent: Option<DekoPPtr<DekoRunnable>>,  // in case of fork
+    ) -> Self {
+        // We need to clone the page table.
+        kunimplemented!("Implement DekoRunnable::new");
+    }
 }
 
 impl WellFormed for DekoRunnable {
