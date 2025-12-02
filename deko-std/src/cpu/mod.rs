@@ -1,9 +1,75 @@
+use deko_macros::DekoDebug;
 use vstd::prelude::*;
 
 use crate::prelude::*;
 use crate::snp::MSR_AMD64_SEV_ES_GHCB;
 
 verus! {
+
+#[derive(Clone, Copy, DekoDebug)]
+pub struct CpuID {
+    pub eax: u32,
+    pub ebx: u32,
+    pub ecx: u32,
+    pub edx: u32,
+}
+
+impl CpuID {
+    #[verifier::external_body]
+    pub fn xsave_area_size() -> (r: usize)
+        ensures
+            r <= PAGE_SIZE,
+    {
+        let cpuid = CpuID::new(0xD, 0x0);
+        cpuid.ecx as usize
+    }
+
+    /// Executes the CPUID instruction with the given function and subfunction
+    #[verifier::external_body]
+    pub fn new(func: u64, leaf: u64) -> Self {
+        let mut result_eax: u32;
+        let mut result_ebx: u32;
+        let mut result_ecx: u32;
+        let mut result_edx: u32;
+        // SAFETY: Inline assembly to execute the CPUID instruction which does
+        // not change any state. Input registers (EAX, ECX) and output
+        // registers (EAX, EBX, ECX, EDX) are safely managed.
+        unsafe {
+            core::arch::asm!("push %rbx",
+                 "cpuid",
+                 "movl %ebx, %edi",
+                 "pop %rbx",
+                 in("eax") func,
+                 in("ecx") leaf,
+                 lateout("eax") result_eax,
+                 lateout("edi") result_ebx,
+                 lateout("ecx") result_ecx,
+                 lateout("edx") result_edx,
+                 options(att_syntax));
+        }
+        Self { eax: result_eax, ebx: result_ebx, ecx: result_ecx, edx: result_edx }
+    }
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy, DekoDebug)]
+pub struct X86GeneralRegs {
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub r11: u64,
+    pub r10: u64,
+    pub r9: u64,
+    pub r8: u64,
+    pub rbp: u64,
+    pub rdi: u64,
+    pub rsi: u64,
+    pub rdx: u64,
+    pub rcx: u64,
+    pub rbx: u64,
+    pub rax: u64,
+}
 
 #[verifier::external_body]
 pub fn read_msr(msr: u32) -> u64 {

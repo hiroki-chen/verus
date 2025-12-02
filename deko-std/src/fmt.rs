@@ -1,6 +1,7 @@
 use lexical_core::{write_with_options, NumberFormatBuilder};
 use vstd::prelude::*;
 
+use crate::sync::rwlock::{RwLock, RwLockPredicate};
 use crate::{DekoPPtr, WellFormed};
 
 // Remove the generic implementation and use a macro instead
@@ -314,6 +315,13 @@ impl DekoDebug for () {
     #[verifier::external_body]
     fn deko_debug<W: DekoWriter>(&self, writer: &W) {
         writer.write_str("()");
+    }
+}
+
+impl<V, Pred: RwLockPredicate<V>> DekoDebug for RwLock<V, Pred> {
+    #[verifier::external_body]
+    fn deko_debug<W: DekoWriter>(&self, writer: &W) {
+        writer.write_str("RwLock(...)");
     }
 }
 

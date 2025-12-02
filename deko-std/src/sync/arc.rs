@@ -148,7 +148,7 @@ impl<V: WellFormed> WellFormed for ArcInner<V> {
     }
 }
 
-/// A wrapped predicate for the `Arc` type.
+/// A wrapped predicate for the `DekoArc` type.
 ///
 /// Why do we need this type? This is because we have to reason about the inner permissioned
 /// types but for the user API we expose the predicate like `V -> bool` so we need a proxy
@@ -173,7 +173,7 @@ impl<V, F> Predicate<DekoPointsTo<ArcInner<V>>> for ArcPredicateWrapper<V, F> wh
 #[verifier::reject_recursive_types(V)]
 pub tracked struct ArcStatus<V, F> where V: WellFormed, F: Predicate<V> {
     pub count: PermissionU64,
-    /// A state machine to track the state of the `Arc`.
+    /// A state machine to track the state of the `DekoArc`.
     /// This allows us to reason about the reference counter.
     pub data: Rc::counter<
         DekoPointsTo<ArcInner<V>>,
@@ -197,29 +197,29 @@ impl<V, F> ArcStatus<V, F> where V: WellFormed, F: Predicate<V> {
 
 struct_with_invariants! {
 
-/// A thread-safe reference-counting pointer. 'Arc' stands for 'Atomically
+/// A thread-safe reference-counting pointer. 'DekoArc' stands for 'Atomically
 /// Reference Counted'.
 ///
-/// The type `Arc<T>` provides shared ownership of a value of type `T`,
-/// allocated in the heap. Invoking [`clone`][clone] on `Arc` produces
-/// a new `Arc` instance, which points to the same allocation on the heap as the
-/// source `Arc`, while increasing a reference count. When the last `Arc`
+/// The type `DekoArc<T>` provides shared ownership of a value of type `T`,
+/// allocated in the heap. Invoking [`clone`][clone] on `DekoArc` produces
+/// a new `DekoArc` instance, which points to the same allocation on the heap as the
+/// source `DekoArc`, while increasing a reference count. When the last `DekoArc`
 /// pointer to a given allocation is destroyed, the value stored in that allocation (often
 /// referred to as "inner value") is also dropped.
 ///
-/// Shared references in Rust disallow mutation by default, and `Arc` is no
+/// Shared references in Rust disallow mutation by default, and `DekoArc` is no
 /// exception: you cannot generally obtain a mutable reference to something
-/// inside an `Arc`. If you do need to mutate through an `Arc`, you have several options:
+/// inside an `DekoArc`. If you do need to mutate through an `DekoArc`, you have several options:
 ///
 /// 1. Use interior mutability with synchronization primitives like [`Mutex`][mutex],
 ///    [`RwLock`][rwlock], or one of the [`Atomic`][atomic] types.
 ///
-/// 2. Use clone-on-write semantics with [`Arc::make_mut`] which provides efficient mutation
+/// 2. Use clone-on-write semantics with [`DekoArc::make_mut`] which provides efficient mutation
 ///    without requiring interior mutability. This approach clones the data only when
 ///    needed (when there are multiple references) and can be more efficient when mutations
 ///    are infrequent.
 ///
-/// 3. Use [`Arc::get_mut`] when you know your `Arc` is not shared (has a reference count of 1),
+/// 3. Use [`DekoArc::get_mut`] when you know your `DekoArc` is not shared (has a reference count of 1),
 ///    which provides direct mutable access to the inner value without any cloning.
 ///
 /// This type also accepts an invariant `F` for the inner value `V`so that we are able to
@@ -228,12 +228,12 @@ struct_with_invariants! {
 ///
 /// FIXME: This is still a WIP;
 #[verifier::reject_recursive_types(V)]
-pub struct Arc<V, F>
+pub struct DekoArc<V, F>
 where
     V: WellFormed,
     F: Predicate<V>,
 {
-    /// The atomic holder of the `Arc` which contains the reference count and the inner value.
+    /// The atomic holder of the `DekoArc` which contains the reference count and the inner value.
     ptr: (DekoPPtr<ArcInner<V>>, Ghost<F>),
     /// The invariant that should be kept for the inner value.
     inv: Tracked<Shared<AtomicInvariant<_, ArcStatus<V, F>, _>>>,
@@ -261,7 +261,7 @@ pub closed spec fn wf(&self) -> bool {
 }
 }
 
-impl<U, F> View for Arc<U, F> where U: WellFormed, F: Predicate<U> {
+impl<U, F> View for DekoArc<U, F> where U: WellFormed, F: Predicate<U> {
     type V = U;
 
     closed spec fn view(&self) -> Self::V {
@@ -269,7 +269,7 @@ impl<U, F> View for Arc<U, F> where U: WellFormed, F: Predicate<U> {
     }
 }
 
-impl<V, F> Arc<V, F> where V: WellFormed, F: Predicate<V> {
+impl<V, F> DekoArc<V, F> where V: WellFormed, F: Predicate<V> {
     pub closed spec fn inv(&self, v: V) -> bool {
         self.ptr.1@.inv(v)
     }
@@ -278,7 +278,7 @@ impl<V, F> Arc<V, F> where V: WellFormed, F: Predicate<V> {
         self.ptr.1
     }
 
-    /// Constructs a new `Arc<T>` with the given value and invariant.
+    /// Constructs a new `DekoArc<T>` with the given value and invariant.
     pub fn new(v: V, allocator: &DefaultDekoHeapAllocator, Ghost(f): Ghost<F>) -> (s: Self)
         requires
             f.inv(v),
@@ -307,7 +307,7 @@ impl<V, F> Arc<V, F> where V: WellFormed, F: Predicate<V> {
         let tracked inv = AtomicInvariant::new((tr_inst, tr_counter), status, ARC_ID);
         let tracked inv = Shared::new(inv);
 
-        Arc {
+        DekoArc {
             ptr: (pptr, Ghost(f)),
             inv: Tracked(inv),
             inst: Tracked(inst),
@@ -384,7 +384,7 @@ impl<V, F> Arc<V, F> where V: WellFormed, F: Predicate<V> {
             };
 
             if res.is_ok() {
-                return Arc {
+                return DekoArc {
                     ptr: self.ptr,  // ptr is Copy
                     inv: Tracked(self.inv.borrow().clone()),
                     inst: self.inst.clone(),
@@ -411,7 +411,7 @@ impl<V, F> Arc<V, F> where V: WellFormed, F: Predicate<V> {
 
     /// Immutably borrows from an owned value.
     ///
-    /// For [`Arc<V, F>`], this is equivalent to [`Arc::as_ref`].
+    /// For [`DekoArc<V, F>`], this is equivalent to [`DekoArc::as_ref`].
     #[inline(always)]
     pub fn borrow<'a>(&'a self) -> (v: &'a V) {
         proof {

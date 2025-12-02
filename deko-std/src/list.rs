@@ -473,11 +473,11 @@ impl<V: WellFormed> LinkedList<V> {
     )
         requires
             old(self).wf(),
+            old(self)@.len() < usize::MAX,
             perm@.wf(),
-            old(self).len < usize::MAX,
             perm@.value().value.wf(),
-            v@ == perm@.pptr(),
             perm@.is_init(),
+            v@ == perm@.pptr(),
         ensures
             self.wf(),
             self@ == seq![perm@.value().value].add(old(self)@),

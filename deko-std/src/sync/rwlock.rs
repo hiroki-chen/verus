@@ -235,6 +235,9 @@ RwLockToks<K, V, Pred: InvariantPredicate<K, V>> {
 
 verus! {
 
+/// A trait for predicates that can be used to constrain the values
+/// stored into the [`RwLock`]. We maintain the invariant that the
+/// value `v` stored into the lock always satisfies `inv(v)`.
 pub trait RwLockPredicate<V>: Sized {
     spec fn inv(self, v: V) -> bool;
 }
@@ -703,23 +706,6 @@ impl<V, Pred: RwLockPredicate<V>> RwLock<V, Pred> {
     }
 }
 
-} // verus!
-verus! {
-
-/// A wrapper for a `RwLockPredicate` that allows us to use it as a ghost type
-pub ghost struct RwLockPredicateWrapper<V: WellFormed, Pred: Predicate<V>> {
-    pub pred: Pred,
-    pub __marker: core::marker::PhantomData<V>,
-}
-
-impl<V, Pred> RwLockPredicate<V> for RwLockPredicateWrapper<V, Pred> where
-    V: WellFormed,
-    Pred: Predicate<V>,
- {
-    open spec fn inv(self, v: V) -> bool {
-        &&& v.wf()
-        &&& self.pred.inv(v)
-    }
-}
+pub type DekoRwLock<V, P, Pred> = RwLock<DekoAtomicData<V, P>, Pred>;
 
 } // verus!

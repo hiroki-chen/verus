@@ -113,7 +113,6 @@ impl<V, F: Predicate<V>> Mutex<V, F> {
                 return Tracked(points_to_opt.tracked_unwrap());
             }
         }
-
     }
 
     pub fn release(&self, Tracked(points_to): Tracked<PointsTo<V>>)

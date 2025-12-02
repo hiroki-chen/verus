@@ -21,6 +21,20 @@ use crate::{kpanic_if, kunimplemented, vec};
 
 verus! {
 
+/// Predicate for managing `VirtualMemoryRegion` in any sync primitives.
+pub struct VirtualMemoryRegionPredicate;
+
+impl Predicate<
+    DekoAtomicData<VirtualMemoryRegion, VirtualMemoryRegionPermission>,
+> for VirtualMemoryRegionPredicate {
+    open spec fn inv(
+        self,
+        data: DekoAtomicData<VirtualMemoryRegion, VirtualMemoryRegionPermission>,
+    ) -> bool {
+        &&& data.data.wf_with(&data.perm@)
+    }
+}
+
 /// Granularity of ranges mapped by [`VirtualMemoryRegion`]. The mapped region of a
 /// [`VirtualMemoryRegion`] is always a multiple of this constant.
 /// One [`VMR_GRANULE`] covers one top-level page-table entry on x86-64 with
