@@ -74,7 +74,7 @@ use verus_syn::token::{Brace, Paren};
 use verus_syn::visit_mut::VisitMut;
 use verus_syn::*;
 
-pub(crate) const VERUS_UNERASED_PROXY: &str = "VERUS_UNERASED_PROXY__";
+pub(crate) const VERUS_UNERASED_PROXY: &str = "__VERUS_UNERASED_PROXY__";
 
 impl crate::syntax::Visitor {
     fn needs_unerased_proxies(&self) -> bool {
