@@ -114,7 +114,7 @@ impl<V: WellFormed, F: Predicate<V>> BoxInner<V, F> {
             perm@.pptr() === self@@,
             perm@.is_init(),
     {
-        self.ptr.write(Tracked(&mut perm.points_to), v)
+        self.ptr.write(Tracked(&mut perm.points_to), v);
     }
 
     /// Allocates memory on the heap and leaves it uninitialized.
