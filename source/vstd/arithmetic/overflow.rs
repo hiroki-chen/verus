@@ -83,11 +83,15 @@ macro_rules! checked_uint_gen {
             }
 
             impl $crate::std_specs::clone::CloneSpecImpl for $cty {
-                closed spec fn obeys_clone_spec() -> bool {
+                open spec fn obeys_clone_requires() -> bool {
                     true
                 }
 
-                closed spec fn clone_requires(&self) -> bool {
+                open spec fn obeys_clone_spec() -> bool {
+                    true
+                }
+
+                open spec fn clone_requires(&self) -> bool {
                     true
                 }
 

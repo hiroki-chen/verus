@@ -8,6 +8,8 @@ verus! {
 pub trait ExClone: Sized {
     type ExternalTraitSpecificationFor: core::clone::Clone;
 
+    spec fn obeys_clone_requires() -> bool;
+
     spec fn obeys_clone_spec() -> bool;
 
     spec fn clone_requires(&self) -> bool;
@@ -15,8 +17,10 @@ pub trait ExClone: Sized {
     spec fn clone_spec(&self) -> Self;
 
     fn clone(&self) -> (r: Self)
+        requires
+            Self::obeys_clone_requires() ==> self.clone_requires(),
         ensures
-            Self::obeys_clone_spec() ==> self.clone_requires() ==> r == self.clone_spec(),
+            Self::obeys_clone_spec() ==> r == self.clone_spec(),
         default_ensures
             r == *self,
     ;

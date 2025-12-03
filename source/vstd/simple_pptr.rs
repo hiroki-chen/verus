@@ -321,6 +321,10 @@ impl<V> PointsTo<V> {
 }
 
 impl<V> CloneSpecImpl for PPtr<V> {
+    closed spec fn obeys_clone_requires() -> bool {
+        true
+    }
+
     closed spec fn obeys_clone_spec() -> bool {
         true
     }

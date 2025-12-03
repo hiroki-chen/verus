@@ -2,6 +2,7 @@
 //! executable code of [`verus_builtin_macros::exec_spec`].
 #![cfg(all(feature = "alloc", feature = "std"))]
 
+use crate::std_specs::clone::CloneSpecImpl;
 use crate::prelude::*;
 pub use verus_builtin_macros::exec_spec;
 
@@ -227,6 +228,24 @@ impl<'a> ToOwned<String> for &'a str {
     #[inline(always)]
     fn get_owned(self) -> String {
         self.to_string()
+    }
+}
+
+impl CloneSpecImpl for String {
+    closed spec fn obeys_clone_requires() -> bool {
+        true
+    }
+
+    closed spec fn obeys_clone_spec() -> bool {
+        true
+    }
+
+    closed spec fn clone_requires(&self) -> bool {
+        true
+    }
+
+    closed spec fn clone_spec(&self) -> Self {
+        *self
     }
 }
 
