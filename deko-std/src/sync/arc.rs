@@ -7,6 +7,7 @@ use vstd::shared::Shared;
 use vstd::{atomic_with_ghost, open_atomic_invariant};
 
 use crate::ptr::{DekoPPtr, DekoPointsTo};
+use crate::std_extra::convert::AsRefSpecImpl;
 use crate::wf::WellFormed;
 use crate::{boxed_ptr, DefaultDekoHeapAllocator, Predicate, ARC_ID};
 
@@ -156,13 +157,12 @@ tokenized_state_machine! {
 
 pub struct ArcInner<V: WellFormed> {
     count: PAtomicUsize,
-    data: DekoPPtr<V>,
+    data: V,
 }
 
 impl<V: WellFormed> WellFormed for ArcInner<V> {
-    #[verifier::inline]
-    open spec fn wf(&self) -> bool {
-        true
+    closed spec fn wf(&self) -> bool {
+        &&& self.data.wf()
     }
 }
 
@@ -172,30 +172,18 @@ pub tracked struct ArcStatus<V: WellFormed, F: Predicate<V>> {
     /// A state machine to track the state of the `DekoArc`.
     /// This allows us to reason about the reference counter.
     pub data: Rc::count<V, DekoPointsTo<ArcInner<V>>, F>,
-    /// The "actual permission" to the data held by the `DekoArc`.
-    pub data_perm: Option<DekoPointsTo<V>>,
 }
 
 impl<V: WellFormed, F: Predicate<V>> ArcStatus<V, F> {
     pub open spec fn wf_with(
         self,
         inst: Rc::Instance<V, DekoPointsTo<ArcInner<V>>, F>,
-        data: V,
-        data_ptr: DekoPPtr<V>,
         ref_count: PAtomicUsize,
     ) -> bool {
         &&& self.count@.patomic == ref_count.id()
         &&& self.data.instance_id() == inst.id()
         &&& self.count.value() as nat == self.data.value()
         &&& 0 <= self.count@.value < u64::MAX
-        &&& self.count@.value == 0 <==> self.data_perm is None
-        &&& self.count@.value > 0 <==> self.data_perm is Some
-        &&& self.data_perm matches Some(data_perm) ==> {
-            &&& data_perm.pptr() == data_ptr@
-            &&& data_perm.value() == data
-            &&& data_perm.is_init()
-            &&& data_perm.wf()
-        }
     }
 }
 
@@ -219,9 +207,6 @@ pub struct DekoArc<V: WellFormed, F: Predicate<V>> {
     // state machines.
     inst: Tracked<Rc::Instance<V, DekoPointsTo<ArcInner<V>>, F>>,
     reader: Tracked<Rc::reader<V, DekoPointsTo<ArcInner<V>>, F>>,
-
-    data: Ghost<V>,
-    data_ptr: Ghost<DekoPPtr<V>>,
     ref_count: Ghost<PAtomicUsize>,
 }
 
@@ -232,12 +217,11 @@ pub closed spec fn wf(&self) -> bool {
         &&& self.reader@.instance_id() == self.inst@.id()
         &&& self.reader@.element().pptr() == self.ptr@
         &&& self.reader@.element().is_init()
-        &&& self.reader@.element().value().data == self.data_ptr
         &&& self.reader@.element().wf()
     }
 
-    invariant on inv with (inst, data, data_ptr, ref_count) specifically (self.inv@@) is (value: ArcStatus<V, F>) {
-        value.wf_with(inst@, data@, data_ptr@, ref_count@)
+    invariant on inv with (inst, ref_count) specifically (self.inv@@) is (value: ArcStatus<V, F>) {
+        value.wf_with(inst@, ref_count@)
     }
 }
 
@@ -248,7 +232,7 @@ impl<U, F> View for DekoArc<U, F> where U: WellFormed, F: Predicate<U> {
     type V = U;
 
     closed spec fn view(&self) -> Self::V {
-        self.data@
+        self.reader@.element().value().data
     }
 }
 
@@ -264,30 +248,24 @@ impl<V: WellFormed, F: Predicate<V>> DekoArc<V, F> {
     }
 
     fn new_with_inner(
-        data: DekoPPtr<V>,
         inner: DekoPPtr<ArcInner<V>>,
         v: V,
-        Tracked(data_perm): Tracked<DekoPointsTo<V>>,
         Tracked(inner_perm): Tracked<DekoPointsTo<ArcInner<V>>>,
         Ghost(f): Ghost<F>,
     ) -> (r: Self)
         requires
             v.wf(),
             f.inv(v),
-            data_perm.wf(),
             inner_perm.wf(),
-            data@ == data_perm.pptr(),
             inner@ == inner_perm.pptr(),
         ensures
             r.wf(),
             r@ == v,
     {
-        let tracked mut data_perm = data_perm;
         let tracked mut inner_perm = inner_perm;
 
         let (count, Tracked(mut count_perm)) = PAtomicUsize::new(1);
-        inner.write(Tracked(&mut inner_perm), ArcInner { count, data });
-        data.write(Tracked(&mut data_perm), v);
+        inner.write(Tracked(&mut inner_perm), ArcInner { count, data: v });
 
         let tracked (Tracked(inst), Tracked(mut token), _) = Rc::Instance::<
             V,
@@ -296,23 +274,17 @@ impl<V: WellFormed, F: Predicate<V>> DekoArc<V, F> {
         >::initialize_empty(f, None, None);
 
         let tracked reader = inst.do_deposit(
-            Ghost(data_perm.value()),
+            Ghost(v),
             inner_perm,
             inner_perm,
-            Ghost(data_perm.value()),
+            Ghost(v),
             &mut token,
         );
-        let tracked status = ArcStatus {
-            count: count_perm,
-            data: token,
-            data_perm: Some(data_perm),
-        };
+        let tracked status = ArcStatus { count: count_perm, data: token };
         let tr_inst = Tracked(inst);
-        let ghost_ptr = Ghost(data);
-        let ghost_data = Ghost(v);
         let ghost_count = Ghost(count);
         let tracked inv: AtomicInvariant<_, ArcStatus<_, _>, _> = AtomicInvariant::new(
-            (tr_inst, ghost_data, ghost_ptr, ghost_count),
+            (tr_inst, ghost_count),
             status,
             ARC_ID,
         );
@@ -323,8 +295,6 @@ impl<V: WellFormed, F: Predicate<V>> DekoArc<V, F> {
             inv: Tracked(inv),
             inst: Tracked(inst),
             reader: Tracked(reader),
-            data: Ghost(v),
-            data_ptr: Ghost(data),
             ref_count: Ghost(count),
         }
     }
@@ -340,12 +310,9 @@ impl<V: WellFormed, F: Predicate<V>> DekoArc<V, F> {
             r.wf(),
             r@ == v,
     {
-        let v_g = Ghost(v);
-
-        let (data, Tracked(mut data_perm)) = boxed_ptr!(V, allocator);
         let (inner, Tracked(mut inner_perm)) = boxed_ptr!(ArcInner<V>, allocator);
 
-        Self::new_with_inner(data, inner, v, Tracked(data_perm), Tracked(inner_perm), Ghost(f))
+        Self::new_with_inner(inner, v, Tracked(inner_perm), Ghost(f))
     }
 
     /// Clone this [`DekoArc`] and increase the strong reference count.
@@ -389,13 +356,12 @@ impl<V: WellFormed, F: Predicate<V>> DekoArc<V, F> {
                     let tracked ArcStatus {
                         count: mut atomic_count,
                         data: mut token,
-                        data_perm: mut data_perm,
                     } = g;
 
                     count = inner_ref.count.load(Tracked(&mut atomic_count));
 
                     proof {
-                        g = ArcStatus { count: atomic_count, data: token, data_perm: data_perm };
+                        g = ArcStatus { count: atomic_count, data: token };
                     }
                 }
             };
@@ -417,7 +383,6 @@ impl<V: WellFormed, F: Predicate<V>> DekoArc<V, F> {
                     let tracked ArcStatus {
                         count: mut atomic_count,
                         data: mut token,
-                        data_perm: mut data_perm,
                     } = g;
 
                     res = inner_ref.count.compare_exchange_weak(
@@ -436,7 +401,7 @@ impl<V: WellFormed, F: Predicate<V>> DekoArc<V, F> {
                     }
 
                     proof {
-                        g = ArcStatus { count: atomic_count, data: token, data_perm: data_perm };
+                        g = ArcStatus { count: atomic_count, data: token };
                     }
                 }
             };
@@ -447,9 +412,7 @@ impl<V: WellFormed, F: Predicate<V>> DekoArc<V, F> {
                     inv: Tracked(self.inv.borrow().clone()),
                     inst: self.inst.clone(),
                     reader: Tracked(new_reader.tracked_unwrap()),
-                    data: self.data,
                     ref_count: self.ref_count,
-                    data_ptr: self.data_ptr,
                 };
             }
         }
@@ -477,29 +440,18 @@ impl<V: WellFormed, F: Predicate<V>> DekoArc<V, F> {
             use_type_invariant(&self);
         }
 
-        let DekoArc {
-            ptr,
-            inv,
-            inst: Tracked(inst),
-            reader: Tracked(reader),
-            data,
-            ref_count,
-            data_ptr,
-        } = self;
+        let DekoArc { ptr, inv, inst: Tracked(inst), reader: Tracked(reader), ref_count } = self;
 
         let tracked perm = inst.reader_guard(reader.element(), &reader);
         let inner = ptr.borrow(Tracked(perm));
-        let inner_ptr = inner.data;
         let count;
         let tracked mut inner_perm: Option<DekoPointsTo<ArcInner<V>>> = None;
-        let tracked mut inner_data_perm: Option<DekoPointsTo<V>> = None;
 
         open_atomic_invariant! {
             inv.borrow().borrow() => g => {
                 let tracked ArcStatus {
                     count: mut atomic_count,
                     data: mut token,
-                    data_perm: mut data_perm,
                 } = g;
 
                 count = inner.count.compare_exchange_weak(Tracked(&mut atomic_count), 1, 0);
@@ -507,43 +459,55 @@ impl<V: WellFormed, F: Predicate<V>> DekoArc<V, F> {
                     if let Ok(1) = count {
                         let tracked (Tracked(arc_perm), _, _) = inst.do_free(reader.element(), &mut token, reader);
                         inner_perm = Some(arc_perm);
-                        inner_data_perm = data_perm;
-
-                        g = ArcStatus {
-                            count: atomic_count,
-                            data: token,
-                            data_perm: None,
-                        };
-                    } else {
-                        g = ArcStatus {
-                            count: atomic_count,
-                            data: token,
-                            data_perm: data_perm,
-                        };
                     }
+
+                    g = ArcStatus {
+                            count: atomic_count,
+                            data: token,
+                        };
                 }
             }
         }
 
         if let Ok(1) = count {
-            let tracked mut inner_data_perm = inner_data_perm.tracked_unwrap();
             let tracked mut inner_perm = inner_perm.tracked_unwrap();
 
-            let old_v = inner_ptr.take(Tracked(&mut inner_data_perm));
+            let old_v = ptr.take(Tracked(&mut inner_perm)).data;
             // Now construct a "new" DekoArc again.
-            let new_self = Self::new_with_inner(
-                inner_ptr,
-                ptr,
-                v,
-                Tracked(inner_data_perm),
-                Tracked(inner_perm),
-                Ghost(inst.f()),
-            );
+            let new_self = Self::new_with_inner(ptr, v, Tracked(inner_perm), Ghost(inst.f()));
 
             Ok((new_self, old_v))
         } else {
             Err(v)
         }
+    }
+}
+
+impl<V: WellFormed, F: Predicate<V>> AsRefSpecImpl<V> for DekoArc<V, F> {
+    closed spec fn obeys_as_ref_spec() -> bool {
+        true
+    }
+
+    closed spec fn as_ref_requires(&self) -> bool {
+        self.wf()
+    }
+
+    closed spec fn as_ref_spec(&self) -> &V {
+        &self@
+    }
+}
+
+impl<V: WellFormed, F: Predicate<V>> AsRef<V> for DekoArc<V, F> {
+    fn as_ref<'a>(&'a self) -> (r: &'a V) {
+        proof {
+            use_type_invariant(&self);
+        }
+
+        let tracked inst = self.inst.borrow();
+        let tracked reader = self.reader.borrow();
+        let tracked perm = inst.reader_guard(reader.element(), &reader);
+
+        &self.ptr.borrow(Tracked(perm)).data
     }
 }
 
