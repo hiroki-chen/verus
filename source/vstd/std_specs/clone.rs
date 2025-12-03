@@ -4,10 +4,20 @@ use core::clone::Clone;
 verus! {
 
 #[verifier::external_trait_specification]
+#[verifier::external_trait_extension(CloneSpec via CloneSpecImpl)]
 pub trait ExClone: Sized {
     type ExternalTraitSpecificationFor: core::clone::Clone;
 
-    fn clone(&self) -> Self;
+    spec fn obeys_clone_spec() -> bool;
+
+    spec fn clone_requires(&self) -> bool;
+
+    spec fn clone_spec(&self) -> Self;
+
+    fn clone(&self) -> (r: Self)
+        ensures
+            Self::obeys_clone_spec() ==> self.clone_requires() ==> r == self.clone_spec(),
+    ;
 }
 
 /*

@@ -2,6 +2,7 @@ use super::layout::*;
 use super::prelude::*;
 use super::raw_ptr;
 use super::raw_ptr::*;
+use super::std_specs::clone::CloneSpecImpl;
 use core::marker::PhantomData;
 
 verus! {
@@ -319,11 +320,22 @@ impl<V> PointsTo<V> {
     }
 }
 
+impl<V> CloneSpecImpl for PPtr<V> {
+    closed spec fn obeys_clone_spec() -> bool {
+        true
+    }
+
+    closed spec fn clone_requires(&self) -> bool {
+        true
+    }
+
+    open spec fn clone_spec(&self) -> Self {
+        *self
+    }
+}
+
 impl<V> Clone for PPtr<V> {
-    fn clone(&self) -> (res: Self)
-        ensures
-            res == *self,
-    {
+    fn clone(&self) -> (res: Self) {
         PPtr(self.0, PhantomData)
     }
 }

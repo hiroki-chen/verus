@@ -82,6 +82,20 @@ macro_rules! checked_uint_gen {
                 }
             }
 
+            impl $crate::std_specs::clone::CloneSpecImpl for $cty {
+                closed spec fn obeys_clone_spec() -> bool {
+                    true
+                }
+
+                closed spec fn clone_requires(&self) -> bool {
+                    true
+                }
+
+                closed spec fn clone_spec(&self) -> Self {
+                    Self { i: self.i, v: self.v }
+                }
+            }
+
             impl Clone for $cty {
                 /// Clones the `$cty` instance.
                 /// Ensures the cloned instance has the same value as the original.
