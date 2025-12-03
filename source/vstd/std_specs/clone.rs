@@ -17,6 +17,8 @@ pub trait ExClone: Sized {
     fn clone(&self) -> (r: Self)
         ensures
             Self::obeys_clone_spec() ==> self.clone_requires() ==> r == self.clone_spec(),
+        default_ensures
+            r == *self,
     ;
 }
 
