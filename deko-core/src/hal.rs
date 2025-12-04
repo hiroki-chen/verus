@@ -240,7 +240,7 @@ fn init_early_idt_late(idt: &mut Idt) {
     ensures
 )]
 pub fn setup_env(ctx: DekoPPtr<DekoCtx>) -> (__discard: !) {
-    let tracked Tracked(mut ctx_perm) = ctx_perm;
+    let tracked mut ctx_perm = ctx_perm.get();
 
     // Extract the launch info from the context.
     let header = ctx.borrow(Tracked(&ctx_perm.deko_ctx_ptr_perm)).stage2_launch_info.borrow(

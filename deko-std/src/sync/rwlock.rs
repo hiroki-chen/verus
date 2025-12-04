@@ -1,3 +1,4 @@
+//! A verified implementation of a reader-writer lock (RwLock).
 use core::marker::PhantomData;
 
 use verus_state_machines_macros::tokenized_state_machine;
@@ -736,11 +737,11 @@ impl<V: WellFormed> DekoSimpleRwLock<V> {
 /// A type alias for a [`RwLock`] that uses [`DekoAtomicData`] as its
 /// atomic storage type; the backing spin type is the default `()` with
 /// no IRQs allowed during locks held.
-pub type DekoRwLock<V, P, Pred> = RwLock<DekoAtomicData<V, P>, (), Pred>;
+pub type DekoRwLock<V, P, Pred> = RwLock<DekoAtomicData<V, P>, SpinNoIrq, Pred>;
 
 pub type DekoSimpleRwLock<V> = RwLock<
     DekoAtomicDataNoPerm<V>,
-    (),
+    SpinNoIrq,
     TrivialPredicate<DekoAtomicDataNoPerm<V>>,
 >;
 

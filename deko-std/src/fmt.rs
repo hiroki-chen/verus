@@ -467,4 +467,11 @@ impl<V: WellFormed> DekoDebug for DekoPPtr<V> {
     }
 }
 
+impl<V: WellFormed, P: crate::Predicate<V>> DekoDebug for crate::sync::arc::Arc<V, P> {
+    #[verifier::external_body]
+    fn deko_debug<W: DekoWriter>(&self, writer: &W) {
+        writer.write_str("Arc(...)");
+    }
+}
+
 } // verus!

@@ -5,6 +5,7 @@
 #![feature(core_intrinsics)]
 #![feature(never_type)]
 #![feature(trait_alias)]
+#![feature(likely_unlikely)]
 #![allow(named_asm_labels)]
 #![allow(binary_asm_labels)]
 #![allow(mismatched_lifetime_syntaxes)]

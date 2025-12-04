@@ -1,16 +1,16 @@
 use core::cmp::Ordering;
 use core::sync::atomic::{AtomicU32, AtomicU64};
 
-use deko_macros::DekoDebug;
+use deko_macros::{with_atomic_pred, DekoDebug};
 use deko_std::address::{VaddrRange, VirtAddr};
 use deko_std::array::Array;
 use deko_std::cpu::{no_irq_zone, CpuID, X86GeneralRegs};
 use deko_std::list::{LinkedList, Node};
-use deko_std::mem::PAGE_SIZE;
+use deko_std::mem::{PAGE_SIZE, PGTABLE_LVL3_IDX_SHARED};
 use deko_std::ptr::{DekoPPtr, DekoPointsTo};
 use deko_std::sync::arc::DekoArc;
 use deko_std::sync::rwlock::{DekoRwLock, RwLockPredicate};
-use deko_std::sync::DekoAtomicData;
+use deko_std::sync::{DekoAtomicData, RwLock};
 use deko_std::wf::WellFormed;
 use deko_std::{boxed_ptr, with_permission};
 use vstd::prelude::*;
@@ -19,13 +19,19 @@ use vstd::std_specs::cmp::{PartialEqSpec, PartialEqSpecImpl, PartialOrdSpecImpl}
 use crate::collections::Vec;
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::paging::{PageTable, PageTablePermission};
+use crate::mm::stack::DekoKernelStack;
 use crate::mm::vm::{
     VirtualMemoryRegion, VirtualMemoryRegionPermission, VirtualMemoryRegionPredicate,
 };
 use crate::mm::DEKO_FRAME_ALLOCATOR;
-use crate::{die, kerror, kunimplemented};
+use crate::{die, kerror, kpanic_if, kunimplemented};
 
 verus! {
+
+pub broadcast axiom fn xsave_area_size_wf()
+    ensures
+        #[trigger] Array::<u8, 4096>::size_wf(),
+;
 
 /// Generates a unique identifier for a task.
 ///
@@ -72,6 +78,45 @@ impl RwLockPredicate<DekoAtomicData<DekoRunQueue, DekoRunQueuePermission>> for D
     }
 }
 
+/// The arguments passed to a task upon its creation to specify
+/// its initial configuration.
+#[derive(DekoDebug)]
+pub struct DekoTaskArgs {
+    /// If this task is spawned by another task, this field holds
+    /// a pointer to the parent task.
+    pub parent: Option<DekoRunnablePtr>,
+    /// The entry point of the new task which should be the pointer
+    /// to the function to execute.
+    #[deko(hex)]
+    pub entry: u64,
+    /// The name of the task for debugging purposes.
+    #[deko(hex)]
+    pub name: &'static str,
+    /// The mode in which the task should run.
+    pub mode: DekoTaskMode,
+}
+
+impl WellFormed for DekoTaskArgs {
+    open spec fn wf(&self) -> bool {
+        &&& self.parent matches Some(parent) ==> parent.wf() && parent@.data.mm.wf()
+    }
+}
+
+/// The mode in which a task is running.
+#[derive(DekoDebug)]
+pub enum DekoTaskMode {
+    /// User mode task.
+    User { entry: u64 },
+    /// Kernel mode task.
+    Kernel { entry: u64, param: u64, ret: u64 },
+}
+
+impl WellFormed for DekoTaskMode {
+    open spec fn wf(&self) -> bool {
+        true
+    }
+}
+
 /// A task run queue that manages the scheduling of runnable tasks.
 ///
 /// The [`DekoRunQueue`] maintains a collection of tasks that are ready to execute
@@ -89,21 +134,31 @@ impl RwLockPredicate<DekoAtomicData<DekoRunQueue, DekoRunQueuePermission>> for D
 pub struct DekoRunQueue {
     /// The list of runnable tasks queued for execution.
     #[deko(skip)]
-    pub run_list: LinkedList<DekoPPtr<DekoRunnable>>,
+    pub run_list: LinkedList<DekoRunnablePtr>,
     /// The currently running task.
-    pub current: Option<DekoPPtr<DekoRunnable>>,
+    pub current: Option<DekoRunnablePtr>,
     /// The idle task pointer.
-    pub idle: Option<DekoPPtr<DekoRunnable>>,
+    pub idle: Option<DekoRunnablePtr>,
     /// The terminated task pointer.
-    pub terminated: Option<DekoPPtr<DekoRunnable>>,
+    pub terminated: Option<DekoRunnablePtr>,
+}
+
+impl View for DekoRunQueue {
+    type V = Seq<DekoAtomicData<DekoRunnable, DekoRunnablePermission>>;
+
+    /// The view on the [`DekoRunQueue`] is the sequence of runnable tasks
+    /// in the run list (n.B: deep view of the [`DekoArc<T>`] not its PTR addr).
+    open spec fn view(&self) -> Self::V {
+        Seq::new(self.run_list@.len() as nat, |i: int| { self.run_list@[i as int]@ })
+    }
 }
 
 with_permission!(
     DekoRunQueue,
-    run_list_perm: Ghost<Seq<DekoPointsTo<DekoRunnable>>>,
-    current_ptr: Option<DekoPointsTo<DekoRunnable>>,
-    idle_ptr: Option<DekoPointsTo<DekoRunnable>>,
-    terminated_ptr: Option<DekoPointsTo<DekoRunnable>>,
+    run_list_perm: Ghost<Seq<Ghost<DekoRunnablePtr>>>,
+    current_ptr: Option<DekoRunnablePtr>,
+    idle_ptr: Option<DekoRunnablePtr>,
+    terminated_ptr: Option<DekoRunnablePtr>,
 );
 
 impl WellFormed for DekoRunQueue {
@@ -120,7 +175,7 @@ impl DekoRunQueue {
         &&& forall|i: int|
             #![trigger self.run_list@[i as int], perm.run_list_perm@[i as int]]
             0 <= i < perm.run_list_perm@.len() ==> self.run_list@[i as int]@
-                == perm.run_list_perm@[i as int].pptr()
+                == perm.run_list_perm@[i as int]@@
     }
 
     /// Checks if the run queue has any scheduleable tasks.
@@ -148,38 +203,39 @@ impl DekoRunQueue {
 
     /// Sets the idle task of the run queue; if there was a previous idle task,
     /// the task pointer is returned.
+    #[allow(non_shorthand_field_patterns)]
     #[verus_spec(r =>
         with
             Tracked(perm): Tracked<&mut DekoRunQueuePermission>,
-            Tracked(idle_perm): Tracked<DekoPointsTo<DekoRunnable>>,
         requires
             old(self).wf_with(*old(perm)),
             old(self).run_list@.len() < usize::MAX - 1,
-            idle_perm.is_init(),
-            idle_perm.wf(),
-            idle_perm.pptr() == idle@,
+            idle.wf(),
         ensures
-            self.run_list@ =~= old(self).run_list@.insert(0, idle),
+            self@ =~= old(self)@.insert(0, idle@),
             self.wf_with(*perm),
             match old(self).idle {
-                None => r == None::<DekoPPtr<DekoRunnable>>,
+                None => r == None::<DekoRunnablePtr>,
                 Some(old_idle) => r == Some(old_idle),
             },
             self.idle == Some(idle),
     )]
-    pub fn set_idle_task(&mut self, idle: DekoPPtr<DekoRunnable>) -> Option<
-        DekoPPtr<DekoRunnable>,
-    > {
+    pub fn set_idle_task(&mut self, idle: DekoRunnablePtr) -> Option<DekoRunnablePtr> {
+        proof {
+            use_type_invariant(&idle);
+        }
+
         let (idle_node_ptr, Tracked(mut idle_ptr_perm)) =
-            boxed_ptr!(Node<DekoPPtr<DekoRunnable>>, &DEKO_FRAME_ALLOCATOR.0);
+            boxed_ptr!(Node<DekoRunnablePtr>, &DEKO_FRAME_ALLOCATOR.0);
+
         // write something into the node.
         idle_node_ptr.write(
             Tracked(&mut idle_ptr_perm),
-            Node { prev: None, next: None, value: idle },
+            Node { prev: None, next: None, value: idle.clone() },
         );
         self.run_list.push_front_no_alloc(idle_node_ptr, Tracked(idle_ptr_perm));
         proof {
-            perm.run_list_perm@ = perm.run_list_perm@.insert(0, idle_perm);
+            perm.run_list_perm@ = perm.run_list_perm@.insert(0, Ghost(idle));
         }
 
         // Update the global task list too.
@@ -196,16 +252,16 @@ impl DekoRunQueue {
             die("");
         }
         let (idle_node_ptr, Tracked(mut idle_ptr_perm)) =
-            boxed_ptr!(Node<DekoPPtr<DekoRunnable>>, &DEKO_FRAME_ALLOCATOR.0);
+            boxed_ptr!(Node<DekoRunnablePtr>, &DEKO_FRAME_ALLOCATOR.0);
         // write something into the node.
         idle_node_ptr.write(
             Tracked(&mut idle_ptr_perm),
-            Node { prev: None, next: None, value: idle },
+            Node { prev: None, next: None, value: idle.clone() },
         );
 
         data.run_list.push_front_no_alloc(idle_node_ptr, Tracked(idle_ptr_perm));
         proof {
-            perm.run_list_perm@ = perm.run_list_perm@.insert(0, idle_perm);
+            perm.run_list_perm@ = perm.run_list_perm@.insert(0, Ghost(idle));
         }
 
         handle.release_write(DekoAtomicData { data, perm: Tracked(perm) });
@@ -268,42 +324,176 @@ pub struct DekoRunnable {
     >,
 }
 
-// todo: design this struct.
-with_permission!(
-    DekoRunnable,
-    // parent_cpu: DekoCpuCore,
-);
-
 #[verus_verify]
 impl DekoRunnable {
-    /// Creates a new runnable task on the given CPU.
+    /// Createas and initializes a new virtual memory manager for the task.
+    #[verus_spec(r =>
+        ensures
+            r.wf(),
+    )]
+    pub fn create_mm() -> DekoArc<
+        VirtualMemoryRegion,
+        VirtualMemoryRegionPermission,
+        VirtualMemoryRegionPredicate,
+    > {
+        kunimplemented!()
+    }
+
     #[verus_spec(r =>
         with
-            Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
-                -> runnable_perm: Tracked<DekoRunnablePermission>,
+            Tracked(xsave_perm): Tracked<&DekoPointsTo<Array<u8, 4096>>>,
         requires
-            old(ctx_perm).wf_with(cpu),
-        ensures
-            ctx_perm.wf_with(cpu),
+            cpu.wf(),
+            xsave@ == xsave_perm.pptr(),
     )]
-    pub fn new(
-        cpu: DekoPPtr<DekoCpuCtx>,
+    pub fn alloc_user_stack(cpu: &DekoCpuCtx, entry: u64, xsave: DekoPPtr<Array<u8, 4096>>) -> (
+        VaddrRange,
+        VaddrRange,
+        u64,
+    ) {
+        kunimplemented!()
+    }
+
+    /// Returns the stack mapped range, the raw stack range, and the initial RSP value.
+    #[verus_spec(r =>
+        with
+            Tracked(xsave_perm): Tracked<&DekoPointsTo<Array<u8, 4096>>>,
+        requires
+            cpu.wf(),
+            xsave@ == xsave_perm.pptr(),
+    )]
+    pub fn alloc_kernel_stack(
+        cpu: &DekoCpuCtx,
         entry: u64,
-        parent: Option<DekoPPtr<DekoRunnable>>,  // in case of fork
-    ) -> Self {
-        let id = generate_id();
-        let xsave_area_size = CpuID::xsave_area_size();
-        // Allocate the XSAVE area.
-        let (xsave_ptr, Tracked(xsave_perm)) = boxed_ptr!(Array<u8, 4096>, &DEKO_FRAME_ALLOCATOR.0);
+        param: u64,
+        ret: u64,
+        xsave: DekoPPtr<Array<u8, 4096>>,
+    ) -> (VaddrRange, VaddrRange, u64) {
+        let stack = DekoKernelStack::new_with_size(0x8000, false);
+        let range = stack.range();
+
+        // We need to setup a context on the stack that matches the stack layout
+        // defined in switch_context below.
+
+        kunimplemented!()
+    }
+
+    /// Creates a new runnable task with the given arguments on the given CPU.
+    #[verus_spec(r =>
+        with
+            Tracked(ctx_perm): Tracked<&DekoCpuCtxPermission>,
+        requires
+            cpu.wf(),
+            cpu.vm_region_spec() matches Some(vm) && vm.wf(),
+            cpu.kernel_mapping_spec().wf(),
+            cpu.pgtable_spec()@ == ctx_perm.pgtable_perm.pgtable_perm.pptr(),
+            ctx_perm.pgtable_perm.wf(),
+            args.wf(),
+        ensures
+            r.wf(),
+            // r@.???
+    )]
+    pub fn new(cpu: &DekoCpuCtx, args: DekoTaskArgs) -> DekoRunnablePtr {
+        kpanic_if!(core::hint::unlikely(
+            cpu.vm_region().is_none(),
+        ), "CPU has no VM region assigned");
+
+        // Allocate a page table for the new task.
+        let (new_pgtable, _, Tracked(mut pgtable_perm)) = PageTable::new(
+            cpu.private_bit,
+            cpu.shared_bit,
+            Ghost(&cpu.kernel_mapping_spec()),
+        );
+
+        let old_pte_value = *cpu.pgtable.borrow(
+            Tracked(&ctx_perm.pgtable_perm.pgtable_perm),
+        ).0.index(PGTABLE_LVL3_IDX_SHARED as usize);
+
+        // Copy the shared mappings from the kernel page table.
+        PageTable::update_entry_by_ptr(
+            new_pgtable,
+            Tracked(&mut pgtable_perm.pgtable_perm),
+            PGTABLE_LVL3_IDX_SHARED as usize,
+            old_pte_value,
+        );
 
         proof {
-            assert(xsave_area_size <= PAGE_SIZE);
+            broadcast use xsave_area_size_wf;
+
+            assert(pgtable_perm.wf()) by {
+                admit();
+            }
         }
 
-        // We need to clone the page table.
-        kunimplemented!("Implement DekoRunnable::new");
+        proof_with!(Tracked(&mut pgtable_perm));
+        cpu.vm_region().as_ref().unwrap().copy_to_page_table(new_pgtable);
+
+        let task_mm = match args.parent {
+            Some(ptr) => { ptr.as_ref().data.mm.clone() },
+            None => { Self::create_mm() },
+        };
+
+        // Allocate xsave areas.
+        let (xsave_ptr, Tracked(xsave_perm)) = boxed_ptr!(Array<u8, 4096>, &DEKO_FRAME_ALLOCATOR.0);
+        // This does nothing but clear the area to mark it as init.
+        xsave_ptr.put(Tracked(&mut xsave_perm), Array::fill(0));
+
+        let (stack, vrange, rsp) = match args.mode {
+            DekoTaskMode::Kernel { entry, param, ret } => {
+                proof_with!(Tracked(&xsave_perm));
+                Self::alloc_kernel_stack(cpu, entry, param, ret, xsave_ptr)
+            },
+            DekoTaskMode::User { entry } => {
+                proof_with!(Tracked(&xsave_perm));
+                Self::alloc_user_stack(cpu, entry, xsave_ptr)
+            },
+        };
+
+        let task = DekoRunnable {
+            id: generate_id(),
+            pgtable: RwLock::new(
+                DekoAtomicData::new_with(new_pgtable, Tracked(pgtable_perm)),
+                (),
+                Ghost(DekoPagaTablePred {  }),
+            ),
+            priority: 0,
+            xsave: xsave_ptr,
+            mm: task_mm,
+            rsp: vrange.end.0.checked_sub(rsp).unwrap_or(0),
+            ssp: VirtAddr(0),
+            stack,
+            xsave_size: PAGE_SIZE as _,
+        };
+
+        proof {
+            // need to fix it later.
+            assert(task.wf()) by {
+                admit();
+            }
+        }
+
+        DekoArc::new(
+            DekoAtomicData::new_with(task, Tracked(DekoRunnablePermission { xsave_perm })),
+            &DEKO_FRAME_ALLOCATOR.0,
+            Ghost(DekoRunnablePred {  }),
+        )
     }
 }
+
+with_permission! {
+    DekoRunnable,
+    xsave_perm: DekoPointsTo<Array<u8, 4096>>,
+}
+
+with_atomic_pred! {
+    DekoRunnable,
+    DekoRunnablePermission,
+    fields: { xsave },
+    perm_fields: { xsave_perm },
+    xsave_perm.pptr() == xsave@ && xsave_perm.is_init() && xsave_perm.wf()
+}
+
+pub type DekoRunnablePtr = DekoArc<DekoRunnable, DekoRunnablePermission, DekoRunnablePred>;
 
 impl WellFormed for DekoRunnable {
     open spec fn wf(&self) -> bool {
@@ -391,7 +581,7 @@ pub unsafe fn schedule_init() {
 /// are valid task pointers.
 #[verus_spec(r =>
     )]
-unsafe fn switch(pre: DekoPPtr<DekoRunnable>, next: DekoPPtr<DekoRunnable>) {
+unsafe fn switch(pre: DekoRunnablePtr, next: DekoRunnablePtr) {
     // NO IRQ is allowed or the system will jump into
     // an inconsistent state.
     no_irq_zone(

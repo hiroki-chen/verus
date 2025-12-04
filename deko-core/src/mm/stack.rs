@@ -1,5 +1,7 @@
+use core::ops::Range;
+
 use deko_macros::DekoDebug;
-use deko_std::address::{PhysAddr, VirtAddr};
+use deko_std::address::{PhysAddr, VaddrRange, VirtAddr};
 use deko_std::fmt::DekoDebug;
 use deko_std::mem::PAGE_SIZE;
 use deko_std::ptr::DekoPPtr;
@@ -137,6 +139,21 @@ impl DekoKernelStack {
         }
 
         Self { alloc: v, guard_pages, shadow }
+    }
+
+    /// Gets the range of virtual addresses covered by this stack.
+    #[verus_spec(r =>
+        requires
+            self.wf(),
+        ensures
+            r.start == self.guard_pages * PAGE_SIZE,
+            r.end == self.guard_pages * PAGE_SIZE + self.alloc@.len() as u64 * PAGE_SIZE,
+    )]
+    pub fn range(&self) -> Range<u64> {
+        let alloc_size = self.alloc.len() as u64 * PAGE_SIZE;
+        let guard_size = self.guard_pages * PAGE_SIZE;
+
+        guard_size..(guard_size + alloc_size)
     }
 }
 

@@ -30,7 +30,9 @@ pub trait Spin {
     fn lock_epilogue(data: &Self::GuardData);
 }
 
-impl Spin for () {
+pub type SpinNoIrq = ();
+
+impl Spin for SpinNoIrq {
     type GuardData = u64;
 
     #[inline]

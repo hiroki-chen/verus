@@ -3,6 +3,28 @@ use vstd::prelude::*;
 verus! {
 
 /// A marker trait for types that are well-formed.
+///
+/// Please be extra careful about name shadowing as sometimes it is tempting to
+/// have a `type_invariant` also named as `wf` and will be closed for some types
+/// like synchronization primitives. This will create unintended verification
+/// errors as Verus will try to resolve the wrong `wf` function.
+///
+/// Be sure to call this function, if naming shadowing happens, by
+/// `<Type as WellFormed>::wf(&self)`.
+///
+/// # Example
+///
+/// ```rust,norun
+/// verus! {
+///     struct MyType<V> { foo: V }
+///
+///     impl<V: WellFormed> WellFormed for MyType<V> {
+///          open spec fn wf(&self) -> bool {
+///              self.foo.wf()
+///          }
+///     }
+/// }
+/// ```
 pub trait WellFormed {
     spec fn wf(&self) -> bool;
 }

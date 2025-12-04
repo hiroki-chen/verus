@@ -15,7 +15,7 @@ verus! {
 /// loads and stores of pointers. Its size depends on the target pointer’s size.
 #[repr(transparent)]
 pub struct AtomicPtr<V: WellFormed> {
-    ptr: DekoPPtr<V>,
+    pub ptr: DekoPPtr<V>,
 }
 
 #[verifier::external]
@@ -34,7 +34,10 @@ impl<V: WellFormed> AtomicPtr<V> {
     /// This is safe because passing `self` by value gaurantees that no other threads
     /// are concurrently accessing the atomic data.
     #[verifier::atomic]
-    pub const fn into_inner(self) -> (r: DekoPPtr<V>) {
+    pub const fn into_inner(self) -> (r: DekoPPtr<V>)
+        returns
+            self.ptr,
+    {
         self.ptr
     }
 }

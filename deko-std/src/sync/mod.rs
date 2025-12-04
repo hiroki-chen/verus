@@ -1,3 +1,18 @@
+//! Verified synchronization primitives for low-level OS programming.
+//!
+//! This module provides several synchronization primitives that are
+//! suitable for use in low-level operating system code, including:
+//!
+//! - [`mutex::Mutex`]: A mutual exclusion lock for protecting shared data.
+//! - [`rwlock::RwLock`]: A reader-writer lock for allowing concurrent read access.
+//! - [`once::OnceCell`]: A cell that can be initialized exactly once.
+//! - [`arc::Arc`]: An atomically reference-counted pointer for shared ownership.
+//! - [`lazy::Lazy`]: A lazily initialized value.
+//! - [`atomic::AtomicPtr`]: An atomic pointer type for safe concurrent access.
+//!
+//! Each primitive is designed to be thread-safe and can be used in static
+//! contexts. They leverage Verus's verification capabilities to ensure
+//! correctness properties about concurrent access and data integrity.
 #[cfg(feature = "alloc")]
 pub mod arc;
 pub mod atomic;

@@ -5,5 +5,6 @@ pub mod allocator;
 #[cfg(feature = "alloc")]
 pub mod collections;
 pub mod convert;
+pub mod hint;
 pub mod option;
 pub mod result;

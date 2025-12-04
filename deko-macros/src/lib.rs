@@ -1,6 +1,7 @@
 use proc_macro::TokenStream;
 use syn::{DeriveInput, parse_macro_input};
 
+pub(crate) mod atomic_pred;
 pub(crate) mod imp;
 
 /// Derive macro for DekoDebug trait
@@ -15,7 +16,7 @@ pub(crate) mod imp;
 /// - `#[deko(name = "custom_name")]` - Use custom field name
 ///
 /// Example:
-/// ```rust
+/// ```rust,norun
 /// #[derive(DekoDebug)]
 /// struct MyStruct {
 ///     #[deko(hex)]
@@ -35,4 +36,19 @@ pub fn derive_deko_debug(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
     imp::generate_deko_debug_impl(&input).unwrap_or_else(|e| e.to_compile_error()).into()
+}
+
+/// Macro for generating atomic predicates
+///
+/// Usage:
+/// ```rust,norun
+/// with_atomic_pred!(DekoRunnable, DekoRunnable, DekoRunnablePermission,
+///     fields: { xsave },
+///     perm_fields: { xsave_perm },
+///     xsave_perm.pptr() == xsave@ &&& xsave_perm.is_init() &&& xsave_perm.wf()
+/// );
+/// ```
+#[proc_macro]
+pub fn with_atomic_pred(input: TokenStream) -> TokenStream {
+    atomic_pred::with_atomic_pred_impl(input)
 }

@@ -365,7 +365,6 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
         ghcb_perm,
         ctx_switch_stack_perm: None,
         vm_region_perm: None,
-        run_queue_perm: None,
     };
 
     assume(cpu_ctx_perm.wf_with(bsp_percpu_ptr));

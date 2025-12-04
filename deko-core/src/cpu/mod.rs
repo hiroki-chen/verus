@@ -16,7 +16,9 @@ use vstd::prelude::*;
 
 use crate::cpu::apic::X86Apic;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
-use crate::cpu::task::{DekoRunQueue, DekoRunnable};
+use crate::cpu::task::{
+    DekoRunQueue, DekoRunQueuePermission, DekoRunnable, DekoRunqueuePred, DekoTaskArgs,
+};
 use crate::mm::paging::{
     bit_not_in_addr_region, bit_not_overlapping, Mapping, Page, PageTable, PageTablePermission,
     PteFlags,
@@ -311,7 +313,7 @@ pub struct DekoCpuCtx {
     /// APIC interface for this CPU.
     apic: X86Apic,
     /// Runqueue
-    run_queue: Option<DekoRunQueue>,
+    run_queue: Option<DekoRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunqueuePred>>,
 }
 
 with_permission! {
@@ -321,7 +323,6 @@ with_permission! {
     ghcb_perm: DekoPointsTo<GuestHostCommucationBlock>,
     ctx_switch_stack_perm: Option<DekoPointsTo<DekoKernelStack>>,
     vm_region_perm: Option<VirtualMemoryRegionPermission>,
-    run_queue_perm: Option<DekoPointsTo<DekoRunQueue>>,
 }
 
 impl DekoCpuCtxPermission {
@@ -364,8 +365,6 @@ impl WellFormed for DekoCpuCtxPermission {
         &&& self.ghcb_perm.is_init()
         &&& self.ghcb_perm.wf()
         &&& self.ghcb_perm.pptr() == self.ptr_perm.value().ghcb_spec()@
-        &&& self.run_queue_perm.wf()
-        &&& self.run_queue_perm.is_some() <==> self.ptr_perm.value().run_queue_spec().is_some()
     }
 }
 
@@ -545,13 +544,6 @@ impl DekoCpuCtx {
         &self.apic
     }
 
-    pub closed spec fn run_queue_spec(&self) -> Option<&DekoRunQueue> {
-        match &self.run_queue {
-            Some(rq) => Some(rq),
-            None => None,
-        }
-    }
-
     #[verifier::when_used_as_spec(apic_spec)]
     #[inline]
     pub fn apic(&self) -> (r: &X86Apic)
@@ -634,17 +626,20 @@ impl DekoCpuCtx {
         (ptr, Tracked::assume_new())
     }
 
-    #[inline]
-    #[verifier::when_used_as_spec(run_queue_spec)]
-    pub fn run_queue(&self) -> (r: Option<&DekoRunQueue>)
-        requires
-            self.wf(),
-        ensures
-            r == self.run_queue_spec(),
-    {
-        self.run_queue.as_ref()
-    }
-
+    // #[inline]
+    // #[verifier::when_used_as_spec(run_queue_spec)]
+    // pub fn run_queue(&self) -> (r: Option<&DekoRunQueue>)
+    //     requires
+    //         self.wf(),
+    //     ensures
+    //         r == self.run_queue_spec(),
+    // {
+    //     match &self.run_queue {
+    //         Some(rq) => {
+    //         }
+    //         None => None,
+    //     }
+    // }
     /// Creates a new CPU data structure.
     pub fn new(
         pgtable: DekoPPtr<PageTable>,
@@ -657,7 +652,7 @@ impl DekoCpuCtx {
         vm_region: Option<VirtualMemoryRegion>,
         ctx_switch_stack: Option<DekoPPtr<DekoKernelStack>>,
         ist_stack: Option<DekoIstStack>,
-        run_queue: Option<DekoRunQueue>,
+        run_queue: Option<DekoRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunqueuePred>>,
     ) -> (r: Self)
         requires
             cpu_id < CPUID_MAX_COUNT as u64,
@@ -824,14 +819,27 @@ impl DekoCpuCtx {
     )
         requires
             old(perm).wf_with(ptr),
-            old(perm).run_queue_perm.wf(),
-            old(perm).run_queue_perm matches Some(runnable_perm),
+            old(perm).ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
         ensures
             perm.wf_with(ptr),
     {
         // Now create a new runnable task here.
-        #[verus_spec(with Tracked(perm) => Tracked(runnable_perm))]
-        let task = DekoRunnable::new(ptr, entry, None);
+        let cpu = ptr.borrow(Tracked(&perm.ptr_perm));
+
+        #[verus_spec(with Tracked(perm))]
+        let task = DekoRunnable::new(
+            cpu,
+            DekoTaskArgs {
+                parent: None,
+                entry,
+                name: "idle",
+                mode: task::DekoTaskMode::Kernel {
+                    entry,
+                    param: 0,  // cpu id...
+                    ret: 0x0,  /* TO BE FILLED */
+                },
+            },
+        );
     }
 }
 

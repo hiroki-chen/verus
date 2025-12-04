@@ -12,6 +12,7 @@
 #![allow(mismatched_lifetime_syntaxes)]
 #![cfg_attr(feature = "alloc", feature(allocator_api))]
 #![feature(sized_hierarchy)]
+#![feature(likely_unlikely)]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;

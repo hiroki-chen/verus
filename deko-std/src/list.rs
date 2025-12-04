@@ -9,7 +9,6 @@ use crate::prelude::*;
 verus! {
 
 #[verifier::reject_recursive_types(V)]
-#[verifier::ext_equal]
 pub struct Node<V: WellFormed> {
     /// The previous node in the linked list.
     pub prev: Option<DekoPPtr<Node<V>>>,
@@ -21,28 +20,24 @@ pub struct Node<V: WellFormed> {
 impl<T: WellFormed> View for Node<T> {
     type V = T;
 
-    #[verifier::inline]
     open spec fn view(&self) -> Self::V {
         self.value
     }
 }
 
 impl<V: WellFormed> WellFormed for Node<V> {
-    #[verifier(inline)]
     open spec fn wf(&self) -> bool {
-        self@.wf()
+        &&& self@.wf()
     }
 }
 
 #[verifier::reject_recursive_types(V)]
-#[verifier::ext_equal]
 pub tracked struct LinkedListInner<V: WellFormed> {
     pub ptrs: Seq<DekoPPtr<Node<V>>>,
     pub perms: Map<nat, DekoPointsTo<Node<V>>>,
 }
 
 #[verifier::reject_recursive_types(V)]
-#[verifier::ext_equal]
 pub struct LinkedList<V: WellFormed> {
     pub head: Option<DekoPPtr<Node<V>>>,
     pub tail: Option<DekoPPtr<Node<V>>>,
@@ -146,7 +141,7 @@ impl<V: WellFormed> LinkedList<V> {
             old(self)@.len() == 0,
             perm@.is_init(),
             perm@.wf(),
-            perm@.value().value.wf(),
+            perm@.value().wf(),
             perm@.value().prev == None::<DekoPPtr<Node<V>>>,
             perm@.value().next == None::<DekoPPtr<Node<V>>>,
             v@ == perm@.pptr(),
@@ -475,12 +470,12 @@ impl<V: WellFormed> LinkedList<V> {
             old(self).wf(),
             old(self)@.len() < usize::MAX,
             perm@.wf(),
-            perm@.value().value.wf(),
+            perm@.value().wf(),
             perm@.is_init(),
             v@ == perm@.pptr(),
         ensures
             self.wf(),
-            self@ == seq![perm@.value().value].add(old(self)@),
+            self@ =~= old(self)@.insert(0, perm@.value().value),
             self.inner@.ptrs == seq![v].add(old(self).inner@.ptrs),
     {
         let Tracked(mut points_to) = perm;

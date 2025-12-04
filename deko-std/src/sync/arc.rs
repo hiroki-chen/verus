@@ -1,3 +1,4 @@
+//! A verified implementation of an atomically reference-counted pointer (Arc).
 use verus_state_machines_macros::tokenized_state_machine;
 use vstd::atomic::{PAtomicU64, PAtomicUsize, PermissionU64, PermissionUsize};
 use vstd::invariant::{self, AtomicInvariant};
@@ -11,7 +12,7 @@ use crate::ptr::{DekoPPtr, DekoPointsTo};
 use crate::std_extra::convert::AsRefSpecImpl;
 use crate::sync::DekoAtomicData;
 use crate::wf::WellFormed;
-use crate::{boxed_ptr, DefaultDekoHeapAllocator, Predicate, ARC_ID};
+use crate::{boxed_ptr, DefaultDekoHeapAllocator, Predicate, VirtAddr, ARC_ID};
 
 verus! {
 
@@ -213,7 +214,7 @@ pub struct Arc<V: WellFormed, F: Predicate<V>> {
 }
 
 #[verifier::type_invariant]
-pub closed spec fn wf(&self) -> bool {
+pub closed spec fn type_inv(&self) -> bool {
     predicate {
         &&& self.reader@.element().value().count == self.ref_count@
         &&& self.reader@.instance_id() == self.inst@.id()
@@ -239,14 +240,71 @@ impl<U, F> View for Arc<U, F> where U: WellFormed, F: Predicate<U> {
 }
 
 impl<V: WellFormed, F: Predicate<V>> WellFormed for Arc<V, F> {
-    closed spec fn wf(&self) -> bool {
-        true
+    open spec fn wf(&self) -> bool {
+        self.type_inv()
     }
 }
 
 impl<V: WellFormed, F: Predicate<V>> Arc<V, F> {
+    /// Extracts the address of the Arc pointer.
+    pub closed spec fn ptr_addr(self) -> usize {
+        self.ptr.addr()
+    }
+
     pub closed spec fn inv(&self, v: V) -> bool {
         self.inst@.f().inv(v)
+    }
+
+    /// Returns true if the two Arcs point to the same allocation in a vein similar to [`core::ptr::eq`].
+    /// This function ignores the metadata of `dyn Trait` pointers.
+    #[inline]
+    #[must_use = "Compared result must be used"]
+    pub fn ptr_eq(this: &Self, other: &Self) -> (r: bool)
+        returns
+            this.ptr_addr() == other.ptr_addr(),
+    {
+        this.ptr.addr() == other.ptr.addr()
+    }
+
+    /// Gets the number of strong (Arc) pointers to this allocation.
+    ///
+    /// # Safety
+    ///
+    ///This method by itself is safe, but using it correctly requires
+    /// extra care. Another thread can change the strong count at any
+    /// time, including potentially between calling this method and
+    /// acting on the result (time of check v.s. time of use).
+    pub fn strong_count(&self) -> (r: usize)
+        requires
+            self.wf(),
+    {
+        proof {
+            use_type_invariant(&self);
+        }
+
+        let tracked inst = self.inst.borrow();
+        let tracked reader = self.reader.borrow();
+        let tracked perm = inst.reader_guard(reader.element(), &reader);
+
+        let inner_ref = self.ptr.borrow(Tracked(perm));
+
+        let count;
+        open_atomic_invariant! {
+            self.inv.borrow().borrow() => g => {
+                let tracked ArcStatus {
+                    count: mut atomic_count,
+                    data: mut token,
+                } = g;
+
+                count = inner_ref.count.load(Tracked(&mut atomic_count));
+
+                proof {
+                    g = ArcStatus { count: atomic_count, data: token };
+                }
+            }
+        };
+
+        count
     }
 
     fn new_with_inner(
@@ -399,7 +457,7 @@ impl<V: WellFormed, F: Predicate<V>> Arc<V, F> {
     /// locks like [`Mutex`] or [`DekoRwLock`] and wrap data and permissions using
     /// [`DekoAtomicData<V, P>`].
     #[verifier::exec_allows_no_decreases_clause]
-    fn clone(&self) -> (r: Self)
+    pub fn clone(&self) -> (r: Self)
         requires
             self.wf(),
         ensures
@@ -486,20 +544,21 @@ impl<V: WellFormed, F: Predicate<V>> Arc<V, F> {
 }
 
 impl<V: WellFormed, F: Predicate<V>> AsRefSpecImpl<V> for Arc<V, F> {
-    closed spec fn obeys_as_ref_spec() -> bool {
+    open spec fn obeys_as_ref_spec() -> bool {
         true
     }
 
-    closed spec fn as_ref_requires(&self) -> bool {
+    open spec fn as_ref_requires(&self) -> bool {
         self.wf()
     }
 
-    closed spec fn as_ref_spec(&self) -> &V {
+    open spec fn as_ref_spec(&self) -> &V {
         &self@
     }
 }
 
 impl<V: WellFormed, F: Predicate<V>> AsRef<V> for Arc<V, F> {
+    /// Get a shared reference to the _inner_ value.
     fn as_ref<'a>(&'a self) -> (r: &'a V) {
         proof {
             use_type_invariant(&self);

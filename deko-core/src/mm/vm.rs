@@ -373,6 +373,21 @@ impl VirtualMemoryRegion {
         }
     }
 
+    /// Copies all the page table entries from this region's page table to the target page table.
+    #[verus_spec(
+        with
+            Tracked(pgtable_perm): Tracked<&mut PageTablePermission>,
+        requires
+            self.wf(),
+            old(pgtable_perm).wf(),
+            old(pgtable_perm).pgtable_perm.pptr() == target_pgtable@,
+        ensures
+            pgtable_perm.wf(),
+            //
+    )]
+    pub fn copy_to_page_table(&self, target_pgtable: DekoPPtr<PageTable>) {
+    }
+
     /// Inserts a new VM block [`VirtualMemory`] at the given virtual address.
     /// Note that this method checks if the block will overlap with any of the
     /// current blocks in this region.
