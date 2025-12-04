@@ -10,7 +10,7 @@ use crate::prelude::*;
 
 verus! {
 
-pub type OnceCellNoPred<V> = OnceCell<V, ()>;
+pub type DekoSimpleOnceCell<V> = OnceCell<V, ()>;
 
 /// A tracked state of a¸ `OnceCell` that can be used to ensure that the cell is
 /// initialized before accessing its value.

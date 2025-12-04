@@ -60,39 +60,39 @@ pub exec static DEKO_FRAME_ALLOCATOR: DekoPageFrameAllocator
     DekoPageFrameAllocator::new()
 }
 
-pub exec static PTE_MASK_PRIVATE: OnceCellNoPred<u64>
+pub exec static PTE_MASK_PRIVATE: DekoSimpleOnceCell<u64>
     ensures
         PTE_MASK_PRIVATE.wf(),
 {
-    OnceCellNoPred::new(Ghost(()))
+    DekoSimpleOnceCell::new(Ghost(()))
 }
 
-pub exec static PTE_MASK_SHARED: OnceCellNoPred<u64>
+pub exec static PTE_MASK_SHARED: DekoSimpleOnceCell<u64>
     ensures
         PTE_MASK_SHARED.wf(),
 {
-    OnceCellNoPred::new(Ghost(()))
+    DekoSimpleOnceCell::new(Ghost(()))
 }
 
-pub exec static PHYS_ADDR_SIZE: OnceCellNoPred<u32>
+pub exec static PHYS_ADDR_SIZE: DekoSimpleOnceCell<u32>
     ensures
         PHYS_ADDR_SIZE.wf(),
 {
-    OnceCellNoPred::new(Ghost(()))
+    DekoSimpleOnceCell::new(Ghost(()))
 }
 
-pub exec static MAX_PHYS_ADDR: OnceCellNoPred<u64>
+pub exec static MAX_PHYS_ADDR: DekoSimpleOnceCell<u64>
     ensures
         MAX_PHYS_ADDR.wf(),
 {
-    OnceCellNoPred::new(Ghost(()))
+    DekoSimpleOnceCell::new(Ghost(()))
 }
 
-pub exec static FEATURE_MASK: OnceCellNoPred<PteFlags>
+pub exec static FEATURE_MASK: DekoSimpleOnceCell<PteFlags>
     ensures
         FEATURE_MASK.wf(),
 {
-    OnceCellNoPred::new(Ghost(()))
+    DekoSimpleOnceCell::new(Ghost(()))
 }
 
 pub struct PageEncryptionMasks {

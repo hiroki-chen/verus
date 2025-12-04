@@ -97,7 +97,7 @@ pub struct DekoBuddyAllocator<V: WellFormed + Heap> {
     /// This is a RwLock to allow concurrent access to the heap.
     /// Note that this is not a global allocator, so we do not use
     /// the `GlobalAlloc` trait.
-    allocator: RwLock<V, DekoHeapPredicate>,
+    allocator: DekoRwLock<V, (), DekoHeapPredicate>,
 }
 
 impl<V: WellFormed + Heap> DekoBuddyAllocator<V> {
@@ -108,11 +108,11 @@ impl<V: WellFormed + Heap> DekoBuddyAllocator<V> {
     pub const fn new(v: V, Ghost(pred): Ghost<DekoHeapPredicate>) -> (s: Self)
         requires
             v.wf(),
-            pred.inv(v),
+            pred.deep_inv(v),
         ensures
             s.wf(),
     {
-        Self { allocator: RwLock::new(v, Ghost(pred)) }
+        Self { allocator: DekoRwLock::new(DekoAtomicData::new(v), (), Ghost(pred)) }
     }
 
     pub fn init(&self, heap_start: u64, heap_size: u64)
@@ -123,11 +123,11 @@ impl<V: WellFormed + Heap> DekoBuddyAllocator<V> {
         let (mut allocator, write_handle) = self.allocator.acquire_write();
 
         // If already initialized, we do nothing.
-        if allocator.is_init_impl() {
+        if allocator.data.is_init_impl() {
             write_handle.release_write(allocator);
             return ;
         }
-        allocator.init(heap_start, heap_size, HEAP_SIZE as u64);
+        allocator.data.init(heap_start, heap_size, HEAP_SIZE as u64);
 
         write_handle.release_write(allocator);
     }
@@ -195,8 +195,8 @@ impl<V: WellFormed + Heap> DekoBuddyAllocator<V> {
     {
         let (mut allocator, write_handle) = self.allocator.acquire_write();
 
-        if allocator.check_allocation_size(size as u64, align as u64) {
-            let res = allocator.allocate(size as u64, align as u64);
+        if allocator.data.check_allocation_size(size as u64, align as u64) {
+            let res = allocator.data.allocate(size as u64, align as u64);
             write_handle.release_write(allocator);
             res
         } else {
@@ -213,7 +213,7 @@ impl<V: WellFormed + Heap> DekoBuddyAllocator<V> {
     {
         let (mut allocator, write_handle) = self.allocator.acquire_write();
 
-        if allocator.check_allocation_size(size as u64, align as u64) {
+        if allocator.data.check_allocation_size(size as u64, align as u64) {
             // TODO: Since the allocator itself is globally shared and protected
             // by the RwLock, we need to find a way to reason about the safety
             // issue here to guarantee that the pointer is indeed allocated from
@@ -221,9 +221,9 @@ impl<V: WellFormed + Heap> DekoBuddyAllocator<V> {
             //
             // Perhaps we will need to have a tracked registry of all allocated
             // pointers from this allocator like a `tracked` meta allocator.
-            assume(allocator.in_heap_range(ptr.addr() as nat, size as nat));
+            assume(allocator.data.in_heap_range(ptr.addr() as nat, size as nat));
 
-            allocator.deallocate(ptr.addr() as u64, size as u64, align as u64);
+            allocator.data.deallocate(ptr.addr() as u64, size as u64, align as u64);
             write_handle.release_write(allocator);
             return ;
         } else {

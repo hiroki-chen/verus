@@ -11,6 +11,7 @@
 #![allow(non_shorthand_field_patterns)]
 #![allow(mismatched_lifetime_syntaxes)]
 #![cfg_attr(feature = "alloc", feature(allocator_api))]
+#![feature(sized_hierarchy)]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -68,21 +69,18 @@ verus! {
 
 /// This is a globally accessible flag to indicate whether tracing (some debugging)
 /// is enabled.
-pub exec static TRACE_ON: RwLockNoPred<bool> = RwLockNoPred::new(
-    false,
-    Ghost(TrivialPredicate::new()),
-);
+pub exec static TRACE_ON: DekoSimpleRwLock<bool> = DekoSimpleRwLock::new_simple(false);
 
 #[verifier::external_body]
 pub fn trace_enable(enabled: bool) {
     let (_, write_handle) = TRACE_ON.acquire_write();
-    write_handle.release_write(enabled);
+    write_handle.release_write(DekoAtomicData::new(enabled));
 }
 
 #[verifier::external_body]
 pub fn trace_is_enabled() -> bool {
     let read_handle = TRACE_ON.acquire_read();
-    let enabled = *read_handle.borrow();
+    let enabled = read_handle.borrow().data;
     read_handle.release_read();
 
     enabled
@@ -124,14 +122,6 @@ impl<V: WellFormed> RwLockPredicate<V> for TrivialPredicate<V> {
         true
     }
 }
-
-// #[cfg(feature = "alloc")]
-// pub type ArcNoPred<V> = Arc<V, TrivialPredicate<V>>;
-pub type MutexNoPred<V> = Mutex<V, TrivialPredicate<V>>;
-
-pub type OnceLockNoPred<V> = OnceLock<V, TrivialPredicate<V>>;
-
-pub type RwLockNoPred<V> = RwLock<V, TrivialPredicate<V>>;
 
 } // verus!
 #[macro_export]

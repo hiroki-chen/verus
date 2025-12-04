@@ -6,6 +6,22 @@ use crate::snp::MSR_AMD64_SEV_ES_GHCB;
 
 verus! {
 
+#[verifier::external_body]
+pub fn disable_interrupts() -> u64 {
+    let flags: u64;
+    unsafe {
+        core::arch::asm!("pushfq", "pop {}", "cli", out(reg) flags, options(att_syntax, nomem, preserves_flags));
+    }
+    flags
+}
+
+#[verifier::external_body]
+pub fn restore_interrupts(flags: u64) {
+    unsafe {
+        core::arch::asm!("push {}", "popfq", in(reg) flags, options(att_syntax, nomem, preserves_flags));
+    }
+}
+
 #[derive(Clone, Copy, DekoDebug)]
 pub struct CpuID {
     pub eax: u32,

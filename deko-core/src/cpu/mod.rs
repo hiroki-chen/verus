@@ -65,7 +65,7 @@ pub struct PerCpuShared {
     apic_id: u32,  // the id of the local apic
     cpu_index: usize,
     #[deko(skip)]
-    guest_vmsa: RwLockNoPred<GuestVmsaRef>,
+    guest_vmsa: DekoSimpleRwLock<GuestVmsaRef>,
     #[deko(skip)]
     online: (PAtomicBool, Tracked<PermissionBool>),
     #[deko(skip)]
@@ -119,9 +119,8 @@ impl PerCpuShared {
         let ipi_pending = PAtomicBool::new(false);
         let nmi_pending = PAtomicBool::new(false);
         let ipi_irr = Self::new_ipi_irr();
-        let guest_vmsa = RwLockNoPred::new(
+        let guest_vmsa = DekoSimpleRwLock::new_simple(
             GuestVmsaRef { vmsa: None, caa: None, generation: 0, gen_in_use: 0 },
-            Ghost(TrivialPredicate::new()),
         );
 
         proof {
@@ -153,9 +152,9 @@ impl WellFormed for PerCpuAreas {
 
 pub struct PerCpuAreasInv;
 
-impl RwLockPredicate<PerCpuAreas> for PerCpuAreasInv {
-    open spec fn inv(self, v: PerCpuAreas) -> bool {
-        v.wf()
+impl RwLockPredicate<DekoAtomicDataNoPerm<PerCpuAreas>> for PerCpuAreasInv {
+    open spec fn inv(self, v: DekoAtomicDataNoPerm<PerCpuAreas>) -> bool {
+        v.data.wf()
     }
 }
 
@@ -183,11 +182,15 @@ impl View for PerCpuAreas {
 ///
 /// For verification and the ease of implementation, we just use a simple
 /// read-write lock to protect the access to this structure.
-pub exec static PERCPU_AREAS: RwLock<PerCpuAreas, PerCpuAreasInv>
+pub exec static PERCPU_AREAS: DekoRwLock<PerCpuAreas, (), PerCpuAreasInv>
     ensures
         PERCPU_AREAS.wf(),
 {
-    let lock = RwLock::new(PerCpuAreas::new(), Ghost(PerCpuAreasInv {  }));
+    let lock = DekoRwLock::new(
+        DekoAtomicDataNoPerm::new(PerCpuAreas::new()),
+        (),
+        Ghost(PerCpuAreasInv {  }),
+    );
     proof {
         use_type_invariant(&lock);
     }

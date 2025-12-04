@@ -10,6 +10,7 @@ use vstd::prelude::*;
 use vstd::set::*;
 
 use crate::prelude::*;
+use crate::sync::mutex::Spin;
 
 // The following code is copy-and-paste from `vstd::rwlock::*`.
 tokenized_state_machine!(
@@ -253,18 +254,21 @@ ghost struct InternalPred<V, Pred> {
     pred: Pred,
 }
 
-impl<V, Pred: RwLockPredicate<V>> InvariantPredicate<(Pred, CellId), PointsTo<V>> for InternalPred<
-    V,
-    Pred,
-> {
-    closed spec fn inv(k: (Pred, CellId), v: PointsTo<V>) -> bool {
-        v.id() == k.1 && v.is_init() && k.0.inv(v.value())
+impl<V, S, Pred: RwLockPredicate<V>> InvariantPredicate<
+    (Pred, S, CellId),
+    PointsTo<V>,
+> for InternalPred<V, Pred> {
+    closed spec fn inv(k: (Pred, S, CellId), v: PointsTo<V>) -> bool {
+        v.id() == k.2 && v.is_init() && k.0.inv(v.value())
     }
 }
 
 struct_with_invariants!{
     /** A verified implementation of a reader-writer lock,
     implemented using atomics and a reference count.
+
+    This also takes an optional `Spin` parameter that allows
+    specifying spinlock behavior on lock acquisition and release.
 
     When constructed, you can provide an invariant via the `Pred` parameter,
     specifying the allowed values that can go in the lock.
@@ -337,29 +341,30 @@ struct_with_invariants!{
     ```
     */
 
-    pub struct RwLock<V, Pred: RwLockPredicate<V>> {
+    pub struct RwLock<V, S: Spin, Pred: RwLockPredicate<V>> {
         cell: PCell<V>,
-        exc: AtomicBool<_, RwLockToks::flag_exc<(Pred, CellId), PointsTo<V>, InternalPred<V, Pred>>, _>,
-        rc: AtomicUsize<_, RwLockToks::flag_rc<(Pred, CellId), PointsTo<V>, InternalPred<V, Pred>>, _>,
+        spin: S,
+        exc: AtomicBool<_, RwLockToks::flag_exc<(Pred, S, CellId), PointsTo<V>, InternalPred<V, Pred>>, _>,
+        rc: AtomicUsize<_, RwLockToks::flag_rc<(Pred, S, CellId), PointsTo<V>, InternalPred<V, Pred>>, _>,
 
-        inst: Tracked<RwLockToks::Instance<(Pred, CellId), PointsTo<V>, InternalPred<V, Pred>>>,
+        inst: Tracked<RwLockToks::Instance<(Pred, S, CellId), PointsTo<V>, InternalPred<V, Pred>>>,
         pred: Ghost<Pred>,
     }
 
     #[verifier::type_invariant]
     pub closed spec fn wf(&self) -> bool {
-        invariant on exc with (inst) is (v: bool, g: RwLockToks::flag_exc<(Pred, CellId), PointsTo<V>, InternalPred<V, Pred>>) {
+        invariant on exc with (inst) is (v: bool, g: RwLockToks::flag_exc<(Pred, S, CellId), PointsTo<V>, InternalPred<V, Pred>>) {
             g.instance_id() == inst@.id()
                 && g.value() == v
         }
 
-        invariant on rc with (inst) is (v: usize, g: RwLockToks::flag_rc<(Pred, CellId), PointsTo<V>, InternalPred<V, Pred>>) {
+        invariant on rc with (inst) is (v: usize, g: RwLockToks::flag_rc<(Pred, S, CellId), PointsTo<V>, InternalPred<V, Pred>>) {
             g.instance_id() == inst@.id()
                 && g.value() == v
         }
 
         predicate {
-            self.inst@.k() == (self.pred@, self.cell.id())
+            self.inst@.k() == (self.pred@, self.spin, self.cell.id())
         }
     }
 }
@@ -373,10 +378,10 @@ struct_with_invariants!{
 /// **Warning:** The lock is _NOT_ released automatically when the handle
 /// is dropped. You must call [`release_write`](WriteHandle::release_write).
 /// Verus does not check that lock is released.
-pub struct WriteHandle<'a, V, Pred: RwLockPredicate<V>> {
-    handle: Tracked<RwLockToks::writer<(Pred, CellId), PointsTo<V>, InternalPred<V, Pred>>>,
+pub struct WriteHandle<'a, V, S: Spin, Pred: RwLockPredicate<V>> {
+    handle: Tracked<RwLockToks::writer<(Pred, S, CellId), PointsTo<V>, InternalPred<V, Pred>>>,
     perm: Tracked<PointsTo<V>>,
-    rwlock: &'a RwLock<V, Pred>,
+    rwlock: &'a RwLock<V, S, Pred>,
 }
 
 /// Handle obtained for a shared read-lock from an [`RwLock`].
@@ -384,12 +389,12 @@ pub struct WriteHandle<'a, V, Pred: RwLockPredicate<V>> {
 /// **Warning:** The lock is _NOT_ released automatically when the handle
 /// is dropped. You must call [`release_read`](ReadHandle::release_read).
 /// Verus does not check that lock is released.
-pub struct ReadHandle<'a, V, Pred: RwLockPredicate<V>> {
-    handle: Tracked<RwLockToks::reader<(Pred, CellId), PointsTo<V>, InternalPred<V, Pred>>>,
-    rwlock: &'a RwLock<V, Pred>,
+pub struct ReadHandle<'a, V, S: Spin, Pred: RwLockPredicate<V>> {
+    handle: Tracked<RwLockToks::reader<(Pred, S, CellId), PointsTo<V>, InternalPred<V, Pred>>>,
+    rwlock: &'a RwLock<V, S, Pred>,
 }
 
-impl<'a, V, Pred: RwLockPredicate<V>> WriteHandle<'a, V, Pred> {
+impl<'a, V, S: Spin, Pred: RwLockPredicate<V>> WriteHandle<'a, V, S, Pred> {
     #[verifier::type_invariant]
     spec fn wf_write_handle(self) -> bool {
         equal(self.perm@.id(), self.rwlock.cell.id()) && self.perm@.is_uninit() && equal(
@@ -398,7 +403,7 @@ impl<'a, V, Pred: RwLockPredicate<V>> WriteHandle<'a, V, Pred> {
         ) && self.rwlock.wf()
     }
 
-    pub closed spec fn rwlock(self) -> RwLock<V, Pred> {
+    pub closed spec fn rwlock(self) -> RwLock<V, S, Pred> {
         *self.rwlock
     }
 
@@ -421,7 +426,7 @@ impl<'a, V, Pred: RwLockPredicate<V>> WriteHandle<'a, V, Pred> {
     }
 }
 
-impl<'a, V, Pred: RwLockPredicate<V>> ReadHandle<'a, V, Pred> {
+impl<'a, V, S: Spin, Pred: RwLockPredicate<V>> ReadHandle<'a, V, S, Pred> {
     #[verifier::type_invariant]
     spec fn wf_read_handle(self) -> bool {
         equal(self.handle@.instance_id(), self.rwlock.inst@.id())
@@ -435,7 +440,7 @@ impl<'a, V, Pred: RwLockPredicate<V>> ReadHandle<'a, V, Pred> {
         self.handle@.element().value()
     }
 
-    pub closed spec fn rwlock(self) -> RwLock<V, Pred> {
+    pub closed spec fn rwlock(self) -> RwLock<V, S, Pred> {
         *self.rwlock
     }
 
@@ -455,8 +460,8 @@ impl<'a, V, Pred: RwLockPredicate<V>> ReadHandle<'a, V, Pred> {
     }
 
     pub proof fn lemma_readers_match(
-        tracked read_handle1: &ReadHandle<V, Pred>,
-        tracked read_handle2: &ReadHandle<V, Pred>,
+        tracked read_handle1: &ReadHandle<V, S, Pred>,
+        tracked read_handle2: &ReadHandle<V, S, Pred>,
     )
         requires
             read_handle1.rwlock() == read_handle2.rwlock(),
@@ -489,7 +494,7 @@ impl<'a, V, Pred: RwLockPredicate<V>> ReadHandle<'a, V, Pred> {
     }
 }
 
-impl<V, Pred: RwLockPredicate<V>> RwLock<V, Pred> {
+impl<V, S: Spin, Pred: RwLockPredicate<V>> RwLock<V, S, Pred> {
     /// Predicate configured for this lock instance.
     pub closed spec fn pred(&self) -> Pred {
         self.pred@
@@ -501,26 +506,26 @@ impl<V, Pred: RwLockPredicate<V>> RwLock<V, Pred> {
         self.pred().inv(val)
     }
 
-    pub const fn new(val: V, Ghost(pred): Ghost<Pred>) -> (s: Self)
+    pub const fn new(val: V, s: S, Ghost(pred): Ghost<Pred>) -> (r: Self)
         requires
             pred.inv(val),
         ensures
-            s.pred() == pred,
+            r.pred() == pred,
     {
         let (cell, Tracked(perm)) = PCell::<V>::new(val);
 
         let tracked (Tracked(inst), Tracked(flag_exc), Tracked(flag_rc), _, _, _, _) =
             RwLockToks::Instance::<
-            (Pred, CellId),
+            (Pred, S, CellId),
             PointsTo<V>,
             InternalPred<V, Pred>,
-        >::initialize_full((pred, cell.id()), perm, Option::Some(perm));
+        >::initialize_full((pred, s, cell.id()), perm, Option::Some(perm));
         let inst = Tracked(inst);
 
         let exc = AtomicBool::new(Ghost(inst), false, Tracked(flag_exc));
         let rc = AtomicUsize::new(Ghost(inst), 0, Tracked(flag_rc));
 
-        RwLock { cell, exc, rc, inst, pred: Ghost(pred) }
+        RwLock { cell, exc, rc, inst, pred: Ghost(pred), spin: s }
     }
 
     /// Acquires an exclusive write-lock. To release it, use [`WriteHandle::release_write`].
@@ -529,7 +534,7 @@ impl<V, Pred: RwLockPredicate<V>> RwLock<V, Pred> {
     /// is dropped. You must call [`WriteHandle::release_write`].
     /// Verus does not check that lock is released.
     #[verifier::exec_allows_no_decreases_clause]
-    pub fn acquire_write(&self) -> (ret: (V, WriteHandle<V, Pred>))
+    pub fn acquire_write(&self) -> (ret: (V, WriteHandle<V, S, Pred>))
         ensures
             ({
                 let val = ret.0;
@@ -541,9 +546,11 @@ impl<V, Pred: RwLockPredicate<V>> RwLock<V, Pred> {
         proof {
             use_type_invariant(self);
         }
+        let flags = S::lock_prologue();
+
         let mut done = false;
         let tracked mut token: Option<
-            RwLockToks::pending_writer<(Pred, CellId), PointsTo<V>, InternalPred<V, Pred>>,
+            RwLockToks::pending_writer<(Pred, S, CellId), PointsTo<V>, InternalPred<V, Pred>>,
         > = Option::None;
         while !done
             invariant
@@ -574,8 +581,10 @@ impl<V, Pred: RwLockPredicate<V>> RwLock<V, Pred> {
         {
             let tracked mut perm_opt: Option<PointsTo<V>> = None;
             let tracked mut handle_opt: Option<
-                RwLockToks::writer<(Pred, CellId), PointsTo<V>, InternalPred<V, Pred>>,
+                RwLockToks::writer<(Pred, S, CellId), PointsTo<V>, InternalPred<V, Pred>>,
             > = None;
+
+            S::cpu_relax();
 
             let result =
                 atomic_with_ghost!(
@@ -608,6 +617,8 @@ impl<V, Pred: RwLockPredicate<V>> RwLock<V, Pred> {
                     handle: Tracked(handle),
                     rwlock: self,
                 };
+
+                S::lock_epilogue(&flags);
                 return (t, write_handle);
             }
         }
@@ -619,7 +630,7 @@ impl<V, Pred: RwLockPredicate<V>> RwLock<V, Pred> {
     /// is dropped. You must call [`ReadHandle::release_read`].
     /// Verus does not check that lock is released.
     #[verifier::exec_allows_no_decreases_clause]
-    pub fn acquire_read(&self) -> (read_handle: ReadHandle<V, Pred>)
+    pub fn acquire_read(&self) -> (read_handle: ReadHandle<V, S, Pred>)
         ensures
             read_handle.rwlock() == *self,
             self.inv(read_handle.view()),
@@ -627,14 +638,18 @@ impl<V, Pred: RwLockPredicate<V>> RwLock<V, Pred> {
         proof {
             use_type_invariant(self);
         }
+
+        let flags = S::lock_prologue();
+
         loop
             invariant
                 self.wf(),
         {
-            let val = atomic_with_ghost!(&self.rc => load(); ghost g => { });
+            S::cpu_relax();
 
+            let val = atomic_with_ghost!(&self.rc => load(); ghost g => { });
             let tracked mut token: Option<
-                RwLockToks::pending_reader<(Pred, CellId), PointsTo<V>, InternalPred<V, Pred>>,
+                RwLockToks::pending_reader<(Pred, S, CellId), PointsTo<V>, InternalPred<V, Pred>>,
             > = Option::None;
 
             if val < usize::MAX {
@@ -652,7 +667,11 @@ impl<V, Pred: RwLockPredicate<V>> RwLock<V, Pred> {
                 match result {
                     Result::Ok(_) => {
                         let tracked mut handle_opt: Option<
-                            RwLockToks::reader<(Pred, CellId), PointsTo<V>, InternalPred<V, Pred>>,
+                            RwLockToks::reader<
+                                (Pred, S, CellId),
+                                PointsTo<V>,
+                                InternalPred<V, Pred>,
+                            >,
                         > = None;
 
                         let result =
@@ -676,6 +695,8 @@ impl<V, Pred: RwLockPredicate<V>> RwLock<V, Pred> {
                                 Option::None => proof_from_false(),
                             };
                             let read_handle = ReadHandle { handle: Tracked(handle), rwlock: self };
+
+                            S::lock_epilogue(&flags);
                             return read_handle;
                         } else {
                             let _ =
@@ -706,6 +727,21 @@ impl<V, Pred: RwLockPredicate<V>> RwLock<V, Pred> {
     }
 }
 
-pub type DekoRwLock<V, P, Pred> = RwLock<DekoAtomicData<V, P>, Pred>;
+impl<V: WellFormed> DekoSimpleRwLock<V> {
+    pub const fn new_simple(v: V) -> (r: Self) {
+        RwLock::new(DekoAtomicData::new(v), (), Ghost(TrivialPredicate::new()))
+    }
+}
+
+/// A type alias for a [`RwLock`] that uses [`DekoAtomicData`] as its
+/// atomic storage type; the backing spin type is the default `()` with
+/// no IRQs allowed during locks held.
+pub type DekoRwLock<V, P, Pred> = RwLock<DekoAtomicData<V, P>, (), Pred>;
+
+pub type DekoSimpleRwLock<V> = RwLock<
+    DekoAtomicDataNoPerm<V>,
+    (),
+    TrivialPredicate<DekoAtomicDataNoPerm<V>>,
+>;
 
 } // verus!

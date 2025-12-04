@@ -104,11 +104,8 @@ impl<V: WellFormed> DekoPointsTo<V> {
 }
 
 impl<V: WellFormed> Clone for DekoPPtr<V> {
-    fn clone(&self) -> (res: Self)
-        ensures
-            res == *self,
-    {
-        DekoPPtr(self.0.clone())
+    fn clone(&self) -> (res: Self) {
+        DekoPPtr(self.0)
     }
 }
 

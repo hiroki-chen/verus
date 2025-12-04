@@ -62,7 +62,7 @@ fn setup_bsp_cpu(
         let read_handle = PERCPU_AREAS.acquire_read();
         // The permission is discarded; you can only obtain this permission
         // if you own this.
-        let (ptr, _) = read_handle.borrow().0.index_as_ptr(0);
+        let (ptr, _) = read_handle.borrow().data.0.index_as_ptr(0);
 
         read_handle.release_read();
 
@@ -214,8 +214,7 @@ fn setup_bsp_cpu(
     vm_region.insert(vm_block_for_ist_stack);
 
     let cpu_ist_stack = DekoIstStack { df_stack: Some(cpu_ist_stack), df_ss: None };
-    proof_with!(=> Tracked(run_queue_perm));
-    let run_queue = DekoRunQueue::new();
+    let (run_queue, Tracked(run_queue_perm)) = DekoRunQueue::new();
 
     let cpu_ctx = DekoCpuCtx::new(
         init_pgtable,

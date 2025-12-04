@@ -19,6 +19,37 @@ verus! {
 
 pub struct MutexInv;
 
+/// A marker trait for spin-based locks.
+pub trait Spin {
+    type GuardData;
+
+    fn lock_prologue() -> Self::GuardData;
+
+    fn cpu_relax();
+
+    fn lock_epilogue(data: &Self::GuardData);
+}
+
+impl Spin for () {
+    type GuardData = u64;
+
+    #[inline]
+    fn lock_prologue() -> Self::GuardData {
+        disable_interrupts()
+    }
+
+    #[verifier::external_body]
+    #[inline]
+    fn cpu_relax() {
+        core::hint::spin_loop();
+    }
+
+    #[inline]
+    fn lock_epilogue(data: &Self::GuardData) {
+        restore_interrupts(*data);
+    }
+}
+
 impl<V, F: Predicate<V>> InvariantPredicate<
     (AtomicCellId, CellId, Ghost<F>),
     (PermissionBool, Option<PointsTo<V>>),
@@ -46,7 +77,7 @@ impl<V, F: Predicate<V>> InvariantPredicate<
 ///
 /// The implementation uses either a ticket mutex or a regular spin-based primitive.
 #[verifier::reject_recursive_types(V)]
-pub struct Mutex<V, F: Predicate<V>> {
+pub struct Mutex<V, S: Spin, F: Predicate<V>> {
     pub atomic: PAtomicBool,
     // todo: replace it with 'invcell`?
     pub cell: PCell<V>,
@@ -57,15 +88,16 @@ pub struct Mutex<V, F: Predicate<V>> {
             MutexInv,
         >,
     >,
+    pub spin: S,
 }
 
-impl<V, F: Predicate<V>> Mutex<V, F> {
+impl<V, F: Predicate<V>, S: Spin> Mutex<V, S, F> {
     pub closed spec fn wf(&self) -> bool {
         &&& self.inv@.constant().0 == self.atomic.id()
         &&& self.inv@.constant().1 == self.cell.id()
     }
 
-    pub const fn new(value: V, Ghost(f): Ghost<F>) -> (result: Self)
+    pub const fn new(value: V, s: S, Ghost(f): Ghost<F>) -> (result: Self)
         requires
             f.inv(value),
         ensures
@@ -79,7 +111,7 @@ impl<V, F: Predicate<V>> Mutex<V, F> {
             ATOMIC_CELL_ID,
         );
 
-        Self { atomic, cell, inv: Tracked(inv) }
+        Self { atomic, cell, inv: Tracked(inv), spin: s }
     }
 
     #[verifier::exec_allows_no_decreases_clause]

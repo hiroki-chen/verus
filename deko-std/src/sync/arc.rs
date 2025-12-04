@@ -2,12 +2,14 @@ use verus_state_machines_macros::tokenized_state_machine;
 use vstd::atomic::{PAtomicU64, PAtomicUsize, PermissionU64, PermissionUsize};
 use vstd::invariant::{self, AtomicInvariant};
 use vstd::multiset::Multiset;
+use vstd::pervasive::arbitrary;
 use vstd::prelude::*;
 use vstd::shared::Shared;
 use vstd::{atomic_with_ghost, open_atomic_invariant};
 
 use crate::ptr::{DekoPPtr, DekoPointsTo};
 use crate::std_extra::convert::AsRefSpecImpl;
+use crate::sync::DekoAtomicData;
 use crate::wf::WellFormed;
 use crate::{boxed_ptr, DefaultDekoHeapAllocator, Predicate, ARC_ID};
 
@@ -169,7 +171,7 @@ impl<V: WellFormed> WellFormed for ArcInner<V> {
 #[verifier::reject_recursive_types(V)]
 pub tracked struct ArcStatus<V: WellFormed, F: Predicate<V>> {
     pub count: PermissionUsize,
-    /// A state machine to track the state of the `DekoArc`.
+    /// A state machine to track the state of the `Arc`.
     /// This allows us to reason about the reference counter.
     pub data: Rc::count<V, DekoPointsTo<ArcInner<V>>, F>,
 }
@@ -189,17 +191,17 @@ impl<V: WellFormed, F: Predicate<V>> ArcStatus<V, F> {
 
 struct_with_invariants! {
 
-/// A thread-safe reference-counting pointer. 'DekoArc' stands for 'Atomically
+/// A thread-safe reference-counting pointer. ['Arc'] stands for 'Atomically
 /// Reference Counted'.
 ///
-/// The type [`DekoArc<T>`] provides shared ownership of a value of type `T`,
-/// allocated in the heap. Invoking [`clone`][clone] on `DekoArc` produces
-/// a new `DekoArc` instance, which points to the same allocation on the heap as the
-/// source `DekoArc`, while increasing a reference count. When the last `DekoArc`
+/// The type [`Arc<T>`] provides shared ownership of a value of type `T`,
+/// allocated in the heap. Invoking [`clone`][clone] on `[Arc`] produces
+/// a new [`Arc`] instance, which points to the same allocation on the heap as the
+/// source `Arc`, while increasing a reference count. When the last `Arc`
 /// pointer to a given allocation is destroyed, the value stored in that allocation (often
 /// referred to as "inner value") is also dropped.
 #[verifier::reject_recursive_types(V)]
-pub struct DekoArc<V: WellFormed, F: Predicate<V>> {
+pub struct Arc<V: WellFormed, F: Predicate<V>> {
     /// The shared pointer to the inner data.
     ptr: DekoPPtr<ArcInner<V>>,
     /// The invariant that should be kept for the inner value.
@@ -228,7 +230,7 @@ pub closed spec fn wf(&self) -> bool {
 }  // struct_with_invariants!
 
 
-impl<U, F> View for DekoArc<U, F> where U: WellFormed, F: Predicate<U> {
+impl<U, F> View for Arc<U, F> where U: WellFormed, F: Predicate<U> {
     type V = U;
 
     closed spec fn view(&self) -> Self::V {
@@ -236,13 +238,13 @@ impl<U, F> View for DekoArc<U, F> where U: WellFormed, F: Predicate<U> {
     }
 }
 
-impl<V: WellFormed, F: Predicate<V>> WellFormed for DekoArc<V, F> {
+impl<V: WellFormed, F: Predicate<V>> WellFormed for Arc<V, F> {
     closed spec fn wf(&self) -> bool {
         true
     }
 }
 
-impl<V: WellFormed, F: Predicate<V>> DekoArc<V, F> {
+impl<V: WellFormed, F: Predicate<V>> Arc<V, F> {
     pub closed spec fn inv(&self, v: V) -> bool {
         self.inst@.f().inv(v)
     }
@@ -299,7 +301,7 @@ impl<V: WellFormed, F: Predicate<V>> DekoArc<V, F> {
         }
     }
 
-    /// Constructs a new [`DekoArc<T>`] instance with the given value `v`, using the provided allocator
+    /// Constructs a new [`Arc<T>`] instance with the given value `v`, using the provided allocator
     /// and with a predicate `f` that should hold for the inner value.
     pub fn new(v: V, allocator: &DefaultDekoHeapAllocator, Ghost(f): Ghost<F>) -> (r: Self)
         requires
@@ -315,7 +317,71 @@ impl<V: WellFormed, F: Predicate<V>> DekoArc<V, F> {
         Self::new_with_inner(inner, v, Tracked(inner_perm), Ghost(f))
     }
 
-    /// Clone this [`DekoArc`] and increase the strong reference count.
+    /// Try to write a new value into the inner data of this [`Arc`].
+    /// If the strong reference count is 1, we can directly write
+    /// into the inner data and return [`Result::Ok`] with the new [`Arc`]
+    /// as well as the old value stored in the inner data.
+    ///
+    /// If the strong reference count is larger than 1, we return
+    /// [`Result::Err`] with the provided value `v`.
+    pub fn try_write(self, v: V) -> (r: Result<(Self, V), V>)
+        requires
+            self.wf(),
+            self.inv(v),
+            v.wf(),
+        ensures
+            match r {
+                Result::Ok((new_arc, old_v)) => new_arc@ == v && old_v == self@,
+                Result::Err(new_v) => v == new_v,
+            },
+    {
+        proof {
+            use_type_invariant(&self);
+        }
+
+        let Arc { ptr, inv, inst: Tracked(inst), reader: Tracked(reader), ref_count } = self;
+
+        let tracked perm = inst.reader_guard(reader.element(), &reader);
+        let inner = ptr.borrow(Tracked(perm));
+        let count;
+        let tracked mut inner_perm: Option<DekoPointsTo<ArcInner<V>>> = None;
+
+        open_atomic_invariant! {
+            inv.borrow().borrow() => g => {
+                let tracked ArcStatus {
+                    count: mut atomic_count,
+                    data: mut token,
+                } = g;
+
+                count = inner.count.compare_exchange_weak(Tracked(&mut atomic_count), 1, 0);
+                proof {
+                    if let Ok(1) = count {
+                        let tracked (Tracked(arc_perm), _, _) = inst.do_free(reader.element(), &mut token, reader);
+                        inner_perm = Some(arc_perm);
+                    }
+
+                    g = ArcStatus {
+                            count: atomic_count,
+                            data: token,
+                        };
+                }
+            }
+        }
+
+        if let Ok(1) = count {
+            let tracked mut inner_perm = inner_perm.tracked_unwrap();
+
+            let old_v = ptr.take(Tracked(&mut inner_perm)).data;
+            // Now construct a "new" Arc again.
+            let new_self = Self::new_with_inner(ptr, v, Tracked(inner_perm), Ghost(inst.f()));
+
+            Ok((new_self, old_v))
+        } else {
+            Err(v)
+        }
+    }
+
+    /// Clone this [`Arc`] and increase the strong reference count.
     ///
     /// This operation is safe and will not create duplicate ownership to the
     /// inner value as we never expose any APIs to the outside world that can
@@ -323,17 +389,17 @@ impl<V: WellFormed, F: Predicate<V>> DekoArc<V, F> {
     /// shared references like [`Self::as_ref`] or [`Self::borrow`].
     ///
     /// Due to some limitations in the transition system, we do not (yet) allow
-    /// mutating the [`DekoArc`] in a way as Rust std's APIs do. For example,
+    /// mutating the [`Arc`] in a way as Rust std's APIs do. For example,
     /// there is no [`alloc::sync::Arc::get_mut`] or [`alloc::sync::Arc::make_mut`]
     /// under the assumption that the strong reference count becomes 1. We do
-    /// offer consuming the [`DekoArc`] to get the inner value out and then re-wrap
-    /// it back into a new [`DekoArc`]. This has only some ergnomic disadvantages.
+    /// offer consuming the [`Arc`] to get the inner value out and then re-wrap
+    /// it back into a new [`Arc`]. This has only some ergnomic disadvantages.
     ///
     /// If one really needs interior mutability, one should wrap everything inside
     /// locks like [`Mutex`] or [`DekoRwLock`] and wrap data and permissions using
     /// [`DekoAtomicData<V, P>`].
     #[verifier::exec_allows_no_decreases_clause]
-    pub fn clone(&self) -> (r: Self)
+    fn clone(&self) -> (r: Self)
         requires
             self.wf(),
         ensures
@@ -367,14 +433,14 @@ impl<V: WellFormed, F: Predicate<V>> DekoArc<V, F> {
             };
 
             if count == 0 {
-                vstd::vpanic!("DekoArc use after free");
+                vstd::vpanic!("Arc use after free");
             }
             // Ensure that the reference count is valid.
 
             if count >= usize::MAX - 1 {
                 // this is rare and the kernel should be buggy
                 // so we just panic here.
-                vstd::vpanic!("DekoArc reference count overflow");
+                vstd::vpanic!("Arc reference count overflow");
             }
             let tracked mut new_reader = None;
             let res;
@@ -407,7 +473,7 @@ impl<V: WellFormed, F: Predicate<V>> DekoArc<V, F> {
             };
 
             if res.is_ok() {
-                return DekoArc {
+                return Arc {
                     ptr: self.ptr,  // ptr is Copy
                     inv: Tracked(self.inv.borrow().clone()),
                     inst: self.inst.clone(),
@@ -417,73 +483,9 @@ impl<V: WellFormed, F: Predicate<V>> DekoArc<V, F> {
             }
         }
     }
-
-    /// Try to write a new value into the inner data of this [`DekoArc`].
-    /// If the strong reference count is 1, we can directly write
-    /// into the inner data and return [`Result::Ok`] with the new [`DekoArc`]
-    /// as well as the old value stored in the inner data.
-    ///
-    /// If the strong reference count is larger than 1, we return
-    /// [`Result::Err`] with the provided value `v`.
-    pub fn try_write(self, v: V) -> (r: Result<(Self, V), V>)
-        requires
-            self.wf(),
-            self.inv(v),
-            v.wf(),
-        ensures
-            match r {
-                Result::Ok((new_arc, old_v)) => new_arc@ == v && old_v == self@,
-                Result::Err(new_v) => v == new_v,
-            },
-    {
-        proof {
-            use_type_invariant(&self);
-        }
-
-        let DekoArc { ptr, inv, inst: Tracked(inst), reader: Tracked(reader), ref_count } = self;
-
-        let tracked perm = inst.reader_guard(reader.element(), &reader);
-        let inner = ptr.borrow(Tracked(perm));
-        let count;
-        let tracked mut inner_perm: Option<DekoPointsTo<ArcInner<V>>> = None;
-
-        open_atomic_invariant! {
-            inv.borrow().borrow() => g => {
-                let tracked ArcStatus {
-                    count: mut atomic_count,
-                    data: mut token,
-                } = g;
-
-                count = inner.count.compare_exchange_weak(Tracked(&mut atomic_count), 1, 0);
-                proof {
-                    if let Ok(1) = count {
-                        let tracked (Tracked(arc_perm), _, _) = inst.do_free(reader.element(), &mut token, reader);
-                        inner_perm = Some(arc_perm);
-                    }
-
-                    g = ArcStatus {
-                            count: atomic_count,
-                            data: token,
-                        };
-                }
-            }
-        }
-
-        if let Ok(1) = count {
-            let tracked mut inner_perm = inner_perm.tracked_unwrap();
-
-            let old_v = ptr.take(Tracked(&mut inner_perm)).data;
-            // Now construct a "new" DekoArc again.
-            let new_self = Self::new_with_inner(ptr, v, Tracked(inner_perm), Ghost(inst.f()));
-
-            Ok((new_self, old_v))
-        } else {
-            Err(v)
-        }
-    }
 }
 
-impl<V: WellFormed, F: Predicate<V>> AsRefSpecImpl<V> for DekoArc<V, F> {
+impl<V: WellFormed, F: Predicate<V>> AsRefSpecImpl<V> for Arc<V, F> {
     closed spec fn obeys_as_ref_spec() -> bool {
         true
     }
@@ -497,7 +499,7 @@ impl<V: WellFormed, F: Predicate<V>> AsRefSpecImpl<V> for DekoArc<V, F> {
     }
 }
 
-impl<V: WellFormed, F: Predicate<V>> AsRef<V> for DekoArc<V, F> {
+impl<V: WellFormed, F: Predicate<V>> AsRef<V> for Arc<V, F> {
     fn as_ref<'a>(&'a self) -> (r: &'a V) {
         proof {
             use_type_invariant(&self);
@@ -510,5 +512,9 @@ impl<V: WellFormed, F: Predicate<V>> AsRef<V> for DekoArc<V, F> {
         &self.ptr.borrow(Tracked(perm)).data
     }
 }
+
+/// A type alias for a [`Arc`] that uses [`DekoAtomicData`] as its
+/// atomic storage type.
+pub type DekoArc<V, P, F> = Arc<DekoAtomicData<V, P>, F>;
 
 } // verus!

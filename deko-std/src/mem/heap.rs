@@ -4,6 +4,7 @@ use vstd::arithmetic::power2::*;
 use vstd::prelude::*;
 
 use crate::prelude::*;
+use crate::std_extra::convert::AsRefSpec;
 
 verus! {
 
@@ -114,8 +115,16 @@ pub trait Heap: WellFormed + Sized {
 
 pub ghost struct DekoHeapPredicate;
 
-impl<V: WellFormed + Heap> RwLockPredicate<V> for DekoHeapPredicate {
-    open spec fn inv(self, v: V) -> bool {
+impl<V: WellFormed + Heap> RwLockPredicate<DekoAtomicDataNoPerm<V>> for DekoHeapPredicate {
+    open spec fn inv(self, v: DekoAtomicDataNoPerm<V>) -> bool {
+        &&& v.data.wf()
+        &&& v.data.free_list_valid()
+    }
+}
+
+impl DekoHeapPredicate {
+    #[verifier::inline]
+    pub open spec fn deep_inv<V: WellFormed + Heap>(self, v: V) -> bool {
         &&& v.wf()
         &&& v.free_list_valid()
     }
@@ -649,7 +658,7 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
             0 < ORDER <= 32,
         ensures
             s.wf(),
-            f.inv(s),
+            s.free_list_valid(),
             !s.is_init(),
     {
         Self {

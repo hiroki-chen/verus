@@ -59,6 +59,7 @@ pub exec static DEKO_TASK_LIST: DekoRwLock<DekoRunQueue, DekoRunQueuePermission,
 
     DekoRwLock::new(
         DekoAtomicData { data: queue, perm: Tracked(queue_perm) },
+        (),
         Ghost(DekoRunqueuePred {  }),
     )
 };
@@ -143,33 +144,6 @@ impl DekoRunQueue {
     )]
     pub fn is_scheduleable(&self) -> bool {
         self.run_list.len() > 0 || self.idle.is_some()
-    }
-
-    /// Creates a new, empty run queue.
-    #[inline]
-    pub const fn new() -> (r: (Self, Tracked<DekoRunQueuePermission>))
-        ensures
-            r.0.wf(),
-            r.0.wf_with(r.1@),
-            !r.0.is_scheduleable(),
-    {
-        let perm = Tracked(
-            DekoRunQueuePermission {
-                run_list_perm: Ghost(Seq::empty()),
-                current_ptr: None,
-                idle_ptr: None,
-                terminated_ptr: None,
-            },
-        );
-        (
-            DekoRunQueue {
-                run_list: LinkedList::new(),
-                current: None,
-                idle: None,
-                terminated: None,
-            },
-            perm,
-        )
     }
 
     /// Sets the idle task of the run queue; if there was a previous idle task,
@@ -288,7 +262,8 @@ pub struct DekoRunnable {
     /// The memory management.
     #[deko(skip)]
     pub mm: DekoArc<
-        DekoAtomicData<VirtualMemoryRegion, VirtualMemoryRegionPermission>,
+        VirtualMemoryRegion,
+        VirtualMemoryRegionPermission,
         VirtualMemoryRegionPredicate,
     >,
 }
@@ -428,6 +403,37 @@ unsafe fn switch(pre: DekoPPtr<DekoRunnable>, next: DekoPPtr<DekoRunnable>) {
                 // ???
             },
     );
+}
+
+} // verus!
+verus! {
+
+impl DekoRunQueue {
+    /// Creates a new, empty run queue.
+    #[inline]
+    pub const fn new() -> (r: (Self, Tracked<DekoRunQueuePermission>))
+        ensures
+            r.0.wf(),
+            r.0.wf_with(r.1@),
+            !r.0.is_scheduleable(),
+    {
+        let tracked perm = DekoRunQueuePermission {
+            run_list_perm: Ghost(Seq::empty()),
+            current_ptr: None,
+            idle_ptr: None,
+            terminated_ptr: None,
+        };
+
+        (
+            DekoRunQueue {
+                run_list: LinkedList::new(),
+                current: None,
+                idle: None,
+                terminated: None,
+            },
+            Tracked(perm),
+        )
+    }
 }
 
 } // verus!

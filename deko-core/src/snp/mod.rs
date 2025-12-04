@@ -36,19 +36,6 @@ pub const VMPCK_SIZE: usize = 32;
 
 pub const VMPL_MAX: usize = 4;
 
-pub exec static SECRETS_PAGE: RwLockNoPred<SecretsPage>
-    ensures
-        SECRETS_PAGE.wf(),
-{
-    let r = RwLockNoPred::new(SecretsPage::new(), Ghost(TrivialPredicate::new()));
-
-    proof {
-        use_type_invariant(&r);
-    }
-
-    r
-}
-
 #[derive(Copy, Clone, DekoDebug)]
 #[repr(C, packed)]
 pub struct SecretsPage {
@@ -133,11 +120,11 @@ fn has_vtom() -> bool {
     snp_status.contains(VTOM)
 }
 
-pub exec static SNP_VTOM: OnceCellNoPred<usize>
+pub exec static SNP_VTOM: DekoSimpleOnceCell<usize>
     ensures
         SNP_VTOM.wf(),
 {
-    OnceCellNoPred::new(Ghost(()))
+    DekoSimpleOnceCell::new(Ghost(()))
 }
 
 pub const MSR_SEV_STATUS: u32 = 0xC001_0131;
@@ -325,7 +312,7 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
         let read_handle = PERCPU_AREAS.acquire_read();
         // The permission is discarded; you can only obtain this permission
         // if you own this.
-        let (ptr, _) = read_handle.borrow().0.index_as_ptr(0);
+        let (ptr, _) = read_handle.borrow().data.0.index_as_ptr(0);
 
         read_handle.release_read();
 

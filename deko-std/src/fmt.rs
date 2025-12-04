@@ -318,7 +318,7 @@ impl DekoDebug for () {
     }
 }
 
-impl<V, Pred: RwLockPredicate<V>> DekoDebug for RwLock<V, Pred> {
+impl<V, S: crate::Spin, Pred: RwLockPredicate<V>> DekoDebug for RwLock<V, S, Pred> {
     #[verifier::external_body]
     fn deko_debug<W: DekoWriter>(&self, writer: &W) {
         writer.write_str("RwLock(...)");
