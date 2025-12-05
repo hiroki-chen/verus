@@ -38,6 +38,7 @@ pub mod proofs;
 pub mod ptr;
 pub mod std_extra;
 pub mod sync;
+pub mod tla;
 pub mod wf;
 
 #[cfg(feature = "snp")]
