@@ -25,7 +25,10 @@ hashbrown = { version = "0.16.1", optional = true, default-features = false, fea
 ] }
 
 deko-macros = { workspace = true }
-allocator-api2 = { version = "=0.2.9", default-features = false, features = ["alloc"] }
+allocator-api2 = { version = "=0.2.9", default-features = false, features = [
+  "alloc",
+] }
+tla = { git = "https://github.com/hiroki-chen/verus-tla-lib.git", optional = true }
 
 [package.metadata.verus]
 verify = true
@@ -36,3 +39,4 @@ alloc = ["vstd/alloc", "hashbrown"]
 logging = []
 snp = []
 tdx = []
+experimental = ["tla"]

@@ -427,6 +427,7 @@ dependencies = [
  "lexical-core",
  "paste",
  "ryu",
+ "tla",
  "verus_builtin",
  "verus_builtin_macros",
  "verus_state_machines_macros",
@@ -1963,6 +1964,17 @@ checksum = "42d3e9c45c09de15d06dd8acf5f4e0e399e85927b7f00711024eb7ae10fa4869"
 dependencies = [
  "displaydoc",
  "zerovec",
+]
+
+[[package]]
+name = "tla"
+version = "0.1.0"
+source = "git+https://github.com/hiroki-chen/verus-tla-lib.git#3774e4aed759b34c3a07f2a8a1e4baff60fa773a"
+dependencies = [
+ "verus_builtin",
+ "verus_builtin_macros",
+ "verus_state_machines_macros",
+ "vstd",
 ]
 
 [[package]]
