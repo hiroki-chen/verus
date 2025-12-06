@@ -471,16 +471,15 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
         ctx_perm.pgtable_perm.mapping_space == old(ctx_perm).pgtable_perm.mapping_space,
 )]
 pub fn validate_vaddr_region(vrange: Range<VirtAddr>, validate: bool) {
-    broadcast use vstd::arithmetic::div_mod::lemma_mod_subtraction;
+    broadcast use vstd::arithmetic::div_mod::lemma_mod_equivalence;
 
     let mut cur = vrange.start.0;
     let end = vrange.end.0;
 
     proof {
-        assert(PAGE_SIZE > 0);
         assert(end % PAGE_SIZE == 0);
         assert(cur % PAGE_SIZE == 0);
-        assert(((end - cur) as u64) % PAGE_SIZE == 0);
+        assert(((end - cur)) % PAGE_SIZE as int == 0);
     }
 
     while cur < end

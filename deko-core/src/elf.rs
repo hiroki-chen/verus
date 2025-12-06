@@ -309,7 +309,7 @@ impl<'a> ElfFile<'a> {
             header.get_elf() matches Some(elf_file) && elf_file == *self,
             header.wf_for_loading(old(ctx_perm).pgtable_perm.mapping_space),
             header.get_igvm_param_block_spec().find_kernel_region_spec() matches Some((kstart, _))
-                && kstart == old(paddr),
+                && kstart == *old(paddr),
             old(paddr).wf(),
             old(ctx_perm).wf_with(ctx),
             old(paddr)@ % PAGE_SIZE == 0,
@@ -351,7 +351,7 @@ impl<'a> ElfFile<'a> {
                 segment_len == self.load_segments().len() as usize,
                 header.get_elf() matches Some(elf_file) && elf_file == *self,
                 header.wf_for_loading(ctx_perm.pgtable_perm.mapping_space),
-                header.get_igvm_param_block_spec().find_kernel_region_spec() matches Some((kstart, _)) && kstart == old(paddr),
+                header.get_igvm_param_block_spec().find_kernel_region_spec() matches Some((kstart, _)) && kstart == *old(paddr),
                 self.wf(),
                 paddr.wf(),
                 paddr@ % PAGE_SIZE == 0,

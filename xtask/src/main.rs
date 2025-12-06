@@ -472,6 +472,8 @@ impl Builder {
             .arg(&self.config.target_arch)
             .arg("--")
             .arg("--expand-errors");
+        // .arg("-V")
+        // .arg("new-mut-ref");
 
         if release {
             cmd.arg("--release");

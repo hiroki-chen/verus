@@ -564,7 +564,7 @@ unsafe fn copy_igvm_params_to_mapped_region(src_addr: VirtAddr, igvm_vregion: Va
         old(kernel_end).wf(),
         old(kernel_end)@ % PAGE_SIZE == 0,
         header.wf_for_loading(old(ctx_perm).pgtable_perm.mapping_space),
-        header.get_igvm_param_block_spec().find_kernel_region_spec() matches Some((kstart, _)) ==> kstart == old(kernel_end),
+        header.get_igvm_param_block_spec().find_kernel_region_spec() matches Some((kstart, _)) ==> kstart == *old(kernel_end),
     ensures
         ctx_perm.wf_with(ctx),
         ctx_perm.pgtable_perm.mapping_space == old(ctx_perm).pgtable_perm.mapping_space,

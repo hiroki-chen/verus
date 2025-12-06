@@ -40,7 +40,6 @@ impl Parse for AtomicPredInput {
         input.parse::<Token![,]>()?;
 
         // Try to parse structured input with fields: and perm_fields:
-        let mut data_fields = None;
         let mut perm_fields = None;
         let mut expressions = Vec::new();
 
@@ -55,7 +54,7 @@ impl Parse for AtomicPredInput {
                     let _brace = syn::braced!(content in input);
                     let field_list: Punctuated<Ident, Token![,]> =
                         content.parse_terminated(Ident::parse, Token![,])?;
-                    data_fields = Some(field_list.into_iter().collect());
+                    let data_fields = Some(field_list.into_iter().collect());
 
                     input.parse::<Token![,]>()?;
 

@@ -340,29 +340,37 @@ impl DekoRunnable {
 
     #[verus_spec(r =>
         with
+            Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
             Tracked(xsave_perm): Tracked<&DekoPointsTo<Array<u8, 4096>>>,
         requires
-            cpu.wf(),
+            old(ctx_perm).wf_with(cpu),
             xsave@ == xsave_perm.pptr(),
+        ensures
+            ctx_perm.wf_with(cpu),
+            ctx_perm.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
     )]
-    pub fn alloc_user_stack(cpu: &DekoCpuCtx, entry: u64, xsave: DekoPPtr<Array<u8, 4096>>) -> (
-        VaddrRange,
-        VaddrRange,
-        u64,
-    ) {
+    pub fn alloc_user_stack(
+        cpu: DekoPPtr<DekoCpuCtx>,
+        entry: u64,
+        xsave: DekoPPtr<Array<u8, 4096>>,
+    ) -> (VaddrRange, VaddrRange, u64) {
         kunimplemented!()
     }
 
     /// Returns the stack mapped range, the raw stack range, and the initial RSP value.
     #[verus_spec(r =>
         with
+            Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
             Tracked(xsave_perm): Tracked<&DekoPointsTo<Array<u8, 4096>>>,
         requires
-            cpu.wf(),
+            old(ctx_perm).wf_with(cpu),
             xsave@ == xsave_perm.pptr(),
+        ensures
+            ctx_perm.wf_with(cpu),
+            ctx_perm.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
     )]
     pub fn alloc_kernel_stack(
-        cpu: &DekoCpuCtx,
+        cpu: DekoPPtr<DekoCpuCtx>,
         entry: u64,
         param: u64,
         ret: u64,
@@ -380,31 +388,32 @@ impl DekoRunnable {
     /// Creates a new runnable task with the given arguments on the given CPU.
     #[verus_spec(r =>
         with
-            Tracked(ctx_perm): Tracked<&DekoCpuCtxPermission>,
+            Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
         requires
-            cpu.wf(),
-            cpu.vm_region_spec() matches Some(vm) && vm.wf(),
-            cpu.kernel_mapping_spec().wf(),
-            cpu.pgtable_spec()@ == ctx_perm.pgtable_perm.pgtable_perm.pptr(),
-            ctx_perm.pgtable_perm.wf(),
+            old(ctx_perm).wf_with(cpu),
+            old(ctx_perm).ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
             args.wf(),
         ensures
             r.wf(),
+            ctx_perm.wf_with(cpu),
+            ctx_perm.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
             // r@.???
     )]
-    pub fn new(cpu: &DekoCpuCtx, args: DekoTaskArgs) -> DekoRunnablePtr {
+    pub fn new(cpu: DekoPPtr<DekoCpuCtx>, args: DekoTaskArgs) -> DekoRunnablePtr {
+        let cpu_borrowed = cpu.borrow(Tracked(&ctx_perm.ptr_perm));
+
         kpanic_if!(core::hint::unlikely(
-            cpu.vm_region().is_none(),
+            cpu_borrowed.vm_region().is_none(),
         ), "CPU has no VM region assigned");
 
         // Allocate a page table for the new task.
         let (new_pgtable, _, Tracked(mut pgtable_perm)) = PageTable::new(
-            cpu.private_bit,
-            cpu.shared_bit,
-            Ghost(&cpu.kernel_mapping_spec()),
+            cpu_borrowed.private_bit,
+            cpu_borrowed.shared_bit,
+            Ghost(&cpu_borrowed.kernel_mapping_spec()),
         );
 
-        let old_pte_value = *cpu.pgtable.borrow(
+        let old_pte_value = *cpu_borrowed.pgtable.borrow(
             Tracked(&ctx_perm.pgtable_perm.pgtable_perm),
         ).0.index(PGTABLE_LVL3_IDX_SHARED as usize);
 
@@ -425,7 +434,7 @@ impl DekoRunnable {
         }
 
         proof_with!(Tracked(&mut pgtable_perm));
-        cpu.vm_region().as_ref().unwrap().copy_to_page_table(new_pgtable);
+        cpu_borrowed.vm_region().as_ref().unwrap().copy_to_page_table(new_pgtable);
 
         let task_mm = match args.parent {
             Some(ptr) => { ptr.as_ref().data.mm.clone() },
@@ -439,11 +448,11 @@ impl DekoRunnable {
 
         let (stack, vrange, rsp) = match args.mode {
             DekoTaskMode::Kernel { entry, param, ret } => {
-                proof_with!(Tracked(&xsave_perm));
+                proof_with!(Tracked(ctx_perm), Tracked(&xsave_perm));
                 Self::alloc_kernel_stack(cpu, entry, param, ret, xsave_ptr)
             },
             DekoTaskMode::User { entry } => {
-                proof_with!(Tracked(&xsave_perm));
+                proof_with!(Tracked(ctx_perm), Tracked(&xsave_perm));
                 Self::alloc_user_stack(cpu, entry, xsave_ptr)
             },
         };

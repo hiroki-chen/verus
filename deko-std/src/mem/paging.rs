@@ -1,8 +1,13 @@
+use deko_macros::deko_const_decl;
 use vstd::prelude::*;
 
 use crate::prelude::*;
 
 verus! {
+
+global layout usize is size == 8;
+
+global layout u64 is size == 8;
 
 // Note on the constants: Verus is having trouble verifying
 // non-overflow/underflow of some arithmetic operations that
@@ -71,51 +76,127 @@ pub const PERCPU_BASE: VirtAddr = VirtAddr(0xFFFF_FF00_0000_0000);
 /// End Address of per-cpu memory region
 pub const PERCPU_END: VirtAddr = VirtAddr(0xFFFF_FF80_0000_0000);
 
-/// PerCPU CAA mappings
-pub const PERCPU_CAA_BASE: VirtAddr = VirtAddr(PERCPU_BASE.0 + (2 * SIZE_LEVEL0));
-
-/// PerCPU VMSA mappings
-pub const PERCPU_VMSA_BASE: VirtAddr = VirtAddr(PERCPU_BASE.0 + (4 * SIZE_LEVEL0));
-
-/// Region for PerCPU Stacks
-pub const PERCPU_STACKS_BASE: VirtAddr = VirtAddr(PERCPU_BASE.0 + (SIZE_LEVEL1));
-
-/// Shadow stack address of the per-cpu init task
-pub const SHADOW_STACKS_INIT_TASK: VirtAddr = PERCPU_STACKS_BASE;
-
-/// Stack address to use during context switches
-pub const CONTEXT_SWITCH_STACK: VirtAddr = VirtAddr(SHADOW_STACKS_INIT_TASK.0 + (STACK_TOTAL_SIZE));
-
-/// Shadow stack address to use during context switches
-pub const CONTEXT_SWITCH_SHADOW_STACK: VirtAddr = VirtAddr(
-    CONTEXT_SWITCH_STACK.0 + (STACK_TOTAL_SIZE),
+deko_const_decl!(
+    /// PerCPU CAA mappings
+    PERCPU_CAA_BASE,
+    VirtAddr,
+    VirtAddr((PERCPU_BASE.0 + (2 * SIZE_LEVEL0)) as u64),
+    VirtAddr(PERCPU_BASE.0 + (2 * SIZE_LEVEL0)),
 );
 
-///  IST Stacks base address
-pub const STACKS_IST_BASE: VirtAddr = VirtAddr(CONTEXT_SWITCH_SHADOW_STACK.0 + (STACK_TOTAL_SIZE));
+deko_const_decl!(
+    /// PerCPU VMSA mappings
+    PERCPU_VMSA_BASE,
+    VirtAddr,
+    VirtAddr((PERCPU_BASE.0 + (4 * SIZE_LEVEL0)) as u64),
+    VirtAddr(PERCPU_BASE.0 + (4 * SIZE_LEVEL0)),
+);
 
-/// DoubleFault IST stack base address
-pub const STACK_IST_DF_BASE: VirtAddr = STACKS_IST_BASE;
+deko_const_decl!(
+    /// Region for PerCPU Stacks
+    PERCPU_STACKS_BASE,
+    VirtAddr,
+    VirtAddr((PERCPU_BASE.0 + (6 * SIZE_LEVEL0)) as u64),
+    VirtAddr(PERCPU_BASE.0 + (6 * SIZE_LEVEL0)),
+);
 
-/// DoubleFault ISST shadow stack base address
-pub const SHADOW_STACK_ISST_DF_BASE: VirtAddr = VirtAddr(STACKS_IST_BASE.0 + (STACK_TOTAL_SIZE));
+/// Shadow stack address of the per-cpu init task
+deko_const_decl!(
+    SHADOW_STACKS_INIT_TASK,
+    VirtAddr,
+    PERCPU_STACKS_BASE,
+    PERCPU_STACKS_BASE,
+);
+
+/// Stack address to use during context switches
+deko_const_decl!(
+    CONTEXT_SWITCH_STACK,
+    VirtAddr,
+    VirtAddr((SHADOW_STACKS_INIT_TASK.0 + (STACK_TOTAL_SIZE)) as u64),
+    VirtAddr(SHADOW_STACKS_INIT_TASK.0 + (STACK_TOTAL_SIZE)),
+);
+
+deko_const_decl!(
+    /// Shadow stack address to use during context switches
+    CONTEXT_SWITCH_SHADOW_STACK,
+    VirtAddr,
+    VirtAddr((CONTEXT_SWITCH_STACK.0 + (STACK_TOTAL_SIZE)) as u64),
+    VirtAddr(CONTEXT_SWITCH_STACK.0 + (STACK_TOTAL_SIZE)),
+);
+
+deko_const_decl!(
+    /// IST Stacks base address
+    STACKS_IST_BASE,
+    VirtAddr,
+    VirtAddr((CONTEXT_SWITCH_SHADOW_STACK.0 + (STACK_TOTAL_SIZE)) as u64),
+    VirtAddr(CONTEXT_SWITCH_SHADOW_STACK.0 + (STACK_TOTAL_SIZE)),
+);
+
+deko_const_decl!(
+    /// DoubleFault IST stack base address
+    STACK_IST_DF_BASE,
+    VirtAddr,
+    STACKS_IST_BASE,
+    STACKS_IST_BASE,
+);
+
+deko_const_decl!(
+    /// DoubleFault ISST shadow stack base address
+    SHADOW_STACK_ISST_DF_BASE,
+    VirtAddr,
+    VirtAddr((STACKS_IST_BASE.0 + (STACK_TOTAL_SIZE)) as u64),
+    VirtAddr(STACKS_IST_BASE.0 + (STACK_TOTAL_SIZE)),
+);
 
 /// PerCPU XSave Context area base address
-pub const XSAVE_AREA_BASE: VirtAddr = VirtAddr(SHADOW_STACK_ISST_DF_BASE.0 + (STACK_TOTAL_SIZE));
+deko_const_decl!(
+    XSAVE_AREA_BASE,
+    VirtAddr,
+    VirtAddr((SHADOW_STACK_ISST_DF_BASE.0 + (STACK_TOTAL_SIZE)) as u64),
+    VirtAddr(SHADOW_STACK_ISST_DF_BASE.0 + (STACK_TOTAL_SIZE)),
+);
 
+// pub const XSAVE_AREA_BASE: VirtAddr = VirtAddr(SHADOW_STACK_ISST_DF_BASE.0 + (STACK_TOTAL_SIZE));
 /// Base Address for temporary mappings - used by page-table guards
-pub const PERCPU_TEMP_BASE: VirtAddr = VirtAddr(PERCPU_BASE.0 + (SIZE_LEVEL2));
+deko_const_decl!(
+    PERCPU_TEMP_BASE,
+    VirtAddr,
+    VirtAddr((PERCPU_BASE.0 + (SIZE_LEVEL2)) as u64),
+    VirtAddr(PERCPU_BASE.0 + (SIZE_LEVEL2)),
+);
 
 // Below is space for 512 temporary 4k mappings and 511 temporary 2M mappings
-/// Start and End for PAGE_SIZEed temporary mappings
-pub const PERCPU_TEMP_BASE_4K: VirtAddr = PERCPU_TEMP_BASE;
+deko_const_decl!(
+    /// Start and End for PAGE_SIZEed temporary mappings
+    PERCPU_TEMP_BASE_4K,
+    VirtAddr,
+    PERCPU_TEMP_BASE,
+    PERCPU_TEMP_BASE,
+);
 
-pub const PERCPU_TEMP_END_4K: VirtAddr = VirtAddr(PERCPU_TEMP_BASE_4K.0 + (SIZE_LEVEL1));
+deko_const_decl!(
+    /// Start and End for PAGE_SIZEed temporary mappings
+    PERCPU_TEMP_END_4K,
+    VirtAddr,
+    VirtAddr((PERCPU_TEMP_BASE_4K.0 + (SIZE_LEVEL1)) as u64),
+    VirtAddr(PERCPU_TEMP_BASE_4K.0 + (SIZE_LEVEL1)),
+);
 
-/// Start and End for PAGE_SIZEed temporary mappings
-pub const PERCPU_TEMP_BASE_2M: VirtAddr = VirtAddr(PERCPU_TEMP_BASE.0 + (SIZE_LEVEL1));
+deko_const_decl!(
+    /// Start and End for PAGE_SIZEed temporary mappings
+    PERCPU_TEMP_BASE_2M,
+    VirtAddr,
+    VirtAddr((PERCPU_TEMP_BASE.0 + (SIZE_LEVEL1)) as u64),
+    VirtAddr(PERCPU_TEMP_BASE.0 + (SIZE_LEVEL1)),
+);
 
-pub const PERCPU_TEMP_END_2M: VirtAddr = VirtAddr(PERCPU_TEMP_BASE.0 + (SIZE_LEVEL2));
+deko_const_decl!(
+    /// Start and End for PAGE_SIZEed temporary mappings
+    PERCPU_TEMP_END_2M,
+    VirtAddr,
+    VirtAddr((PERCPU_TEMP_BASE.0 + (SIZE_LEVEL2)) as u64),
+    VirtAddr(PERCPU_TEMP_BASE.0 + (SIZE_LEVEL2)),
+);
 
 /// Task mappings level 3 index
 pub const PGTABLE_LVL3_IDX_PERTASK: u64 = 508;
@@ -125,8 +206,13 @@ pub const PGTABLE_LVL3_IDX_PERTASK: u64 = 508;
 // FIXME: Hardcoded due to verus verification issues
 pub const PERTASK_BASE: VirtAddr = VirtAddr(0xFE0000000000);
 
-/// End address of task memory region
-pub const PERTASK_END: VirtAddr = VirtAddr(PERTASK_BASE.0 + (SIZE_LEVEL3));
+deko_const_decl!(
+    /// End address of task memory region
+    PERTASK_END,
+    VirtAddr,
+    VirtAddr((PERTASK_BASE.0 + (SIZE_LEVEL3)) as u64),
+    VirtAddr(PERTASK_BASE.0 + (SIZE_LEVEL3)),
+);
 
 /// Page table self-map level 3 index
 pub const PGTABLE_LVL3_IDX_PTE_SELFMAP: u64 = 493;
@@ -141,8 +227,13 @@ pub const PTE_BASE: VirtAddr = VirtAddr(0xFFFFF68000000000);
 /// Start of user memory address range
 pub const USER_MEM_START: VirtAddr = VirtAddr(0);
 
-/// End of user memory address range
-pub const USER_MEM_END: VirtAddr = VirtAddr(USER_MEM_START.0 + (256 * SIZE_LEVEL3));
+deko_const_decl!(
+    /// End of user memory address range
+    USER_MEM_END,
+    VirtAddr,
+    VirtAddr((USER_MEM_START.0 + (256 * SIZE_LEVEL3)) as u64),
+    VirtAddr(USER_MEM_START.0 + (256 * SIZE_LEVEL3)),
+);
 
 pub const PAGE_TABLE_ENTRY: usize = 0x200;
 

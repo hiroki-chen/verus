@@ -822,13 +822,11 @@ impl DekoCpuCtx {
             old(perm).ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
         ensures
             perm.wf_with(ptr),
+            perm.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
     {
-        // Now create a new runnable task here.
-        let cpu = ptr.borrow(Tracked(&perm.ptr_perm));
-
         #[verus_spec(with Tracked(perm))]
         let task = DekoRunnable::new(
-            cpu,
+            ptr,
             DekoTaskArgs {
                 parent: None,
                 entry,
