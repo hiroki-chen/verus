@@ -20,9 +20,7 @@ use crate::collections::Vec;
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::paging::{PageTable, PageTablePermission};
 use crate::mm::stack::DekoKernelStack;
-use crate::mm::vm::{
-    VirtualMemoryRegion, VirtualMemoryRegionPermission, VirtualMemoryRegionPredicate,
-};
+use crate::mm::vm::{VirtualMemoryRegion, VirtualMemoryRegionPermission, VirtualMemoryRegionPred};
 use crate::mm::DEKO_FRAME_ALLOCATOR;
 use crate::{die, kerror, kpanic_if, kunimplemented};
 
@@ -57,27 +55,32 @@ pub(crate) fn generate_id() -> u64 {
 ///
 /// - Ensures the run queue is well-formed.
 /// - Ensures its associated permission type is well-formed with respect to the run queue.
-pub struct DekoRunqueuePred;
+with_atomic_pred! {
+    DekoRunQueue,
+    DekoRunQueuePermission,
+    fields: { },
+    perm_fields: { },
+    data.wf() && data.wf_with(perm)
+}
 
-pub exec static DEKO_TASK_LIST: DekoRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunqueuePred> =
+pub exec static DEKO_TASK_LIST: DekoRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred> =
     {
     let (queue, Tracked(queue_perm)) = DekoRunQueue::new();
 
     DekoRwLock::new(
         DekoAtomicData { data: queue, perm: Tracked(queue_perm) },
         (),
-        Ghost(DekoRunqueuePred {  }),
+        Ghost(DekoRunQueuePred {  }),
     )
 };
 
-impl RwLockPredicate<DekoAtomicData<DekoRunQueue, DekoRunQueuePermission>> for DekoRunqueuePred {
-    #[verifier::inline]
-    open spec fn inv(self, data: DekoAtomicData<DekoRunQueue, DekoRunQueuePermission>) -> bool {
-        &&& data.data.wf()
-        &&& data.data.wf_with(data.perm@)
-    }
-}
-
+// impl RwLockPredicate<DekoAtomicData<DekoRunQueue, DekoRunQueuePermission>> for DekoRunqueuePred {
+//     #[verifier::inline]
+//     open spec fn inv(self, data: DekoAtomicData<DekoRunQueue, DekoRunQueuePermission>) -> bool {
+//         &&& data.data.wf()
+//         &&& data.data.wf_with(data.perm@)
+//     }
+// }
 /// The arguments passed to a task upon its creation to specify
 /// its initial configuration.
 #[derive(DekoDebug)]
@@ -317,11 +320,7 @@ pub struct DekoRunnable {
     pub xsave_size: usize,
     /// The memory management.
     #[deko(skip)]
-    pub mm: DekoArc<
-        VirtualMemoryRegion,
-        VirtualMemoryRegionPermission,
-        VirtualMemoryRegionPredicate,
-    >,
+    pub mm: DekoArc<VirtualMemoryRegion, VirtualMemoryRegionPermission, VirtualMemoryRegionPred>,
 }
 
 #[verus_verify]
@@ -334,7 +333,7 @@ impl DekoRunnable {
     pub fn create_mm() -> DekoArc<
         VirtualMemoryRegion,
         VirtualMemoryRegionPermission,
-        VirtualMemoryRegionPredicate,
+        VirtualMemoryRegionPred,
     > {
         kunimplemented!()
     }

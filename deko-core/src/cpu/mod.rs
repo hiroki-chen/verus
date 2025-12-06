@@ -17,7 +17,7 @@ use vstd::prelude::*;
 use crate::cpu::apic::X86Apic;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
 use crate::cpu::task::{
-    DekoRunQueue, DekoRunQueuePermission, DekoRunnable, DekoRunqueuePred, DekoTaskArgs,
+    DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred, DekoRunnable, DekoTaskArgs,
 };
 use crate::mm::paging::{
     bit_not_in_addr_region, bit_not_overlapping, Mapping, Page, PageTable, PageTablePermission,
@@ -313,7 +313,7 @@ pub struct DekoCpuCtx {
     /// APIC interface for this CPU.
     apic: X86Apic,
     /// Runqueue
-    run_queue: Option<DekoRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunqueuePred>>,
+    run_queue: Option<DekoRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred>>,
 }
 
 with_permission! {
@@ -652,7 +652,7 @@ impl DekoCpuCtx {
         vm_region: Option<VirtualMemoryRegion>,
         ctx_switch_stack: Option<DekoPPtr<DekoKernelStack>>,
         ist_stack: Option<DekoIstStack>,
-        run_queue: Option<DekoRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunqueuePred>>,
+        run_queue: Option<DekoRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred>>,
     ) -> (r: Self)
         requires
             cpu_id < CPUID_MAX_COUNT as u64,

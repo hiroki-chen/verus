@@ -13,6 +13,15 @@
 //! Each primitive is designed to be thread-safe and can be used in static
 //! contexts. They leverage Verus's verification capabilities to ensure
 //! correctness properties about concurrent access and data integrity.
+//!
+//! # Important notes
+//!
+//! The current version of these synchronization primitives does not guarantee
+//! safety and liveness properties (e.g., no deadlocks, and locks are eventually
+//! acquired if attempted) due to the limitation of VerusSync.
+//!
+//! In the future, this module might be migrated to TLA+ based reasoning system
+//! supported by Anvil.
 #[cfg(feature = "alloc")]
 pub mod arc;
 pub mod atomic;

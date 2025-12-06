@@ -1,7 +1,7 @@
 use core::ops::Range;
 use core::sync::atomic::AtomicU32;
 
-use deko_macros::DekoDebug;
+use deko_macros::{with_atomic_pred, DekoDebug};
 use deko_std::prelude::*;
 use vstd::cell::PCell;
 use vstd::invariant;
@@ -36,6 +36,23 @@ pub const VMPCK_SIZE: usize = 32;
 
 pub const VMPL_MAX: usize = 4;
 
+pub exec static SECRETS_PAGE: DekoRwLock<SecretsPage, SecretsPagePermission, SecretsPagePred>
+    ensures
+        SECRETS_PAGE.wf(),
+{
+    let r = DekoRwLock::new(
+        DekoAtomicData::new_with(SecretsPage::new(), Tracked(SecretsPagePermission {  })),
+        (),
+        Ghost(SecretsPagePred {  }),
+    );
+
+    proof {
+        use_type_invariant(&r);
+    }
+
+    r
+}
+
 #[derive(Copy, Clone, DekoDebug)]
 #[repr(C, packed)]
 pub struct SecretsPage {
@@ -60,7 +77,15 @@ pub struct SecretsPage {
     reserved_164: [u8; 3740],
 }
 
-#[verus_verify]
+with_permission! {
+    SecretsPage,
+}
+
+with_atomic_pred! {
+    SecretsPage,
+    SecretsPagePermission,
+}
+
 impl SecretsPage {
     pub const fn new() -> (r: Self)
         ensures
@@ -85,6 +110,47 @@ impl SecretsPage {
             reserved_164: [0;3740],
         }
     }
+}
+
+#[verus_verify]
+impl SecretsPage {
+    /// Copy the secrets page from the given virtual address.
+    #[verifier::external_body]
+    #[inline(always)]
+    #[verus_spec(
+        with
+            Tracked(pgtable_perm): Tracked<&PageTablePermission>
+        requires
+            pgtable_perm.mapped(from),
+            old(self).wf(),
+            from.wf(),
+        ensures
+            self.wf(),
+    )]
+    pub fn copy_from(&mut self, from: VirtAddr) {
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                from.0 as *const SecretsPage,
+                self as *mut SecretsPage,
+                1,
+            );
+        }
+    }
+}
+
+#[verus_spec(
+    with
+        Tracked(pgtable_perm): Tracked<&PageTablePermission>
+    requires
+        pgtable_perm.mapped(from),
+        from.wf(),
+)]
+pub fn secrets_page_init(from: VirtAddr) {
+    let (DekoAtomicData { mut data, perm }, handle) = SECRETS_PAGE.acquire_write();
+
+    proof_with!(Tracked(pgtable_perm));
+    data.copy_from(from);
+    handle.release_write(DekoAtomicData { data, perm });
 }
 
 impl WellFormed for SecretsPage {

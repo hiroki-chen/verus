@@ -6,6 +6,7 @@ use syn::punctuated::Punctuated;
 use syn::{Ident, Result, Token, Type, parse_macro_input, parse_quote};
 
 /// Represents the input to the with_atomic_pred macro
+#[derive(Debug)]
 pub struct AtomicPredInput {
     pub name: Ident,
     pub data_type: Type,
@@ -135,7 +136,14 @@ fn replace_tokens_in_stream(
                 } else if data_fields.contains(&ident_str) {
                     result.extend(quote! { v.data.#ident });
                 } else {
-                    result.extend(quote! { #ident });
+                    // We allow directly accessing `data` and `perm`
+                    if ident_str == "perm" {
+                        result.extend(quote! { v.perm@ });
+                    } else if ident_str == "data" {
+                        result.extend(quote! { v.data });
+                    } else {
+                        result.extend(quote! { #ident });
+                    }
                 }
             }
             other => result.extend(quote! { #other }),
@@ -151,9 +159,21 @@ pub fn generate_atomic_pred(input: AtomicPredInput) -> proc_macro2::TokenStream 
         input;
 
     let pred_name = syn::Ident::new(&format!("{}Pred", name), name.span());
+    let rw_impl = quote! {
+        impl deko_std::prelude::RwLockPredicate<deko_std::sync::DekoAtomicData<#data_type, #perm_type>>
+            for #pred_name
+            {
+                #[verifier::inline]
+                open spec fn inv(self, v: deko_std::sync::DekoAtomicData<#data_type, #perm_type>) -> bool {
+                    <Self as deko_std::prelude::Predicate<deko_std::sync::DekoAtomicData<#data_type, #perm_type>>>::inv(self, v)
+                }
+            }
+    };
 
     // Default case: just return true
-    if expressions.is_none() {
+    if expressions.is_none()
+        || expressions.as_ref().is_some_and(|tt| tt.is_empty() || tt.len() == 1 && tt[0].is_empty())
+    {
         return quote! {
             verus! {
                 pub struct #pred_name;
@@ -164,6 +184,8 @@ pub fn generate_atomic_pred(input: AtomicPredInput) -> proc_macro2::TokenStream 
                         true
                     }
                 }
+
+                #rw_impl
             }
         };
     }
@@ -187,11 +209,15 @@ pub fn generate_atomic_pred(input: AtomicPredInput) -> proc_macro2::TokenStream 
     };
 
     // Convert to proc_macro2::TokenStream and combine with &&&
-    let combined_exprs: proc_macro2::TokenStream = final_expressions
-        .into_iter()
-        .map(|ts| -> proc_macro2::TokenStream { ts.into() })
-        .reduce(|acc, expr| quote! { #acc &&& #expr })
-        .unwrap_or_else(|| quote! { true });
+    let combined_exprs: proc_macro2::TokenStream = if final_expressions.is_empty() {
+        quote! { true }
+    } else {
+        final_expressions
+            .into_iter()
+            .map(|ts| -> proc_macro2::TokenStream { ts.into() })
+            .reduce(|acc, expr| quote! { #acc &&& #expr })
+            .unwrap_or_else(|| quote! { true })
+    };
 
     quote! {
         verus! {
@@ -203,6 +229,8 @@ pub fn generate_atomic_pred(input: AtomicPredInput) -> proc_macro2::TokenStream 
                     #combined_exprs
                 }
             }
+
+            #rw_impl
         }
     }
 }
