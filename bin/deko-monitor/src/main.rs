@@ -392,7 +392,8 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
     }
     // Assign "deko_main" to the BSP CPU context so that it will
     // start executing from there.
-    DekoCpuCtx::setup_idle_task(bst_cpu_ptr, Tracked(&mut cpu_ctx_perm), 114514);
+    proof_with!(Tracked(cpu_ctx_perm) => Tracked(cpu_ctx_perm));
+    DekoCpuCtx::setup_idle_task(bst_cpu_ptr, 114514);
 
     loop {
         // should never reach here

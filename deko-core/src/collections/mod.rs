@@ -18,6 +18,21 @@ pub type Vec<T> = alloc::vec::Vec<T, DekoAllocatorApi>;
 /// A type alias for a vector declaration that uses the Deko page frame allocator as its allocator.
 pub type VecDeque<T> = alloc::collections::vec_deque::VecDeque<T, DekoAllocatorApi>;
 
+/// Updates the element at the given index in the vector to the given value.
+///
+/// Since Verus does not support mutable references to elements in a vector,
+/// we provide this helper function to update an element at a specific index.
+#[verifier::external_body]
+#[inline]
+pub fn update_vec<T>(v: &mut Vec<T>, index: usize, value: T)
+    requires
+        0 <= index < old(v)@.len(),
+    ensures
+        v@ =~= old(v)@.update(index as int, value),
+{
+    v[index] = value;
+}
+
 } // verus!
 /// Creates a [`Vec`] containing the arguments.
 ///

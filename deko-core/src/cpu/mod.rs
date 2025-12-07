@@ -513,6 +513,7 @@ impl X86Tss {
     }
 }
 
+#[verus_verify]
 impl DekoCpuCtx {
     uninterp spec fn addr(&self) -> u64;
 
@@ -812,19 +813,19 @@ impl DekoCpuCtx {
     }
 
     /// Setup the idle task for this CPU.
-    pub fn setup_idle_task(
-        ptr: DekoPPtr<Self>,
-        Tracked(perm): Tracked<&mut DekoCpuCtxPermission>,
-        entry: u64,
-    )
+    #[verus_spec(r =>
+        with
+            Tracked(perm): Tracked<DekoCpuCtxPermission>,
+                -> new_perm: Tracked<DekoCpuCtxPermission>,
         requires
-            old(perm).wf_with(ptr),
-            old(perm).ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
-        ensures
             perm.wf_with(ptr),
             perm.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
-    {
-        #[verus_spec(with Tracked(perm))]
+        ensures
+            new_perm@.wf_with(ptr),
+            new_perm@.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
+    )]
+    pub fn setup_idle_task(ptr: DekoPPtr<Self>, entry: u64) {
+        proof_with!(Tracked(perm) => Tracked(new_perm));
         let task = DekoRunnable::new(
             ptr,
             DekoTaskArgs {
@@ -838,6 +839,9 @@ impl DekoCpuCtx {
                 },
             },
         );
+
+        proof_with!(|= Tracked(new_perm));
+        ()
     }
 }
 

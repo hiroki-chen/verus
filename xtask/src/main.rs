@@ -472,6 +472,22 @@ impl Builder {
             .arg(&self.config.target_arch)
             .arg("--")
             .arg("--expand-errors");
+        // This option is unstable and some of the code
+        // will break because of it since vstd is not
+        // currently compatible with it; for example,
+        // Tracke<&mut T> cannot be used if T is tracked.
+        // However, if T is `PointsTo<V>` then creating a
+        // mutable token to the actual data <V> is common
+        // practice.
+        //
+        // This also requires some code refactoring since
+        // we now use pointer updates in some places which
+        // is inefficient now.
+        //
+        // I'm still waiting for the Verus people to update
+        // and fix the permission systems so we may have a
+        // cleaner and more efficient implementation later.
+        //
         // .arg("-V")
         // .arg("new-mut-ref");
 

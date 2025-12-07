@@ -100,16 +100,16 @@ deko_const_decl!(
     VirtAddr(PERCPU_BASE.0 + (6 * SIZE_LEVEL0)),
 );
 
-/// Shadow stack address of the per-cpu init task
 deko_const_decl!(
+    /// Shadow stack address of the per-cpu init task
     SHADOW_STACKS_INIT_TASK,
     VirtAddr,
     PERCPU_STACKS_BASE,
     PERCPU_STACKS_BASE,
 );
 
-/// Stack address to use during context switches
 deko_const_decl!(
+    /// Stack address to use during context switches
     CONTEXT_SWITCH_STACK,
     VirtAddr,
     VirtAddr((SHADOW_STACKS_INIT_TASK.0 + (STACK_TOTAL_SIZE)) as u64),
@@ -148,17 +148,16 @@ deko_const_decl!(
     VirtAddr(STACKS_IST_BASE.0 + (STACK_TOTAL_SIZE)),
 );
 
-/// PerCPU XSave Context area base address
 deko_const_decl!(
+    /// PerCPU XSave Context area base address
     XSAVE_AREA_BASE,
     VirtAddr,
     VirtAddr((SHADOW_STACK_ISST_DF_BASE.0 + (STACK_TOTAL_SIZE)) as u64),
     VirtAddr(SHADOW_STACK_ISST_DF_BASE.0 + (STACK_TOTAL_SIZE)),
 );
 
-// pub const XSAVE_AREA_BASE: VirtAddr = VirtAddr(SHADOW_STACK_ISST_DF_BASE.0 + (STACK_TOTAL_SIZE));
-/// Base Address for temporary mappings - used by page-table guards
 deko_const_decl!(
+    /// Base Address for temporary mappings - used by page-table guards
     PERCPU_TEMP_BASE,
     VirtAddr,
     VirtAddr((PERCPU_BASE.0 + (SIZE_LEVEL2)) as u64),

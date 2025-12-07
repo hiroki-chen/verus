@@ -18,13 +18,71 @@ use vstd::std_specs::cmp::{PartialEqSpec, PartialEqSpecImpl, PartialOrdSpecImpl}
 
 use crate::collections::Vec;
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
-use crate::mm::paging::{PageTable, PageTablePermission};
+use crate::mm::frame_allocator::DekoPageFrameAllocator;
+use crate::mm::paging::{PageTable, PageTablePermission, PteFlags};
 use crate::mm::stack::DekoKernelStack;
-use crate::mm::vm::{VirtualMemoryRegion, VirtualMemoryRegionPermission, VirtualMemoryRegionPred};
+use crate::mm::vm::{
+    VirtualMemory, VirtualMemoryPermission, VirtualMemoryRegion, VirtualMemoryRegionPermission,
+    VirtualMemoryRegionPred,
+};
 use crate::mm::DEKO_FRAME_ALLOCATOR;
-use crate::{die, kerror, kpanic_if, kunimplemented};
+use crate::{die, kerror, kinfo, kpanic_if, kunimplemented};
 
 verus! {
+
+/// The memory management information of a task.
+pub struct DekoTaskMM {
+    /// The page table index covered by the MM for quick
+    /// lookups. This index ensures that the top-level
+    /// page table entry is always reserved for the task MM.
+    pub pgtable_index: usize,
+    /// The virtual memory region of the task for kernel level.
+    pub k_vm_region: VirtualMemoryRegion,
+    /// The virtual memory region of the task for user level.
+    pub u_vm_region: Option<VirtualMemoryRegion>,
+}
+
+with_permission! {
+    DekoTaskMM,
+    // pgtable_perm: Tracked<PageTablePermission>, will it own the permission?
+    k_vm_region_perm: Tracked<VirtualMemoryRegionPermission>,
+    u_vm_region_perm: Tracked<Option<VirtualMemoryRegionPermission>>,
+}
+
+with_atomic_pred! {
+    DekoTaskMM,
+    DekoTaskMMPermission,
+    fields: { k_vm_region, u_vm_region, },
+    perm_fields: { k_vm_region_perm, u_vm_region_perm, },
+    k_vm_region.wf_with(&k_vm_region_perm.view())
+        && match (&u_vm_region, u_vm_region_perm.view()) {
+            (Some(vm), Some(vm_perm)) => vm.wf_with(&vm_perm),
+            (None, None) => true,
+            _ => false,
+        }
+}
+
+fn on_task_exit() {
+}
+
+#[verus_verify]
+impl DekoTaskMM {
+    #[verus_spec(r =>
+        with
+            Tracked(u_vm_region_perm): Tracked<Option<VirtualMemoryRegionPermission>>,
+        requires
+            match (&u_vm_region, &u_vm_region_perm) {
+                (Some(vm), Some(vm_perm)) => vm.wf_with(&vm_perm),
+                (None, None) => true,
+                _ => false,
+            },
+    )]
+    pub fn new(u_vm_region: Option<VirtualMemoryRegion>) -> Self {
+        // TODO: We may also need a global bitmap allocator so that
+        // some pages can be reserved for specific purposes only.
+        kunimplemented!()
+    }
+}
 
 pub broadcast axiom fn xsave_area_size_wf()
     ensures
@@ -340,47 +398,156 @@ impl DekoRunnable {
 
     #[verus_spec(r =>
         with
-            Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
+            Tracked(vm_region_perm): Tracked<&mut VirtualMemoryRegionPermission>,
             Tracked(xsave_perm): Tracked<&DekoPointsTo<Array<u8, 4096>>>,
         requires
-            old(ctx_perm).wf_with(cpu),
+            old(vm_region).wf_with(old(vm_region_perm)),
             xsave@ == xsave_perm.pptr(),
         ensures
-            ctx_perm.wf_with(cpu),
-            ctx_perm.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
+            vm_region.wf(),
+            vm_region.wf_with(vm_region_perm),
     )]
     pub fn alloc_user_stack(
-        cpu: DekoPPtr<DekoCpuCtx>,
+        vm_region: &mut VirtualMemoryRegion,
         entry: u64,
         xsave: DekoPPtr<Array<u8, 4096>>,
     ) -> (VaddrRange, VaddrRange, u64) {
         kunimplemented!()
     }
 
-    /// Returns the stack mapped range, the raw stack range, and the initial RSP value.
+    #[verifier::external_body]
+    pub fn push_stack_frames(stack_ptr: u64, entry: u64, xsave: u64, params: u64, ret: u64) {
+        unsafe {
+            let task_ctx_ptr = (stack_ptr - core::mem::size_of::<
+                DekoRunnableCtx,
+            >() as u64) as *mut DekoRunnableCtx;
+            (*task_ctx_ptr).regs.rdi = entry;
+            (*task_ctx_ptr).regs.rsi = xsave;
+            (*task_ctx_ptr).regs.rdx = params;
+            (*task_ctx_ptr).ret = ret;
+            (*task_ctx_ptr).flags = 0x2;  // Default flags with interrupts enabled.
+
+            (task_ctx_ptr as *mut u64).write(on_task_exit as u64);
+        }
+    }
+
+    /// This function allocates the kernel stack for a new task.
+    ///
+    /// It does the following stuff:
+    ///
+    /// - Allocates the kernel stack pages via the frame allocator.
+    /// - Creates the mapping on the current CPU.
+    /// - Prepare the context on the stack so that when we switch to
+    ///   this task it will start executing from the entry point.
     #[verus_spec(r =>
         with
-            Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
+            Tracked(vm_region_perm): Tracked<&mut VirtualMemoryRegionPermission>,
+            Tracked(pgtable_perm): Tracked<&PageTablePermission>,
             Tracked(xsave_perm): Tracked<&DekoPointsTo<Array<u8, 4096>>>,
         requires
-            old(ctx_perm).wf_with(cpu),
+            pgtable_perm.wf(),
+            allocator.wf(),
+            private_bit == pgtable_perm.private_bit,
+            shared_bit == pgtable_perm.shared_bit,
+            old(vm_region).wf(),
+            old(vm_region).wf_with(old(vm_region_perm)),
             xsave@ == xsave_perm.pptr(),
         ensures
-            ctx_perm.wf_with(cpu),
-            ctx_perm.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
+            vm_region.wf(),
+            vm_region.wf_with(vm_region_perm),
     )]
     pub fn alloc_kernel_stack(
-        cpu: DekoPPtr<DekoCpuCtx>,
+        vm_region: &mut VirtualMemoryRegion,
+        private_bit: u64,
+        shared_bit: u64,
+        allocator: &DekoPageFrameAllocator,
         entry: u64,
         param: u64,
         ret: u64,
         xsave: DekoPPtr<Array<u8, 4096>>,
     ) -> (VaddrRange, VaddrRange, u64) {
-        let stack = DekoKernelStack::new_with_size(0x8000, false);
+        kinfo!("the vm region before allocating kernel stack: ", vm_region => hex);
+
+        let mut stack = DekoKernelStack::new_with_size(0x8000, false);
+        proof_with!(Tracked(pgtable_perm));
+        stack.alloc_pages(private_bit, shared_bit, allocator);
+
         let range = stack.range();
+
+        kinfo!("Allocated kernel stack at range: ", range => hex);
+
+        proof {
+            assert(stack.alloc@.len() == 8) by {
+                assert(stack.alloc@.len() as u64 == 0x8000 >> 12);
+                assert(0x8000u64 >> 12 == 8) by (bit_vector);
+            }
+        }
+
+        // Fetch the backing page of the stack.
+        // FIXME: This is incorrect as this reveals the range in the kernel
+        // but not the actual stack mapping for the new kernel.
+        // For instance, the kernel's virtaddr of these pages are 0xFFFF_FF80_0000_0000 + ...
+        // but for the new task this should be different.
+        let (vaddr, paddr) = match &stack.alloc[0] {
+            Some((vaddr, paddr)) => (*vaddr, *paddr),
+            None => {
+                kerror!("Failed to allocate physical memory for kernel stack");
+                die("");
+            },
+        };
+
+        kinfo!("Kernel stack base vaddr: ", vaddr => hex, ", paddr: ", paddr => hex);
+
+        proof {
+            // TODO:
+            assume(vaddr@ + range.end <= u64::MAX);
+        }
 
         // We need to setup a context on the stack that matches the stack layout
         // defined in switch_context below.
+        let stack_tos = vaddr.0 + range.end;
+        // Need space for task handler.
+        let stack_offset = 8;  // == core::mem::size_of::<u64>();
+        let rsp = stack_tos - stack_offset;
+
+        kinfo!("Kernel top of stack: ", stack_tos => hex);
+        kinfo!("Kernel stack rsp: ", rsp => hex);
+
+        // 'Push' the task frame onto the stack
+        //
+        // SAFETY: we ensure that both `TaskContext` and the function pointer
+        // can be written to valid memory. The address storing the function
+        // pointer is always 8b-aligned.
+        // The processor flags must always be in a default state, unrelated
+        // to the flags of the caller.  In particular, interrupts must be
+        // disabled because the task switch code expects to execute a new
+        // task with interrupts disabled.
+        Self::push_stack_frames(rsp, entry, xsave.addr() as u64, param, ret);
+
+        let vm_block = VirtualMemory {
+            range: VirtAddr(range.start)..VirtAddr(range.end),
+            paddr,
+            flags: PteFlags::nx_kernel(),
+        };
+        let tracked vm_block_perm = VirtualMemoryPermission {
+            parent_id: vm_region_perm.id,
+            range: VirtAddr(range.start)..VirtAddr(range.end),
+        };
+
+        proof {
+            // Let's do this later.
+            assert(vm_block.wf()) by {
+                admit();
+            }
+            assert(vm_region.compatible_spec(&vm_block) && vm_region.disjoint_blocks(&vm_block))
+                by {
+                admit();
+            }
+        }
+
+        // Insert the new stack mapping into the given VM region.
+        proof_with!(Tracked(vm_region_perm), Tracked(vm_block_perm));
+        vm_region.insert(vm_block);
 
         kunimplemented!()
     }
@@ -388,15 +555,16 @@ impl DekoRunnable {
     /// Creates a new runnable task with the given arguments on the given CPU.
     #[verus_spec(r =>
         with
-            Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
+            Tracked(ctx_perm): Tracked<DekoCpuCtxPermission>,
+            -> ctx_perm_updated: Tracked<DekoCpuCtxPermission>,
         requires
-            old(ctx_perm).wf_with(cpu),
-            old(ctx_perm).ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
+            ctx_perm.wf_with(cpu),
+            ctx_perm.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
             args.wf(),
         ensures
             r.wf(),
-            ctx_perm.wf_with(cpu),
-            ctx_perm.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
+            ctx_perm_updated@.wf_with(cpu),
+            ctx_perm_updated@.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
             // r@.???
     )]
     pub fn new(cpu: DekoPPtr<DekoCpuCtx>, args: DekoTaskArgs) -> DekoRunnablePtr {
@@ -436,24 +604,67 @@ impl DekoRunnable {
         proof_with!(Tracked(&mut pgtable_perm));
         cpu_borrowed.vm_region().as_ref().unwrap().copy_to_page_table(new_pgtable);
 
-        let task_mm = match args.parent {
-            Some(ptr) => { ptr.as_ref().data.mm.clone() },
-            None => { Self::create_mm() },
-        };
+        // let task_mm = match args.parent {
+        //     // If so we inherit the parent's memory management.
+        //     Some(ptr) => { ptr.as_ref().data.mm.clone() },
+        //     // If not just create a new one.
+        //     None => { Self::create_mm() },
+        // };
 
         // Allocate xsave areas.
         let (xsave_ptr, Tracked(xsave_perm)) = boxed_ptr!(Array<u8, 4096>, &DEKO_FRAME_ALLOCATOR.0);
         // This does nothing but clear the area to mark it as init.
         xsave_ptr.put(Tracked(&mut xsave_perm), Array::fill(0));
 
+        let tracked mut ctx_perm = ctx_perm;
+        let cpu_taken = cpu.take(Tracked(&mut ctx_perm.ptr_perm));
+        let DekoCpuCtx {
+            magic,
+            cpu_id,
+            ghcb,
+            tss,
+            shared_area,
+            pgtable,
+            ctx_switch_stack,
+            ist_stack,
+            private_bit,
+            shared_bit,
+            kernel_mapping,
+            vm_region,
+            apic,
+            run_queue,
+        } = cpu_taken;
+        kpanic_if!(core::hint::unlikely(
+            vm_region.is_none(),
+        ), "CPU has no VM region assigned");
+
+        let tracked DekoCpuCtxPermission {
+            ptr_perm,
+            pgtable_perm: cpu_pgtable_perm,
+            ghcb_perm,
+            ctx_switch_stack_perm,
+            vm_region_perm,
+        } = ctx_perm;
+
+        let mut vm_region = vm_region.unwrap();
+        let tracked mut vm_region_perm = vm_region_perm.tracked_unwrap();
         let (stack, vrange, rsp) = match args.mode {
             DekoTaskMode::Kernel { entry, param, ret } => {
-                proof_with!(Tracked(ctx_perm), Tracked(&xsave_perm));
-                Self::alloc_kernel_stack(cpu, entry, param, ret, xsave_ptr)
+                proof_with!(Tracked(&mut vm_region_perm), Tracked(&cpu_pgtable_perm) ,Tracked(&mut xsave_perm));
+                Self::alloc_kernel_stack(
+                    &mut vm_region,
+                    private_bit,
+                    shared_bit,
+                    &DEKO_FRAME_ALLOCATOR,
+                    entry,
+                    param,
+                    ret,
+                    xsave_ptr,
+                )
             },
             DekoTaskMode::User { entry } => {
-                proof_with!(Tracked(ctx_perm), Tracked(&xsave_perm));
-                Self::alloc_user_stack(cpu, entry, xsave_ptr)
+                proof_with!(Tracked(&mut vm_region_perm), Tracked(&mut xsave_perm));
+                Self::alloc_user_stack(&mut vm_region, entry, xsave_ptr)
             },
         };
 
@@ -466,7 +677,8 @@ impl DekoRunnable {
             ),
             priority: 0,
             xsave: xsave_ptr,
-            mm: task_mm,
+            // mm: task_mm,
+            mm: kunimplemented!(),
             rsp: vrange.end.0.checked_sub(rsp).unwrap_or(0),
             ssp: VirtAddr(0),
             stack,
@@ -480,6 +692,32 @@ impl DekoRunnable {
             }
         }
 
+        let cpu_new = DekoCpuCtx {
+            magic,
+            cpu_id,
+            ghcb,
+            tss,
+            shared_area,
+            pgtable,
+            ctx_switch_stack,
+            ist_stack,
+            private_bit,
+            shared_bit,
+            kernel_mapping,
+            vm_region: Some(vm_region),
+            apic,
+            run_queue,
+        };
+        let tracked ctx_perm = DekoCpuCtxPermission {
+            ptr_perm,
+            pgtable_perm: cpu_pgtable_perm,
+            ghcb_perm,
+            ctx_switch_stack_perm,
+            vm_region_perm: Some(vm_region_perm),
+        };
+        cpu.write(Tracked(&mut ctx_perm.ptr_perm), cpu_new);
+
+        proof_with!(|= Tracked(ctx_perm));
         DekoArc::new(
             DekoAtomicData::new_with(task, Tracked(DekoRunnablePermission { xsave_perm })),
             &DEKO_FRAME_ALLOCATOR.0,

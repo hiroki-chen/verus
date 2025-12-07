@@ -46,8 +46,10 @@ pub struct VirtualMemoryRegion {
     #[deko(skip)]
     pub id: Ghost<int>,
     /// Start address of this range as virtual PFN (VirtAddr >> PAGE_SHIFT).
+    #[deko(hex)]
     pub start_pfn: u64,
     /// End address of this range as virtual PFN (VirtAddr >> PAGE_SHIFT)
+    #[deko(hex)]
     pub end_pfn: u64,
     /// Global to all mappings in this virtual memory region.
     #[deko(skip)]
@@ -63,8 +65,10 @@ pub struct VirtualMemoryRegion {
     /// The mapping space this region belongs to.
     pub ms: MappingSpace,
     /// Private bit for this region.
+    #[deko(hex)]
     pub private_bit: u64,
     /// Shared bit for this region.
+    #[deko(hex)]
     pub shared_bit: u64,
 }
 
@@ -193,6 +197,7 @@ impl PartialOrdSpecImpl for VirtualMemory {
 #[verus_verify]
 impl VirtualMemoryRegion {
     pub open spec fn wf_with(&self, perm: &VirtualMemoryRegionPermission) -> bool {
+        &&& self.id == perm.id
         &&& self.ms == perm.pgtable_perm.mapping_space
         &&& self.private_bit == perm.pgtable_perm.private_bit
         &&& self.shared_bit == perm.pgtable_perm.shared_bit
@@ -405,6 +410,7 @@ impl VirtualMemoryRegion {
             self.wf_with(perm),
     )]
     #[verifier::spinoff_prover]
+    // TODO: Returns the exact vaddr that was mapped.
     pub fn insert(&mut self, vm_block: VirtualMemory) {
         broadcast use vstd::std_specs::vec::group_vec_axioms;
         broadcast use deko_std::address::lemma_aligned_vaddr_pfn_preserves_order;
@@ -708,6 +714,7 @@ impl VirtualMemory {
             parent_perm.pgtable_perm.shared_bit == shared_bit,
             parent_perm.pgtable_perm.pgtable_perm.pptr() == old(parent_perm).pgtable_perm.pgtable_perm.pptr(),
             parent_perm.vm_perms == old(parent_perm).vm_perms,
+            parent_perm.id == old(parent_perm).id,
     )]
     pub fn map(
         &self,

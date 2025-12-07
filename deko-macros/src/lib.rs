@@ -1,5 +1,4 @@
 use proc_macro::TokenStream;
-use syn::token::Pub;
 use syn::{DeriveInput, parse_macro_input};
 
 pub(crate) mod atomic_pred;

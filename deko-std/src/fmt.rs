@@ -433,6 +433,16 @@ impl<T: DekoDebug> DekoDebug for core::ops::Range<T> {
         self.end.deko_debug(writer);
         " }".deko_debug(writer);
     }
+
+
+    #[verifier::external_body]
+    fn deko_debug_hex<W: DekoWriter>(&self, writer: &W) {
+        "Range { start: ".deko_debug(writer);
+        self.start.deko_debug_hex(writer);
+        ", end: ".deko_debug(writer);
+        self.end.deko_debug_hex(writer);
+        " }".deko_debug(writer);
+    }
 }
 
 impl<T: DekoDebug + WellFormed, const N: usize> DekoDebug for deko_std::array::Array<T, N> {
