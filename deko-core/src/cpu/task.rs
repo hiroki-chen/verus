@@ -452,6 +452,7 @@ impl DekoRunnable {
             shared_bit == pgtable_perm.shared_bit,
             old(vm_region).wf(),
             old(vm_region).wf_with(old(vm_region_perm)),
+            old(vm_region).areas@.len() + 1 < u64::MAX as int,
             xsave@ == xsave_perm.pptr(),
         ensures
             vm_region.wf(),
@@ -641,6 +642,10 @@ impl DekoRunnable {
         } = ctx_perm;
 
         let mut vm_region = vm_region.unwrap();
+        kpanic_if!(core::hint::unlikely(vm_region.areas.len() as u64 >= u64::MAX - 1 ),
+                  "Too many VM areas in the CPU VM region"
+        );
+
         let tracked mut vm_region_perm = vm_region_perm.tracked_unwrap();
         let (stack, vrange, rsp) = match args.mode {
             DekoTaskMode::Kernel { entry, param, ret } => {

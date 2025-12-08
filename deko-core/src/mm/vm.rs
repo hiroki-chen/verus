@@ -587,6 +587,7 @@ impl VirtualMemoryRegion {
         requires
             old(self).wf(),
             old(self).wf_with(old(perm)),
+            old(self).areas@.len() + 1 < u64::MAX as int,
             mapping.wf(),
             flags.wf(),
             flags.bits() & Pte_ALL_BITS == flags.bits(),
@@ -613,49 +614,6 @@ impl VirtualMemoryRegion {
         self.insert_aligned(mapping, None, align, flags)
     }
 
-    /// Inserts a new VM block [`VirtualMemory`] into the virtual memory region.]
-    #[verus_spec(
-        with
-            Tracked(perm): Tracked<&mut VirtualMemoryRegionPermission>,
-            Tracked(vm_block_perm): Tracked<VirtualMemoryPermission>,
-        requires
-            old(self).wf(),
-            old(self).wf_with(old(perm)),
-            old(self).disjoint_blocks(&vm_block),
-            vm_block.wf(),
-            vm_block.wf_with(&vm_block_perm),
-            vm_block_perm.parent_id == old(self).id,
-            0 <= insert_idx <= old(self).areas@.len() as usize,
-
-            // if insert_idx == 0 {
-            //     old(self).areas@[0].range.start.pfn()@ >= vm_block.range.end.pfn()@
-            // } else if insert_idx == old(self).areas@.len() as usize {
-            //     old(self).areas@[old(self).areas@.len() - 1].range.end.pfn()@ <= vm_block.range.start.pfn()@
-            // } else {
-            //     &&& old(self).areas@[insert_idx as int - 1].range.end.pfn()@ <= vm_block.range.start.pfn()@
-            //     &&& old(self).areas@[insert_idx as int].range.start.pfn()@ >= vm_block.range.end.pfn()@
-            // },
-        ensures
-            self.wf(),
-            self.wf_with(perm),
-    )]
-    #[inline]
-    pub fn insert_vm_block(&mut self, insert_idx: usize, vm_block: VirtualMemory) {
-        proof {
-            perm.vm_perms = Ghost(perm.vm_perms@.insert(insert_idx as int, vm_block_perm));
-        }
-        // We first map the new block.
-        proof_with!(Tracked(perm), Ghost(insert_idx as int));
-        vm_block.map(self.pgtable, &self.ms, self.private_bit, self.shared_bit);
-        self.areas.insert(insert_idx, vm_block);
-
-        // do the proof here.
-        proof {
-            // TODO: Add the precondition and fix the proof.
-            assume(self.wf());
-        }
-    }
-
     /// Inserts a new VM block [`VirtualMemory`] at the given virtual address.
     /// Note that this method checks if the block will overlap with any of the
     /// current blocks in this region.
@@ -668,6 +626,7 @@ impl VirtualMemoryRegion {
         requires
             old(self).wf(),
             old(self).wf_with(old(perm)),
+            old(self).areas@.len() + 1 < u64::MAX as int,
             mapping.wf(),
             hint matches Some(h) ==> {
                 &&& h.wf()
@@ -777,6 +736,7 @@ impl VirtualMemoryRegion {
             invariant
                 search_start_idx <= i <= self.areas@.len() + 1 <= u64::MAX as int,
                 self.wf(),
+                self.wf_with(perm),
                 is_sorted_spec(self.areas@),
                 self.start_pfn <= hint@ <= current_pos,
                 forall |j: int|
@@ -918,11 +878,21 @@ impl VirtualMemoryRegion {
 
         proof_with!(Ghost(self) => Tracked(vm_block_perm));
         let vm_block = VirtualMemory::new(range, mapping, flags);
-        assume(self.disjoint_blocks(&vm_block));
+
+        {
+            proof {
+                assert(self.compatible_spec(&vm_block)) by {
+                    admit();
+                }
+                assert(self.disjoint_blocks(&vm_block)) by {
+                    admit();
+                }
+            }
+        }
 
         // Finally, we can insert the new block.
         proof_with!(Tracked(perm), Tracked(vm_block_perm));
-        self.insert_vm_block(insert_idx, vm_block);
+        self.insert_at_vaddr(VirtAddr(gap_start_pfn << 12), vm_block);
 
         Some(VirtAddr(gap_start_pfn << 12))
     }
@@ -1012,6 +982,7 @@ impl VirtualMemoryRegion {
         ensures
             self.wf(),
             self.wf_with(perm),
+            self.areas@.len() == old(self).areas@.len() + 1,
     )]
     #[verifier::spinoff_prover]
     pub fn insert_at_vaddr(&mut self, vaddr: VirtAddr, vm_block: VirtualMemory) {
