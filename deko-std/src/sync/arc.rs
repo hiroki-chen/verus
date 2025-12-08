@@ -559,7 +559,10 @@ impl<V: WellFormed, F: Predicate<V>> AsRefSpecImpl<V> for Arc<V, F> {
 
 impl<V: WellFormed, F: Predicate<V>> AsRef<V> for Arc<V, F> {
     /// Get a shared reference to the _inner_ value.
-    fn as_ref<'a>(&'a self) -> (r: &'a V) {
+    fn as_ref<'a>(&'a self) -> (r: &'a V)
+        ensures
+            r.wf(),
+    {
         proof {
             use_type_invariant(&self);
         }
@@ -575,5 +578,7 @@ impl<V: WellFormed, F: Predicate<V>> AsRef<V> for Arc<V, F> {
 /// A type alias for a [`Arc`] that uses [`DekoAtomicData`] as its
 /// atomic storage type.
 pub type DekoArc<V, P, F> = Arc<DekoAtomicData<V, P>, F>;
+
+pub type DekoSimpleArc<V, F> = DekoArc<V, (), F>;
 
 } // verus!

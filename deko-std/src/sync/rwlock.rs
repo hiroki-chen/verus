@@ -353,7 +353,7 @@ struct_with_invariants!{
     }
 
     #[verifier::type_invariant]
-    pub closed spec fn wf(&self) -> bool {
+    pub closed spec fn type_inv(&self) -> bool {
         invariant on exc with (inst) is (v: bool, g: RwLockToks::flag_exc<(Pred, S, CellId), PointsTo<V>, InternalPred<V, Pred>>) {
             g.instance_id() == inst@.id()
                 && g.value() == v
@@ -492,6 +492,12 @@ impl<'a, V, S: Spin, Pred: RwLockPredicate<V>> ReadHandle<'a, V, S, Pred> {
         {
             rwlock.inst.borrow().release_shared(handle.element(), &mut g, handle);
         });
+    }
+}
+
+impl<V, S: Spin, Pred: RwLockPredicate<V>> WellFormed for RwLock<V, S, Pred> {
+    open spec fn wf(&self) -> bool {
+        &&& self.type_inv()
     }
 }
 
@@ -744,5 +750,26 @@ pub type DekoSimpleRwLock<V> = RwLock<
     SpinNoIrq,
     TrivialPredicate<DekoAtomicDataNoPerm<V>>,
 >;
+
+/// In case this lock is used in an Arc, we provide a trivial predicate
+/// to automatically downgrade the invariant to just well-formedness so
+/// the inner data `V`'s invariant is called.
+pub struct DekoSimpleRwLockPred;
+
+impl<V: WellFormed, P, Pred: RwLockPredicate<DekoAtomicData<V, P>>> Predicate<
+    DekoAtomicData<DekoRwLock<V, P, Pred>, ()>,
+> for DekoSimpleRwLockPred {
+    open spec fn inv(self, v: DekoAtomicData<DekoRwLock<V, P, Pred>, ()>) -> bool {
+        &&& v.data.wf()
+    }
+}
+
+impl<V: WellFormed, P, Pred: RwLockPredicate<DekoAtomicData<V, P>>> Predicate<
+    DekoRwLock<V, P, Pred>,
+> for DekoSimpleRwLockPred {
+    open spec fn inv(self, v: DekoRwLock<V, P, Pred>) -> bool {
+        &&& v.wf()
+    }
+}
 
 } // verus!

@@ -454,6 +454,21 @@ impl<T: DekoDebug + WellFormed, const N: usize> DekoDebug for deko_std::array::A
     }
 }
 
+#[cfg(feature = "alloc")]
+impl<T: DekoDebug, A: core::alloc::Allocator> DekoDebug for alloc::vec::Vec<T, A> {
+    #[verifier::external_body]
+    fn deko_debug<W: DekoWriter>(&self, writer: &W) {
+        writer.write_str("Vec[");
+        for (i, item) in self.iter().enumerate() {
+            if i > 0 {
+                writer.write_str(", ");
+            }
+            item.deko_debug(writer);
+        }
+        writer.write_str("]");
+    }
+}
+
 impl<T: DekoDebug, const N: usize> DekoDebug for [T; N] {
     #[verifier::external_body]
     fn deko_debug<W: DekoWriter>(&self, writer: &W) {

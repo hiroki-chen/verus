@@ -13,6 +13,7 @@ use super::frame_allocator::{DekoAllocatorApi, DekoPageFrameAllocator};
 use super::paging::{Page, PageTablePermission};
 use super::virt_to_phys_checked;
 use crate::collections::{self, Vec};
+use crate::mm::vm::VmMapping;
 use crate::{kunimplemented, vec};
 
 verus! {
@@ -67,6 +68,7 @@ impl WellFormed for DekoKernelStack {
                 Some((vaddr, paddr)) => {
                     &&& vaddr.wf() && vaddr@ % PAGE_SIZE == 0
                     &&& paddr.wf() && paddr@ % PAGE_SIZE == 0
+                    &&& paddr@ < 0x000f_ffff_ffff_f000
                 },
                 None => true,
             }
@@ -108,6 +110,18 @@ impl DekoKernelStack {
         let top = guard_size + self.alloc.len() as u64 * PAGE_SIZE;
 
         top
+    }
+
+    /// Returns the mapping for the stack to insert into the
+    /// given VM region.
+    #[verus_spec(r =>
+        requires
+            self.wf(),
+        ensures
+            r.wf(),
+    )]
+    pub fn mapping(&self) -> VmMapping {
+        kunimplemented!()
     }
 
     #[verus_spec(r =>

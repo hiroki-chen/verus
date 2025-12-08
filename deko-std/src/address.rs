@@ -303,6 +303,56 @@ pub const fn sign_extend(addr: u64) -> (r: u64)
     v
 }
 
+/// Aligns arbitrary address `addr` upwards to the next multiple of `align`.
+#[inline]
+pub fn align_up(addr: u64, align: u64) -> (r: u64)
+    requires
+        0 < align < u64::MAX,
+        is_power_of_two_spec(align as nat),
+        addr + align <= u64::MAX,
+    ensures
+        r >= addr,
+        r % align == 0,
+        r < addr + align,
+{
+    broadcast use crate::math::lemma_is_power_of_two_equiv;
+    broadcast use vstd::arithmetic::power2::lemma_pow2;
+    broadcast use vstd::arithmetic::power::lemma_pow_increases;
+
+    let mask = align - 1;
+    let r = (addr + mask) & !mask;
+
+    proof {
+        // First prove the bitwise property
+        assert(r >= addr && (r & mask) == 0 && r < addr + align) by (bit_vector)
+            requires
+                r == ((addr + mask) as u64) & !(mask as u64),
+                mask == (align - 1) as u64,
+                align > 0,
+                addr + align <= u64::MAX,
+                (align & mask) == 0  // align is power of 2
+                ,
+        ;
+
+        let n = choose|n: nat| align as nat == vstd::arithmetic::power::pow(2, n);
+        assert(n < 64) by {
+            if n >= 64 {
+                vstd::arithmetic::power2::lemma2_to64();
+
+                assert(align == vstd::arithmetic::power::pow(2, n));
+                assert(align >= u64::MAX);
+            }
+        }
+
+        assert(r % align == 0) by {
+            vstd::arithmetic::power2::lemma_pow2(n);
+            vstd::bits::lemma_u64_low_bits_mask_is_mod(r, n);
+        };
+    }
+
+    r
+}
+
 /// A complete address mapping space containing kernel and physical memory mappings.
 ///
 /// This structure combines separate mapping ranges for kernel memory and physical memory,
@@ -1133,7 +1183,7 @@ impl WellFormed for VaddrRange {
     #[verifier::inline]
     open spec fn wf(&self) -> bool {
         &&& self.end@ <= VADDR_LOWER_MASK || self.start@ >= VADDR_UPPER_MASK
-        &&& self.start@ < self.end@ < u64::MAX
+        &&& self.start@ < self.end@ <= u64::MAX
     }
 }
 

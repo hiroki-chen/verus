@@ -32,6 +32,7 @@ pub mod rwlock;
 
 #[cfg(feature = "alloc")]
 pub use arc::*;
+use deko_macros::DekoDebug;
 pub use lazy::*;
 pub use mutex::*;
 pub use once::*;
@@ -80,6 +81,23 @@ impl<V> DekoAtomicDataNoPerm<V> {
 impl<V: WellFormed, P> WellFormed for DekoAtomicData<V, P> {
     open spec fn wf(&self) -> bool {
         self.data.wf()
+    }
+}
+
+impl<T: WellFormed, P> View for DekoAtomicData<T, P> {
+    type V = T;
+
+    open spec fn view(&self) -> T {
+        self.data
+    }
+}
+
+impl<V: WellFormed + crate::DekoDebug> crate::DekoDebug for DekoAtomicData<V, ()> {
+    #[verifier::external_body]
+    fn deko_debug<W: deko_std::prelude::DekoWriter>(&self, writer: &W) {
+        writer.write_str("DekoAtomicData{ data: ");
+        self.data.deko_debug(writer);
+        writer.write_str(" }");
     }
 }
 

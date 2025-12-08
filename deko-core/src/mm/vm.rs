@@ -3,9 +3,8 @@ use core::ops::{Range, RangeBounds};
 
 use deko_macros::{with_atomic_pred, DekoDebug};
 use deko_std::prelude::*;
-use deko_std::std_extra::cmp::{
-    comparator_consistent_spec, is_sorted_spec, lemma_cmp_pivot_monotonic,
-};
+use deko_std::std_extra::cmp::{is_sorted_spec, lemma_cmp_pivot_monotonic};
+use deko_std::std_extra::slice::comparator_consistent_spec;
 use vstd::pervasive::arbitrary;
 use vstd::prelude::*;
 use vstd::std_specs::cmp::*;
@@ -16,8 +15,9 @@ use crate::mm::paging::{
     all_in_range_paddrs, all_normalized_vaddrs, bit_not_in_addr_region, bit_not_overlapping,
     PageTable, PageTablePermission, PteFlags, Pte_ALL_BITS, PRESENT,
 };
+use crate::mm::stack::DekoKernelStack;
 use crate::mm::vm;
-use crate::{kpanic_if, kunimplemented, vec};
+use crate::{kpanic_if, kunimplemented, kwarn, vec};
 
 verus! {
 
@@ -27,6 +27,138 @@ with_atomic_pred! {
     fields: { },
     perm_fields: { },
     data.wf_with(&perm)
+}
+
+#[derive(DekoDebug)]
+pub struct RawMapping {
+    /// A vec containing references to PageFile allocations
+    pub pages: Vec<Option<(VirtAddr, PhysAddr)>>,
+    /// Number of pages required in `pages`.
+    pub nr_pages: usize,
+}
+
+/// A mapping is a reference-counted pointer to a [`VmMapping`] protected by a [`RwLock`].
+///
+/// This currently looks ugly because it mingles the `DekoArc` and `DekoRwLock` types with
+/// invariant together and is not very ergnomic to use. We may need to provide some helper
+/// functions to make it easier to create.
+pub type Mapping = DekoArc<DekoRwLock<VmMapping, (), VmMappingPred>, (), DekoSimpleRwLockPred>;
+
+/// A [`VmMapping`] represents a backing mapping from the offset to a base to the physical
+/// address with a fixed size used in the [`VirtualMemory] struct for translating virtual
+/// memories into physical ones and manage the backing paging system.
+///
+/// This struct is NOT intended for direct use outside of the VM system as it does _NOT_
+/// contain any information about the virtual address it is covering. The correct usage
+/// to request the kernel frame allocator to allocate physical frames and then use the
+/// returned physical address to create a mapping. The virtual addresses are kernel owned.
+#[derive(DekoDebug)]
+pub enum VmMapping {
+    /// A mapping backed by a contiguous physical memory region.
+    PhysMem { paddr: PhysAddr, size: u64 },
+    /// Mapping type for which uses self-allocated PageFile pages.
+    Stack { stack: DekoKernelStack },
+}
+
+with_atomic_pred!(
+    VmMapping,
+    (),
+    fields: { },
+    perm_fields: { },
+    data.wf()
+);
+
+impl WellFormed for VmMapping {
+    open spec fn wf(&self) -> bool {
+        &&& PAGE_SIZE <= self.mapping_size_spec() <= u64::MAX
+        &&& match self {
+            VmMapping::PhysMem { paddr, size } => {
+                &&& paddr.wf()
+                &&& paddr@ % PAGE_SIZE == 0
+                &&& size <= u64::MAX
+                &&& size % PAGE_SIZE == 0
+                &&& paddr@ + *size < 0x000f_ffff_ffff_f000
+            },
+            VmMapping::Stack { stack } => { stack.wf() },
+        }
+    }
+}
+
+#[verus_verify]
+impl VmMapping {
+    #[verifier::inline]
+    pub open spec fn mapping_size_spec(&self) -> u64 {
+        match self {
+            VmMapping::PhysMem { paddr, size } => *size,
+            VmMapping::Stack { stack } => ((stack.alloc@.len() as u64) * PAGE_SIZE) as u64,
+        }
+    }
+
+    pub open spec fn phys_at_spec(&self, offset: u64) -> Option<PhysAddr>
+        recommends
+            self.wf(),
+            offset < self.mapping_size_spec(),
+    {
+        arbitrary()
+    }
+
+    /// Request the size of the virtual memory mapping.
+    #[verifier::when_used_as_spec(mapping_size_spec)]
+    #[verus_spec(r =>
+        requires
+            self.wf(),
+        ensures
+            r == Self::mapping_size_spec(self),
+            r % PAGE_SIZE == 0,
+    )]
+    pub fn mapping_size(&self) -> u64 {
+        match self {
+            VmMapping::PhysMem { paddr, size } => *size,
+            VmMapping::Stack { stack } => (stack.alloc.len() as u64) * PAGE_SIZE,
+        }
+    }
+
+    /// Request physical address to map for a given `offset` which should be
+    /// less than the mapping size.
+    ///
+    /// [`Option::None`] means that there is no mapping for the given offset.
+    #[verifier::when_used_as_spec(phys_at_spec)]
+    #[verus_spec(r =>
+        requires
+            self.wf(),
+            offset < self.mapping_size_spec(),
+        ensures
+            // r == Self::phys_at_spec(self, offset),
+            r matches Some(paddr) ==> {
+                &&& paddr.wf()
+                &&& offset % PAGE_SIZE == 0 ==> paddr@ % PAGE_SIZE == 0
+                &&& paddr@ < 0x000f_ffff_ffff_f000
+            },
+    )]
+    pub fn phys_at(&self, offset: u64) -> Option<PhysAddr> {
+        match self {
+            VmMapping::PhysMem { paddr, size } => {
+                kpanic_if!(core::hint::unlikely(
+                    offset >= *size,
+                ), "Offset out of bounds in VmMapping::phys_at");
+
+                Some(PhysAddr(paddr.0 + offset))
+            },
+            VmMapping::Stack { stack } => {
+                let pfn = offset / PAGE_SIZE;
+                let guard_offset = stack.guard_pages << 12;
+
+                if pfn >= guard_offset {
+                    match stack.alloc.get(pfn as usize) {
+                        Some(Some((_, paddr))) => { Some(*paddr) },
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            },
+        }
+    }
 }
 
 /// Granularity of ranges mapped by [`VirtualMemoryRegion`]. The mapped region of a
@@ -45,10 +177,10 @@ pub const VMR_NAME_MAX_LEN: usize = 32;
 pub struct VirtualMemoryRegion {
     #[deko(skip)]
     pub id: Ghost<int>,
-    /// Start address of this range as virtual PFN (VirtAddr >> PAGE_SHIFT).
+    /// Start address of this range as virtual PFN (VirtAddr >> 12).
     #[deko(hex)]
     pub start_pfn: u64,
-    /// End address of this range as virtual PFN (VirtAddr >> PAGE_SHIFT)
+    /// End address of this range as virtual PFN (VirtAddr >> 12)
     #[deko(hex)]
     pub end_pfn: u64,
     /// Global to all mappings in this virtual memory region.
@@ -56,7 +188,7 @@ pub struct VirtualMemoryRegion {
     pub pt_flags: PteFlags,
     /// All the virtual memory areas managed by this region.
     ///
-    /// FIXME: This data structure is not efficient for lookups. We may need to change it to
+    /// This data structure MAY NOT be the most optimal for lookups. We may need to change it to
     /// an interval tree or other more efficient data structures but not verification-friendly.
     #[deko(skip)]
     pub areas: Vec<VirtualMemory>,
@@ -86,15 +218,14 @@ pub tracked struct VirtualMemoryRegionPermission {
 #[derive(DekoDebug)]
 pub struct VirtualMemory {
     /// The range of virtual addresses covered by this region.
+    ///
+    /// Note: they are virtual addresses, not PFNs.
     pub range: Range<VirtAddr>,
-    /// The physical address of this region.
-    pub paddr: PhysAddr,
+    /// The backing mapping for this virtual memory.
+    pub mapping: Mapping,
     /// The page table entry flags for this region.
     #[deko(skip)]
     pub flags: PteFlags,
-    // The pointer to the underlying memory.
-    // pub ptr: RwLockNoPred<ReprPtr<M>>, ??? possibly with some generics.
-    // but this requires some transformation techniques.
 }
 
 /// Tracks the corresponding permissions for a virtual memory if there is
@@ -107,7 +238,7 @@ pub tracked struct VirtualMemoryPermission {
 
 impl WellFormed for VirtualMemoryRegion {
     open spec fn wf(&self) -> bool {
-        &&& self.start_pfn < self.end_pfn <= u64::MAX / PAGE_SIZE
+        &&& (VADDR_UPPER_MASK >> 12) <= self.start_pfn < self.end_pfn <= u64::MAX >> 12
         &&& (self.start_pfn << 12) % VMR_GRANULE == 0
         &&& (self.end_pfn << 12) % VMR_GRANULE == 0
         &&& self.pt_flags.wf()
@@ -115,14 +246,16 @@ impl WellFormed for VirtualMemoryRegion {
         &&& self.pgtable_consistent()
         &&& forall|i: int|
             #![trigger self.areas@[i]]
-            0 <= i < self.areas@.len() as int
-                ==> self.areas@[i].wf()
-        // Ensure no overlapping areas.
+            0 <= i < self.areas@.len() as int ==> self.areas@[i].wf() && (self.start_pfn
+                <= self.areas@[i].range.start.pfn()@ < self.areas@[i].range.end.pfn()@
+                <= self.end_pfn)
+            // Ensure no overlapping areas.
         &&& forall|i: int|
             #![trigger self.areas@[i]]
             0 <= i < self.areas@.len() - 1 as int ==> {
                 &&& self.areas@[i].range.end@ <= self.areas@[i + 1].range.start@
             }
+        &&& self.areas@.len() < u64::MAX as int
         &&& is_sorted_spec(self.areas@)
         &&& self.ms.wf()
         &&& bit_not_overlapping(self.private_bit)
@@ -139,8 +272,7 @@ impl WellFormed for VirtualMemory {
         &&& self.range.end@ % PAGE_SIZE == 0
         &&& self.range.end@ + PAGE_SIZE_2M <= u64::MAX
         &&& all_normalized_vaddrs(self.range)
-        &&& self.paddr@ % PAGE_SIZE == 0
-        &&& self.paddr@ + (self.range.end@ - self.range.start@) < 0x000f_ffff_ffff_f000
+        &&& self.mapping.wf()
         &&& self.flags.bits() & Pte_ALL_BITS == self.flags.bits()
         &&& self.flags.wf()
     }
@@ -168,13 +300,13 @@ impl PartialOrd for VirtualMemory {
 }
 
 impl PartialEqSpecImpl for VirtualMemory {
-    closed spec fn obeys_eq_spec() -> bool {
+    open spec fn obeys_eq_spec() -> bool {
         true
     }
 
     open spec fn eq_spec(&self, other: &Self) -> bool {
-        &&& self.range.start.0 == other.range.start.0
-        &&& self.range.end.0 == other.range.end.0
+        &&& self.range.start@ == other.range.start@
+        &&& self.range.end@ == other.range.end@
     }
 }
 
@@ -214,16 +346,50 @@ impl VirtualMemoryRegion {
         true
     }
 
-    pub open spec fn compatible_spec(&self, vm_block: &VirtualMemory) -> bool {
-        &&& vm_block.range.start@ >= self.start_pfn * PAGE_SIZE
-        &&& vm_block.range.end@ <= self.end_pfn * PAGE_SIZE
-        &&& all_in_range_paddrs(&self.ms, vm_block.paddr, vm_block.range)
-    }
-
+    /// This says that the block does not overlap with any existing blocks in the sense of
+    /// virtual address mapping.
     pub open spec fn disjoint_blocks(&self, vm_block: &VirtualMemory) -> bool {
         forall|i: int|
             #![trigger self.areas@[i]]
             0 <= i < self.areas@.len() as int ==> { self.areas@[i].disjoint_with(vm_block) }
+    }
+
+    /// Checks whether there is enough space to insert a new mapping of the given size.
+    pub open spec fn can_insert(&self, size: u64) -> bool
+        recommends
+            size > 0,
+            is_power_of_two_spec(size as nat),
+            self.wf(),
+            is_sorted_spec(self.areas@),
+    {
+        exists|i: int| 0 <= i <= self.areas@.len() && #[trigger] self.gap_size_at(i) >= size
+    }
+
+    /// Returns the size of the gap at position i
+    /// - Gap i is between areas[i-1] and areas[i]
+    /// - Gap 0 is before the first area
+    /// - Gap len() is after the last area
+    pub open spec fn gap_size_at(&self, i: int) -> u64
+        recommends
+            0 <= i <= self.areas@.len(),
+    {
+        let gap_start = if i == 0 {
+            self.start_pfn
+        } else {
+            self.areas@[i - 1].range.end.pfn()@
+        };
+
+        let gap_end = if i == self.areas@.len() {
+            self.end_pfn
+        } else {
+            self.areas@[i].range.start.pfn()@
+        };
+
+        if gap_end > gap_start {
+            (gap_end - gap_start) as u64
+        } else {
+            0
+        }
     }
 
     pub open spec fn new_spec(
@@ -244,6 +410,14 @@ impl VirtualMemoryRegion {
         &&& s.ms == ms
         &&& s.private_bit == private_bit
         &&& s.shared_bit == shared_bit
+    }
+
+    pub open spec fn compatible_spec(&self, vm_block: &VirtualMemory) -> bool {
+        &&& vm_block.range.start@ >= self.start_pfn * PAGE_SIZE
+        &&& vm_block.range.end@ <= self.end_pfn
+            * PAGE_SIZE
+        // &&& all_in_range_paddrs(&self.ms, vm_block.paddr, vm_block.range)
+
     }
 
     pub proof fn lemma_disjoint_blocks_implies_ne(&self, vm_block: &VirtualMemory)
@@ -316,6 +490,8 @@ impl VirtualMemoryRegion {
         private_bit: u64,
         shared_bit: u64,
     ) -> Self {
+        broadcast use deko_std::address::lemma_aligned_vaddr_pfn_preserves_order;
+
         proof {
             let start = start_addr@;
             let end = end_addr@;
@@ -344,10 +520,22 @@ impl VirtualMemoryRegion {
                     end % VMR_GRANULE == 0,
                     start < end <= u64::MAX,
             ;
+
+            assert(start_pfn >= (VADDR_UPPER_MASK >> 12)) by (bit_vector)
+                requires
+                    start >= VADDR_UPPER_MASK,
+                    start_pfn == start >> 12,
+            ;
         }
 
         proof {
             super::paging::option_page_ptr_array_size_wf();
+
+            let e = end_addr@;
+            assert((e >> 12) <= u64::MAX >> 12) by (bit_vector)
+                requires
+                    e <= u64::MAX,
+            ;
         }
 
         let ghost id = arbitrary();
@@ -387,6 +575,87 @@ impl VirtualMemoryRegion {
     pub fn copy_to_page_table(&self, target_pgtable: DekoPPtr<PageTable>) {
     }
 
+    /// Inserts a new mapping [`VmMapping`] into the virtual memory region and
+    /// returns the virtual address where it was inserted.
+    ///
+    /// Since it is hard to verify that the the insertion will always succeed,
+    /// we currently rely on runtime checks to ensure safety (but may incur
+    /// little performance overhead as linear scan is `O(n)`).
+    #[verus_spec(r =>
+        with
+            Tracked(perm): Tracked<&mut VirtualMemoryRegionPermission>,
+        requires
+            old(self).wf(),
+            old(self).wf_with(old(perm)),
+            mapping.wf(),
+            flags.wf(),
+            flags.bits() & Pte_ALL_BITS == flags.bits(),
+        ensures
+            self.wf(),
+            self.wf_with(perm),
+            r matches Some(vaddr) ==> {
+                &&& vaddr@ % PAGE_SIZE == 0
+                // &&& self.range.start@ <= vaddr@ < self.range.end@
+            },
+    )]
+    #[inline]
+    pub fn insert(&mut self, mapping: Mapping, flags: PteFlags) -> Option<VirtAddr> {
+        let align = {
+            let read_handle = mapping.as_ref().data.acquire_read();
+            let align = read_handle.borrow().data.mapping_size();
+
+            read_handle.release_read();
+            align.next_power_of_two()
+        };
+
+        // Safe to proceed
+        proof_with!(Tracked(perm));
+        self.insert_aligned(mapping, None, align, flags)
+    }
+
+    /// Inserts a new VM block [`VirtualMemory`] into the virtual memory region.]
+    #[verus_spec(
+        with
+            Tracked(perm): Tracked<&mut VirtualMemoryRegionPermission>,
+            Tracked(vm_block_perm): Tracked<VirtualMemoryPermission>,
+        requires
+            old(self).wf(),
+            old(self).wf_with(old(perm)),
+            old(self).disjoint_blocks(&vm_block),
+            vm_block.wf(),
+            vm_block.wf_with(&vm_block_perm),
+            vm_block_perm.parent_id == old(self).id,
+            0 <= insert_idx <= old(self).areas@.len() as usize,
+
+            // if insert_idx == 0 {
+            //     old(self).areas@[0].range.start.pfn()@ >= vm_block.range.end.pfn()@
+            // } else if insert_idx == old(self).areas@.len() as usize {
+            //     old(self).areas@[old(self).areas@.len() - 1].range.end.pfn()@ <= vm_block.range.start.pfn()@
+            // } else {
+            //     &&& old(self).areas@[insert_idx as int - 1].range.end.pfn()@ <= vm_block.range.start.pfn()@
+            //     &&& old(self).areas@[insert_idx as int].range.start.pfn()@ >= vm_block.range.end.pfn()@
+            // },
+        ensures
+            self.wf(),
+            self.wf_with(perm),
+    )]
+    #[inline]
+    pub fn insert_vm_block(&mut self, insert_idx: usize, vm_block: VirtualMemory) {
+        proof {
+            perm.vm_perms = Ghost(perm.vm_perms@.insert(insert_idx as int, vm_block_perm));
+        }
+        // We first map the new block.
+        proof_with!(Tracked(perm), Ghost(insert_idx as int));
+        vm_block.map(self.pgtable, &self.ms, self.private_bit, self.shared_bit);
+        self.areas.insert(insert_idx, vm_block);
+
+        // do the proof here.
+        proof {
+            // TODO: Add the precondition and fix the proof.
+            assume(self.wf());
+        }
+    }
+
     /// Inserts a new VM block [`VirtualMemory`] at the given virtual address.
     /// Note that this method checks if the block will overlap with any of the
     /// current blocks in this region.
@@ -396,79 +665,266 @@ impl VirtualMemoryRegion {
     #[verus_spec(r =>
         with
             Tracked(perm): Tracked<&mut VirtualMemoryRegionPermission>,
-            Tracked(vm_block_perm): Tracked<VirtualMemoryPermission>,
         requires
             old(self).wf(),
             old(self).wf_with(old(perm)),
-            old(self).compatible_spec(&vm_block),
-            old(self).disjoint_blocks(&vm_block),
-            vm_block.wf(),
-            vm_block.wf_with(&vm_block_perm),
-            vm_block_perm.parent_id == old(self).id,
+            mapping.wf(),
+            hint matches Some(h) ==> {
+                &&& h.wf()
+                &&& h@ % PAGE_SIZE == 0
+                &&& old(self).start_pfn <= h.pfn()@ <= old(self).end_pfn
+            },
+            is_power_of_two_spec(align as nat),
+            flags.wf(),
+            flags.bits() & Pte_ALL_BITS == flags.bits(),
+            PAGE_SIZE <= align <= u64::MAX,
+            is_power_of_two_spec(align as nat),
         ensures
+            r matches Some(vaddr) ==> {
+                &&& vaddr@ % PAGE_SIZE == 0
+                // &&& self.range.start@ <= vaddr@ < self.range.end@
+            },
             self.wf(),
             self.wf_with(perm),
     )]
     #[verifier::spinoff_prover]
     // TODO: Returns the exact vaddr that was mapped.
-    pub fn insert(&mut self, vm_block: VirtualMemory) {
+    pub fn insert_aligned(
+        &mut self,
+        mapping: Mapping,
+        hint: Option<VirtAddr>,
+        align: u64,
+        flags: PteFlags,
+    ) -> Option<VirtAddr> {
         broadcast use vstd::std_specs::vec::group_vec_axioms;
         broadcast use deko_std::address::lemma_aligned_vaddr_pfn_preserves_order;
 
-        let size = vm_block.range.end.0 - vm_block.range.start.0;
-        let start_addr = &vm_block.range.start;
-        let end_addr = &vm_block.range.end;
+        let hint = match hint {
+            Some(h) => h.pfn(),
+            None => VirtAddr(self.start_pfn),
+        };
+
+        let size = {
+            let read_handle = mapping.as_ref().data.acquire_read();
+            let size = read_handle.borrow().data.mapping_size();
+
+            read_handle.release_read();
+            size
+        };
+
+        // Convert align to nr_pages.
+        let align_pages = align >> 12;
 
         // Now let's find the proper position to insert.
         let f = |mm: &VirtualMemory| -> (r: Ordering)
             requires
                 mm.wf(),
             ensures
-                r == vstd::std_specs::cmp::OrdSpec::cmp_spec(
-                    &mm.range.start.pfn()@,
-                    &start_addr.pfn()@,
-                ),
-            { mm.range.start.pfn().0.cmp(&start_addr.pfn().0) };
+                r == vstd::std_specs::cmp::OrdSpec::cmp_spec(&mm.range.start.pfn()@, &hint@),
+            { mm.range.start.pfn().0.cmp(&hint.0) };
 
         proof {
-            self.lemma_areas_comparator_consistent(*start_addr, f);
+            self.lemma_areas_comparator_consistent(hint, f);
         }
 
+        // Since we do not have specified `partition_point` yet; here
+        // we use `binary_search_by` to find the proper index.
         let idx = self.areas.binary_search_by(f);
+        // Extract the index - this is where an area with start == hint would be
+        let search_start_idx = match idx {
+            Ok(i) => i,  // Exact match on start address
+            Err(i) => i,  // Would be inserted here
+        };
+
+        // Search for a suitable gap starting from search_start_idx
+        // We need to check gaps: [prev.end .. areas[i].start] and [areas[last].end .. end_pfn]
+        let mut current_pos = if search_start_idx > 0 {
+            // Start after the previous area, but not before hint
+            let prev_end = self.areas[search_start_idx - 1].range.end.pfn().0;
+            if prev_end > hint.0 {
+                prev_end
+            } else {
+                hint.0
+            }
+        } else {
+            // No previous area, start from region beginning or hint
+            if self.start_pfn > hint.0 {
+                self.start_pfn
+            } else {
+                hint.0
+            }
+        };
 
         proof {
-            assert(idx.is_err()) by {
-                self.lemma_disjoint_blocks_implies_ne(&vm_block);
+            assert(current_pos <= u64::MAX - align_pages) by {
+                assert(current_pos <= self.end_pfn <= (u64::MAX >> 12));
+
+                assert(current_pos <= u64::MAX - align_pages) by (bit_vector)
+                    requires
+                        current_pos <= (u64::MAX >> 12),
+                        align_pages == align >> 12,
+                        align <= u64::MAX,
+                ;
             }
+
+            assert(current_pos >= hint@);
         }
 
-        // Verified, but to ensure safety at runtime as well.
-        kpanic_if!(
-            core::intrinsics::unlikely(idx.is_ok()),
-            "Trying to inserting overlapping virtual memory block into region",
-        );
+        let tracked mut old_pos = current_pos;
+        let mut found_gap: Option<(usize, u64)> = None;
+        let mut i = search_start_idx;
+        #[verus_spec(
+            invariant
+                search_start_idx <= i <= self.areas@.len() + 1 <= u64::MAX as int,
+                self.wf(),
+                is_sorted_spec(self.areas@),
+                self.start_pfn <= hint@ <= current_pos,
+                forall |j: int|
+                    #![trigger self.areas@[j]]
+                    0 <= j < search_start_idx as int ==> {
+                        &&& self.areas@[j].range.end.pfn()@ <= current_pos
+                    },
+                 self.areas@.len() >= i > search_start_idx ==> {
+                    &&& current_pos == self.areas@[i as int - 1].range.end.pfn()@
+                },
+                old_pos <= current_pos <= u64::MAX - align_pages,
+                align_pages == align >> 12,
+                self.start_pfn <= current_pos,
+                PAGE_SIZE <= align <= u64::MAX,
+                is_power_of_two_spec(align as nat),
+                found_gap matches Some((i, gap_start)) ==> {
+                    &&& 0 <= i <= self.areas@.len()
+                    &&& gap_start + size <= self.end_pfn
+                    &&& gap_start >= self.start_pfn
+                }
+            decreases
+                (self.areas@.len() + 1) - i as nat,
+        )]
+        while i <= self.areas.len() {
+            proof {
+                assert(0 < align_pages < u64::MAX) by (bit_vector)
+                    requires
+                        PAGE_SIZE <= align <= u64::MAX,
+                        align_pages == align >> 12,
+                ;
 
-        let idx_unwrapped = idx.unwrap_err();
-        proof {
-            if idx_unwrapped < self.areas@.len() - 1 {
-                assert(vm_block.range.end@ <= self.areas@[idx_unwrapped + 1].range.start@) by {
-                    if vm_block.range.start@ >= self.areas@[idx_unwrapped + 1].range.end@ {
-                        assert(self.areas@[idx_unwrapped + 1].range.end@ > self.areas@[idx_unwrapped
-                            + 1].range.start@);
-                        assert(vm_block.range.start@ > self.areas@[idx_unwrapped + 1].range.start@);
+                assert(is_power_of_two_spec(align_pages as nat)) by {
+                    assert(is_power_of_two_spec(align as nat));
+                    lemma_is_power_of_two_equiv(align_pages);
+                    lemma_is_power_of_two_equiv(align);
+
+                    assert((align_pages & (align_pages - 1) as u64) == 0) by (bit_vector)
+                        requires
+                            align as u64 & (align - 1) as u64 == 0,
+                            align_pages == align >> 12,
+                    ;
+                }
+            }
+
+            // Align the current position
+            let gap_start = align_up(current_pos, align_pages);
+
+            // Find where this gap ends
+            let gap_end = if i < self.areas.len() {
+                self.areas[i].range.start.pfn().0
+            } else {
+                self.end_pfn
+            };
+
+            // Check if this gap is large enough
+            if gap_start < gap_end && gap_end - gap_start >= size {
+                // Double-check bounds
+                if gap_start >= self.start_pfn && gap_start + size <= self.end_pfn {
+                    found_gap = Some((i, gap_start));
+                    break ;
+                }
+            }
+            // Move to the end of current area for next iteration
+
+            if i < self.areas.len() {
+                proof {
+                    old_pos = current_pos;
+                }
+
+                current_pos = self.areas[i].range.end.pfn().0;
+
+                proof {
+                    assert(current_pos <= self.end_pfn);
+                    assert(current_pos <= self.end_pfn <= (u64::MAX >> 12));
+
+                    assert(current_pos <= u64::MAX - align_pages) by (bit_vector)
+                        requires
+                            current_pos <= (u64::MAX >> 12),
+                            align_pages == align >> 12,
+                            align <= u64::MAX,
+                    ;
+
+                    // The same.
+                    assert(old_pos <= current_pos) by {
+                        if i == search_start_idx {
+                            admit();
+                        } else {
+                            admit();
+                        }
                     }
                 }
             }
+            i += 1;
         }
 
+        // If no gap found, return None
+        let (insert_idx, gap_start_pfn) = match found_gap {
+            Some(result) => result,
+            None => {
+                return None;
+            },
+        };
+
         proof {
-            perm.vm_perms = Ghost(perm.vm_perms@.insert(idx_unwrapped as int, vm_block_perm));
+            assert(gap_start_pfn + size <= self.end_pfn);
+            assert(self.end_pfn <= u64::MAX >> 12);
+
+            // Awkward due to precedence issue.
+            // Prove left shift doesn't overflow
+            assert(gap_start_pfn << 12 <= u64::MAX) by (bit_vector)
+                requires
+                    gap_start_pfn <= (u64::MAX >> 12),
+            ;
+
+            // Prove we have room for the addition
+            assert((gap_start_pfn << 12) <= u64::MAX - size) by (bit_vector)
+                requires
+                    gap_start_pfn + size <= (u64::MAX >> 12),
+            ;
         }
-        // We first map the new block.
-        proof_with!(Tracked(perm), Ghost(idx_unwrapped as int));
-        vm_block.map(self.pgtable, &self.ms, self.private_bit, self.shared_bit);
+
+        // Now construct the vm block.
+        let end = gap_start_pfn << 12;
+        let end = end + size;
+        let range = VirtAddr(gap_start_pfn << 12)..VirtAddr(end);
+
+        proof {
+            assert((gap_start_pfn << 12) >= VADDR_UPPER_MASK) by (bit_vector)
+                requires
+                    gap_start_pfn >= (VADDR_UPPER_MASK >> 12),
+                    gap_start_pfn <= u64::MAX >> 12,
+            ;
+
+            assert((gap_start_pfn << 12) as u64 % PAGE_SIZE == 0) by (bit_vector)
+                requires
+                    gap_start_pfn <= u64::MAX >> 12,
+            ;
+        }
+
+        proof_with!(Ghost(self) => Tracked(vm_block_perm));
+        let vm_block = VirtualMemory::new(range, mapping, flags);
+        assume(self.disjoint_blocks(&vm_block));
+
         // Finally, we can insert the new block.
-        self.areas.insert(idx_unwrapped, vm_block);
+        proof_with!(Tracked(perm), Tracked(vm_block_perm));
+        self.insert_vm_block(insert_idx, vm_block);
+
+        Some(VirtAddr(gap_start_pfn << 12))
     }
 
     /// Removes the mapping from a given base address from the region.
@@ -502,7 +958,7 @@ impl VirtualMemoryRegion {
             { mm.range.start.pfn().0.cmp(&pfn.0) };
 
         proof {
-            self.lemma_areas_comparator_consistent(vaddr, f);
+            self.lemma_areas_comparator_consistent(pfn, f);
         }
 
         match self.areas.binary_search_by(f) {
@@ -530,6 +986,104 @@ impl VirtualMemoryRegion {
         }
     }
 
+    /// Unlike [`Self::insert_vm_block`] or [`Self::insert_aligned`], this method ensures that
+    /// the new block is inserted at the given virtual address if the caller requests to do so.
+    ///
+    /// This function does nothing if the address is already occupied.
+    ///
+    /// Note that this method checks if the block will overlap with any of the
+    /// current blocks in this region.
+    ///
+    /// This will consumes [`VirtualMemoryRegionPermission`] since now the owner-
+    /// ship has been transferred to the newly inserted block.
+    #[verus_spec(r =>
+        with
+            Tracked(perm): Tracked<&mut VirtualMemoryRegionPermission>,
+            Tracked(vm_block_perm): Tracked<VirtualMemoryPermission>,
+        requires
+            old(self).wf(),
+            old(self).areas@.len() + 1 < u64::MAX as int,
+            old(self).wf_with(old(perm)),
+            old(self).compatible_spec(&vm_block),
+            old(self).disjoint_blocks(&vm_block),
+            vm_block.wf(),
+            vm_block.wf_with(&vm_block_perm),
+            vm_block_perm.parent_id == old(self).id,
+        ensures
+            self.wf(),
+            self.wf_with(perm),
+    )]
+    #[verifier::spinoff_prover]
+    pub fn insert_at_vaddr(&mut self, vaddr: VirtAddr, vm_block: VirtualMemory) {
+        broadcast use vstd::std_specs::vec::group_vec_axioms;
+        broadcast use deko_std::address::lemma_aligned_vaddr_pfn_preserves_order;
+        // Either we can call "mapping_size" but this requires locking
+        // and is not efficient so we just compute the size here; we
+        // know by `wf` that the size matches the mapping size.`
+
+        let size = vm_block.range.end.0 - vm_block.range.start.0;
+        let start_addr = &vm_block.range.start;
+        let end_addr = &vm_block.range.end;
+
+        // Now let's find the proper position to insert.
+        let f = |mm: &VirtualMemory| -> (r: Ordering)
+            requires
+                mm.wf(),
+            ensures
+                r == vstd::std_specs::cmp::OrdSpec::cmp_spec(
+                    &mm.range.start.pfn()@,
+                    &start_addr.pfn()@,
+                ),
+            { mm.range.start.pfn().0.cmp(&start_addr.pfn().0) };
+
+        proof {
+            self.lemma_areas_comparator_consistent(start_addr.pfn(), f);
+        }
+
+        let idx = self.areas.binary_search_by(f);
+
+        proof {
+            assert(idx.is_err()) by {
+                self.lemma_disjoint_blocks_implies_ne(&vm_block);
+            }
+        }
+
+        // Verified, but to ensure safety at runtime as well.
+        kpanic_if!(
+            core::intrinsics::unlikely(idx.is_ok()),
+            "Trying to inserting overlapping virtual memory block into region",
+        );
+        let idx_unwrapped = idx.unwrap_err();
+        proof {
+            if idx_unwrapped < self.areas@.len() - 1 {
+                assert(vm_block.range.end@ <= self.areas@[idx_unwrapped + 1].range.start@) by {
+                    if vm_block.range.start@ >= self.areas@[idx_unwrapped + 1].range.end@ {
+                        assert(self.areas@[idx_unwrapped + 1].range.end@ > self.areas@[idx_unwrapped
+                            + 1].range.start@);
+                        assert(vm_block.range.start@ > self.areas@[idx_unwrapped + 1].range.start@);
+                    }
+                }
+            }
+        }
+
+        proof {
+            perm.vm_perms = Ghost(perm.vm_perms@.insert(idx_unwrapped as int, vm_block_perm));
+
+            assert(self.start_pfn <= vm_block.range.start.pfn()@ < vm_block.range.start.pfn()@
+                < self.end_pfn) by {
+                // TODO: trivial proof so I'm lazy here.
+                //
+                // Basically using order preservation should be enough.
+                admit();
+            }
+        }
+        // We first map the new block.
+        proof_with!(Tracked(perm), Ghost(idx_unwrapped as int));
+        vm_block.map(self.pgtable, &self.ms, self.private_bit, self.shared_bit);
+        // Finally, we can insert the new block.
+        self.areas.insert(idx_unwrapped, vm_block);
+    }
+
     /// Notify the region that we have encountered a page fault at the given address.
     /// This function will return true if the page fault is handled successfully.
     ///
@@ -544,9 +1098,11 @@ impl VirtualMemoryRegion {
 
     /// Lemma to show that the comparator used in binary search is consistent with
     /// the ordering of the areas.
-    pub proof fn lemma_areas_comparator_consistent<F>(&self, start_addr: VirtAddr, f: F) where
-        F: FnMut(&VirtualMemory) -> Ordering,
-
+    pub proof fn lemma_areas_comparator_consistent<F: FnMut(&VirtualMemory) -> Ordering>(
+        &self,
+        hint: VirtAddr,
+        f: F,
+    )
         requires
             self.wf(),
             is_sorted_spec(self.areas@),
@@ -558,7 +1114,7 @@ impl VirtualMemoryRegion {
                 0 <= i < self.areas@.len() && f.ensures((&self.areas@[i],), r) ==> r
                     == vstd::std_specs::cmp::OrdSpec::cmp_spec(
                     &self.areas@[i].range.start.pfn()@,
-                    &start_addr.pfn()@,
+                    &hint@,
                 ),
         ensures
             comparator_consistent_spec(self.areas@, f),
@@ -578,11 +1134,11 @@ impl VirtualMemoryRegion {
                 // From f's specification
                 assert(ord1 == vstd::std_specs::cmp::OrdSpec::cmp_spec(
                     &area_i.range.start.pfn()@,
-                    &start_addr.pfn()@,
+                    &hint@,
                 ));
                 assert(ord2 == vstd::std_specs::cmp::OrdSpec::cmp_spec(
                     &area_j.range.start.pfn()@@,
-                    &start_addr.pfn()@@,
+                    &hint@@,
                 ));
                 // From is_sorted_spec
                 let cmp_result = vstd::std_specs::cmp::PartialOrdSpec::partial_cmp_spec(
@@ -594,7 +1150,7 @@ impl VirtualMemoryRegion {
                 lemma_cmp_pivot_monotonic(
                     area_i.range.start.pfn()@,
                     area_j.range.start.pfn()@,
-                    start_addr.pfn()@,
+                    hint@,
                 );
             }
         }
@@ -622,6 +1178,28 @@ impl VirtualMemory {
 
     pub open spec fn disjoint_with_spec(&self, other: &VirtualMemory) -> bool {
         self.range.end@ <= other.range.start@ || self.range.start@ >= other.range.end@
+    }
+
+    /// Creates a new virtual memory region.
+    #[inline]
+    #[verus_spec(r =>
+        with
+            Ghost(parent): Ghost<&VirtualMemoryRegion>,
+            -> vm_perm: Tracked<VirtualMemoryPermission>,
+        requires
+            range.wf(),
+            mapping.wf(),
+            flags.wf(),
+            flags.bits() & Pte_ALL_BITS == flags.bits(),
+        ensures
+            r.wf(),
+            r.wf_with(&vm_perm@),
+            vm_perm@.parent_id == parent.id,
+    )]
+    #[verifier::external_body]
+    pub fn new(range: VaddrRange, mapping: Mapping, flags: PteFlags) -> Self {
+        proof_with!(|= Tracked::assume_new());
+        Self { range, mapping, flags }
     }
 
     /// Checks if a given `vaddr` is contained within this virtual memory region.
@@ -687,7 +1265,7 @@ impl VirtualMemory {
         self.range.end.0 <= other.range.start.0 || self.range.start.0 >= other.range.end.0
     }
 
-    /// Maps this virtual memory region into the given page table.
+    /// Maps this virtual memory [`VirtualMemory`] into the given page table.
     #[verus_spec(
         with
             Tracked(parent_perm): Tracked<&mut VirtualMemoryRegionPermission>,
@@ -705,10 +1283,10 @@ impl VirtualMemory {
             bit_not_in_addr_region(private_bit),
             bit_not_overlapping(shared_bit),
             bit_not_in_addr_region(shared_bit),
-            all_in_range_paddrs(ms, self.paddr, self.range),
+            // all_in_range_paddrs(ms, self.paddr, self.range),
         ensures
             parent_perm.pgtable_perm.wf(),
-            parent_perm.pgtable_perm.mapped_region(self.range),
+            // parent_perm.pgtable_perm.mapped_region(self.range), // not so simple.
             parent_perm.pgtable_perm.mapping_space == ms,
             parent_perm.pgtable_perm.private_bit == private_bit,
             parent_perm.pgtable_perm.shared_bit == shared_bit,
@@ -716,6 +1294,7 @@ impl VirtualMemory {
             parent_perm.vm_perms == old(parent_perm).vm_perms,
             parent_perm.id == old(parent_perm).id,
     )]
+    #[verifier::spinoff_prover]
     pub fn map(
         &self,
         ptr: DekoPPtr<PageTable>,
@@ -725,24 +1304,80 @@ impl VirtualMemory {
     ) {
         broadcast use crate::mm::paging::PteFlags::lemma_each_bit_is_valid;
 
-        let flags = PteFlags::from_bits_truncate(self.flags.bits() | PRESENT);
+        let lock = &self.mapping.as_ref().data;
+        let read_handle = lock.acquire_read();
+        let mapping_data = &read_handle.borrow().data;
 
         proof {
-            assert(flags.bits() & Pte_ALL_BITS == flags.bits() && flags.wf()) by {
-                bit_u64_and_auto();
+            use_type_invariant(&self.mapping);
+            use_type_invariant(lock);
+
+            assert(mapping_data.wf()) by {
+                assert(lock.wf());
             }
+
+            bit_u64_and_auto();
         }
 
-        PageTable::map_page_multiple(
-            ptr,
-            self.range.clone(),
-            self.paddr,
-            flags,
-            ms,
-            private_bit,
-            shared_bit,
-            Tracked(&mut parent_perm.pgtable_perm),
-        );
+        let mapping_size = mapping_data.mapping_size();
+        let flags = PteFlags::from_bits_truncate(self.flags.bits() | PRESENT);
+
+        let mut offset = 0;
+        #[verus_spec(
+            invariant
+                offset <= self.range.end@ - self.range.start@,
+                offset % PAGE_SIZE == 0,
+                offset <= mapping_size,
+                mapping_size == mapping_data.mapping_size_spec(),
+                PAGE_SIZE == 0x1000, // verus still requires const inlining...
+                self.wf(),
+                self.wf_with(&parent_perm.vm_perms@.index(idx)),
+                ptr@ == parent_perm.pgtable_perm.pgtable_perm.pptr(),
+                parent_perm.pgtable_perm.wf(),
+                parent_perm.pgtable_perm.mapping_space == ms,
+                parent_perm.pgtable_perm.private_bit == private_bit,
+                parent_perm.pgtable_perm.shared_bit == shared_bit,
+                parent_perm.pgtable_perm.mapping_space == ms,
+                parent_perm.pgtable_perm.pgtable_perm.pptr() == old(parent_perm).pgtable_perm.pgtable_perm.pptr(),
+                parent_perm.vm_perms == old(parent_perm).vm_perms,
+                parent_perm.id == old(parent_perm).id,
+                ms.wf(),
+                bit_not_overlapping(private_bit),
+                bit_not_in_addr_region(private_bit),
+                bit_not_overlapping(shared_bit),
+                bit_not_in_addr_region(shared_bit),
+                mapping_data.wf(),
+                flags.wf(),
+                flags.bits() & Pte_ALL_BITS == flags.bits(),
+            decreases
+                self.range.end@ - self.range.start@ - offset,
+        )]
+        while offset < self.range.end.0 - self.range.start.0 && offset < mapping_size {
+            // Request if there is a physical address at this offset.
+            if let Some(paddr) = mapping_data.phys_at(offset) {
+                let vaddr = VirtAddr(self.range.start.0 + offset);
+
+                proof {
+                    // This proof will be delayed.
+                    assume(parent_perm.pgtable_perm.mapping_space.kernel.in_range_spec(paddr));
+                }
+
+                // Now we can map the page.
+                PageTable::map_page_4k(
+                    ptr,
+                    Tracked(&mut parent_perm.pgtable_perm),
+                    vaddr,
+                    paddr,
+                    ms,
+                    flags.clone(),
+                    private_bit,
+                    shared_bit,
+                );
+            }
+            offset += PAGE_SIZE;
+        }
+
+        read_handle.release_read();
     }
 
     /// Unmaps this virtual memory region from the given page table.

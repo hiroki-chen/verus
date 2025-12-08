@@ -4,15 +4,16 @@ use core::sync::atomic::{AtomicU32, AtomicU64};
 use deko_macros::{with_atomic_pred, DekoDebug};
 use deko_std::address::{VaddrRange, VirtAddr};
 use deko_std::array::Array;
+use deko_std::bits::bit_u64_and_auto;
 use deko_std::cpu::{no_irq_zone, CpuID, X86GeneralRegs};
 use deko_std::list::{LinkedList, Node};
 use deko_std::mem::{PAGE_SIZE, PGTABLE_LVL3_IDX_SHARED};
 use deko_std::ptr::{DekoPPtr, DekoPointsTo};
 use deko_std::sync::arc::DekoArc;
 use deko_std::sync::rwlock::{DekoRwLock, RwLockPredicate};
-use deko_std::sync::{DekoAtomicData, RwLock};
+use deko_std::sync::{DekoAtomicData, DekoSimpleRwLock, DekoSimpleRwLockPred, RwLock};
 use deko_std::wf::WellFormed;
-use deko_std::{boxed_ptr, with_permission};
+use deko_std::{boxed_ptr, with_permission, TrivialPredicate};
 use vstd::prelude::*;
 use vstd::std_specs::cmp::{PartialEqSpec, PartialEqSpecImpl, PartialOrdSpecImpl};
 
@@ -23,7 +24,7 @@ use crate::mm::paging::{PageTable, PageTablePermission, PteFlags};
 use crate::mm::stack::DekoKernelStack;
 use crate::mm::vm::{
     VirtualMemory, VirtualMemoryPermission, VirtualMemoryRegion, VirtualMemoryRegionPermission,
-    VirtualMemoryRegionPred,
+    VirtualMemoryRegionPred, VmMapping, VmMappingPred,
 };
 use crate::mm::DEKO_FRAME_ALLOCATOR;
 use crate::{die, kerror, kinfo, kpanic_if, kunimplemented};
@@ -476,31 +477,48 @@ impl DekoRunnable {
 
         kinfo!("Allocated kernel stack at range: ", range => hex);
 
-        proof {
-            assert(stack.alloc@.len() == 8) by {
-                assert(stack.alloc@.len() as u64 == 0x8000 >> 12);
-                assert(0x8000u64 >> 12 == 8) by (bit_vector);
-            }
-        }
+        let mapping = {
+            let stack = VmMapping::Stack { stack };
 
-        // Fetch the backing page of the stack.
-        // FIXME: This is incorrect as this reveals the range in the kernel
-        // but not the actual stack mapping for the new kernel.
-        // For instance, the kernel's virtaddr of these pages are 0xFFFF_FF80_0000_0000 + ...
-        // but for the new task this should be different.
-        let (vaddr, paddr) = match &stack.alloc[0] {
-            Some((vaddr, paddr)) => (*vaddr, *paddr),
+            proof {
+                assert(stack.mapping_size_spec() >= PAGE_SIZE) by {
+                    assert(0x8000u64 >> 12 == 8) by (bit_vector);
+                }
+            }
+
+            let mapping_lock = DekoRwLock::new(
+                DekoAtomicData::new(stack),
+                (),
+                Ghost(VmMappingPred {  }),
+            );
+
+            proof {
+                use_type_invariant(&mapping_lock);
+            }
+
+            DekoArc::new(
+                DekoAtomicData::new(mapping_lock),
+                &DEKO_FRAME_ALLOCATOR.0,
+                Ghost(DekoSimpleRwLockPred {  }),
+            )
+        };
+
+        proof {
+            use_type_invariant(&mapping);
+            bit_u64_and_auto();
+        }
+        // Insert the new stack mapping into the given VM region.
+        let vaddr = match #[verus_spec(with Tracked(vm_region_perm))]
+        vm_region.insert(mapping, PteFlags::nx_kernel()) {
+            Some(vaddr) => vaddr,
             None => {
-                kerror!("Failed to allocate physical memory for kernel stack");
+                kerror!("Failed to insert kernel stack mapping into VM region");
                 die("");
             },
         };
 
-        kinfo!("Kernel stack base vaddr: ", vaddr => hex, ", paddr: ", paddr => hex);
-
         proof {
-            // TODO:
-            assume(vaddr@ + range.end <= u64::MAX);
+            assume(114514 < vaddr@ + range.end < u64::MAX);
         }
 
         // We need to setup a context on the stack that matches the stack layout
@@ -522,32 +540,8 @@ impl DekoRunnable {
         // to the flags of the caller.  In particular, interrupts must be
         // disabled because the task switch code expects to execute a new
         // task with interrupts disabled.
+        // FIXME: This now page faults.
         Self::push_stack_frames(rsp, entry, xsave.addr() as u64, param, ret);
-
-        let vm_block = VirtualMemory {
-            range: VirtAddr(range.start)..VirtAddr(range.end),
-            paddr,
-            flags: PteFlags::nx_kernel(),
-        };
-        let tracked vm_block_perm = VirtualMemoryPermission {
-            parent_id: vm_region_perm.id,
-            range: VirtAddr(range.start)..VirtAddr(range.end),
-        };
-
-        proof {
-            // Let's do this later.
-            assert(vm_block.wf()) by {
-                admit();
-            }
-            assert(vm_region.compatible_spec(&vm_block) && vm_region.disjoint_blocks(&vm_block))
-                by {
-                admit();
-            }
-        }
-
-        // Insert the new stack mapping into the given VM region.
-        proof_with!(Tracked(vm_region_perm), Tracked(vm_block_perm));
-        vm_region.insert(vm_block);
 
         kunimplemented!()
     }
