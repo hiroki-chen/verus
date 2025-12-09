@@ -1,13 +1,16 @@
 use core::cmp::Ordering;
+use core::ops::Range;
 use core::sync::atomic::{AtomicU32, AtomicU64};
 
 use deko_macros::{with_atomic_pred, DekoDebug};
-use deko_std::address::{VaddrRange, VirtAddr};
+use deko_std::address::{MappingSpace, VaddrRange, VirtAddr};
 use deko_std::array::Array;
 use deko_std::bits::bit_u64_and_auto;
 use deko_std::cpu::{no_irq_zone, CpuID, X86GeneralRegs};
 use deko_std::list::{LinkedList, Node};
-use deko_std::mem::{PAGE_SIZE, PGTABLE_LVL3_IDX_SHARED};
+use deko_std::mem::bitalloc::{DekoBitAlloc, DekoBitmapAllocator1024};
+use deko_std::mem::{PAGE_SIZE, PERTASK_BASE, PGTABLE_LVL3_IDX_SHARED};
+use deko_std::prelude::VADDR_UPPER_MASK;
 use deko_std::ptr::{DekoPPtr, DekoPointsTo};
 use deko_std::sync::arc::DekoArc;
 use deko_std::sync::rwlock::{DekoRwLock, RwLockPredicate};
@@ -20,16 +23,67 @@ use vstd::std_specs::cmp::{PartialEqSpec, PartialEqSpecImpl, PartialOrdSpecImpl}
 use crate::collections::Vec;
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
-use crate::mm::paging::{PageTable, PageTablePermission, PteFlags};
+use crate::mm::paging::{
+    bit_not_in_addr_region, bit_not_overlapping, PageTable, PageTablePermission, PteFlags,
+};
 use crate::mm::stack::DekoKernelStack;
 use crate::mm::vm::{
-    VirtualMemory, VirtualMemoryPermission, VirtualMemoryRegion, VirtualMemoryRegionPermission,
-    VirtualMemoryRegionPred, VmMapping, VmMappingPred,
+    self, VirtualMemory, VirtualMemoryPermission, VirtualMemoryRegion,
+    VirtualMemoryRegionPermission, VirtualMemoryRegionPred, VmMapping, VmMappingPred, VMR_GRANULE,
 };
 use crate::mm::DEKO_FRAME_ALLOCATOR;
 use crate::{die, kerror, kinfo, kpanic_if, kunimplemented};
 
 verus! {
+
+pub exec static DEKO_KTASK_BIT_ALLOC: DekoSimpleRwLock<DekoBitmapAllocator1024>
+    ensures
+        DEKO_KTASK_BIT_ALLOC.wf(),
+{
+    let allocator = DekoBitmapAllocator1024::new_empty();
+    let r = DekoSimpleRwLock::new(
+        DekoAtomicData::new(allocator),
+        (),
+        Ghost(TrivialPredicate::new()),
+    );
+
+    proof {
+        use_type_invariant(&r);
+    }
+
+    r
+}
+
+/// Ask the bit allocator to give us a VM region index for a new task.
+#[verifier::external_body]
+#[verus_spec(r =>
+    ensures
+        r matches Some((idx, region)) ==> {
+            &&& 0 <= idx < DekoBitmapAllocator1024::cap_spec()
+            &&& region.start@ % VMR_GRANULE == 0
+            &&& region.end@ % VMR_GRANULE == 0
+            &&& region.start@ >= VADDR_UPPER_MASK
+            &&& region.wf()
+        }
+)]
+pub fn request_vm_region() -> Option<(usize, VaddrRange)> {
+    let (mut alloc, write_handle) = DEKO_KTASK_BIT_ALLOC.acquire_write();
+
+    let r = alloc.data.alloc(1, 0);
+    write_handle.release_write(alloc);
+
+    match r {
+        None => None,
+        Some(idx) => {
+            // HACK: for testing purposes.
+            let idx = 1;
+            let span = 0x8000000000u64 / DekoBitmapAllocator1024::cap() as u64;
+            let base = PERTASK_BASE.0 + (idx * span as usize) as u64;
+
+            Some((idx, VirtAddr(base)..VirtAddr(span as u64 + base)))
+        },
+    }
+}
 
 /// The memory management information of a task.
 pub struct DekoTaskMM {
@@ -100,11 +154,11 @@ pub broadcast axiom fn xsave_area_size_wf()
         2 <= r <= u64::MAX,
 )]
 pub(crate) fn generate_id() -> u64 {
-    const ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+    const ID_COUNTER: AtomicU64 = AtomicU64::new(2);
 
-    let mut id = ID_COUNTER.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    let mut id = ID_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     while id < 2 {
-        id = ID_COUNTER.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        id = ID_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
 
     id
@@ -386,15 +440,56 @@ pub struct DekoRunnable {
 impl DekoRunnable {
     /// Createas and initializes a new virtual memory manager for the task.
     #[verus_spec(r =>
+        requires
+            ms.wf(),
+            bit_not_overlapping(private_bit),
+            bit_not_overlapping(shared_bit),
+            bit_not_in_addr_region(private_bit),
+            bit_not_in_addr_region(shared_bit),
         ensures
             r.wf(),
     )]
-    pub fn create_mm() -> DekoArc<
+    pub fn create_mm(private_bit: u64, shared_bit: u64, ms: MappingSpace) -> DekoArc<
         VirtualMemoryRegion,
         VirtualMemoryRegionPermission,
         VirtualMemoryRegionPred,
     > {
-        kunimplemented!()
+        let (pgtable, _, Tracked(pgtable_perm)) = PageTable::new(
+            private_bit,
+            shared_bit,
+            Ghost(&ms),
+        );
+        let flags = PteFlags::from_bits_truncate(0);
+        proof {
+            bit_u64_and_auto();
+        }
+
+        let (idx, region) = match request_vm_region() {
+            Some((idx, region)) => (idx, region),
+            None => {
+                kerror!("Failed to allocate VM region for new task");
+                die("");
+            },
+        };
+
+        // TODO: Where should the virtual region come from?
+        // Perhaps we'll need some allocator to do so.
+        proof_with!(Tracked(pgtable_perm), => Tracked(vm_region_perm));
+        let vmr = VirtualMemoryRegion::new(
+            region.start,
+            region.end,
+            flags,
+            pgtable,
+            ms,
+            private_bit,
+            shared_bit,
+        );
+
+        DekoArc::new(
+            DekoAtomicData::new_with(vmr, Tracked(vm_region_perm)),
+            &DEKO_FRAME_ALLOCATOR.0,
+            Ghost(VirtualMemoryRegionPred {  }),
+        )
     }
 
     #[verus_spec(r =>
@@ -407,16 +502,22 @@ impl DekoRunnable {
         ensures
             vm_region.wf(),
             vm_region.wf_with(vm_region_perm),
+            r.1.end >= r.1.start,
+            r.0@ + r.1.end < u64::MAX,
     )]
     pub fn alloc_user_stack(
         vm_region: &mut VirtualMemoryRegion,
         entry: u64,
         xsave: DekoPPtr<Array<u8, 4096>>,
-    ) -> (VaddrRange, VaddrRange, u64) {
+    ) -> (VirtAddr, Range<u64>, u64) {
         kunimplemented!()
     }
 
     #[verifier::external_body]
+    #[verus_spec(
+        requires
+            // TODO: need to ensure that stack.ptr is mapped and valid.
+    )]
     pub fn push_stack_frames(stack_ptr: u64, entry: u64, xsave: u64, params: u64, ret: u64) {
         unsafe {
             let task_ctx_ptr = (stack_ptr - core::mem::size_of::<
@@ -440,6 +541,12 @@ impl DekoRunnable {
     /// - Creates the mapping on the current CPU.
     /// - Prepare the context on the stack so that when we switch to
     ///   this task it will start executing from the entry point.
+    ///
+    /// The return value is a triple of:
+    ///
+    /// - The stack mapping in the new task's VM region.
+    /// - The stack's bound (excluding the guard pages).
+    /// - The offset to the task context in the stack.
     #[verus_spec(r =>
         with
             Tracked(vm_region_perm): Tracked<&mut VirtualMemoryRegionPermission>,
@@ -457,6 +564,8 @@ impl DekoRunnable {
         ensures
             vm_region.wf(),
             vm_region.wf_with(vm_region_perm),
+            r.1.end >= r.1.start,
+            r.0@ + r.1.end < u64::MAX,
     )]
     pub fn alloc_kernel_stack(
         vm_region: &mut VirtualMemoryRegion,
@@ -467,7 +576,7 @@ impl DekoRunnable {
         param: u64,
         ret: u64,
         xsave: DekoPPtr<Array<u8, 4096>>,
-    ) -> (VaddrRange, VaddrRange, u64) {
+    ) -> (VirtAddr, Range<u64>, u64) {
         kinfo!("the vm region before allocating kernel stack: ", vm_region => hex);
 
         let mut stack = DekoKernelStack::new_with_size(0x8000, false);
@@ -508,9 +617,10 @@ impl DekoRunnable {
             use_type_invariant(&mapping);
             bit_u64_and_auto();
         }
+
         // Insert the new stack mapping into the given VM region.
         let vaddr = match #[verus_spec(with Tracked(vm_region_perm))]
-        vm_region.insert(mapping, PteFlags::nx_kernel()) {
+        vm_region.insert(mapping.clone(), PteFlags::nx_kernel()) {
             Some(vaddr) => vaddr,
             None => {
                 kerror!("Failed to insert kernel stack mapping into VM region");
@@ -529,6 +639,7 @@ impl DekoRunnable {
         let stack_offset = 8;  // == core::mem::size_of::<u64>();
         let rsp = stack_tos - stack_offset;
 
+        kinfo!("Allocated kernel stack at virtual address: ", vaddr => hex);
         kinfo!("Kernel top of stack: ", stack_tos => hex);
         kinfo!("Kernel stack rsp: ", rsp => hex);
 
@@ -541,10 +652,9 @@ impl DekoRunnable {
         // to the flags of the caller.  In particular, interrupts must be
         // disabled because the task switch code expects to execute a new
         // task with interrupts disabled.
-        // FIXME: This now page faults.
         Self::push_stack_frames(rsp, entry, xsave.addr() as u64, param, ret);
 
-        kunimplemented!()
+        (vaddr, range, stack_offset)
     }
 
     /// Creates a new runnable task with the given arguments on the given CPU.
@@ -598,14 +708,6 @@ impl DekoRunnable {
 
         proof_with!(Tracked(&mut pgtable_perm));
         cpu_borrowed.vm_region().as_ref().unwrap().copy_to_page_table(new_pgtable);
-
-        // let task_mm = match args.parent {
-        //     // If so we inherit the parent's memory management.
-        //     Some(ptr) => { ptr.as_ref().data.mm.clone() },
-        //     // If not just create a new one.
-        //     None => { Self::create_mm() },
-        // };
-
         // Allocate xsave areas.
         let (xsave_ptr, Tracked(xsave_perm)) = boxed_ptr!(Array<u8, 4096>, &DEKO_FRAME_ALLOCATOR.0);
         // This does nothing but clear the area to mark it as init.
@@ -632,6 +734,13 @@ impl DekoRunnable {
         kpanic_if!(core::hint::unlikely(
             vm_region.is_none(),
         ), "CPU has no VM region assigned");
+
+        let task_mm = match args.parent {
+            // If so we inherit the parent's memory management.
+            Some(ptr) => { ptr.as_ref().data.mm.clone() },
+            // If not just create a new one.
+            None => { Self::create_mm(private_bit, shared_bit, kernel_mapping) },
+        };
 
         let tracked DekoCpuCtxPermission {
             ptr_perm,
@@ -667,6 +776,8 @@ impl DekoRunnable {
             },
         };
 
+        let stack_bounds = VirtAddr(stack.0 + vrange.start)..VirtAddr(stack.0 + vrange.end);
+
         let task = DekoRunnable {
             id: generate_id(),
             pgtable: RwLock::new(
@@ -677,10 +788,10 @@ impl DekoRunnable {
             priority: 0,
             xsave: xsave_ptr,
             // mm: task_mm,
-            mm: kunimplemented!(),
-            rsp: vrange.end.0.checked_sub(rsp).unwrap_or(0),
+            mm: task_mm,
+            rsp: vrange.end.checked_sub(rsp).unwrap_or(0),
             ssp: VirtAddr(0),
-            stack,
+            stack: stack_bounds,
             xsave_size: PAGE_SIZE as _,
         };
 
@@ -715,6 +826,8 @@ impl DekoRunnable {
             vm_region_perm: Some(vm_region_perm),
         };
         cpu.write(Tracked(&mut ctx_perm.ptr_perm), cpu_new);
+
+        kinfo!("Finished creating new task with ID: ", task.id => hex);
 
         proof_with!(|= Tracked(ctx_perm));
         DekoArc::new(

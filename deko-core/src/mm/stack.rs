@@ -169,6 +169,7 @@ impl DekoKernelStack {
         ensures
             r.start == self.guard_pages * PAGE_SIZE,
             r.end == self.guard_pages * PAGE_SIZE + self.alloc@.len() as u64 * PAGE_SIZE,
+            r.end >= r.start,
     )]
     pub fn range(&self) -> Range<u64> {
         let alloc_size = self.alloc.len() as u64 * PAGE_SIZE;

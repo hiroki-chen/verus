@@ -51,6 +51,7 @@
 //! We thank the author(s) for their work and the license is MIT.
 #[cfg(feature = "alloc")]
 pub mod allocator;
+pub mod bitalloc;
 pub mod heap;
 pub mod paging;
 pub mod perm;

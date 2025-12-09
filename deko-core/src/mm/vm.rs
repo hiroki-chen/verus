@@ -17,7 +17,7 @@ use crate::mm::paging::{
 };
 use crate::mm::stack::DekoKernelStack;
 use crate::mm::vm;
-use crate::{kpanic_if, kunimplemented, kwarn, vec};
+use crate::{kinfo, kpanic_if, kunimplemented, kwarn, vec};
 
 verus! {
 
@@ -90,7 +90,8 @@ impl VmMapping {
     pub open spec fn mapping_size_spec(&self) -> u64 {
         match self {
             VmMapping::PhysMem { paddr, size } => *size,
-            VmMapping::Stack { stack } => ((stack.alloc@.len() as u64) * PAGE_SIZE) as u64,
+            VmMapping::Stack { stack } => (((stack.alloc@.len() as u64 + stack.guard_pages
+                * 2)) as u64 * PAGE_SIZE) as u64,
         }
     }
 
@@ -114,7 +115,8 @@ impl VmMapping {
     pub fn mapping_size(&self) -> u64 {
         match self {
             VmMapping::PhysMem { paddr, size } => *size,
-            VmMapping::Stack { stack } => (stack.alloc.len() as u64) * PAGE_SIZE,
+            VmMapping::Stack { stack } => ((stack.alloc.len() as u64 + stack.guard_pages
+                * 2)) as u64 * PAGE_SIZE,
         }
     }
 
@@ -126,7 +128,7 @@ impl VmMapping {
     #[verus_spec(r =>
         requires
             self.wf(),
-            offset < self.mapping_size_spec(),
+            // offset < self.mapping_size_spec(),
         ensures
             // r == Self::phys_at_spec(self, offset),
             r matches Some(paddr) ==> {
@@ -145,10 +147,23 @@ impl VmMapping {
                 Some(PhysAddr(paddr.0 + offset))
             },
             VmMapping::Stack { stack } => {
-                let pfn = offset / PAGE_SIZE;
+                let pfn = offset >> 12;
                 let guard_offset = stack.guard_pages << 12;
 
-                if pfn >= guard_offset {
+                if pfn >= stack.guard_pages {
+                    proof {
+                        let gp = stack.guard_pages;
+
+                        assert(offset >= guard_offset) by (bit_vector)
+                            requires
+                                pfn >= gp,
+                                pfn == offset >> 12,
+                                guard_offset == gp << 12,
+                        ;
+                    }
+
+                    let pfn = (offset - guard_offset) >> 12;
+
                     match stack.alloc.get(pfn as usize) {
                         Some(Some((_, paddr))) => { Some(*paddr) },
                         _ => None,
@@ -609,6 +624,8 @@ impl VirtualMemoryRegion {
             align.next_power_of_two()
         };
 
+        kinfo!("Inserting VM block with alignment:", align => hex);
+
         // Safe to proceed
         proof_with!(Tracked(perm));
         self.insert_aligned(mapping, None, align, flags)
@@ -647,7 +664,6 @@ impl VirtualMemoryRegion {
             self.wf_with(perm),
     )]
     #[verifier::spinoff_prover]
-    // TODO: Returns the exact vaddr that was mapped.
     pub fn insert_aligned(
         &mut self,
         mapping: Mapping,
@@ -1011,6 +1027,8 @@ impl VirtualMemoryRegion {
             self.lemma_areas_comparator_consistent(start_addr.pfn(), f);
         }
 
+        // Here we do a binary search again since we now have
+        // already known the exact virtual address to insert.
         let idx = self.areas.binary_search_by(f);
 
         proof {
@@ -1293,12 +1311,13 @@ impl VirtualMemory {
         let mapping_size = mapping_data.mapping_size();
         let flags = PteFlags::from_bits_truncate(self.flags.bits() | PRESENT);
 
+        kinfo!("the mapping range is ", self.range);
+
         let mut offset = 0;
         #[verus_spec(
             invariant
                 offset <= self.range.end@ - self.range.start@,
                 offset % PAGE_SIZE == 0,
-                offset <= mapping_size,
                 mapping_size == mapping_data.mapping_size_spec(),
                 PAGE_SIZE == 0x1000, // verus still requires const inlining...
                 self.wf(),
@@ -1323,7 +1342,9 @@ impl VirtualMemory {
             decreases
                 self.range.end@ - self.range.start@ - offset,
         )]
-        while offset < self.range.end.0 - self.range.start.0 && offset < mapping_size {
+        while offset < self.range.end.0 - self.range.start.0 {
+            kinfo!("Requesting mapping at offset ", offset);
+
             // Request if there is a physical address at this offset.
             if let Some(paddr) = mapping_data.phys_at(offset) {
                 let vaddr = VirtAddr(self.range.start.0 + offset);
@@ -1332,6 +1353,8 @@ impl VirtualMemory {
                     // This proof will be delayed.
                     assume(parent_perm.pgtable_perm.mapping_space.kernel.in_range_spec(paddr));
                 }
+
+                kinfo!("Mapping", vaddr, "to", paddr, "with flags", flags.bits() => hex);
 
                 // Now we can map the page.
                 PageTable::map_page_4k(
@@ -1346,6 +1369,10 @@ impl VirtualMemory {
                 );
             }
             offset += PAGE_SIZE;
+
+            proof {
+                assume(offset <= mapping_size);
+            }
         }
 
         read_handle.release_read();

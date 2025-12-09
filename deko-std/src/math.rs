@@ -146,6 +146,13 @@ pub assume_specification[ u64::ilog2 ](n: u64) -> (result: u32)
         result == log(2, n as int),
 ;
 
+pub assume_specification[ usize::ilog2 ](n: usize) -> (result: u32)
+    requires
+        n > 0,
+    ensures
+        result == log(2, n as int),
+;
+
 pub assume_specification[ u64::next_power_of_two ](n: u64) -> (result: u64)
     ensures
         result == next_power_of_two_spec(n as nat),
