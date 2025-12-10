@@ -26,6 +26,9 @@ deko-std = { workspace = true, features = ["alloc"] }
 elf = { workspace = true }
 paste = "1.0.15"
 
+[build-dependencies]
+chrono = { version = "0.4", features = ["std"] }
+
 [features]
 default = [
   "snp",

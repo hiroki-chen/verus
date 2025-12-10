@@ -368,6 +368,7 @@ version = "0.1.0"
 dependencies = [
  "deko-core",
  "deko-std",
+ "paste",
  "verus_builtin",
  "verus_builtin_macros",
  "vstd",
@@ -377,6 +378,7 @@ dependencies = [
 name = "deko-core"
 version = "0.0.0"
 dependencies = [
+ "chrono",
  "deko-logging",
  "deko-macros",
  "deko-std",

@@ -10,6 +10,7 @@ pub mod types;
 
 use deko_macros::DekoDebug;
 use deko_std::prelude::*;
+use task::DekoRunnablePtr;
 use vstd::atomic::{PAtomicBool, PAtomicU32, PermissionBool, PermissionU32};
 use vstd::cell::{PCell, PointsTo};
 use vstd::prelude::*;
@@ -17,15 +18,17 @@ use vstd::prelude::*;
 use crate::cpu::apic::X86Apic;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
 use crate::cpu::task::{
-    DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred, DekoRunnable, DekoTaskArgs,
+    DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred, DekoRunnable, DekoRunnablePred,
+    DekoTaskArgs,
 };
+use crate::kpanic_if;
 use crate::mm::paging::{
     bit_not_in_addr_region, bit_not_overlapping, Mapping, Page, PageTable, PageTablePermission,
     PteFlags,
 };
 use crate::mm::stack::{DekoIstStack, DekoKernelStack};
-use crate::mm::virt_to_phys;
 use crate::mm::vm::{VirtualMemoryRegion, VirtualMemoryRegionPermission};
+use crate::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR};
 use crate::snp::ghcb::GuestHostCommucationBlock;
 
 verus! {
@@ -545,6 +548,15 @@ impl DekoCpuCtx {
         &self.apic
     }
 
+    pub closed spec fn run_queue_spec(&self) -> Option<
+        &DekoRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred>,
+    > {
+        match &self.run_queue {
+            Some(rq) => Some(rq),
+            None => None,
+        }
+    }
+
     #[verifier::when_used_as_spec(apic_spec)]
     #[inline]
     pub fn apic(&self) -> (r: &X86Apic)
@@ -820,11 +832,14 @@ impl DekoCpuCtx {
         requires
             perm.wf_with(ptr),
             perm.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
+            perm.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
         ensures
             new_perm@.wf_with(ptr),
             new_perm@.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
+            new_perm@.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
     )]
     pub fn setup_idle_task(ptr: DekoPPtr<Self>, entry: u64) {
+        // Create a new idle task.
         proof_with!(Tracked(perm) => Tracked(new_perm));
         let task = DekoRunnable::new(
             ptr,
@@ -839,6 +854,32 @@ impl DekoCpuCtx {
                 },
             },
         );
+
+        // Now insert into the runqueue.
+        let cpu_ctx = ptr.borrow(Tracked(&new_perm.ptr_perm));
+
+        kpanic_if!(core::hint::unlikely(
+            cpu_ctx.run_queue.is_none()),
+            "Runqueue is not initialized for CPU",
+            cpu_ctx.cpu_id,
+        );
+
+        let lock = cpu_ctx.run_queue.as_ref().unwrap();
+        let (DekoAtomicData { data: mut runqueue, mut perm }, write_handle) = lock.acquire_write();
+
+        kpanic_if!(core::hint::unlikely(runqueue.run_list.len() >= usize::MAX - 1),
+            "Runqueue is full for CPU",
+            cpu_ctx.cpu_id,
+        );
+
+        proof_with!(Tracked(perm.borrow_mut()));
+        runqueue.set_idle_task(task);
+
+        write_handle.release_write(DekoAtomicData::new_with(runqueue, perm));
+
+        proof {
+            use_type_invariant(&lock);
+        }
 
         proof_with!(|= Tracked(new_perm));
         ()

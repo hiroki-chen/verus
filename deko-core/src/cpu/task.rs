@@ -34,6 +34,8 @@ use crate::mm::vm::{
 use crate::mm::DEKO_FRAME_ALLOCATOR;
 use crate::{die, kerror, kinfo, kpanic_if, kunimplemented};
 
+core::arch::global_asm!(include_str!("switch.S"), options(att_syntax));
+
 verus! {
 
 pub exec static DEKO_KTASK_BIT_ALLOC: DekoSimpleRwLock<DekoBitmapAllocator1024>
@@ -278,8 +280,12 @@ with_permission!(
 );
 
 impl WellFormed for DekoRunQueue {
+    #[verifier::inline]
     open spec fn wf(&self) -> bool {
         &&& self.run_list.wf()
+        &&& self.current.wf()
+        &&& self.idle.wf()
+        &&& self.terminated.wf()
     }
 }
 
@@ -382,6 +388,49 @@ impl DekoRunQueue {
 
         handle.release_write(DekoAtomicData { data, perm: Tracked(perm) });
         self.idle.replace(idle)
+    }
+
+    /// Schedules the next task to run from the run queue.
+    #[verus_spec(r =>
+        with
+            Tracked(perm): Tracked<&mut DekoRunQueuePermission>,
+        requires
+            old(self).wf(),
+            old(self).wf_with(*old(perm)),
+            old(self).is_scheduleable_spec(),
+        ensures
+            self.wf_with(*perm),
+            self.current is Some,
+    )]
+    pub fn schedule_init(&mut self) -> DekoRunnablePtr {
+        if self.run_list.len() == 0 {
+            match &self.idle {
+                Some(idle_ptr) => {
+                    self.current = Some(idle_ptr.clone());
+
+                    idle_ptr.clone()
+                },
+                None => {
+                    die("No idle task is found.");
+                },
+            }
+        } else {
+            proof {
+                assert(self.run_list@.len() > 0);
+            }
+
+            let (task, Tracked(mut task_perm)) = self.run_list.pop_front_no_alloc();
+            let task = task.take(Tracked(&mut task_perm)).value;
+            // todo: free the node.
+
+            self.current = Some(task.clone());
+
+            proof {
+                perm.run_list_perm = Ghost(perm.run_list_perm@.remove(0));
+            }
+
+            task
+        }
     }
 }
 
@@ -925,8 +974,29 @@ pub unsafe fn schedule_init() {
     no_irq_zone(
         ||
             {
-                // need to fetch the pointer to the idle task
-                // let idle_task = ???
+                let (cpu, Tracked(perm)) = DekoCpuCtx::this_cpu();
+                let cpu = cpu.borrow(Tracked(&perm.ptr_perm));
+
+                match &cpu.run_queue {
+                    Some(runqueue) => {
+                        let (DekoAtomicData { data: mut runqueue, mut perm }, handle) =
+                            runqueue.acquire_write();
+
+                        kpanic_if!(!runqueue.is_scheduleable(),
+                                   "No scheduleable task is found.");
+
+                        proof_with!(Tracked(perm.borrow_mut()));
+                        let task = runqueue.schedule_init();
+
+                        handle.release_write(DekoAtomicData::new_with(runqueue, perm));
+
+                        // perform the actual context switch
+                        switch(0, task);
+                    },
+                    None => {
+                        die("No active run queue is found.");
+                    },
+                }
             },
     );
 }
@@ -936,10 +1006,11 @@ pub unsafe fn schedule_init() {
 /// # Safety
 ///
 /// The caller must ensure that both `pre` and `next`
-/// are valid task pointers.
+/// are valid task pointers (they must be raw so we can
+/// use assembly to jump to them).
 #[verus_spec(r =>
     )]
-unsafe fn switch(pre: DekoRunnablePtr, next: DekoRunnablePtr) {
+unsafe fn switch(pre: u64, next: u64) {
     // NO IRQ is allowed or the system will jump into
     // an inconsistent state.
     no_irq_zone(
@@ -951,6 +1022,15 @@ unsafe fn switch(pre: DekoRunnablePtr, next: DekoRunnablePtr) {
                 // ???
             },
     );
+}
+
+#[verifier::external_body]
+pub fn do_switch_context(pre: u64, next: u64) {
+    unsafe {
+        core::arch::asm!(
+            "movq "
+        );
+    }
 }
 
 } // verus!

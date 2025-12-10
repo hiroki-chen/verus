@@ -131,6 +131,7 @@ impl<V: WellFormed> LinkedList<V> {
             self.wf(),
         ensures
             len == self@.len(),
+            len == self.spec_len(),
     {
         self.len
     }
@@ -179,6 +180,9 @@ impl<V: WellFormed> LinkedList<V> {
             self@ == old(self)@.remove(0),
             self.inner@.ptrs == old(self).inner@.ptrs.remove(0),
             self.wf(),
+            res.0@ == res.1@.pptr(),
+            res.1@.wf(),
+            res.1@.is_init(),
     {
         proof {
             // Unfold that definition so we indeed know that the head node is well formed.

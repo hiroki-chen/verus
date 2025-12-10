@@ -7,7 +7,7 @@
 use deko_core::cpu::gdt::GLOBAL_GDT;
 use deko_core::cpu::idt::{create_early_idt, init_early_idt, Idt};
 use deko_core::cpu::regs::{cr0_init, cr4_init, load_cr3, sse_init};
-use deko_core::cpu::task::{DekoRunQueue, DekoRunQueuePred};
+use deko_core::cpu::task::{schedule_init, DekoRunQueue, DekoRunQueuePred};
 use deko_core::cpu::{DekoCpuCtx, DekoCpuCtxPermission, IST_DF, PERCPU_AREAS};
 use deko_core::elf::ElfFile;
 use deko_core::logging::print_banner;
@@ -452,22 +452,33 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
         // do it later.
         assume(cpu_ctx_perm.wf_with(bst_cpu_ptr));
         assume(cpu_ctx_perm.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf());
+        assume(cpu_ctx_perm.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf());
     }
+
     // Assign "deko_main" to the BSP CPU context so that it will
     // start executing from there.
     proof_with!(Tracked(cpu_ctx_perm) => Tracked(cpu_ctx_perm));
-    DekoCpuCtx::setup_idle_task(bst_cpu_ptr, 114514);
+    DekoCpuCtx::setup_idle_task(bst_cpu_ptr, deko_main_func_ptr());
+
+    unsafe {
+        schedule_init();
+    }
 
     loop {
         // should never reach here
         // early_die();
     }
-    // deko_core::hal::setup_env(ctx);
 }
 
 /// The "main" function scheduled after the monitor is fully set up.
 fn deko_main() {
+    kinfo!("Hello World");
+
+    loop {
+    }
 }
+
+func_ptr!(deko_main);
 
 #[verifier::external]
 #[panic_handler]

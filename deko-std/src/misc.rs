@@ -329,3 +329,20 @@ macro_rules! lift_to_closure {
         }
     };
 }
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! func_ptr {
+    ($ident:ident) => {
+        paste::paste! {
+                                                                                        verus! {
+            #[doc(hidden)]
+            #[inline(always)]
+            #[verifier::external_body]
+            pub fn [<$ident _func_ptr>]() -> u64 {
+                $ident as u64
+            }
+        }
+                                                                                    }
+    };
+}

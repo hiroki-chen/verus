@@ -12,7 +12,7 @@ use crate::ptr::{DekoPPtr, DekoPointsTo};
 use crate::std_extra::convert::AsRefSpecImpl;
 use crate::sync::DekoAtomicData;
 use crate::wf::WellFormed;
-use crate::{boxed_ptr, DefaultDekoHeapAllocator, Predicate, VirtAddr, ARC_ID};
+use crate::{addr_of_ref, boxed_ptr, DefaultDekoHeapAllocator, Predicate, VirtAddr, ARC_ID};
 
 verus! {
 
@@ -540,6 +540,29 @@ impl<V: WellFormed, F: Predicate<V>> Arc<V, F> {
                 };
             }
         }
+    }
+
+    /// Gets a raw pointer to the inner data.
+    ///
+    /// The counts are not affected in any way and the `Arc` is not consumed.
+    /// The pointer is valid for as long as there is at least one `Arc` pointer
+    /// alive.
+    pub fn as_ptr(this: &Self) -> DekoPPtr<V>
+        requires
+            this.wf(),
+    {
+        let tracked inst = this.inst.borrow();
+        let tracked reader = this.reader.borrow();
+        let tracked perm = inst.reader_guard(reader.element(), &reader);
+
+        let inner_ref = this.ptr.borrow(Tracked(perm));
+
+        DekoPPtr(
+            vstd::simple_pptr::PPtr(
+                addr_of_ref(&inner_ref.data) as usize,
+                core::marker::PhantomData,
+            ),
+        )
     }
 }
 
