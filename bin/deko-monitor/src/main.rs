@@ -293,10 +293,10 @@ fn setup_bsp_cpu(
         private_bit,
         kernel_mapping,
         Some(vm_region),
-        // Some(ctx_switch_stack),
+        Some(top_of_the_stack),
         // Some(cpu_ist_stack),
         None,
-        None,
+        // None,
         Some(run_queue),
     );
 
@@ -471,6 +471,7 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
 }
 
 /// The "main" function scheduled after the monitor is fully set up.
+#[verifier::exec_allows_no_decreases_clause]
 fn deko_main() {
     kinfo!("Hello World");
 

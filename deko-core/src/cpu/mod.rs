@@ -299,7 +299,7 @@ pub struct DekoCpuCtx {
     /// The page table of this CPU.
     pgtable: DekoPPtr<PageTable>,
     /// The stack for doing context switches.
-    ctx_switch_stack: Option<DekoPPtr<DekoKernelStack>>,
+    ctx_switch_stack: Option<VirtAddr>,
     /// The stack for handling interrupts.
     ist_stack: Option<DekoIstStack>,
     /// The private bit of the PTE of this core.
@@ -324,7 +324,6 @@ with_permission! {
     ptr_perm: DekoPointsTo<DekoCpuCtx>,
     pgtable_perm: PageTablePermission,
     ghcb_perm: DekoPointsTo<GuestHostCommucationBlock>,
-    ctx_switch_stack_perm: Option<DekoPointsTo<DekoKernelStack>>,
     vm_region_perm: Option<VirtualMemoryRegionPermission>,
 }
 
@@ -540,7 +539,7 @@ impl DekoCpuCtx {
         self.kernel_mapping
     }
 
-    pub closed spec fn ctx_switch_stack_spec(&self) -> Option<DekoPPtr<DekoKernelStack>> {
+    pub closed spec fn ctx_switch_stack_spec(&self) -> Option<VirtAddr> {
         self.ctx_switch_stack
     }
 
@@ -614,7 +613,7 @@ impl DekoCpuCtx {
 
     #[verifier::when_used_as_spec(ctx_switch_stack_spec)]
     #[inline]
-    pub fn ctx_switch_stack(&self) -> (r: Option<DekoPPtr<DekoKernelStack>>)
+    pub fn ctx_switch_stack(&self) -> (r: Option<VirtAddr>)
         requires
             self.wf(),
         ensures
@@ -663,7 +662,7 @@ impl DekoCpuCtx {
         private_bit: u64,
         kernel_mapping: MappingSpace,
         vm_region: Option<VirtualMemoryRegion>,
-        ctx_switch_stack: Option<DekoPPtr<DekoKernelStack>>,
+        ctx_switch_stack: Option<VirtAddr>,
         ist_stack: Option<DekoIstStack>,
         run_queue: Option<DekoRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred>>,
     ) -> (r: Self)

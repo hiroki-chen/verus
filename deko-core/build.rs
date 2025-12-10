@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{TimeZone, Utc};
 
 fn main() {
     // Capture git commit hash
@@ -32,6 +32,8 @@ fn main() {
     // Rebuild if git HEAD changes
     println!("cargo:rerun-if-changed=../.git/HEAD");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src/cpu/switch.S");
+    println!("cargo:rerun-if-changed=src/cpu/idt.S");
 }
 
 fn format_timestamp_from_epoch(epoch: i64) -> String {

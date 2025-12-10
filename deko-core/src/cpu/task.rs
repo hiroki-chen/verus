@@ -31,7 +31,7 @@ use crate::mm::vm::{
     self, VirtualMemory, VirtualMemoryPermission, VirtualMemoryRegion,
     VirtualMemoryRegionPermission, VirtualMemoryRegionPred, VmMapping, VmMappingPred, VMR_GRANULE,
 };
-use crate::mm::DEKO_FRAME_ALLOCATOR;
+use crate::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR};
 use crate::{die, kerror, kinfo, kpanic_if, kunimplemented};
 
 core::arch::global_asm!(include_str!("switch.S"), options(att_syntax));
@@ -465,6 +465,7 @@ pub struct DekoRunnableCtx {
 #[derive(DekoDebug)]
 pub struct DekoRunnable {
     /// The stack pointer of the task.
+    #[deko(hex)]
     pub rsp: u64,
     /// The SSP of the task.
     pub ssp: VirtAddr,
@@ -479,9 +480,9 @@ pub struct DekoRunnable {
     /// The area allocated for XSAVE/XSTOR.
     pub xsave: DekoPPtr<Array<u8, 4096>>,
     /// The size of the XSAVE area.
+    #[deko(hex)]
     pub xsave_size: usize,
     /// The memory management.
-    #[deko(skip)]
     pub mm: DekoArc<VirtualMemoryRegion, VirtualMemoryRegionPermission, VirtualMemoryRegionPred>,
 }
 
@@ -735,6 +736,10 @@ impl DekoRunnable {
             Ghost(&cpu_borrowed.kernel_mapping_spec()),
         );
 
+        // This is a trick to avoid copying all the shared mappings
+        // one by one. We just copy the PTE from the kernel page table
+        // where the PDPE for shared mappings is stored; thus shared pages
+        // will be accessible in the new page table as well.
         let old_pte_value = *cpu_borrowed.pgtable.borrow(
             Tracked(&ctx_perm.pgtable_perm.pgtable_perm),
         ).0.index(PGTABLE_LVL3_IDX_SHARED as usize);
@@ -795,7 +800,6 @@ impl DekoRunnable {
             ptr_perm,
             pgtable_perm: cpu_pgtable_perm,
             ghcb_perm,
-            ctx_switch_stack_perm,
             vm_region_perm,
         } = ctx_perm;
 
@@ -836,9 +840,8 @@ impl DekoRunnable {
             ),
             priority: 0,
             xsave: xsave_ptr,
-            // mm: task_mm,
             mm: task_mm,
-            rsp: vrange.end.checked_sub(rsp).unwrap_or(0),
+            rsp: stack_bounds.end.0.checked_sub(rsp).unwrap_or(0),
             ssp: VirtAddr(0),
             stack: stack_bounds,
             xsave_size: PAGE_SIZE as _,
@@ -871,7 +874,6 @@ impl DekoRunnable {
             ptr_perm,
             pgtable_perm: cpu_pgtable_perm,
             ghcb_perm,
-            ctx_switch_stack_perm,
             vm_region_perm: Some(vm_region_perm),
         };
         cpu.write(Tracked(&mut ctx_perm.ptr_perm), cpu_new);
@@ -988,14 +990,73 @@ pub unsafe fn schedule_init() {
                         proof_with!(Tracked(perm.borrow_mut()));
                         let task = runqueue.schedule_init();
 
+                        proof {
+                            use_type_invariant(&task);
+                        }
+
                         handle.release_write(DekoAtomicData::new_with(runqueue, perm));
 
                         // perform the actual context switch
-                        switch(0, task);
+                        kinfo!("next task to schedule: ", task.as_ref().data);
+
+                        switch(None, task);
                     },
                     None => {
                         die("No active run queue is found.");
                     },
+                }
+            },
+    );
+}
+
+/// Attempts to perform the task switch.
+#[verus_spec(r =>
+    requires
+        pre.wf(),
+        next.wf(),
+)]
+fn switch(pre: Option<DekoRunnablePtr>, next: DekoRunnablePtr) {
+    // NO IRQ is allowed or the system will jump into
+    // an inconsistent state.
+    no_irq_zone(
+        ||
+            {
+                let (cpu, Tracked(perm)) = DekoCpuCtx::this_cpu();
+                let cpu = cpu.borrow(Tracked(&perm.ptr_perm));
+                let Some(stack) = cpu.ctx_switch_stack else {
+                    die("No context switch stack is assigned to the CPU.");
+                };
+                let private_bit = cpu.private_bit;
+                let shared_bit = cpu.shared_bit;
+
+                kinfo!("the private_bit: ", private_bit => hex);
+                kinfo!("the shared_bit: ", shared_bit => hex);
+
+                let cr3_next = {
+                    let read_handle = next.as_ref().data.pgtable.acquire_read();
+                    let pgtable_vaddr = read_handle.borrow().data.addr() as u64;
+
+                    read_handle.release_read();
+
+                    // Use this CPU's private and shared bits and page table to translate
+                    // the virtual address to physical address.
+                    virt_to_phys(
+                        private_bit,
+                        shared_bit,
+                        VirtAddr::new(pgtable_vaddr),
+                        Tracked(&perm.pgtable_perm),
+                    ).0
+                };
+
+                let pre = match pre {
+                    Some(ptr) => DekoArc::as_ptr(&ptr).addr() as u64,
+                    None => 0,
+                };
+                let next = DekoArc::as_ptr(&next).addr() as u64;
+
+                // perform the actual context switch
+                unsafe {
+                    do_context_switch(pre, next, cr3_next, stack.0);
                 }
             },
     );
@@ -1008,27 +1069,32 @@ pub unsafe fn schedule_init() {
 /// The caller must ensure that both `pre` and `next`
 /// are valid task pointers (they must be raw so we can
 /// use assembly to jump to them).
-#[verus_spec(r =>
-    )]
-unsafe fn switch(pre: u64, next: u64) {
-    // NO IRQ is allowed or the system will jump into
-    // an inconsistent state.
-    no_irq_zone(
-        ||
-            {
-                let (cpu, Tracked(perm)) = DekoCpuCtx::this_cpu();
-
-                // perform the actual context switch
-                // ???
-            },
-    );
-}
-
+///
+/// Typically this is just an unsafe wrapper for the [`switch`] function
+/// that de-reference the [`DekoArc<T>`] to get the raw pointer.
 #[verifier::external_body]
-pub fn do_switch_context(pre: u64, next: u64) {
+fn do_context_switch(pre: u64, next: u64, cr3_next: u64, stack_next: u64) {
+    kinfo!("Switching context: pre=", pre => hex);
+    kinfo!("Switching context: next=", next => hex);
+    kinfo!("Switching context: cr3_next=", cr3_next => hex);
+    kinfo!("Switching context: stack_next=", stack_next => hex);
+    kinfo!("rsp => ", unsafe { (next as *const DekoRunnable).read()}.rsp => hex);
+
+    // test if rsp can be read.
+    let v = unsafe { (((next as *const DekoRunnable).read().rsp) as *const u8).read() };
+
+    kinfo!("test read rsp => ", v => hex);
+
+    // BUG: Seems rsp is not mapped in the new task's page table?
+
     unsafe {
         core::arch::asm!(
-            "movq "
+            "call context_switch",
+            in("r12") pre,
+            in("r13") next,
+            in("r14") stack_next,
+            in("r15") cr3_next,
+            options(att_syntax),
         );
     }
 }
