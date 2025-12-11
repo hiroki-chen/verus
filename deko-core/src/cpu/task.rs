@@ -1,5 +1,5 @@
 use core::cmp::Ordering;
-use core::ops::Range;
+use core::ops::{Add, Range};
 use core::sync::atomic::{AtomicU32, AtomicU64};
 
 use deko_macros::{with_atomic_pred, DekoDebug};
@@ -10,7 +10,7 @@ use deko_std::cpu::{no_irq_zone, CpuID, X86GeneralRegs};
 use deko_std::list::{LinkedList, Node};
 use deko_std::mem::bitalloc::{DekoBitAlloc, DekoBitmapAllocator1024};
 use deko_std::mem::{PAGE_SIZE, PERTASK_BASE, PGTABLE_LVL3_IDX_SHARED};
-use deko_std::prelude::VADDR_UPPER_MASK;
+use deko_std::prelude::{func_ptr, VADDR_UPPER_MASK};
 use deko_std::ptr::{DekoPPtr, DekoPointsTo};
 use deko_std::sync::arc::DekoArc;
 use deko_std::sync::rwlock::{DekoRwLock, RwLockPredicate};
@@ -54,6 +54,12 @@ pub exec static DEKO_KTASK_BIT_ALLOC: DekoSimpleRwLock<DekoBitmapAllocator1024>
     }
 
     r
+}
+
+#[verifier::external_body]
+#[inline]
+pub const fn deko_rsp_offset() -> u64 {
+    core::mem::offset_of!(DekoRunnable, rsp) as u64
 }
 
 /// Ask the bit allocator to give us a VM region index for a new task.
@@ -120,6 +126,7 @@ with_atomic_pred! {
 }
 
 fn on_task_exit() {
+    kinfo!("Task exited");
 }
 
 #[verus_verify]
@@ -552,6 +559,8 @@ impl DekoRunnable {
         ensures
             vm_region.wf(),
             vm_region.wf_with(vm_region_perm),
+            old(vm_region_perm).pgtable_perm.private_bit == vm_region_perm.pgtable_perm.private_bit,
+            old(vm_region_perm).pgtable_perm.shared_bit == vm_region_perm.pgtable_perm.shared_bit,
             r.1.end >= r.1.start,
             r.0@ + r.1.end < u64::MAX,
     )]
@@ -614,6 +623,8 @@ impl DekoRunnable {
         ensures
             vm_region.wf(),
             vm_region.wf_with(vm_region_perm),
+            old(vm_region_perm).pgtable_perm.private_bit == vm_region_perm.pgtable_perm.private_bit,
+            old(vm_region_perm).pgtable_perm.shared_bit == vm_region_perm.pgtable_perm.shared_bit,
             r.1.end >= r.1.start,
             r.0@ + r.1.end < u64::MAX,
     )]
@@ -687,11 +698,12 @@ impl DekoRunnable {
         let stack_tos = vaddr.0 + range.end;
         // Need space for task handler.
         let stack_offset = 8;  // == core::mem::size_of::<u64>();
-        let rsp = stack_tos - stack_offset;
+        let stack_ptr = (stack_tos - stack_offset);
 
         kinfo!("Allocated kernel stack at virtual address: ", vaddr => hex);
         kinfo!("Kernel top of stack: ", stack_tos => hex);
-        kinfo!("Kernel stack rsp: ", rsp => hex);
+        kinfo!("Kernel stack rsp: ", stack_ptr => hex);
+        kinfo!("ret addr: ", ret => hex);
 
         // 'Push' the task frame onto the stack
         //
@@ -702,9 +714,9 @@ impl DekoRunnable {
         // to the flags of the caller.  In particular, interrupts must be
         // disabled because the task switch code expects to execute a new
         // task with interrupts disabled.
-        Self::push_stack_frames(rsp, entry, xsave.addr() as u64, param, ret);
+        Self::push_stack_frames(stack_ptr, entry, xsave.addr() as u64, param, ret);
 
-        (vaddr, range, stack_offset)
+        (vaddr, range, 0x98  /* stack_offset + ctx_size */ )
     }
 
     /// Creates a new runnable task with the given arguments on the given CPU.
@@ -729,10 +741,13 @@ impl DekoRunnable {
             cpu_borrowed.vm_region().is_none(),
         ), "CPU has no VM region assigned");
 
+        let private_bit = cpu_borrowed.private_bit;
+        let shared_bit = cpu_borrowed.shared_bit;
+
         // Allocate a page table for the new task.
         let (new_pgtable, _, Tracked(mut pgtable_perm)) = PageTable::new(
-            cpu_borrowed.private_bit,
-            cpu_borrowed.shared_bit,
+            private_bit,
+            shared_bit,
             Ghost(&cpu_borrowed.kernel_mapping_spec()),
         );
 
@@ -760,7 +775,7 @@ impl DekoRunnable {
             }
         }
 
-        proof_with!(Tracked(&mut pgtable_perm));
+        proof_with!(Tracked(&mut pgtable_perm), Tracked(&ctx_perm.vm_region_perm.tracked_borrow()));
         cpu_borrowed.vm_region().as_ref().unwrap().copy_to_page_table(new_pgtable);
         // Allocate xsave areas.
         let (xsave_ptr, Tracked(xsave_perm)) = boxed_ptr!(Array<u8, 4096>, &DEKO_FRAME_ALLOCATOR.0);
@@ -809,7 +824,7 @@ impl DekoRunnable {
         );
 
         let tracked mut vm_region_perm = vm_region_perm.tracked_unwrap();
-        let (stack, vrange, rsp) = match args.mode {
+        let (stack, vrange, rsp_offset) = match args.mode {
             DekoTaskMode::Kernel { entry, param, ret } => {
                 proof_with!(Tracked(&mut vm_region_perm), Tracked(&cpu_pgtable_perm) ,Tracked(&mut xsave_perm));
                 Self::alloc_kernel_stack(
@@ -830,6 +845,7 @@ impl DekoRunnable {
         };
 
         let stack_bounds = VirtAddr(stack.0 + vrange.start)..VirtAddr(stack.0 + vrange.end);
+        kinfo!("rsp offset is : ", rsp_offset => hex);
 
         let task = DekoRunnable {
             id: generate_id(),
@@ -841,7 +857,7 @@ impl DekoRunnable {
             priority: 0,
             xsave: xsave_ptr,
             mm: task_mm,
-            rsp: stack_bounds.end.0.checked_sub(rsp).unwrap_or(0),
+            rsp: stack_bounds.end.0.checked_sub(rsp_offset).unwrap_or(0),
             ssp: VirtAddr(0),
             stack: stack_bounds,
             xsave_size: PAGE_SIZE as _,
@@ -1032,6 +1048,8 @@ fn switch(pre: Option<DekoRunnablePtr>, next: DekoRunnablePtr) {
                 kinfo!("the private_bit: ", private_bit => hex);
                 kinfo!("the shared_bit: ", shared_bit => hex);
 
+                let rsp_next = next.as_ref().data.rsp;
+
                 let cr3_next = {
                     let read_handle = next.as_ref().data.pgtable.acquire_read();
                     let pgtable_vaddr = read_handle.borrow().data.addr() as u64;
@@ -1056,7 +1074,7 @@ fn switch(pre: Option<DekoRunnablePtr>, next: DekoRunnablePtr) {
 
                 // perform the actual context switch
                 unsafe {
-                    do_context_switch(pre, next, cr3_next, stack.0);
+                    do_context_switch(pre, next, deko_rsp_offset(), cr3_next, stack.0);
                 }
             },
     );
@@ -1073,23 +1091,34 @@ fn switch(pre: Option<DekoRunnablePtr>, next: DekoRunnablePtr) {
 /// Typically this is just an unsafe wrapper for the [`switch`] function
 /// that de-reference the [`DekoArc<T>`] to get the raw pointer.
 #[verifier::external_body]
-fn do_context_switch(pre: u64, next: u64, cr3_next: u64, stack_next: u64) {
+fn do_context_switch(pre: u64, next: u64, rsp_offset: u64, cr3_next: u64, stack_next: u64) {
     kinfo!("Switching context: pre=", pre => hex);
     kinfo!("Switching context: next=", next => hex);
     kinfo!("Switching context: cr3_next=", cr3_next => hex);
     kinfo!("Switching context: stack_next=", stack_next => hex);
-    kinfo!("rsp => ", unsafe { (next as *const DekoRunnable).read()}.rsp => hex);
+    kinfo!("Switching context: rsp_offset=", rsp_offset => hex);
+
+    // Debug what's stored at rsp of the next task.
+    let rsp_arr: &[u64; 18] = unsafe {
+        core::slice::from_raw_parts(
+            ((next).add(rsp_offset) as *const u64).read() as *const u64,
+            18,
+        ).try_into().unwrap()
+    };
+
+    for (i, val) in rsp_arr.iter().enumerate() {
+        kinfo!("rsp[", i, "] = ", *val => hex);
+    }
+
+    // kinfo!("Next task rsp content:", rsp_arr => hex);
 
     // test if rsp can be read.
     let v = unsafe { (((next as *const DekoRunnable).read().rsp) as *const u8).read() };
 
-    kinfo!("test read rsp => ", v => hex);
-
-    // BUG: Seems rsp is not mapped in the new task's page table?
-
     unsafe {
         core::arch::asm!(
             "call context_switch",
+            in("r11") rsp_offset,
             in("r12") pre,
             in("r13") next,
             in("r14") stack_next,
@@ -1129,5 +1158,18 @@ impl DekoRunQueue {
         )
     }
 }
+
+/// This function's address must be registered on the stack
+/// so that `retq` can jump to it.
+#[verifier::exec_allows_no_decreases_clause]
+#[no_mangle]
+pub extern "C" fn run_kernel_tasks() {
+    kinfo!("you are finally here");
+
+    loop {
+    }
+}
+
+func_ptr!(run_kernel_tasks);
 
 } // verus!

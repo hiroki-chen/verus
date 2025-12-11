@@ -1,3 +1,10 @@
+rustflags = [
+	"-C", "force-frame-pointers",
+	"-C", "linker-flavor=ld",
+	"--cfg", "aes_force_soft",
+	"--cfg", "polyval_force_soft",
+]
+
 [unstable]
 build-std-features = ["compiler-builtins-mem"]
 build-std = ["core", "alloc", "compiler_builtins"]

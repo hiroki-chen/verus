@@ -201,6 +201,10 @@ impl WellFormed for DekoCtxPermission {
         &&& self.pgtable_perm.mapped(
             VirtAddr::new(self.stage2_launch_info_perm.value().igvm_params as u64),
         )
+        &&& bit_not_overlapping(self.shared_bit())
+        &&& bit_not_overlapping(self.private_bit())
+        &&& bit_not_in_addr_region(self.shared_bit())
+        &&& bit_not_in_addr_region(self.private_bit())
     }
 }
 
@@ -208,10 +212,6 @@ impl DekoCtxPermission {
     pub open spec fn wf_with(&self, ctx: DekoPPtr<DekoCtx>) -> bool {
         &&& self.wf()
         &&& ctx@ === self.deko_ctx_ptr_perm.pptr()
-        &&& bit_not_overlapping(self.shared_bit())
-        &&& bit_not_overlapping(self.private_bit())
-        &&& bit_not_in_addr_region(self.shared_bit())
-        &&& bit_not_in_addr_region(self.private_bit())
     }
 
     /// Get the shared bit mask for this context.

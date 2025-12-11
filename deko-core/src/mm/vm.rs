@@ -13,13 +13,16 @@ use super::frame_allocator::DekoAllocatorApi;
 use crate::collections::Vec;
 use crate::mm::paging::{
     all_in_range_paddrs, all_normalized_vaddrs, bit_not_in_addr_region, bit_not_overlapping,
-    PageTable, PageTablePermission, PteFlags, Pte_ALL_BITS, PRESENT,
+    index_at_level, make_private_address, PageTable, PageTableEntry, PageTablePermission, PteFlags,
+    Pte_ALL_BITS, PRESENT, RECURSIVE_INDEX,
 };
 use crate::mm::stack::DekoKernelStack;
 use crate::mm::vm;
 use crate::{kinfo, kpanic_if, kunimplemented, kwarn, vec};
 
 verus! {
+
+pub type RootCoverage = u16;
 
 with_atomic_pred! {
     VirtualMemoryRegion,
@@ -209,6 +212,9 @@ pub struct VirtualMemoryRegion {
     pub areas: Vec<VirtualMemory>,
     /// The top-level page tables for this region.
     pub pgtable: DekoPPtr<PageTable>,
+    /// "Covered" regions of this [`VirtualMemoryRegion`] at the top-level of the root page table
+    /// it uses. One can think of this as a bitmap where each bit represents whether the corresponding
+    pub pgtable_top_level_coverage: RootCoverage,
     /// The mapping space this region belongs to.
     pub ms: MappingSpace,
     /// Private bit for this region.
@@ -343,6 +349,16 @@ impl PartialOrdSpecImpl for VirtualMemory {
 
 #[verus_verify]
 impl VirtualMemoryRegion {
+    /// This is an invariant that the coverage bits are consistent with the actual areas
+    /// the region is managing, i.e., `forall i ∈ [0, 512)`, coverage bit `i` is set iff.
+    /// `i * LEVEL_3_SPAN` is in `[start_pfn * PAGE_SIZE, end_pfn * PAGE_SIZE)` and `∃ vm ∈ areas.`
+    /// such that `vm.range` covers the whole `[i * LEVEL_3_SPAN, (i + 1) * LEVEL_3_SPAN)`.
+    pub open spec fn coverage_consistent(&self, perm: &VirtualMemoryRegionPermission) -> bool {
+        // TODO: Say this.
+        // &&& ((self.pgtable_top_level_coverage) as u64) & (RECURSIVE_INDEX) == 0
+        true
+    }
+
     pub open spec fn wf_with(&self, perm: &VirtualMemoryRegionPermission) -> bool {
         &&& self.id == perm.id
         &&& self.ms == perm.pgtable_perm.mapping_space
@@ -355,6 +371,7 @@ impl VirtualMemoryRegion {
             0 <= i < self.areas@.len() ==> #[trigger] self.areas@[i].wf_with(&perm.vm_perms@[i])
         &&& forall|i: int|
             0 <= i < self.areas@.len() ==> #[trigger] perm.vm_perms@[i].parent_id == self.id
+        &&& self.coverage_consistent(perm)
     }
 
     pub open spec fn pgtable_consistent(&self) -> bool {
@@ -569,6 +586,7 @@ impl VirtualMemoryRegion {
             pt_flags,
             areas: vec![],
             pgtable,
+            pgtable_top_level_coverage: 0,
             ms,
             private_bit,
             shared_bit,
@@ -576,18 +594,87 @@ impl VirtualMemoryRegion {
     }
 
     /// Copies all the page table entries from this region's page table to the target page table.
+    ///
+    /// The copy is lazy: only entries at the top-level managed by this region will be copied to
+    /// to top-level of the target page table. New mappings will do a full copy when needed.
+    ///
+    /// We do not use `self.areas` to do the copy as this is inefficient because there might be
+    /// many small areas scattered in the region. Using the bitmap is guaranteed that the loop
+    /// will ends in at most 512 iterations.
     #[verus_spec(
         with
             Tracked(pgtable_perm): Tracked<&mut PageTablePermission>,
+            Tracked(region_perm): Tracked<&VirtualMemoryRegionPermission>,
         requires
             self.wf(),
+            self.wf_with(region_perm),
             old(pgtable_perm).wf(),
             old(pgtable_perm).pgtable_perm.pptr() == target_pgtable@,
+            self.private_bit == old(pgtable_perm).private_bit,
+            self.shared_bit == old(pgtable_perm).shared_bit,
         ensures
             pgtable_perm.wf(),
-            //
+            pgtable_perm.pgtable_perm.pptr() == target_pgtable@,
+            old(pgtable_perm).mapping_space == pgtable_perm.mapping_space,
+            old(pgtable_perm).private_bit == pgtable_perm.private_bit,
+            old(pgtable_perm).shared_bit == pgtable_perm.shared_bit,
+            // more...
     )]
     pub fn copy_to_page_table(&self, target_pgtable: DekoPPtr<PageTable>) {
+        broadcast use crate::mm::paging::PteFlags::lemma_each_bit_is_valid;
+
+        let mut i = 0;
+        let flags = PteFlags::writeable_kernel();
+
+        proof {
+            bit_u64_and_auto();
+        }
+
+        #[verus_spec(
+            invariant
+                i <= PAGE_TABLE_ENTRY,
+                PAGE_TABLE_ENTRY == 512,
+                self.wf(),
+                self.wf_with(region_perm),
+                pgtable_perm.wf(),
+                pgtable_perm.pgtable_perm.pptr() == target_pgtable@,
+                flags.wf(),
+                flags.bits() & Pte_ALL_BITS == flags.bits(),
+                self.private_bit == pgtable_perm.private_bit,
+                self.shared_bit == pgtable_perm.shared_bit,
+                old(pgtable_perm).mapping_space == pgtable_perm.mapping_space,
+                old(pgtable_perm).private_bit == pgtable_perm.private_bit,
+                old(pgtable_perm).shared_bit == pgtable_perm.shared_bit,
+            decreases
+                PAGE_TABLE_ENTRY - i,
+        )]
+        while i < PAGE_TABLE_ENTRY {
+            // Check if this top-level entry is covered by this region
+            if i & (self.pgtable_top_level_coverage as usize) != 0 {
+                // We've found a coverage and then we copy the entry.
+                let entry = self.pgtable.borrow(
+                    Tracked(&region_perm.pgtable_perm.pgtable_perm),
+                ).0.index(i);
+                let new_entry_val = PageTableEntry(
+                    PhysAddr(
+                        make_private_address(entry.0.0, self.private_bit, self.shared_bit)
+                            | flags.bits(),
+                    ),
+                );
+                PageTable::update_entry_by_ptr(
+                    target_pgtable,
+                    Tracked(&mut pgtable_perm.pgtable_perm),
+                    i,
+                    new_entry_val,
+                );
+
+                proof {
+                    // TODO: Update pgtable_perm accordingly.
+                    assume(pgtable_perm.wf());
+                }
+            }
+            i += 1;
+        }
     }
 
     /// Inserts a new mapping [`VmMapping`] into the virtual memory region and
@@ -609,6 +696,8 @@ impl VirtualMemoryRegion {
         ensures
             self.wf(),
             self.wf_with(perm),
+            old(perm).pgtable_perm.private_bit == perm.pgtable_perm.private_bit,
+            old(perm).pgtable_perm.shared_bit == perm.pgtable_perm.shared_bit,
             r matches Some(vaddr) ==> {
                 &&& vaddr@ % PAGE_SIZE == 0
                 // &&& self.range.start@ <= vaddr@ < self.range.end@
@@ -662,6 +751,8 @@ impl VirtualMemoryRegion {
             },
             self.wf(),
             self.wf_with(perm),
+            old(perm).pgtable_perm.private_bit == perm.pgtable_perm.private_bit,
+            old(perm).pgtable_perm.shared_bit == perm.pgtable_perm.shared_bit,
     )]
     #[verifier::spinoff_prover]
     pub fn insert_aligned(
@@ -999,6 +1090,8 @@ impl VirtualMemoryRegion {
             self.wf(),
             self.wf_with(perm),
             self.areas@.len() == old(self).areas@.len() + 1,
+            old(perm).pgtable_perm.private_bit == perm.pgtable_perm.private_bit,
+            old(perm).pgtable_perm.shared_bit == perm.pgtable_perm.shared_bit,
     )]
     #[verifier::spinoff_prover]
     pub fn insert_at_vaddr(&mut self, vaddr: VirtAddr, vm_block: VirtualMemory) {
@@ -1066,9 +1159,14 @@ impl VirtualMemoryRegion {
                 admit();
             }
         }
+
         // We first map the new block.
         proof_with!(Tracked(perm), Ghost(idx_unwrapped as int));
         vm_block.map(self.pgtable, &self.ms, self.private_bit, self.shared_bit);
+        // Now update the coverage bitmap.
+        let top_level_start = index_at_level::<3>(vm_block.range.start);
+        self.pgtable_top_level_coverage = self.pgtable_top_level_coverage | (
+        top_level_start as u16);
         // Finally, we can insert the new block.
         self.areas.insert(idx_unwrapped, vm_block);
     }

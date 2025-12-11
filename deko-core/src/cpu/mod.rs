@@ -21,7 +21,6 @@ use crate::cpu::task::{
     DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred, DekoRunnable, DekoRunnablePred,
     DekoTaskArgs,
 };
-use crate::kpanic_if;
 use crate::mm::paging::{
     bit_not_in_addr_region, bit_not_overlapping, Mapping, Page, PageTable, PageTablePermission,
     PteFlags,
@@ -30,6 +29,7 @@ use crate::mm::stack::{DekoIstStack, DekoKernelStack};
 use crate::mm::vm::{VirtualMemoryRegion, VirtualMemoryRegionPermission};
 use crate::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR};
 use crate::snp::ghcb::GuestHostCommucationBlock;
+use crate::{kinfo, kpanic_if};
 
 verus! {
 
@@ -364,6 +364,10 @@ impl WellFormed for DekoCpuCtxPermission {
         &&& bit_not_in_addr_region(self.pgtable_perm.shared_bit)
         &&& bit_not_overlapping(self.pgtable_perm.private_bit)
         &&& bit_not_overlapping(self.pgtable_perm.shared_bit)
+        &&& self.vm_region_perm matches Some(perm) ==> {
+            &&& perm.pgtable_perm.private_bit == self.pgtable_perm.private_bit
+            &&& perm.pgtable_perm.shared_bit == self.pgtable_perm.shared_bit
+        }
         &&& self.ghcb_perm.is_init()
         &&& self.ghcb_perm.wf()
         &&& self.ghcb_perm.pptr() == self.ptr_perm.value().ghcb_spec()@
@@ -848,8 +852,8 @@ impl DekoCpuCtx {
                 name: "idle",
                 mode: task::DekoTaskMode::Kernel {
                     entry,
-                    param: 0,  // cpu id...
-                    ret: 0x0,  /* TO BE FILLED */
+                    param: 0,  // cpu id... etc.
+                    ret: crate::cpu::task::run_kernel_tasks_func_ptr(),
                 },
             },
         );

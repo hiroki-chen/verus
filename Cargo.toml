@@ -14,7 +14,7 @@ members = [
 # Unfortunately due to `Cargo`'s default feature unification, we need to
 # exclude some crates that have conflicting default features like global
 # allocator API in tests.
-exclude = ["tools/verus", "tests/buddy", "tests/collections"]
+exclude = ["tools/verus", "tests/buddy", "tests/collections", "tests/elf"]
 
 [workspace.dependencies]
 vstd = { git = "https://github.com/hiroki-chen/verus.git", default-features = false, branch = "verus-spec-const-fix" }
