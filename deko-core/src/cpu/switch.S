@@ -27,7 +27,6 @@ context_switch:
   testq   %r12, %r12   // pre == null
   jz      1f
 
-  // Problematic: ...
   movq    %r12, %rax
   addq    %r11, %rax   // pre + offset_of(rsp)
   movq    %rsp, (%rax)  # save current rsp into pre->rsp
@@ -45,9 +44,9 @@ context_switch:
   // directly load it here and recover the context (which is repr(C)) directly.
 
   movq    %r13, %rax
-  addq    %r11, %rax   // next + offset_of(rsp)
-  movq    (%rax), %rsp  # load next rsp from next->rsp
-  addq    $8, %rsp   # skip saved rsp
+  addq    %r11, %rax    // next + offset_of(rsp)
+  movq    (%rax), %rsp  // load next rsp from next->rsp
+  addq    $8, %rsp      // skip saved rsp
 
   popq    %r15
   popq    %r14
@@ -67,3 +66,15 @@ context_switch:
   popfq
 
   retq
+
+.globl trampoline
+
+trampoline:
+  // void_t trampoline(void_t (*func)(void_t*), void_t* arg)
+  // Call func(arg) and then halt.
+
+  // Restore the interrupts as they were disabled when we switched tasks in the
+  // no_irq_zone.
+  sti
+  xrstor (%rsi)
+  

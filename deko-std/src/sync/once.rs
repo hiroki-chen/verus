@@ -12,6 +12,8 @@ verus! {
 
 pub type DekoSimpleOnceCell<V> = OnceCell<V, ()>;
 
+pub type DekoOnceCell<V, P, Pred> = OnceCell<DekoAtomicData<V, P>, Pred>;
+
 /// A tracked state of a¸ `OnceCell` that can be used to ensure that the cell is
 /// initialized before accessing its value.
 pub tracked enum OnceCellState<V: 'static> {

@@ -22,8 +22,8 @@ use crate::snp::ghcb::{current_ghcb, msr_register_ghcb_gpa, GuestHostCommucation
 use crate::{kinfo, Stage2LaunchInfo};
 
 pub mod ghcb;
-
 pub mod logging;
+pub mod req;
 
 extern "C" {
     /// A global flag to indicate whether the AP has been started.

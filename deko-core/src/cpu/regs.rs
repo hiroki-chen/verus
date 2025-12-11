@@ -258,4 +258,17 @@ pub fn sse_init() {
     xcr0_init();
 }
 
+#[verus_spec(r =>
+    // with Tracked(cpu_core): Tracked<&mut DekoCpuCore>,
+    // requires
+    // ensures
+)]
+#[verifier::external_body]
+#[inline]
+pub fn sse_restore_context(addr: u64) {
+    unsafe {
+        core::arch::x86_64::_xrstor(addr as *const u8, 0b111);
+    }
+}
+
 } // verus!

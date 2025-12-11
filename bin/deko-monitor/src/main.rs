@@ -7,7 +7,7 @@
 use deko_core::cpu::gdt::GLOBAL_GDT;
 use deko_core::cpu::idt::{create_early_idt, init_early_idt, Idt};
 use deko_core::cpu::regs::{cr0_init, cr4_init, load_cr3, sse_init};
-use deko_core::cpu::task::{schedule_init, DekoRunQueue, DekoRunQueuePred};
+use deko_core::cpu::task::{cpu_idle, schedule_init, DekoRunQueue, DekoRunQueuePred};
 use deko_core::cpu::{DekoCpuCtx, DekoCpuCtxPermission, IST_DF, PERCPU_AREAS};
 use deko_core::elf::ElfFile;
 use deko_core::logging::print_banner;
@@ -23,8 +23,9 @@ use deko_core::mm::vm::{
 use deko_core::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR};
 use deko_core::snp::ghcb::GuestHostCommucationBlock;
 use deko_core::snp::logging::init_ghcb_logging;
+use deko_core::snp::req::init_snp_guest_driver;
 use deko_core::snp::{init_guest_host, setup_apic};
-use deko_core::{get_igvm_params, kinfo, DekoKernelLaunchInfo};
+use deko_core::{get_igvm_params, kerror, kinfo, DekoKernelLaunchInfo};
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
@@ -464,19 +465,27 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
         schedule_init();
     }
 
-    loop {
-        // should never reach here
-        // early_die();
-    }
+    // This is unreachable; if this function gets called then
+    // `schedule_init` must have failed.
+    kerror!("deko_setup: reached unreachable point");
+    early_die();
 }
 
 /// The "main" function scheduled after the monitor is fully set up.
 #[verifier::exec_allows_no_decreases_clause]
-fn deko_main() {
-    kinfo!("Hello World");
+#[verus_spec(
+    with Tracked(cpu_ctx_perm): Tracked<DekoCpuCtxPermission>,
+    requires
+        cpu_ctx_perm.ptr_perm.value().cpu_id() == 0,
 
-    loop {
-    }
+)]
+fn deko_main(cpu_index: usize) {
+    kinfo!("deko_main: entered");
+
+    // Initialize the guest driver.
+    init_snp_guest_driver();
+
+    cpu_idle(cpu_index);
 }
 
 func_ptr!(deko_main);

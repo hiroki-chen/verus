@@ -10,6 +10,7 @@ use deko_std::cpu::{no_irq_zone, CpuID, X86GeneralRegs};
 use deko_std::list::{LinkedList, Node};
 use deko_std::mem::bitalloc::{DekoBitAlloc, DekoBitmapAllocator1024};
 use deko_std::mem::{PAGE_SIZE, PERTASK_BASE, PGTABLE_LVL3_IDX_SHARED};
+use deko_std::misc::early_dbg;
 use deko_std::prelude::{func_ptr, VADDR_UPPER_MASK};
 use deko_std::ptr::{DekoPPtr, DekoPointsTo};
 use deko_std::sync::arc::DekoArc;
@@ -21,7 +22,9 @@ use vstd::prelude::*;
 use vstd::std_specs::cmp::{PartialEqSpec, PartialEqSpecImpl, PartialOrdSpecImpl};
 
 use crate::collections::Vec;
-use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
+use crate::cpu::irq::irq_enable;
+use crate::cpu::regs::sse_restore_context;
+use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission, CPUID_MAX_COUNT};
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
 use crate::mm::paging::{
     bit_not_in_addr_region, bit_not_overlapping, PageTable, PageTablePermission, PteFlags,
@@ -266,6 +269,9 @@ pub struct DekoRunQueue {
     pub idle: Option<DekoRunnablePtr>,
     /// The terminated task pointer.
     pub terminated: Option<DekoRunnablePtr>,
+    /// Someone put the task here so the current CPU
+    /// must take care with it.
+    pub wake: Option<DekoRunnablePtr>,
 }
 
 impl View for DekoRunQueue {
@@ -284,6 +290,7 @@ with_permission!(
     current_ptr: Option<DekoRunnablePtr>,
     idle_ptr: Option<DekoRunnablePtr>,
     terminated_ptr: Option<DekoRunnablePtr>,
+    wake_ptr: Option<DekoRunnablePtr>,
 );
 
 impl WellFormed for DekoRunQueue {
@@ -293,6 +300,7 @@ impl WellFormed for DekoRunQueue {
         &&& self.current.wf()
         &&& self.idle.wf()
         &&& self.terminated.wf()
+        &&& self.wake.wf()
     }
 }
 
@@ -301,6 +309,26 @@ impl DekoRunQueue {
     pub open spec fn wf_with(&self, perm: DekoRunQueuePermission) -> bool {
         &&& self.wf()
         &&& perm.run_list_perm@.len() == self.run_list@.len()
+        &&& perm.idle_ptr.wf()
+        &&& perm.current_ptr.wf()
+        &&& perm.terminated_ptr.wf()
+        &&& perm.wake_ptr.wf()
+        // &&& perm.current_ptr is Some <==> self.current is Some
+        // &&& perm.idle_ptr is Some <==> self.idle is Some
+        // &&& perm.terminated_ptr is Some <==> self.terminated is Some
+        // &&& perm.wake_ptr is Some <==> self.wake is Some
+        // &&& perm.current_ptr matches Some(current_ptr) ==> {
+        //     &&& self.current matches Some(current) ==> current@@ == current_ptr@@
+        // }
+        // &&& perm.idle_ptr matches Some(idle_ptr) ==> {
+        //     &&& self.idle matches Some(idle) ==> idle@@ == idle_ptr@@
+        // }
+        // &&& perm.terminated_ptr matches Some(terminated_ptr) ==> {
+        //     &&& self.terminated matches Some(terminated) ==> terminated@@ == terminated_ptr@@
+        // }
+        // &&& perm.wake_ptr matches Some(wake_ptr) ==> {
+        //     &&& self.wake matches Some(wake) ==> wake@@ == wake_ptr@@
+        // }
         &&& forall|i: int|
             #![trigger self.run_list@[i as int], perm.run_list_perm@[i as int]]
             0 <= i < perm.run_list_perm@.len() ==> self.run_list@[i as int]@
@@ -1145,6 +1173,7 @@ impl DekoRunQueue {
             current_ptr: None,
             idle_ptr: None,
             terminated_ptr: None,
+            wake_ptr: None,
         };
 
         (
@@ -1153,6 +1182,7 @@ impl DekoRunQueue {
                 current: None,
                 idle: None,
                 terminated: None,
+                wake: None,
             },
             Tracked(perm),
         )
@@ -1160,16 +1190,69 @@ impl DekoRunQueue {
 }
 
 /// This function's address must be registered on the stack
-/// so that `retq` can jump to it.
-#[verifier::exec_allows_no_decreases_clause]
+/// so that `retq` can jump to it; this function does nothing
+/// but just some checks.
 #[no_mangle]
-pub extern "C" fn run_kernel_tasks() {
-    kinfo!("you are finally here");
+#[allow(improper_ctypes_definitions)]
+#[verifier::exec_allows_no_decreases_clause]
+#[verus_spec()]
+pub extern "C" fn run_kernel_tasks(
+    entry: u64,
+    xsave_addr: DekoPPtr<Array<u8, 4096>>,
+    start_params: u64,
+) {
+    kinfo!("Trampoline: entered `run_kernel_tasks:`");
+    kinfo!("\tentry = ", entry => hex);
+    kinfo!("\txsave_addr = ", xsave_addr.addr() as u64 => hex);
+    kinfo!("\tstart_params = ", start_params => hex);
 
+    // Now we need to re-enable the interrupts.
+    // Then we enter the entry.
+    irq_enable();
+
+    sse_restore_context(xsave_addr.addr() as u64);
+
+    into(entry, start_params);
+}
+
+/// A wrapper function to convert `f` into function pointer type
+/// and call it.
+#[verifier::external_body]
+#[verus_spec()]
+#[inline]
+fn into(f: u64, args: u64) -> (__: !) {
+    let f: fn (u64) = unsafe { core::mem::transmute(f) };
+
+    f(args);
+
+    // This function should NEVER return
     loop {
     }
 }
 
 func_ptr!(run_kernel_tasks);
+
+/// Put the current CPU into idle state and halt it for saving the
+/// power unless some other cores wake it up by sending an IPI.
+#[verus_spec(r =>
+    requires
+        which < CPUID_MAX_COUNT,
+    ensures
+        r.wf(),
+)]
+#[verifier::exec_allows_no_decreases_clause]
+pub fn cpu_idle(which: usize) -> DekoRunnablePtr {
+    #[verus_spec(
+        invariant
+            which < CPUID_MAX_COUNT,
+    )]
+    loop {
+        early_dbg();  // <=> hlt, though bad naming
+
+        // Check if there is any IPI sent to this CPU.
+        let (cpu, Tracked(perm)) = DekoCpuCtx::this_cpu();
+        let cpu = cpu.borrow(Tracked(&perm.ptr_perm));
+    }
+}
 
 } // verus!
