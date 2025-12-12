@@ -596,7 +596,15 @@ impl GuestHostCommucationBlock {
         port: u16,
         size: u8,
     ) -> (r: u64) {
-        0
+        let mut info: u64 = 1;  // IN instruction
+
+        info |= (port as u64) << 16;
+        info |= 1 << ((size as u64) + 3);
+
+        let Tracked(perm) = Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::IOIO, info, 0);
+        let rax = Self::get_rax(ptr, Tracked(&perm));
+
+        rax
     }
 
     #[verifier::external_body]

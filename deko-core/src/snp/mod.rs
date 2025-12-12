@@ -662,4 +662,28 @@ impl SnpStatusFlags {
     }
 }
 
+#[inline]
+pub fn outw(port: u16, val: u16) {
+    let (ghcb, Tracked(perm)) = current_ghcb();
+    GuestHostCommucationBlock::ioout(ghcb, Tracked(perm), port, val as _, 2);
+}
+
+#[inline]
+pub fn inb(port: u16) -> u8 {
+    let (ghcb, Tracked(perm)) = current_ghcb();
+    GuestHostCommucationBlock::ioin(ghcb, Tracked(perm), port, 1) as u8
+}
+
+#[inline]
+pub fn inw(port: u16) -> u16 {
+    let (ghcb, Tracked(perm)) = current_ghcb();
+    GuestHostCommucationBlock::ioin(ghcb, Tracked(perm), port, 2) as u16
+}
+
+#[inline]
+pub fn inl(port: u16) -> u32 {
+    let (ghcb, Tracked(perm)) = current_ghcb();
+    GuestHostCommucationBlock::ioin(ghcb, Tracked(perm), port, 3) as u32
+}
+
 } // verus!

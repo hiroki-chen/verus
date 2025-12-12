@@ -7,6 +7,22 @@ use crate::cmp::is_sorted_spec;
 
 verus! {
 
+pub assume_specification[ core::primitive::str::as_bytes ](s: &str) -> (r: &[u8])
+;
+
+pub assume_specification<P: core::str::pattern::Pattern>[ core::primitive::str::trim_end_matches ](
+    s: &str,
+    p: P,
+) -> (r: &str) where
+    for <'a><P as core::str::pattern::Pattern>::Searcher<'a>: core::str::pattern::ReverseSearcher<
+        'a,
+    >,
+
+;
+
+pub assume_specification[ <core::primitive::str as PartialEq>::eq ](s1: &str, s2: &str) -> bool
+;
+
 pub open spec fn binary_search_spec<'a, T: 'a>(
     s: vstd::seq::Seq<T>,
     x: &T,

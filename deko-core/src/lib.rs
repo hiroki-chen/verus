@@ -6,6 +6,7 @@
 #![feature(never_type)]
 #![feature(trait_alias)]
 #![feature(likely_unlikely)]
+#![feature(specialization)]
 #![allow(named_asm_labels)]
 #![allow(binary_asm_labels)]
 #![allow(mismatched_lifetime_syntaxes)]
@@ -31,6 +32,8 @@ pub mod boot;
 pub mod collections;
 pub mod cpu;
 pub mod elf;
+pub mod fs;
+pub mod fw;
 pub mod hal;
 pub mod imp;
 pub mod logging;

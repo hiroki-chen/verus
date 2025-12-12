@@ -207,4 +207,37 @@ impl<T: WellFormed + Copy, const N: usize> Copy for Array<T, N> {
 
 }
 
+impl<const N: usize> Array<u8, N> {
+    #[verifier::external_body]
+    pub fn as_str(&self) -> (s: &str)
+        requires
+            self.wf(),
+            forall|i: int| 0 <= i < N ==> 0 <= #[trigger] self@[i] < 128,
+        ensures
+            s@.len() == N,
+            forall|i: int| i < N ==> s@[i] == #[trigger] self@[i as int],
+    {
+        let slice = &self.0;
+        unsafe { core::str::from_utf8_unchecked(slice) }
+    }
+}
+
+impl<T: WellFormed + PartialEq<U>, U: WellFormed, const N: usize> core::cmp::PartialEq<
+    Array<U, N>,
+> for Array<T, N> {
+    #[verifier::external_body]
+    fn eq(&self, other: &Array<U, N>) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl<T: WellFormed + PartialEq<U>, U: WellFormed, const N: usize> core::cmp::PartialEq<
+    [U],
+> for Array<T, N> {
+    #[verifier::external_body]
+    fn eq(&self, other: &[U]) -> bool {
+        self.0 == *other
+    }
+}
+
 } // verus!

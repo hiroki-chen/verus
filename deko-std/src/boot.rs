@@ -63,6 +63,156 @@ pub enum MemoryMapEntryType {
     HIDDEN = 0x5,
 }
 
+#[derive(Clone, Copy, DekoDebug)]
+#[repr(C, packed)]
+pub struct MADTEntryHeader {
+    pub entry_type: u8,
+    pub entry_len: u8,
+}
+
+/// Entry for a local APIC within MADT
+#[derive(Clone, DekoDebug)]
+#[repr(C, packed)]
+struct MADTEntryLocalApic {
+    header: MADTEntryHeader,
+    acpi_id: u8,
+    apic_id: u8,
+    flags: u32,
+}
+
+/// Entry for a local X2APIC within MADT
+#[derive(Clone, Copy, DekoDebug)]
+#[repr(C, packed)]
+struct MADTEntryLocalX2Apic {
+    header: MADTEntryHeader,
+    reserved: Array<u8, 2>,
+    apic_id: u32,
+    flags: u32,
+    acpi_id: u32,
+}
+
+/// Higher level representation of the raw ACPI table header
+#[derive(Clone, Copy, DekoDebug)]
+#[repr(C, packed)]
+struct ACPITableHeader {
+    sig: Array<u8, 4>,
+    len: u32,
+    rev: u8,
+    chksum: u8,
+    oem_id: Array<u8, 6>,
+    oem_table_id: Array<u8, 8>,
+    oem_rev: u32,
+    compiler_id: Array<u8, 4>,
+    compiler_rev: u32,
+}
+
+#[derive(DekoDebug)]
+pub struct ACPITable<'a> {
+    header: ACPITableHeader,
+    /// Raw binary content of ACPI table
+    buf: &'a [u8],
+}
+
+impl<'a> ACPITable<'a> {
+    /// Try to parse a raw ACPI table from the given address.
+    #[verifier::external_body]
+    pub fn new(buf: &[u8]) -> (r: Self) {
+        let ptr = buf.as_ptr();
+        let header = unsafe { &*(ptr as *const ACPITableHeader) };
+        let len = header.len as usize;
+
+        let buf = unsafe {
+            core::slice::from_raw_parts(
+                ptr.add(core::mem::size_of::<ACPITableHeader>()) as *const u8,
+                len,
+            )
+        };
+
+        ACPITable { header: header.clone(), buf }
+    }
+
+    /// Try to parse the raw bytes as a CPU topology table. Since this
+    /// requires some unsafe code, we mark it as external body.
+    #[cfg(feature = "alloc")]
+    #[verifier::external_body]
+    pub fn get_cpu_topology<A: core::alloc::Allocator + WellFormed>(&self, alloc: A) -> Option<
+        alloc::vec::Vec<ACPICPUInfo, A>,
+    >
+        requires
+            self.wf(),
+            alloc.wf(),
+    {
+        use alloc::vec::Vec;
+
+        let mut cpus: Vec<ACPICPUInfo, A> = Vec::new_in(alloc);
+        let mut offset = 8;  // Skip the MADT header which is 8 bytes
+
+        while offset < self.buf.len() {
+            let entry = unsafe { &*(self.buf.as_ptr().add(offset) as *const MADTEntryHeader) };
+
+            match entry.entry_type {
+                // We have encountered a Processor Local APIC entry
+                0 if entry.entry_len == 8 => {
+                    let lapic_entry = unsafe {
+                        &*(self.buf.as_ptr().add(offset) as *const MADTEntryLocalApic)
+                    };
+                    let cpu_info = ACPICPUInfo {
+                        apic_id: lapic_entry.apic_id as u32,
+                        enabled: (lapic_entry.flags & 0x1) != 0,
+                    };
+                    cpus.push(cpu_info);
+                    offset += entry.entry_len as usize;
+                }
+                // We have encountered a Processor Local x2APIC entry
+                ,
+                9 if entry.entry_len == 16 => {
+                    let x2apic_entry = unsafe {
+                        &*(self.buf.as_ptr().add(offset) as *const MADTEntryLocalX2Apic)
+                    };
+                    let cpu_info = ACPICPUInfo {
+                        apic_id: x2apic_entry.apic_id,
+                        enabled: (x2apic_entry.flags & 0x1) != 0,
+                    };
+                    cpus.push(cpu_info);
+                    offset += entry.entry_len as usize;
+                },
+                _ => {
+                    // Unknown.
+                },
+            }
+        }
+
+        Some(cpus)
+    }
+}
+
+impl WellFormed for ACPITableHeader {
+    open spec fn wf(&self) -> bool {
+        true
+    }
+}
+
+impl<'a> WellFormed for ACPITable<'a> {
+    open spec fn wf(&self) -> bool {
+        true
+    }
+}
+
+// #[derive(DekoDebug)]
+pub struct ACPITableBuffer<'a> {
+    buf: &'a [u8],
+    /// Collection of metadata for ACPI tables, including signatures
+    tables: &'a [ACPITableMeta],
+}
+
+#[derive(DekoDebug, Clone, Copy)]
+struct ACPITableMeta {
+    /// 4-character signature of the table
+    sig: Array<u8, 4>,
+    /// The offset of the table within the table buffer
+    offset: usize,
+}
+
 #[repr(C)]
 #[derive(Clone, DekoDebug)]
 pub struct IgvmVhsMemoryMapEntry {
@@ -400,6 +550,20 @@ impl IgvmParamBlock {
     }
 }
 
+#[derive(Clone, DekoDebug)]
+pub struct ACPICPUInfo {
+    /// The APIC ID for the CPU
+    pub apic_id: u32,
+    /// Indicates whether the CPU is enabled
+    pub enabled: bool,
+}
+
+impl WellFormed for ACPICPUInfo {
+    open spec fn wf(&self) -> bool {
+        true
+    }
+}
+
 impl<'a> IgvmParams<'a> {
     #[inline]
     pub fn size(&self) -> usize
@@ -410,6 +574,26 @@ impl<'a> IgvmParams<'a> {
         // parameter area always begins at the kernel base
         // address.
         self.igvm_param_block.param_area_size as usize
+    }
+
+    /// Probe the topology information from the MADT, if present.
+    #[cfg(feature = "alloc")]
+    pub fn load_cpu_info<A: core::alloc::Allocator + WellFormed>(&self, alloc: A) -> Option<
+        alloc::vec::Vec<ACPICPUInfo, A>,
+    >
+        requires
+            self.wf(),
+            alloc.wf(),
+    {
+        match self.igvm_madt {
+            Some(madt_data) if madt_data.len() != 0 => {
+                let acpi = ACPITable::new(madt_data);
+
+                acpi.get_cpu_topology(alloc)
+            },
+            // If no madt is found then we will let the caller handle it.
+            _ => None,
+        }
     }
 }
 

@@ -4,14 +4,17 @@
 //!
 //! - `sync`: Provides synchronization primitives such as `Mutex`, `RwLock`, and `OnceCell`.
 #![cfg_attr(not(test), no_std)]
+#![cfg_attr(feature = "alloc", feature(allocator_api))]
 #![allow(non_snake_case)]
 #![allow(unused_imports)]
 #![allow(unexpected_cfgs)]
 #![allow(unused_macros)]
+#![allow(incomplete_features)]
 #![allow(non_shorthand_field_patterns)]
 #![allow(mismatched_lifetime_syntaxes)]
-#![cfg_attr(feature = "alloc", feature(allocator_api))]
+#![feature(pattern)]
 #![feature(sized_hierarchy)]
+#![feature(specialization)]
 #![feature(likely_unlikely)]
 
 #[cfg(feature = "alloc")]

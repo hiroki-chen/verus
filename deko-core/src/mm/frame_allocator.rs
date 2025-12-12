@@ -46,6 +46,12 @@ impl WellFormed for DekoPageFrameAllocator {
 
 pub struct DekoAllocatorApi;
 
+impl WellFormed for DekoAllocatorApi {
+    open spec fn wf(&self) -> bool {
+        true
+    }
+}
+
 #[verifier::external]
 unsafe impl core::alloc::Allocator for DekoAllocatorApi {
     #[inline]

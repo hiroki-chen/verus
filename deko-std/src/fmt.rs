@@ -354,25 +354,7 @@ impl<T: DekoDebug, E: DekoDebug> DekoDebug for Result<T, E> {
     }
 }
 
-// Blanket implementation for references - this allows &T to implement DekoDebug when T does
-impl<T: DekoDebug + ?Sized> DekoDebug for &T {
-    #[verifier::external_body]
-    fn deko_debug<W: DekoWriter>(&self, writer: &W) {
-        (*self).deko_debug(writer);
-    }
-
-    #[verifier::external_body]
-    fn deko_debug_hex<W: DekoWriter>(&self, writer: &W) {
-        (*self).deko_debug_hex(writer);
-    }
-
-    #[verifier::external_body]
-    fn deko_debug_oct<W: DekoWriter>(&self, writer: &W) {
-        (*self).deko_debug_oct(writer);
-    }
-}
-
-impl<'a> DekoDebug for &'a [u8] {
+impl DekoDebug for [u8] {
     #[verifier::external_body]
     fn deko_debug<W: DekoWriter>(&self, writer: &W) {
         if self.is_empty() {
@@ -423,6 +405,23 @@ impl<'a> DekoDebug for &'a [u8] {
     }
 }
 
+// Blanket implementation for references - this allows &T to implement DekoDebug when T does
+impl<T: DekoDebug + ?Sized> DekoDebug for &T {
+    #[verifier::external_body]
+    fn deko_debug<W: DekoWriter>(&self, writer: &W) {
+        <T as DekoDebug>::deko_debug(*self, writer);
+    }
+
+    #[verifier::external_body]
+    fn deko_debug_hex<W: DekoWriter>(&self, writer: &W) {
+        <T as DekoDebug>::deko_debug(*self, writer);
+    }
+
+    #[verifier::external_body]
+    fn deko_debug_oct<W: DekoWriter>(&self, writer: &W) {
+        <T as DekoDebug>::deko_debug(*self, writer);
+    }
+}
 
 impl<T: DekoDebug> DekoDebug for core::ops::Range<T> {
     #[verifier::external_body]
@@ -482,6 +481,20 @@ impl<T: DekoDebug, const N: usize> DekoDebug for [T; N] {
         writer.write_str("]");
     }
 }
+
+// default impl<T: DekoDebug> DekoDebug for [T] {
+//     #[verifier::external_body]
+//     fn deko_debug<W: DekoWriter>(&self, writer: &W) {
+//         writer.write_str("[");
+//         for i in 0..self.len() {
+//             if i > 0 {
+//                 writer.write_str(", ");
+//             }
+//             self[i].deko_debug(writer);
+//         }
+//         writer.write_str("]");
+//     }
+// }
 
 impl<V: WellFormed> DekoDebug for DekoPPtr<V> {
     #[verifier::external_body]

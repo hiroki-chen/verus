@@ -17,9 +17,9 @@ use deko_std::prelude::*;
 use vstd::prelude::*;
 
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
-use crate::kerror;
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
 use crate::mm::paging::{PageTable, PageTablePermission, PteFlags};
+use crate::{kerror, DekoKernelLaunchInfo};
 
 verus! {
 
@@ -214,145 +214,32 @@ pub fn phys_to_virt(
     }
 }
 
-pub tracked struct DekoMemoryRegionPermission;
-
-impl DekoMemoryRegionPermission {
-    /// Check if the permission is well-formed.
-    pub open spec fn wf(&self) -> bool {
-        true
-        // TODO: Implement me!
-
-    }
-}
-
-/// A continuous memory region.
-pub struct DekoMemoryRegion {
-    /// The physical start address of the memory region.
-    pub phys_start: PhysAddr,
-    /// The virtual start address of the memory region.
-    pub virt_start: VirtAddr,
-    /// The number of pages in the memory region.
-    pub npages: u64,
-    /// The permission of the memory region.
-    pub perm: Tracked<DekoMemoryRegionPermission>,
-}
-
-impl WellFormed for DekoMemoryRegion {
-    #[verifier::inline]
-    open spec fn wf(&self) -> bool {
-        &&& self.phys_start.wf()
-        &&& self.virt_start.wf()
-        &&& self.npages > 0
-        &&& self.npages <= (u64::MAX / 0x1000)
-        &&& self.phys_start@ % 0x1000 == 0
-        &&& self.virt_start@ % 0x1000 == 0
-        &&& self.perm@.wf()
-        &&& self.virt_start@ + self.npages * 0x1000 <= u64::MAX
-    }
-}
-
-impl DekoMemoryRegion {
-    #[verifier::inline]
-    pub open spec fn contains_addr_spec(&self, addr: VirtAddr) -> bool {
-        &&& addr@ >= self.virt_start@
-        &&& addr@ < self.virt_start@ + self.npages * 0x1000
-    }
-
-    #[verifier::inline]
-    pub open spec fn subset_of_spec(&self, other: &DekoMemoryRegion) -> bool {
-        &&& self.virt_start@ >= other.virt_start@
-        &&& self.virt_start@ + self.npages * 0x1000 <= other.virt_start@ + other.npages * 0x1000
-    }
-
-    #[verifier::inline]
-    pub open spec fn overlap_with_spec(&self, other: &DekoMemoryRegion) -> bool {
-        &&& self.virt_start@ < other.virt_start@ + other.npages * 0x1000
-        &&& self.virt_start@ + self.npages * 0x1000 > other.virt_start@
-    }
-
-    #[verifier::inline]
-    pub open spec fn empty_spec(&self) -> bool {
-        &&& self.npages == 0
-    }
-
-    #[verifier::when_used_as_spec(contains_addr_spec)]
-    #[inline]
-    pub fn contains_addr(&self, addr: VirtAddr) -> (r: bool)
-        requires
-            self.wf(),
-            addr.wf(),
-        ensures
-            self.contains_addr_spec(addr) == r,
-    {
-        addr.0 >= self.virt_start.0 && addr.0 < self.virt_start.0 + self.npages * 0x1000
-    }
-
-    #[verifier::when_used_as_spec(subset_of_spec)]
-    #[inline]
-    pub fn subset_of(&self, other: &DekoMemoryRegion) -> (r: bool)
-        requires
-            self.wf(),
-            other.wf(),
-        ensures
-            self.subset_of_spec(other) == r,
-    {
-        self.virt_start.0 >= other.virt_start.0 && self.virt_start.0 + self.npages * 0x1000
-            <= other.virt_start.0 + other.npages * 0x1000
-    }
-
-    #[verifier::when_used_as_spec(overlap_with_spec)]
-    #[inline]
-    pub fn overlap_with(&self, other: &DekoMemoryRegion) -> (r: bool)
-        requires
-            self.wf(),
-            other.wf(),
-        ensures
-            self.overlap_with_spec(other) == r,
-    {
-        self.virt_start.0 < other.virt_start.0 + other.npages * 0x1000 && self.virt_start.0
-            + self.npages * 0x1000 > other.virt_start.0
-    }
-
-    #[verifier::when_used_as_spec(empty_spec)]
-    #[inline]
-    pub fn empty(&self) -> (r: bool)
-        requires
-            self.wf(),
-        ensures
-            self.empty_spec() == r,
-    {
-        self.npages == 0
-    }
-
-    #[verifier::external_body]
-    pub const fn new() -> (r: Self)
-        ensures
-            r.wf(),
-            r.empty_spec(),
-    {
-        DekoMemoryRegion {
-            phys_start: PhysAddr(0),
-            virt_start: VirtAddr::new(0),
-            npages: 0,
-            perm: Tracked::assume_new(),
-        }
-    }
-
-    pub fn init_mem_region(&mut self, phys_start: PhysAddr, virt_start: VirtAddr, npages: u64) {
-    }
-}
-
-/// This function copies memory from one ELF segment to another.
-///
-/// # Safety
-///
-/// The caller must ensure that the source and destination memory regions are valid and do not overlap.
-#[verifier::external_body]
-#[verus_spec(r =>
+/// This function initializes the global memory mapping.
+#[verus_spec(
+    with
+        Tracked(ctx_perm): Tracked<&DekoCpuCtxPermission>,
     requires
-        true,
+        header.wf(),
+        ctx_perm.wf(),
 )]
-pub unsafe fn copy_elf_mem(seg: Range<VirtAddr>) {
+pub fn init_memory_map(header: &DekoKernelLaunchInfo) {
+    // stub: placeholder.
+}
+
+/// Since we are now in a full-fledged system, bootstrapped memory regions
+/// used during early boot should be invalidated to prevent accidental usage
+/// and for more memory to be available for general allocation.
+#[verus_spec(
+    with
+        Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
+    requires
+        old(ctx_perm).wf_with(ctx),
+        header.wf(),
+)]
+pub fn invalidate_boot_mem(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) {
+    // stub: placeholder.
+    // Always invalidate stage 2 boot memory unless the firmware
+    // is loaded into the low memory.
 }
 
 } // verus!

@@ -8,9 +8,11 @@ use deko_core::cpu::gdt::GLOBAL_GDT;
 use deko_core::cpu::idt::{create_early_idt, init_early_idt, Idt};
 use deko_core::cpu::regs::{cr0_init, cr4_init, load_cr3, sse_init};
 use deko_core::cpu::task::{cpu_idle, schedule_init, DekoRunQueue, DekoRunQueuePred};
-use deko_core::cpu::{DekoCpuCtx, DekoCpuCtxPermission, IST_DF, PERCPU_AREAS};
+use deko_core::cpu::{CpuidTable, DekoCpuCtx, DekoCpuCtxPermission, IST_DF, PERCPU_AREAS};
 use deko_core::elf::ElfFile;
+use deko_core::fw::load_acpi_tables;
 use deko_core::logging::print_banner;
+use deko_core::mm::frame_allocator::DekoAllocatorApi;
 use deko_core::mm::paging::{
     all_in_range_paddrs, bit_not_in_addr_region, bit_not_overlapping, index_at_level_spec,
     PageTable, PageTablePath, PageTablePermission, PteFlags, Pte_ALL_BITS, GLOBAL, RECURSIVE_INDEX,
@@ -25,7 +27,7 @@ use deko_core::snp::ghcb::GuestHostCommucationBlock;
 use deko_core::snp::logging::init_ghcb_logging;
 use deko_core::snp::req::init_snp_guest_driver;
 use deko_core::snp::{init_guest_host, setup_apic};
-use deko_core::{get_igvm_params, kerror, kinfo, DekoKernelLaunchInfo};
+use deko_core::{get_igvm_params, kdebug, kerror, kinfo, kwarn, DekoKernelLaunchInfo};
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
@@ -33,7 +35,54 @@ core::arch::global_asm!(include_str!("../monitor.S"), options(att_syntax));
 
 verus! {
 
+// TODO: Replace the real thing.
 axiom fn dummy_perm() -> tracked DekoCpuCtxPermission;
+
+/// Populated later.
+exec static LAUNCH_INFO: DekoSimpleOnceCell<DekoKernelLaunchInfo>
+    ensures
+        LAUNCH_INFO.wf(),
+{
+    DekoSimpleOnceCell::new(Ghost(()))
+}
+
+exec static CPUID_PAGE: DekoSimpleOnceCell<CpuidTable>
+    ensures
+        CPUID_PAGE.wf(),
+{
+    DekoSimpleOnceCell::new(Ghost(()))
+}
+
+#[verus_spec(
+    with
+        Tracked(ctx_perm): Tracked<&DekoCpuCtxPermission>,
+    requires
+        addr.wf(),
+        ctx_perm.pgtable_perm.mapped(addr),
+)]
+fn init_cpuid_table(addr: VirtAddr) {
+    // stub: do nothing for now.
+}
+
+/// Starts all application processors.
+#[verus_spec(
+    requires
+        igvm_params.wf(),
+)]
+fn start_application_processors(igvm_params: &IgvmParams) {
+    kdebug!("igvm_params.madt_data", igvm_params.igvm_madt);
+
+    // CPU topology can be either from IGVM MADT or from firmware ACPI tables, but
+    // we try to read it from IGVM MADT first.
+    if let Some(cpus) = igvm_params.load_cpu_info(DekoAllocatorApi {  }) {
+        kinfo!("CPU topology:", cpus);
+    } else {
+        kinfo!("No CPU info found in IGVM parameters; trying firmware ACPI tables");
+
+        // do probe from firmware ACPI tables.
+        let apci_fw = load_acpi_tables();
+    }
+}
 
 #[verus_spec(r =>
     with
@@ -372,6 +421,8 @@ extern "C" fn deko_entry(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInf
         header.wf(),
 )]
 fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
+    LAUNCH_INFO.init(header.clone());
+
     GLOBAL_GDT.load_selectors();
 
     let mut early_idt = Idt { entries: create_early_idt() };
@@ -474,18 +525,34 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
 /// The "main" function scheduled after the monitor is fully set up.
 #[verifier::exec_allows_no_decreases_clause]
 #[verus_spec(
-    with Tracked(cpu_ctx_perm): Tracked<DekoCpuCtxPermission>,
+    with
+        Tracked(cpu_ctx_perm): Tracked<DekoCpuCtxPermission>,
     requires
+        cpu_ctx_perm.wf(),
         cpu_ctx_perm.ptr_perm.value().cpu_id() == 0,
+        cpu_index == cpu_ctx_perm.ptr_perm.value().cpu_id(),
 
 )]
 fn deko_main(cpu_index: usize) {
     kinfo!("deko_main: entered");
 
-    // Initialize the guest driver.
-    init_snp_guest_driver();
+    if let Some(launch_info) = LAUNCH_INFO.get() {
+        let igvm_addr = VirtAddr::new(launch_info.igvm_params_virt_addr as u64);
 
-    cpu_idle(cpu_index);
+        assume(cpu_ctx_perm.pgtable_perm.mapped(igvm_addr));
+
+        proof_with!(Tracked(&cpu_ctx_perm));
+        let igvm_params = deko_core::get_igvm_params(igvm_addr);
+        start_application_processors(&igvm_params);
+
+        // Initialize the guest driver.
+        init_snp_guest_driver();
+
+        cpu_idle(cpu_index);
+    } else {
+        kerror!("deko_main: launch info not initialized");
+        early_die();
+    }
 }
 
 func_ptr!(deko_main);
