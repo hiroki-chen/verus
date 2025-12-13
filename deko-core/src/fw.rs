@@ -2,11 +2,12 @@ use core::ptr::eq;
 
 use deko_macros::DekoDebug;
 use deko_std::array::Array;
-use deko_std::boot::ACPITableBuffer;
+use deko_std::boot::{ACPITableBuffer, RSDPDesc};
 use deko_std::wf::WellFormed;
 use vstd::prelude::*;
 
-use crate::{kerror, kinfo, kpanic_if, kunimplemented};
+use crate::collections::{update_vec, Vec};
+use crate::{die, kerror, kinfo, kpanic_if, kunimplemented};
 
 verus! {
 
@@ -18,6 +19,8 @@ broadcast axiom fn axiom_name_array_size_wf()
 pub const APIC_SIG: &'static str = "APIC";
 
 pub const APIC_PATH: &'static str = "etc/acpi/tables";
+
+pub const RSDP_PATH: &'static str = "etc/acpi/rsdp";
 
 pub const FW_CFG_PORT_SEL: u16 = 0x510;
 
@@ -33,6 +36,7 @@ pub const FW_CFG_FILE_DIR: u16 = 0x0019;
 
 pub struct FwCfg;
 
+#[verus_verify]
 impl FwCfg {
     pub fn fwcfg_probe(&self) -> bool {
         self.select(FW_CFG_SIGNATURE);
@@ -54,6 +58,18 @@ impl FwCfg {
     #[inline]
     pub fn read_byte(&self) -> u8 {
         crate::imp::inb(FW_CFG_PORT_DATA)
+    }
+
+    #[inline]
+    pub fn read_bytes(&self, buf: &mut Vec<u8>) {
+        let len = buf.len();
+        for i in 0..len
+            invariant
+                i <= len,
+                len == buf@.len(),
+        {
+            update_vec(buf, i, self.read_byte());
+        }
     }
 
     #[inline]
@@ -151,6 +167,31 @@ pub struct FwCfgDmaAccess {
     pub address: u64,
 }
 
+#[verifier::external_body]
+pub fn loads_rsdp<'a>() -> Option<RSDPDesc> {
+    let fw = FwCfg {  };
+    kpanic_if!(!fw.fwcfg_probe(), "FW_CFG not detected");  // this is fatal error.
+
+    if let Some(rsdp) = FwCfg.select_file(RSDP_PATH) {
+        kinfo!("Loading RSDP from firmware configuration:", RSDP_PATH);
+
+        let filesize = rsdp.size as usize;
+        let mut buffer = crate::vec![0u8; filesize];
+
+        kinfo!("Transferring", filesize, "bytes via FW_CFG");
+        kinfo!("Selecting", rsdp.select, "for read");
+        // Select the file.
+        fw.select(rsdp.select);
+        fw.read_bytes(&mut buffer);
+
+        kinfo!("Successfully read raw RSDP from FW_CFG");
+
+        Some(unsafe { core::ptr::read(buffer.as_ptr() as *const RSDPDesc) })
+    } else {
+        None
+    }
+}
+
 /// Loads the ACPI tables via the firmware interfaces.
 ///
 /// Note that for virtualized environments like SNP guests,
@@ -167,14 +208,48 @@ pub struct FwCfgDmaAccess {
 /// -fw_cfg name=/etc/acpi/tables,file=acpi_tables.bin \
 /// -fw_cfg name=/foo/bar/baz,file=aux.bin
 /// ```
-pub fn load_acpi_tables<'a>() -> ACPITableBuffer<'a> {
+///
+/// If the guest image is packed via IGVM then the firmware
+/// must be specified in the IGVM config file via the `--firmware`
+/// option. This file is usually the OVMF firmware image:
+///
+/// ```sh
+/// igvmbuilder --firmware /path/to/OVMF_CODE.fd ...
+///
+/// qemu_system_x86_64 -object igvm-cfg,id=igvm,file=xxx.igvm ...
+/// ```
+#[verus_spec()]
+pub fn load_acpi_tables<'a>() -> Option<ACPITableBuffer<'a>> {
     let fw = FwCfg {  };
-    kpanic_if!(!fw.fwcfg_probe(), "FW_CFG not detected");
+    kpanic_if!(!fw.fwcfg_probe(), "FW_CFG not detected");  // this is fatal error.
 
     if let Some(acpi) = FwCfg.select_file(APIC_PATH) {
-        kinfo!("Loading ACPI tables from firmware configuration");
+        kinfo!("Loading ACPI tables from firmware configuration:", APIC_PATH);
+
+        let filesize = acpi.size as usize;
+        let mut buffer = crate::vec![0u8; filesize];
+
+        kinfo!("Transferring", filesize, "bytes via FW_CFG");
+        kinfo!("Selecting", acpi.select, "for read");
+        // Select the file.
+        fw.select(acpi.select);
+        fw.read_bytes(&mut buffer);
+
+        kinfo!("Successfully read raw ACPI tables from FW_CFG");
+
+        // return Some(ACPITableBuffer::new(&buffer));
+        if let Some(rsdp) = loads_rsdp() {
+            kinfo!("Successfully loaded RSDP from FW_CFG");
+            kinfo!("rsdp=>", rsdp);  // RSD PTR + BOCHS signature
+
+            let addr = rsdp.rsdt_address as usize;
+            // now we've got the offset.
+            // Now we need to have many dangerous raw pointer operations here.
+            // todo....
+        }
+        return None;
     }
-    kunimplemented!("Firmware ACPI table loading not implemented yet")
+    None
 }
 
 } // verus!

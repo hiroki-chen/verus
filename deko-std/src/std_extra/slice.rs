@@ -8,6 +8,8 @@ use crate::cmp::is_sorted_spec;
 verus! {
 
 pub assume_specification[ core::primitive::str::as_bytes ](s: &str) -> (r: &[u8])
+    ensures
+        r@ =~= s@.map_values(|v| v as u8),
 ;
 
 pub assume_specification<P: core::str::pattern::Pattern>[ core::primitive::str::trim_end_matches ](
@@ -20,7 +22,9 @@ pub assume_specification<P: core::str::pattern::Pattern>[ core::primitive::str::
 
 ;
 
-pub assume_specification[ <core::primitive::str as PartialEq>::eq ](s1: &str, s2: &str) -> bool
+pub assume_specification[ <core::primitive::str as PartialEq>::eq ](s1: &str, s2: &str) -> (r: bool)
+    ensures
+        r <==> s1@ =~= s2@,
 ;
 
 pub open spec fn binary_search_spec<'a, T: 'a>(

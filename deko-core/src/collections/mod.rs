@@ -50,6 +50,15 @@ macro_rules! vec {
             temp_vec
         }
     };
+    ($val:expr; $count:expr) => {
+        {
+            let allocator = $crate::mm::frame_allocator::DekoAllocatorApi {  };
+            let mut temp_vec = $crate::collections::Vec::new_in(allocator);
+            temp_vec.resize($count, $val);
+            temp_vec
+        }
+    };
+
     () => {
         {
             let allocator = $crate::mm::frame_allocator::DekoAllocatorApi {  };

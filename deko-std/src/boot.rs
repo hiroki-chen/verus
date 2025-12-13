@@ -205,6 +205,22 @@ pub struct ACPITableBuffer<'a> {
     tables: &'a [ACPITableMeta],
 }
 
+/// Root System Description Pointer (RSDP) structure for ACPI 2.0+.
+#[derive(DekoDebug, Clone, Copy)]
+#[repr(C, packed)]
+pub struct RSDPDesc {
+    /// Signature must contain "RSD PTR"
+    sig: Array<u8, 8>,
+    /// Checksum to add to all other bytes
+    chksum: u8,
+    /// OEM-supplied string
+    oem_id: Array<u8, 6>,
+    /// Revision of the ACPI
+    rev: u8,
+    /// Physical address of the RSDT
+    rsdt_addr: u32,
+}
+
 #[derive(DekoDebug, Clone, Copy)]
 struct ACPITableMeta {
     /// 4-character signature of the table
