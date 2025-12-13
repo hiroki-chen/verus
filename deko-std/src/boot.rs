@@ -6,6 +6,11 @@ use crate::prelude::*;
 
 verus! {
 
+pub broadcast axiom fn axiom_meta_array_size_wf()
+    ensures
+        #[trigger] Array::<ACPITableMeta, 8>::size_wf(),
+;
+
 pub const BOOT_VERSION: u8 = 0x1;
 
 // The first 640 KB of RAM (low memory)
@@ -94,29 +99,32 @@ struct MADTEntryLocalX2Apic {
 /// Higher level representation of the raw ACPI table header
 #[derive(Clone, Copy, DekoDebug)]
 #[repr(C, packed)]
-struct ACPITableHeader {
-    sig: Array<u8, 4>,
-    len: u32,
-    rev: u8,
-    chksum: u8,
-    oem_id: Array<u8, 6>,
-    oem_table_id: Array<u8, 8>,
-    oem_rev: u32,
-    compiler_id: Array<u8, 4>,
-    compiler_rev: u32,
+pub struct ACPITableHeader {
+    pub sig: Array<u8, 4>,
+    pub len: u32,
+    pub rev: u8,
+    pub chksum: u8,
+    pub oem_id: Array<u8, 6>,
+    pub oem_table_id: Array<u8, 8>,
+    pub oem_rev: u32,
+    pub compiler_id: Array<u8, 4>,
+    pub compiler_rev: u32,
 }
 
 #[derive(DekoDebug)]
 pub struct ACPITable<'a> {
-    header: ACPITableHeader,
+    pub header: ACPITableHeader,
     /// Raw binary content of ACPI table
-    buf: &'a [u8],
+    pub buf: &'a [u8],
 }
 
 impl<'a> ACPITable<'a> {
     /// Try to parse a raw ACPI table from the given address.
     #[verifier::external_body]
-    pub fn new(buf: &[u8]) -> (r: Self) {
+    pub fn new(buf: &[u8]) -> (r: Self)
+        ensures
+            r.wf(),
+    {
         let ptr = buf.as_ptr();
         let header = unsafe { &*(ptr as *const ACPITableHeader) };
         let len = header.len as usize;
@@ -178,6 +186,7 @@ impl<'a> ACPITable<'a> {
                 },
                 _ => {
                     // Unknown.
+                    offset += entry.entry_len as usize;
                 },
             }
         }
@@ -188,21 +197,39 @@ impl<'a> ACPITable<'a> {
 
 impl WellFormed for ACPITableHeader {
     open spec fn wf(&self) -> bool {
-        true
+        &&& self.sig.wf()
     }
 }
 
 impl<'a> WellFormed for ACPITable<'a> {
+    #[verifier::inline]
     open spec fn wf(&self) -> bool {
-        true
+        &&& self.header.wf()
     }
 }
 
 // #[derive(DekoDebug)]
-pub struct ACPITableBuffer<'a> {
-    buf: &'a [u8],
+#[cfg(feature = "alloc")]
+#[verifier::reject_recursive_types(A)]
+pub struct ACPITableBuffer<A: core::alloc::Allocator + WellFormed> {
+    pub buf: alloc::vec::Vec<u8, A>,
     /// Collection of metadata for ACPI tables, including signatures
-    tables: &'a [ACPITableMeta],
+    pub tables: Array<ACPITableMeta, 8>,  // Max 8 tables
+}
+
+impl WellFormed for ACPITableMeta {
+    #[verifier::inline]
+    open spec fn wf(&self) -> bool {
+        &&& self.sig.wf()
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<A: core::alloc::Allocator + WellFormed> WellFormed for ACPITableBuffer<A> {
+    #[verifier::inline]
+    open spec fn wf(&self) -> bool {
+        &&& self.tables.wf()
+    }
 }
 
 /// Root System Description Pointer (RSDP) structure for ACPI 2.0+.
@@ -210,23 +237,23 @@ pub struct ACPITableBuffer<'a> {
 #[repr(C, packed)]
 pub struct RSDPDesc {
     /// Signature must contain "RSD PTR"
-    sig: Array<u8, 8>,
+    pub sig: Array<u8, 8>,
     /// Checksum to add to all other bytes
-    chksum: u8,
+    pub chksum: u8,
     /// OEM-supplied string
-    oem_id: Array<u8, 6>,
+    pub oem_id: Array<u8, 6>,
     /// Revision of the ACPI
-    rev: u8,
+    pub rev: u8,
     /// Physical address of the RSDT
-    rsdt_addr: u32,
+    pub rsdt_addr: u32,
 }
 
 #[derive(DekoDebug, Clone, Copy)]
-struct ACPITableMeta {
+pub struct ACPITableMeta {
     /// 4-character signature of the table
-    sig: Array<u8, 4>,
+    pub sig: Array<u8, 4>,
     /// The offset of the table within the table buffer
-    offset: usize,
+    pub offset: usize,
 }
 
 #[repr(C)]

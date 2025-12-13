@@ -2,11 +2,14 @@ use core::ptr::eq;
 
 use deko_macros::DekoDebug;
 use deko_std::array::Array;
-use deko_std::boot::{ACPITableBuffer, RSDPDesc};
+use deko_std::boot::{
+    ACPICPUInfo, ACPITable, ACPITableBuffer, ACPITableHeader, ACPITableMeta, RSDPDesc,
+};
 use deko_std::wf::WellFormed;
 use vstd::prelude::*;
 
 use crate::collections::{update_vec, Vec};
+use crate::mm::frame_allocator::DekoAllocatorApi;
 use crate::{die, kerror, kinfo, kpanic_if, kunimplemented};
 
 verus! {
@@ -218,8 +221,14 @@ pub fn loads_rsdp<'a>() -> Option<RSDPDesc> {
 ///
 /// qemu_system_x86_64 -object igvm-cfg,id=igvm,file=xxx.igvm ...
 /// ```
-#[verus_spec()]
-pub fn load_acpi_tables<'a>() -> Option<ACPITableBuffer<'a>> {
+#[cfg(feature = "alloc")]
+#[verus_spec(r =>
+    ensures
+        r.wf(),
+)]
+pub fn load_acpi_tables() -> Option<ACPITableBuffer<DekoAllocatorApi>> {
+    broadcast use deko_std::boot::axiom_meta_array_size_wf;
+
     let fw = FwCfg {  };
     kpanic_if!(!fw.fwcfg_probe(), "FW_CFG not detected");  // this is fatal error.
 
@@ -240,16 +249,88 @@ pub fn load_acpi_tables<'a>() -> Option<ACPITableBuffer<'a>> {
         // return Some(ACPITableBuffer::new(&buffer));
         if let Some(rsdp) = loads_rsdp() {
             kinfo!("Successfully loaded RSDP from FW_CFG");
-            kinfo!("rsdp=>", rsdp);  // RSD PTR + BOCHS signature
 
-            let addr = rsdp.rsdt_address as usize;
+            let addr = rsdp.rsdt_addr as usize;
             // now we've got the offset.
             // Now we need to have many dangerous raw pointer operations here.
-            // todo....
+            let rsdp = read_acpi_table(&buffer, addr)?;
+            if rsdp.buf.len() % core::mem::size_of::<u32>() != 0 {
+                kerror!("RSDT length is not multiple of 4:", rsdp.buf.len());
+                return None;
+            }
+            let rsdp_offsets_arr_len = rsdp.buf.len() / core::mem::size_of::<u32>();
+            if rsdp_offsets_arr_len > 8 {
+                kerror!("Too many ACPI tables:", rsdp_offsets_arr_len);
+                return None;
+            }
+            kinfo!("rsdp =>", rsdp);  // RSD PTR + BOCHS signature
+            assume(Array::<u8, 4>::size_wf());
+            let mut i = 0;
+            let mut tables = Array::<ACPITableMeta, 8>::fill(
+                ACPITableMeta { sig: Array::<u8, 4>::fill(0), offset: 0 },
+            );
+
+            #[verus_spec(
+                 invariant
+                    i <= rsdp_offsets_arr_len <= 8,
+                    rsdp.buf@.len() % (core::mem::size_of::<u32>() as nat) == 0,
+                    core::mem::size_of::<u32>() == 4,
+                    rsdp_offsets_arr_len == rsdp.buf.len() / core::mem::size_of::<u32>(),
+                    tables.wf(),
+                    tables@.len() == 8,
+                decreases
+                    rsdp_offsets_arr_len - i,
+            )]
+            while i < rsdp_offsets_arr_len {
+                let b1 = rsdp.buf[i * 4 + 0] as u32;
+                let b2 = rsdp.buf[i * 4 + 1] as u32;
+                let b3 = rsdp.buf[i * 4 + 2] as u32;
+                let b4 = rsdp.buf[i * 4 + 3] as u32;
+
+                // little endian
+                let offset = (b1) | (b2 << 8) | (b3 << 16) | (b4 << 24);
+                let this_table_hdr = read_acpi_table(&buffer, offset as usize)?.header;
+
+                kinfo!("Read ACPI Table at offset", offset, "header:", this_table_hdr);
+                // Now we just read the meta.
+                tables.update(
+                    i,
+                    ACPITableMeta { sig: this_table_hdr.sig, offset: offset as usize },
+                );
+
+                i += 1;
+            }
+
+            return Some(ACPITableBuffer { buf: buffer, tables });
         }
         return None;
     }
     None
+}
+
+/// Given a raw buffer of the ACPI tables, read the table at the given offset.
+///
+/// Note that this does not parse the body of the table.
+#[verifier::external_body]
+#[verus_spec(r =>
+    ensures
+        r.wf(),
+)]
+pub fn read_acpi_table(buf: &[u8], offset: usize) -> Option<ACPITable> {
+    if offset + core::mem::size_of::<ACPITable>() > buf.len() {
+        return None;
+    }
+    let hdr = {
+        unsafe {
+            // Possibly unaligned read.
+            core::ptr::read_unaligned(buf.as_ptr().add(offset) as *const ACPITableHeader)
+        }
+    };
+
+    let content = &buf[offset + core::mem::size_of::<ACPITableHeader>()..offset + (
+    hdr.len as usize)];
+
+    Some(ACPITable { header: hdr, buf: content })
 }
 
 } // verus!

@@ -4,13 +4,15 @@
 #![allow(improper_ctypes)]
 #![allow(improper_ctypes_definitions)]
 
+use core::ptr::eq;
+
 use deko_core::cpu::gdt::GLOBAL_GDT;
 use deko_core::cpu::idt::{create_early_idt, init_early_idt, Idt};
 use deko_core::cpu::regs::{cr0_init, cr4_init, load_cr3, sse_init};
 use deko_core::cpu::task::{cpu_idle, schedule_init, DekoRunQueue, DekoRunQueuePred};
 use deko_core::cpu::{CpuidTable, DekoCpuCtx, DekoCpuCtxPermission, IST_DF, PERCPU_AREAS};
 use deko_core::elf::ElfFile;
-use deko_core::fw::load_acpi_tables;
+use deko_core::fw::{load_acpi_tables, read_acpi_table};
 use deko_core::logging::print_banner;
 use deko_core::mm::frame_allocator::DekoAllocatorApi;
 use deko_core::mm::paging::{
@@ -80,7 +82,49 @@ fn start_application_processors(igvm_params: &IgvmParams) {
         kinfo!("No CPU info found in IGVM parameters; trying firmware ACPI tables");
 
         // do probe from firmware ACPI tables.
-        let apci_fw = load_acpi_tables();
+        let Some(acpi_fw) = load_acpi_tables() else {
+            kwarn!("No ACPI tables found in firmware; no APs will be started");
+            return ;
+        };
+
+        let mut i = 0;
+
+        while i < acpi_fw.tables.len()
+            invariant
+                0 <= i <= acpi_fw.tables@.len(),
+                acpi_fw.tables.wf(),
+            decreases acpi_fw.tables@.len() - i,
+        {
+            let table_meta = acpi_fw.tables.index(i);
+
+            assume(forall|i: int| 0 <= i < 4 ==> 0 <= #[trigger] table_meta.sig@[i] < 128);
+
+            if <str as PartialEq>::eq(table_meta.sig.as_str(), "APIC") {
+                kdebug!("Found APIC table in ACPI tables at offset", table_meta.offset);
+
+                break ;
+            }
+            i += 1;
+        }
+
+        if i >= acpi_fw.tables.len() {
+            kwarn!("No APIC table found in ACPI tables; no APs will be started");
+            return ;
+        }
+        let offset = acpi_fw.tables.index(i).offset;
+        let Some(apic_table) = read_acpi_table(&acpi_fw.buf, offset) else {
+            kwarn!("Failed to read APIC table; no APs will be started");
+            return ;
+        };
+
+        // Now we parse the content.
+        let Some(cpus) = apic_table.get_cpu_topology(DekoAllocatorApi {  }) else {
+            kwarn!("No CPU info found in APIC table; no APs will be started");
+            return ;
+        };
+
+        kinfo!("Detected", cpus.len(), "live CPUs");
+
     }
 }
 

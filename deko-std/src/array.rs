@@ -89,10 +89,11 @@ impl<T: WellFormed, const N: usize> Array<T, N> {
     #[inline(always)]
     pub fn index(&self, i: usize) -> (t: &T)
         requires
-            0 <= i < self.spec_len() as usize,
+            0 <= (i as int) < self@.len(),
             self.wf(),
         ensures
             *t == self@.index(i as int),
+            t.wf(),
     {
         &self.0[i]
     }
