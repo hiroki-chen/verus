@@ -623,6 +623,46 @@ impl GuestHostCommucationBlock {
         let Tracked(perm) = Self::set_rax(ptr, Tracked(perm), value);
         Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::IOIO, info, 0);
     }
+
+    /// Create an application processor via GHCB.
+    ///
+    /// The AP Creation NAE even allows for an SEV-SNP guest to cause the
+    /// creation/destruction of, or a change to, the register state of an
+    /// AP at the specified VMPL, which can provide an alternative method
+    /// of booting an AP under SEV-SNP.
+    ///
+    /// The AP must be bound to a specific VMPL and a VMSA must be created
+    /// upon the request of the guest. The VMSA must be adjusted via
+    /// [`super::rmpadjust`].
+    ///
+    /// It is expected that the SEV_FEATURES associated with the VMSA for
+    /// the AP use the same interrupt injection mechanism as the BSP. The
+    /// hypervisor can fail the SNP AP Creation request if they do not match.
+    pub fn ap_create(
+        ptr: DekoPPtr<Self>,
+        Tracked(perm): Tracked<DekoPointsTo<Self>>,
+        apic_id: u32,
+        sev_features: u64,
+        vmpl: u64,
+        vmsa: PhysAddr,
+    ) -> (r: Tracked<DekoPointsTo<Self>>)
+        requires
+            perm.wf(),
+            perm.is_init(),
+            perm.pptr() == ptr@,
+        ensures
+            r@.wf(),
+            r@.is_init(),
+            r@.pptr() == ptr@,
+    {
+        let Tracked(perm) = Self::clear(ptr, Tracked(perm));
+
+        let info_1 = ((apic_id as u64) << 32) | (vmpl & 0xf) << 16 | 1 /* (VMRUN) */;
+        let info_2 = vmsa.0 ;
+        let Tracked(perm) = Self::set_rax(ptr, Tracked(perm), sev_features);
+
+        Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::AP_CREATE, info_1, info_2)
+    }
 }
 
 }  // verus!

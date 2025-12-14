@@ -1,6 +1,7 @@
 [build]
 target-dir = "target"
 incremental = true
+rustflags = ["-Z", "emit-stack-sizes"]
 
 [alias]
 xtask = "run --package xtask --release --"

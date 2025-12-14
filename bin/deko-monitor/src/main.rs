@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 #![feature(proc_macro_hygiene)]
+#![feature(likely_unlikely)]
 #![allow(improper_ctypes)]
 #![allow(improper_ctypes_definitions)]
 
@@ -10,7 +11,10 @@ use deko_core::cpu::gdt::GLOBAL_GDT;
 use deko_core::cpu::idt::{create_early_idt, init_early_idt, Idt};
 use deko_core::cpu::regs::{cr0_init, cr4_init, load_cr3, sse_init};
 use deko_core::cpu::task::{cpu_idle, schedule_init, DekoRunQueue, DekoRunQueuePred};
-use deko_core::cpu::{CpuidTable, DekoCpuCtx, DekoCpuCtxPermission, IST_DF, PERCPU_AREAS};
+use deko_core::cpu::{
+    start_application_processor, CpuidTable, DekoCpuCtx, DekoCpuCtxPermission, PerCpuShared,
+    CPUID_MAX_COUNT, IST_DF, PERCPU_AREAS,
+};
 use deko_core::elf::ElfFile;
 use deko_core::fw::{load_acpi_tables, read_acpi_table};
 use deko_core::logging::print_banner;
@@ -29,7 +33,7 @@ use deko_core::snp::ghcb::GuestHostCommucationBlock;
 use deko_core::snp::logging::init_ghcb_logging;
 use deko_core::snp::req::init_snp_guest_driver;
 use deko_core::snp::{init_guest_host, setup_apic};
-use deko_core::{get_igvm_params, kdebug, kerror, kinfo, kwarn, DekoKernelLaunchInfo};
+use deko_core::{get_igvm_params, kdebug, kerror, kinfo, kpanic_if, kwarn, DekoKernelLaunchInfo};
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
@@ -71,8 +75,8 @@ fn init_cpuid_table(addr: VirtAddr) {
     requires
         igvm_params.wf(),
 )]
-fn start_application_processors(igvm_params: &IgvmParams) {
-    kdebug!("igvm_params.madt_data", igvm_params.igvm_madt);
+fn start_application_processors<'a>(igvm_params: IgvmParams<'a>) {
+    kinfo!("igvm_params.madt_data", igvm_params.igvm_madt);
 
     // CPU topology can be either from IGVM MADT or from firmware ACPI tables, but
     // we try to read it from IGVM MADT first.
@@ -125,7 +129,44 @@ fn start_application_processors(igvm_params: &IgvmParams) {
 
         kinfo!("Detected", cpus.len(), "live CPUs");
 
+        do_make_ap_online(&cpus);
     }
+}
+
+/// This function is split from `start_application_processors` to prevent
+/// stack overflow since we only allocated a small stack for the monitor.
+///
+/// Seems we do not have a good way to control the proper usage of stack
+/// sizes so the best practice is to restrict large stack usage functions to
+/// be separate functions.
+fn do_make_ap_online(cpus: &[ACPICPUInfo]) {
+    // FIXME: This overflows the stack again.
+    let (mut percpu_area, write_handle) = PERCPU_AREAS.acquire_write();
+
+    let mut i = 0;
+    #[verus_spec(
+            invariant
+                0 <= i <= cpus.len(),
+                percpu_area.wf(),
+            decreases cpus@.len() - i,
+        )]
+    while i < cpus.len() {
+        let cpu_info = &cpus[i];
+        kpanic_if!(
+                core::hint::unlikely(cpu_info.apic_id >= CPUID_MAX_COUNT as u32),
+                "CPU is exceeds maximum:",
+                cpu_info.apic_id,
+                CPUID_MAX_COUNT
+            );
+
+        let cpu_area = percpu_area.data.0.index(cpu_info.apic_id as usize);
+
+        start_application_processor(cpu_area);
+
+        i += 1;
+    }
+
+    write_handle.release_write(percpu_area);
 }
 
 #[verus_spec(r =>
@@ -587,7 +628,8 @@ fn deko_main(cpu_index: usize) {
 
         proof_with!(Tracked(&cpu_ctx_perm));
         let igvm_params = deko_core::get_igvm_params(igvm_addr);
-        start_application_processors(&igvm_params);
+
+        start_application_processors(igvm_params);
 
         // Initialize the guest driver.
         init_snp_guest_driver();

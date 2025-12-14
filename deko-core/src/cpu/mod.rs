@@ -36,7 +36,7 @@ verus! {
 
 pub const IST_DF: usize = 0;
 
-pub const CPUID_MAX_COUNT: usize = 128;
+pub const CPUID_MAX_COUNT: usize = 32;
 
 pub const CPU_AREA_MAGIC: u64 = 0x114514;
 
@@ -68,18 +68,18 @@ pub struct X86Tss {
 
 #[derive(DekoDebug)]
 pub struct PerCpuShared {
-    apic_id: u32,  // the id of the local apic
-    cpu_index: usize,
+    pub apic_id: u32,  // the id of the local apic
+    pub cpu_index: usize,
     #[deko(skip)]
-    guest_vmsa: DekoSimpleRwLock<GuestVmsaRef>,
+    pub guest_vmsa: DekoSimpleRwLock<GuestVmsaRef>,
     #[deko(skip)]
-    online: (PAtomicBool, Tracked<PermissionBool>),
+    pub online: (PAtomicBool, Tracked<PermissionBool>),
     #[deko(skip)]
-    ipi_irr: Array<(PAtomicU32, Tracked<PermissionU32>), 8>,
+    pub ipi_irr: Array<(PAtomicU32, Tracked<PermissionU32>), 8>,
     #[deko(skip)]
-    ipi_pending: (PAtomicBool, Tracked<PermissionBool>),
+    pub ipi_pending: (PAtomicBool, Tracked<PermissionBool>),
     #[deko(skip)]
-    nmi_pending: (
+    pub nmi_pending: (
         PAtomicBool,
         Tracked<PermissionBool>,
     ),
@@ -117,7 +117,9 @@ impl PerCpuShared {
         Array::new([const { (PAtomicU32::new(0)) };8])
     }
 
-    pub const fn new() -> (r: Self)
+    pub const fn new(id: u32) -> (r: Self)
+        requires
+            id < CPUID_MAX_COUNT,
         ensures
             r.wf(),
     {
@@ -134,8 +136,8 @@ impl PerCpuShared {
         }
 
         PerCpuShared {
-            apic_id: 0,
-            cpu_index: 0,
+            apic_id: id,
+            cpu_index: id as usize,
             guest_vmsa,
             online,
             ipi_irr,
@@ -160,7 +162,13 @@ pub struct PerCpuAreasInv;
 
 impl RwLockPredicate<DekoAtomicDataNoPerm<PerCpuAreas>> for PerCpuAreasInv {
     open spec fn inv(self, v: DekoAtomicDataNoPerm<PerCpuAreas>) -> bool {
-        v.data.wf()
+        &&& v.data.wf()
+        &&& forall|i: int|
+            #![trigger v.data.0@[i]]
+            0 <= i < CPUID_MAX_COUNT as int ==> {
+                &&& v.data.0@[i].wf()
+                &&& v.data.0@[i].apic_id as int == i
+            }
     }
 }
 
@@ -169,9 +177,24 @@ impl PerCpuAreas {
     pub const fn new() -> (r: Self)
         ensures
             r.wf(),
+            forall|i: int|
+                #![trigger r.0@[i]]
+                0 <= i < r.0@.len() ==> {
+                    &&& r.0@[i].wf()
+                    &&& r.0@[i].apic_id as int == i
+                },
     {
-        // This feature is not yet supported by verus.
-        PerCpuAreas(Array::new([const { PerCpuShared::new() };CPUID_MAX_COUNT]))
+        seq_macro::seq!(
+            N in 0..32 {
+                PerCpuAreas(Array::new(
+                    [
+                        #(
+                            const { PerCpuShared::new(N) },
+                        )*
+                    ]
+                ))
+            }
+        )
     }
 }
 
@@ -904,5 +927,39 @@ pub unsafe fn register_cpuid_table(addr: u32) -> (r: &'static CpuidTable)
 {
     &*(addr as *const CpuidTable)
 }
+
+/// Start an application processor given its per-cpu shared area.
+pub fn start_application_processor(which: &PerCpuShared) {
+    kinfo!("Starting application processor: ", which.apic_id);
+
+    let (bsp, Tracked(bsp_perm)) = DekoCpuCtx::this_cpu();
+    let bsp = bsp.borrow(Tracked(&bsp_perm.ptr_perm));
+
+    let cpu_entry = ap_start_func_ptr();
+    // Allocate context for this cpu.
+    let (cpu_ctx, Tracked(cpu_perm)) = boxed_ptr!(DekoCpuCtx, &DEKO_FRAME_ALLOCATOR.0);
+    // Also allocate a new page table for this cpu.
+    let (pgtable, _, Tracked(pgtable_perm)) = PageTable::new(
+        bsp.private_bit(),
+        bsp.shared_bit(),
+        Ghost(&bsp.kernel_mapping_spec()),
+    );
+}
+
+/// Other APs will start execution from here.
+#[no_mangle]
+#[verus_spec(
+    with
+        Tracked(ap_perm): Tracked<DekoCpuCtxPermission>,
+)]
+#[verifier::exec_allows_no_decreases_clause]
+extern "C" fn ap_start() -> ! {
+    kinfo!("hello");
+
+    loop {
+    }
+}
+
+func_ptr!(ap_start);
 
 } // verus!

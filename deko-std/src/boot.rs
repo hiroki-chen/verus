@@ -142,13 +142,22 @@ impl<'a> ACPITable<'a> {
     /// Try to parse the raw bytes as a CPU topology table. Since this
     /// requires some unsafe code, we mark it as external body.
     #[cfg(feature = "alloc")]
-    #[verifier::external_body]
-    pub fn get_cpu_topology<A: core::alloc::Allocator + WellFormed>(&self, alloc: A) -> Option<
+    #[verifier::external_body]  // remove this...
+    pub fn get_cpu_topology<A: core::alloc::Allocator + WellFormed>(&self, alloc: A) -> (r: Option<
         alloc::vec::Vec<ACPICPUInfo, A>,
-    >
+    >)
         requires
             self.wf(),
             alloc.wf(),
+        ensures
+            r matches Some(cpus) ==> {
+                forall|i: int|
+                    #![trigger cpus@[i]]
+                    0 <= i < cpus@.len() ==> (
+                    cpus@[i]).enabled
+                // perhaps need to reason about id boundaries.
+
+            },
     {
         use alloc::vec::Vec;
 

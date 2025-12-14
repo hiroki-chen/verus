@@ -25,6 +25,7 @@ deko-macros = { workspace = true }
 deko-std = { workspace = true, features = ["alloc"] }
 elf = { workspace = true }
 paste = "1.0.15"
+seq-macro = "0.3.6"
 
 [build-dependencies]
 chrono = { version = "0.4", features = ["std"] }

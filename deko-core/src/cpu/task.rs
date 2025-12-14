@@ -803,6 +803,7 @@ impl DekoRunnable {
             }
         }
 
+        kinfo!("cpu.vm_region =>",cpu_borrowed.vm_region());
         proof_with!(Tracked(&mut pgtable_perm), Tracked(&ctx_perm.vm_region_perm.tracked_borrow()));
         cpu_borrowed.vm_region().as_ref().unwrap().copy_to_page_table(new_pgtable);
         // Allocate xsave areas.
