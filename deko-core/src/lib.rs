@@ -1,5 +1,7 @@
 #![no_std]
 #![feature(proc_macro_hygiene)]
+#![feature(const_cmp)]
+#![feature(const_trait_impl)]
 #![feature(abi_x86_interrupt)]
 #![feature(allocator_api)]
 #![feature(core_intrinsics)]
@@ -224,7 +226,6 @@ impl WellFormed for DekoKernelLaunchInfo {
         r.wf(),
 )]
 pub fn get_igvm_params<'a>(igvm_params_vaddr: VirtAddr) -> IgvmParams<'a> {
-    kinfo!("Reading ??");
     let igvm_params_block = unsafe { &*(igvm_params_vaddr.0 as *const IgvmParamBlock) };
     let igvm_params_page_vaddr = igvm_params_vaddr.0 + igvm_params_block.param_page_offset as u64;
     let igvm_params_page = unsafe { &*(igvm_params_page_vaddr as *const IgvmParamPage) };

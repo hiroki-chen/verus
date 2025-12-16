@@ -1,7 +1,7 @@
 use core::ops::Range;
 use core::sync::atomic::AtomicU32;
 
-use deko_macros::{with_atomic_pred, DekoDebug};
+use deko_macros::{deko_const_decl, with_atomic_pred, DekoDebug};
 use deko_std::prelude::*;
 use deko_std::wf::WellFormed;
 use vstd::cell::PCell;
@@ -35,6 +35,44 @@ extern "C" {
 }
 
 verus! {
+
+#[derive(DekoDebug, Clone, Copy)]
+pub enum PageStateChangeOp {
+    Private,
+    Shared,
+    Psmash,
+    Unsmash,
+}
+
+pub(crate) const PSC_OP_SHIFT: u8 = 52;
+
+pub(crate) const PSC_OP_PRIVATE: u64 = 1 << PSC_OP_SHIFT;
+
+pub(crate) const PSC_OP_SHARED: u64 = 2 << PSC_OP_SHIFT;
+
+pub(crate) const PSC_OP_PSMASH: u64 = 3 << PSC_OP_SHIFT;
+
+pub(crate) const PSC_OP_UNSMASH: u64 = 4 << PSC_OP_SHIFT;
+
+pub(crate) const PSC_FLAG_HUGE_SHIFT: u8 = 56;
+
+pub(crate) const PSC_FLAG_HUGE: u64 = 1 << PSC_FLAG_HUGE_SHIFT;
+
+pub(crate) const GHCB_BUFFER_SIZE: usize = 0x7f0;
+
+pub(crate) spec const PSC_GFN_MASK_SPEC: u64 = (((1u64 << 52) - 1) as u64) & !0xfffu64;
+
+#[verifier::when_used_as_spec(PSC_GFN_MASK_SPEC)]
+pub(crate) exec const PSC_GFN_MASK: u64
+    ensures
+        PSC_GFN_MASK == PSC_GFN_MASK_SPEC,
+{
+    proof {
+        assert((1u64 << 52) - 1 >= 0) by (bit_vector);
+    }
+
+    ((1u64 << 52) - 1) & !0xfffu64
+}
 
 deko_bitflags! {
     /// RMP (Reverse Map Table) entry flags.
@@ -885,8 +923,94 @@ pub fn prepare_guest_fw(
                 PaddrRange { start: caa_page, end: PhysAddr(caa_page.0 + PAGE_SIZE as u64) },
             );
         }
-        // We know that they do not overflap.
+        validate_fw_memories(header, igvm_params, &memories);
+    }
+}
 
+/// This functon validates the prevalidated memory regions specified
+/// in the SEV firmware metadata.
+#[verus_spec(
+    requires
+        header.wf(),
+        igvm_params.wf(),
+        forall|i: int|
+            #![trigger memories@[i]]
+            0 <= i < memories@.len() ==> {
+                &&& memories@[i].wf()
+                &&& memories@[i].start@ % PAGE_SIZE == 0
+                &&& memories@[i].end@ % PAGE_SIZE == 0
+            },
+)]
+fn validate_fw_memories(
+    header: &DekoKernelLaunchInfo,
+    igvm_params: &IgvmParams<'_>,
+    memories: &[PaddrRange],
+) {
+    // The lowest bit indicates if we are in shared or private mode.
+    let need_page_change = igvm_params.igvm_param_page.environment_info & 0x1 != 0;
+
+    kinfo!("Preparing to validate ", memories.len(), " firmware memory regions");
+    kinfo!("\tNeed page state change? ", need_page_change);
+
+    if !memories.is_empty() {
+        for i in 0..memories.len()
+            invariant
+                i <= memories.len(),
+                header.wf(),
+                igvm_params.wf(),
+                forall|j: int|
+                    #![trigger memories@[j]]
+                    0 <= j < memories@.len() ==> {
+                        &&& memories@[j].wf()
+                        &&& memories@[j].start@ % PAGE_SIZE == 0
+                        &&& memories@[j].end@ % PAGE_SIZE == 0
+                    },
+        {
+            let this = &memories[i];
+
+            // Consultb the GHCB for page state change.
+            if need_page_change {
+                let (ghcb, Tracked(perm)) = current_ghcb();
+                GuestHostCommucationBlock::pstate_change(
+                    ghcb,
+                    Tracked(perm),
+                    this.clone(),
+                    PageStateChangeOp::Private,
+                );
+            }
+            validate_fw_memory_region(this.clone());
+        }
+    }
+}
+
+/// Validates a single memory region in the RMP table.
+#[verus_spec(
+    requires
+        prange.wf(),
+        prange.start@ % PAGE_SIZE == 0,
+        prange.end@ % PAGE_SIZE == 0,
+)]
+fn validate_fw_memory_region(prange: PaddrRange) {
+    let mut cur = prange.start.0;
+    let end = prange.end.0;
+
+    while cur < end
+        invariant
+            prange.start@ <= cur <= end,
+            prange.wf(),
+            prange.start@ % PAGE_SIZE == 0,
+            prange.end@ % PAGE_SIZE == 0,
+            end == prange.end@,
+            cur % PAGE_SIZE == 0,
+            PAGE_SIZE == 0x1000,
+        decreases end - cur,
+    {
+        // TODO: Allocate new virtual addresses for holding these pages.
+        // and lock them out for future allocation.
+        // Then map these vaddrs into these paddrs.
+        // pvalidate(vaddr, psize, validate, tracked);
+        // rmpadjust(vaddr, psize, tracked);
+        cur += PAGE_SIZE;
     }
 }
 

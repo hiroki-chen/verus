@@ -28,7 +28,7 @@ use crate::mm::paging::{
     PteFlags,
 };
 use crate::mm::stack::{DekoIstStack, DekoKernelStack};
-use crate::mm::vm::{VirtualMemoryRegion, VirtualMemoryRegionPermission};
+use crate::mm::vm::{VirtualMemoryRegion, VirtualMemoryRegionPermission, VirtualMemoryTemporary};
 use crate::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR};
 use crate::snp::ghcb::GuestHostCommucationBlock;
 use crate::snp::vmsa::{VmsaPage, VmsaPagePermission};
@@ -344,6 +344,8 @@ pub struct DekoCpuCtx {
     apic: X86Apic,
     /// Runqueue
     run_queue: Option<DekoRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred>>,
+    /// Temporary mapping.
+    pub temp_mapping: VirtualMemoryTemporary,
 }
 
 with_permission! {
@@ -520,6 +522,7 @@ impl WellFormed for DekoCpuCtx {
         &&& self.tss.wf()
         &&& self.cpu_id < CPUID_MAX_COUNT as u64
         &&& self.magic == CPU_AREA_MAGIC
+        &&& self.temp_mapping.wf()
     }
 }
 
@@ -727,6 +730,7 @@ impl DekoCpuCtx {
             ist_stack,
             apic: X86Apic {  },
             run_queue,
+            temp_mapping: VirtualMemoryTemporary::new_zeroed(),
         }
     }
 

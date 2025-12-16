@@ -12,6 +12,11 @@ pub assume_specification[ core::primitive::str::as_bytes ](s: &str) -> (r: &[u8]
         r@ =~= s@.map_values(|v| v as u8),
 ;
 
+pub assume_specification<T>[ <[T]>::is_empty ](s: &[T]) -> (r: bool)
+    returns
+        s@.len() == 0,
+;
+
 pub assume_specification<P: core::str::pattern::Pattern>[ core::primitive::str::trim_end_matches ](
     s: &str,
     p: P,

@@ -16,6 +16,7 @@
 #![feature(sized_hierarchy)]
 #![feature(specialization)]
 #![feature(likely_unlikely)]
+#![feature(sized_type_properties)]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;

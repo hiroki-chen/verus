@@ -427,7 +427,7 @@ fn setup_bsp_cpu(
         Ghost(DekoRunQueuePred {  }),
     );
 
-    let cpu_ctx = DekoCpuCtx::new(
+    let mut cpu_ctx = DekoCpuCtx::new(
         init_pgtable,
         shared_area_ptr,
         ghcb,
@@ -441,6 +441,11 @@ fn setup_bsp_cpu(
         None,
         // None,
         Some(run_queue),
+    );
+
+    cpu_ctx.temp_mapping.set(
+        PERCPU_TEMP_BASE_4K,
+        ((PERCPU_TEMP_END_4K.0 - PERCPU_TEMP_BASE_4K.0) / PAGE_SIZE) as usize,
     );
 
     cpu_ctx.set_ist_stack_tss(IST_DF, top_of_ist_stack);

@@ -8,7 +8,9 @@
 //! In this module, we define the GHCB structure and provide functions to
 //! interact with it, including sending and receiving messages via the GHCB
 //! protocol.
+use deko_macros::DekoDebug;
 use deko_std::prelude::*;
+use deko_std::std_extra::convert::u64_to_le_bytes;
 use deko_std::sync::RwLockToks::reader;
 use vstd::atomic::{
     PAtomicU16, PAtomicU32, PAtomicU64, PAtomicU8, PermissionU16, PermissionU32, PermissionU64,
@@ -20,9 +22,36 @@ use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::paging::{PageTable, PteFlags};
 use crate::mm::{virt_to_phys, virt_to_phys_checked};
 use crate::prelude::*;
-use crate::{bits, kpanic_if};
+use crate::snp::{
+    PageStateChangeOp, GHCB_BUFFER_SIZE, PSC_GFN_MASK, PSC_OP_PRIVATE, PSC_OP_PSMASH,
+    PSC_OP_SHARED, PSC_OP_UNSMASH,
+};
+use crate::{bits, kdebug, kerror, kinfo, kpanic_if, kunimplemented};
 
 verus! {
+
+pub broadcast axiom fn axiom_shared_buffer_size_wf()
+    ensures
+        #[trigger] Array::<PAtomicU8, GHCB_BUFFER_SIZE>::size_wf(),
+;
+
+#[repr(C, packed)]
+#[derive(DekoDebug, Clone, Copy)]
+pub struct PageStateChangeHeader {
+    cur_entry: u16,
+    end_entry: u16,
+    reserved: u32,
+}
+
+impl PageStateChangeHeader {
+    #[verifier::external_body]
+    pub fn as_le_bytes(&self) -> (r: &[u8; size_of::<Self>()])
+        ensures
+            r@.len() == 8,
+    {
+        unsafe { &*(self as *const Self as *const [u8; size_of::<Self>()]) }
+    }
+}
 
 /// Validates the GHCB page allocated for the current CPU core.
 #[verifier::external_body]
@@ -292,7 +321,7 @@ pub struct GuestHostCommucationBlock {
     pub valid_bitmap: Array<PAtomicU64, 0x2>,
     pub x87_state_gpa: PAtomicU64,
     _reserved9: Array<PAtomicU8, 0x3f8>,
-    pub shared_buffer: Array<PAtomicU8, 0x7f0>,
+    pub shared_buffer: Array<PAtomicU8, GHCB_BUFFER_SIZE>,
     _reserved10: Array<PAtomicU8, 0x0a>,
     /// Version of the GHCB protocol used by the guest.
     pub ghcb_protocol_version: PAtomicU16,
@@ -304,6 +333,7 @@ pub struct GuestHostCommucationBlock {
     pub ghcb_usage: PAtomicU32,
 }
 
+// TODO: This should be integrated into GHCB related APIs; no rush now.
 with_permission! {
     GuestHostCommucationBlock,
     self_perm: DekoPointsTo<GuestHostCommucationBlock>,
@@ -323,11 +353,12 @@ with_permission! {
     x87_state_gpa_perm: PermissionU64,
     ghcb_protocol_version_perm: PermissionU16,
     ghcb_usage_perm: PermissionU32,
+    shared_buffer_perm: Ghost<Seq<PermissionU8>>,
 }
 
 impl WellFormed for GuestHostCommucationBlock {
     closed spec fn wf(&self) -> bool {
-        true
+        &&& self.shared_buffer.wf()
     }
 }
 
@@ -483,8 +514,17 @@ impl GuestHostCommucationBlock {
         );
         raw_vmgexit();
 
+        // Make error information more detailed.
         let sw_exit_info_1 = Self::get_exit_info_1(ptr, Tracked(&perm));
-        kpanic_if!((sw_exit_info_1 != 0), "GHCB VMGEXIT failed: ", sw_exit_info_1);
+        // kpanic_if!((sw_exit_info_1 != 0), "GHCB VMGEXIT failed: ", sw_exit_info_1);
+        if sw_exit_info_1 != 0 {
+            kerror!("GHCB VMGEXIT failed: ", sw_exit_info_1);
+
+            let sw_exit_info_2 = Self::get_exit_info_1(ptr, Tracked(&perm));
+            kerror!("  Additional info: ", sw_exit_info_2);
+
+            crate::die("GHCB VMGEXIT failed");
+        }
 
         Tracked(perm)
     }
@@ -663,6 +703,199 @@ impl GuestHostCommucationBlock {
         let Tracked(perm) = Self::set_rax(ptr, Tracked(perm), sev_features);
 
         Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::AP_CREATE, info_1, info_2)
+    }
+
+    /// Request a state of a page to be changed via GHCB.
+    ///
+    /// Note that this assumes the page size is 4KiB.
+    pub fn pstate_change(
+        ptr: DekoPPtr<Self>,
+        Tracked(perm): Tracked<DekoPointsTo<Self>>,
+        prange: PaddrRange,
+        how: PageStateChangeOp,
+    ) -> (r: Tracked<DekoPointsTo<Self>>)
+        requires
+            perm.wf(),
+            perm.is_init(),
+            perm.pptr() == ptr@,
+            prange.wf(),
+            prange.start@ % PAGE_SIZE == 0,
+            prange.end@ % PAGE_SIZE == 0,
+        ensures
+            r@.wf(),
+            r@.is_init(),
+            r@.pptr() == ptr@,
+    {
+        kdebug!("PSC request: ", prange, " op: ", how);
+        let Tracked(mut perm) = Self::clear(ptr, Tracked(perm));
+
+        let op_mask = match how {
+            PageStateChangeOp::Private => PSC_OP_PRIVATE,
+            PageStateChangeOp::Shared => PSC_OP_SHARED,
+            PageStateChangeOp::Psmash => PSC_OP_PSMASH,
+            PageStateChangeOp::Unsmash => PSC_OP_UNSMASH,
+        };
+
+        let mut cur = prange.start.0;
+        let mut entries = 0u16;
+        let max_entries = ((GHCB_BUFFER_SIZE - 8) / 8) as u16;
+        let end = prange.end.0;
+        while cur < end
+            invariant
+                prange.start@ <= cur <= end,
+                end == prange.end@,
+                prange.start@ % PAGE_SIZE == 0,
+                prange.end@ % PAGE_SIZE == 0,
+                PAGE_SIZE == 0x1000,
+                cur % PAGE_SIZE == 0,
+                perm.wf(),
+                perm.is_init(),
+                perm.pptr() == ptr@,
+                entries < max_entries,
+                max_entries == 253,
+                // "The GHCB Shared Buffer can hold up to 253 Page State Change Entry requests."
+            decreases
+                end - cur,
+        {
+            // struct { // See Table 9: Page State Change Entryuint64 cur_page:12;
+            // uint64 gfn:40;
+            // uint64 operation:4;
+            // uint64 pagesize:1;
+            // uint64 reserved:7;
+            // } page_state_change_entry[];
+            let entry = (cur & PSC_GFN_MASK) | op_mask | (0 & 0xfffu64);
+
+            let offset = (entries as usize) * 8 + 8;
+            Self::write_buffer_slice(
+                ptr,
+                Tracked(&mut perm),
+                offset,
+                &u64_to_le_bytes(entry),
+            );
+
+            cur += PAGE_SIZE;
+            if entries == max_entries - 1 || cur >= end {
+                let hdr = PageStateChangeHeader {
+                    cur_entry: 0,
+                    end_entry: entries,
+                    reserved: 0,
+                };
+
+                let hdr_bytes = hdr.as_le_bytes();
+
+                kdebug!("header bytes: ", hdr_bytes => hex);
+                Self::write_buffer_slice(
+                    ptr,
+                    Tracked(&mut perm),
+                    0,
+                    hdr_bytes,
+                );
+
+                let Tracked(new_perm) = Self::prepare_shared_buffer(ptr, Tracked(perm));
+                let Tracked(new_perm) = Self::vmgexit(ptr, Tracked(new_perm), GHCBExitCode::SNP_PSC, 0, 0);
+
+                entries = 0;
+                proof {
+                    perm = new_perm;
+                }
+            }
+
+            entries += 1;
+        }
+
+        kunimplemented!()
+    }
+
+    /// Write a slice into the GHCB shared buffer.
+    #[verifier::external_body]
+    fn write_buffer_slice(
+        ptr: DekoPPtr<Self>,
+        Tracked(perm): Tracked<&mut DekoPointsTo<Self>>,
+        offset: usize,
+        data: &[u8],
+    )
+        requires
+            old(perm).wf(),
+            old(perm).is_init(),
+            old(perm).pptr() == ptr@,
+            offset + data.len() <= GHCB_BUFFER_SIZE,
+        ensures
+            perm.wf(),
+            perm.is_init(),
+            perm.pptr() == ptr@,
+    {
+        kdebug!("writing data", data => hex, " at offset ", offset);
+
+        let ghcb = ptr.borrow(Tracked(perm));
+        let shared_buffer = &ghcb.shared_buffer;
+
+        for i in offset..offset + data.len()
+            invariant
+                shared_buffer.len() == GHCB_BUFFER_SIZE,
+                i + data.len() <= GHCB_BUFFER_SIZE,
+        {
+            shared_buffer.index(i).store(Tracked::assume_new(), data[i - offset]);
+        }
+    }
+
+    // Make this
+    fn prepare_shared_buffer(
+        ptr: DekoPPtr<Self>,
+        Tracked(perm): Tracked<DekoPointsTo<Self>>,
+    ) -> (r: Tracked<DekoPointsTo<Self>>)
+        requires
+            perm.wf(),
+            perm.is_init(),
+            perm.pptr() == ptr@,
+        ensures
+            r@.wf(),
+            r@.is_init(),
+            r@.pptr() == ptr@,
+    {
+        broadcast use axiom_shared_buffer_size_wf;
+
+        let ghcb = ptr.borrow(Tracked(&perm));
+        let shared_buffer = &ghcb.shared_buffer;
+        let vaddr = VirtAddr::new(shared_buffer.as_ptr().addr() as u64);
+
+        // Self::dump_shared_buffer(shared_buffer);
+
+        let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+        let cpu = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+        let private_bit = cpu.private_bit();
+        let shared_bit = cpu.shared_bit();
+
+        let paddr = virt_to_phys(
+            private_bit,
+            shared_bit,
+            vaddr,
+            Tracked(&cpu_perm.pgtable_perm),
+        );
+
+
+        // This is meaningless but just to make Verus happy.
+        kpanic_if!(core::hint::unlikely(
+            paddr.0 >= u64::MAX - (vaddr.0 & 0xfff),
+        ), "GHCB shared buffer physical address overflow");
+
+        // Note that we need to fix the offset within the page.
+        let paddr_with_offset = paddr.0 + (vaddr.0 & 0xfff);
+        kinfo!("Preparing shared buffer at vaddr ", vaddr, " paddr ", PhysAddr(paddr_with_offset));
+        // The GHCB SW_SCRATCH area must point to a Page State Change structure
+        // that resides in the GHCB Shared Buffer area.
+        Self::set_exit_scratch(ptr, Tracked(perm), paddr_with_offset)
+    }
+
+    #[verifier::external_body]
+    fn dump_shared_buffer(
+        shared_buffer: &Array<PAtomicU8, GHCB_BUFFER_SIZE>,
+    ) {
+        unsafe {
+            kinfo!("GHCB Shared Buffer Dump:", core::slice::from_raw_parts(
+                shared_buffer.index_as_ptr(0).0.addr() as *const u8,
+                GHCB_BUFFER_SIZE,
+            ) => hex);
+        }
     }
 }
 

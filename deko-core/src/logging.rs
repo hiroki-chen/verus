@@ -43,6 +43,21 @@ pub const GIT_HASH: &'static str = env!("DEKO_GIT_HASH");
 
 pub const BUILD_TIME: &'static str = env!("DEKO_BUILD_TIME");
 
+// Log level information - populated by build.rs
+pub const LOG_LEVEL: &'static str = env!("DEKO_LOG_LEVEL");
+
+pub exec const LOG_LEVEL_NUM: usize = {
+    let level_str = env!("DEKO_LOG_LEVEL_NUM");
+    match level_str {
+        "1" => 1,
+        "2" => 2,
+        "3" => 3,
+        "4" => 4,
+        "5" => 5,
+        _ => 3,  // Default to INFO
+    }
+};
+
 // ASCII Art Banner
 pub const DEKO_BANNER: &'static str =
     r#"
@@ -260,7 +275,7 @@ macro_rules! print_args_internal {
 #[macro_export]
 macro_rules! kinfo {
     ($($args:tt)*) => {
-        #[cfg(feature = "logging")]
+        #[cfg(all(feature = "logging", log_level_info))]
         {
             $crate::logging::print_str($crate::logging::INFO_COLOR);
             $crate::logging::print_str("[INFO] ");
@@ -274,7 +289,7 @@ macro_rules! kinfo {
 #[macro_export]
 macro_rules! kwarn {
     ($($args:tt)*) => {
-        #[cfg(feature = "logging")]
+        #[cfg(all(feature = "logging", log_level_warn))]
         {
             $crate::logging::print_str($crate::logging::WARN_COLOR);
             $crate::logging::print_str("[WARN] ");
@@ -288,7 +303,7 @@ macro_rules! kwarn {
 #[macro_export]
 macro_rules! kerror {
     ($($args:tt)*) => {
-        #[cfg(feature = "logging")]
+        #[cfg(all(feature = "logging", log_level_error))]
         {
             $crate::logging::print_str($crate::logging::ERROR_COLOR);
             $crate::logging::print_str("[ERROR] ");
@@ -302,7 +317,7 @@ macro_rules! kerror {
 #[macro_export]
 macro_rules! kdebug {
     ($($args:tt)*) => {
-        #[cfg(feature = "logging")]
+        #[cfg(all(feature = "logging", log_level_debug))]
         {
             $crate::logging::print_str($crate::logging::DEBUG_COLOR);
             $crate::logging::print_str("[DEBUG] ");
@@ -316,7 +331,7 @@ macro_rules! kdebug {
 #[macro_export]
 macro_rules! ktrace {
     ($($args:tt)*) => {
-        #[cfg(feature = "logging")]
+        #[cfg(all(feature = "logging", log_level_trace))]
         {
             $crate::logging::print_str($crate::logging::TRACE_COLOR);
             $crate::logging::print_str("[TRACE] ");

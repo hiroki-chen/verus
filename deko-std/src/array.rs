@@ -163,6 +163,16 @@ impl<T: WellFormed, const N: usize> Array<T, N> {
         // not supported by verus yet
         core::mem::replace(&mut self.0[i], value)
     }
+
+    #[verifier::external_body]
+    #[inline(always)]
+    pub fn as_ptr(&self) -> (p: DekoPPtr<T>)
+        requires
+            self.wf(),
+    {
+        let ptr = self.0.as_ptr() as usize;
+        DekoPPtr(vstd::simple_pptr::PPtr(ptr, core::marker::PhantomData))
+    }
 }
 
 impl<T: WellFormed + Copy, const N: usize> Array<T, N> {

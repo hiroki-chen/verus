@@ -84,7 +84,7 @@ cargo run --bin xtask -- bootstrap-qemu    # Optional but recommended
 cargo run --bin xtask -- bootstrap-ovmf    # Optional for SVSM support
 
 # 2. Build all components
-cargo run --bin xtask -- build --target all --release
+DEKO_LOG_LEVEL=info cargo run --bin xtask -- build --target all --release
 
 # 3. Create bootable image
 cargo run --bin xtask -- create-bootable

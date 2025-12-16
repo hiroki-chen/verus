@@ -2,6 +2,7 @@ use core::cmp::Ordering;
 use core::ops::{Range, RangeBounds};
 
 use deko_macros::{with_atomic_pred, DekoDebug};
+use deko_std::mem::bitalloc::DekoBitmapAllocator1024;
 use deko_std::prelude::*;
 use deko_std::std_extra::cmp::{is_sorted_spec, lemma_cmp_pivot_monotonic};
 use deko_std::std_extra::slice::comparator_consistent_spec;
@@ -23,6 +24,65 @@ use crate::{kinfo, kpanic_if, kunimplemented, kwarn, vec};
 verus! {
 
 pub type RootCoverage = u16;
+
+/// Sometimes we need to temporarily get some mappings and then
+/// discard immediately after use. This struct represents such
+/// temporary mapping requests.
+///
+/// For example, when we want to change some page status where
+/// we only care about the physical addresses mapped but not
+/// the virtual addresses, we can use this struct to represent
+/// such temporary mappings. After all, if pages are not mapped,
+/// we won't be able to r/w them anyway.
+#[derive(DekoDebug)]
+pub struct VirtualMemoryTemporary {
+    /// Starting virtual address of the temporary mapping.
+    pub vaddr_start: VirtAddr,
+    /// Number of pages mapped.
+    pub nr_pages: usize,
+    /// A bitmap allocator for managing temporary mappings.
+    pub alloc: DekoBitmapAllocator1024,
+}
+
+impl WellFormed for VirtualMemoryTemporary {
+    open spec fn wf(&self) -> bool {
+        &&& self.vaddr_start.wf()
+        &&& self.vaddr_start@ % PAGE_SIZE == 0
+        &&& self.nr_pages >= 0
+        &&& self.vaddr_start@ + (self.nr_pages as u64) * PAGE_SIZE < u64::MAX
+        &&& self.alloc.wf()
+    }
+}
+
+#[verus_verify]
+impl VirtualMemoryTemporary {
+    /// Creates a new temporary mapping manager with the given
+    /// starting virtual address and number of pages.
+    #[verus_spec(r =>
+        requires
+            vaddr_start.wf(),
+            vaddr_start@ % PAGE_SIZE == 0,
+            nr_pages > 0,
+            vaddr_start@ + (nr_pages as u64) * PAGE_SIZE < u64::MAX,
+        ensures
+            self.wf(),
+            self.vaddr_start == vaddr_start,
+            self.nr_pages == nr_pages,
+    )]
+    pub fn set(&mut self, vaddr_start: VirtAddr, nr_pages: usize) {
+        self.vaddr_start = vaddr_start;
+        self.nr_pages = nr_pages;
+        self.alloc = DekoBitmapAllocator1024::new_full();
+    }
+
+    #[verus_spec(r =>
+        ensures
+            r.wf(),
+    )]
+    pub fn new_zeroed() -> Self {
+        Self { vaddr_start: VirtAddr(0), nr_pages: 0, alloc: DekoBitmapAllocator1024::new_full() }
+    }
+}
 
 with_atomic_pred! {
     VirtualMemoryRegion,

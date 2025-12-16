@@ -68,6 +68,29 @@ static LOGGER: Logger = Logger {
     port: Mutex::new(unsafe { SerialPort::new(0x3F8) }),
 };
 
+// Get log level based on conditional compilation flags
+fn get_level_filter() -> LevelFilter {
+    #[cfg(log_level_trace)]
+    return LevelFilter::Trace;
+    #[cfg(all(log_level_debug, not(log_level_trace)))]
+    return LevelFilter::Debug;
+    #[cfg(all(log_level_info, not(log_level_debug), not(log_level_trace)))]
+    return LevelFilter::Info;
+    #[cfg(all(log_level_warn, not(log_level_info), not(log_level_debug), not(log_level_trace)))]
+    return LevelFilter::Warn;
+    #[cfg(all(
+        log_level_error,
+        not(log_level_warn),
+        not(log_level_info),
+        not(log_level_debug),
+        not(log_level_trace)
+    ))]
+    return LevelFilter::Error;
+
+    // Default to INFO if no flags are set
+    LevelFilter::Info
+}
+
 // Public function to initialize the logging system.
 pub fn init() {
     // Before we set the logger, we must initialize the serial port hardware.
@@ -76,10 +99,13 @@ pub fn init() {
     // Set our custom logger as the global logger.
     log::set_logger(&LOGGER).unwrap();
 
-    // Set the maximum log level.
-    log::set_max_level(LevelFilter::Trace); // Log everything.
+    // Set the maximum log level based on environment variable.
+    log::set_max_level(get_level_filter());
 
-    log::info!("[DEKO-Monitor] Logger initialized successfully!");
+    log::info!(
+        "[DEKO-Monitor] Logger initialized successfully with level: {}",
+        env!("DEKO_LOG_LEVEL")
+    );
 }
 
 pub fn log(level: Level, args: fmt::Arguments) {
