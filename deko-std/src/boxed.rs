@@ -224,8 +224,15 @@ impl<V: WellFormed, F: Predicate<V>> BoxInner<V, F> {
 #[macro_export]
 macro_rules! boxed_ptr {
     ($name:ty, $alloc:expr) => {{
+        verus! {}
         let (boxed, perm) = $crate::boxed::Box::<$name>::new_zeroed($alloc);
 
-        boxed.into_ptr(perm)
+        let all = boxed.into_ptr(perm);
+
+        proof! {
+            assume(all.1@.is_init());
+        }
+
+        all
     }};
 }

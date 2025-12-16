@@ -1,4 +1,5 @@
 //! Implements a simple page frame allocator.
+use deko_macros::DekoDebug;
 use deko_std::prelude::*;
 use vstd::prelude::*;
 use vstd::raw_ptr::PointsToRaw;
@@ -44,6 +45,7 @@ impl WellFormed for DekoPageFrameAllocator {
     }
 }
 
+#[derive(DekoDebug, Clone, Copy)]
 pub struct DekoAllocatorApi;
 
 impl WellFormed for DekoAllocatorApi {

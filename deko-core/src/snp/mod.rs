@@ -3,10 +3,12 @@ use core::sync::atomic::AtomicU32;
 
 use deko_macros::{with_atomic_pred, DekoDebug};
 use deko_std::prelude::*;
+use deko_std::wf::WellFormed;
 use vstd::cell::PCell;
 use vstd::invariant;
 use vstd::prelude::*;
 
+use crate::collections::Vec;
 use crate::cpu::apic::Apic;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
 use crate::cpu::{
@@ -19,11 +21,13 @@ use crate::mm::{
     MAX_PHYS_ADDR, PHYS_ADDR_SIZE, PTE_MASK_PRIVATE, PTE_MASK_SHARED,
 };
 use crate::snp::ghcb::{current_ghcb, msr_register_ghcb_gpa, GuestHostCommucationBlock};
-use crate::{kinfo, Stage2LaunchInfo};
+use crate::{kinfo, kpanic_if, kwarn, vec, DekoKernelLaunchInfo, Stage2LaunchInfo};
 
 pub mod ghcb;
 pub mod logging;
 pub mod req;
+pub mod rmp;
+pub mod vmsa;
 
 extern "C" {
     /// A global flag to indicate whether the AP has been started.
@@ -31,6 +35,29 @@ extern "C" {
 }
 
 verus! {
+
+deko_bitflags! {
+    /// RMP (Reverse Map Table) entry flags.
+    pub struct Rmp: u32 {
+        const VMPL_LOW = 0;
+        const VMPL_HIGH = 1;
+        const READ = 8;
+        const WRITE = 9;
+        const X_USER = 10;
+        const X_SUPER = 11;
+        const BIT_VMSA = 16;
+    }
+}
+
+deko_bitflags_quick! {
+    Rmp,
+    vmpl0: { 0 },
+    vmpl1: { VMPL_LOW },
+    vmpl2: { VMPL_HIGH },
+    vmpl3: { VMPL_LOW, VMPL_HIGH },
+    vmsa: { BIT_VMSA, READ },
+    rwx: { READ, WRITE, X_USER, X_SUPER },
+}
 
 pub const VMPCK_SIZE: usize = 32;
 
@@ -684,6 +711,191 @@ pub fn inw(port: u16) -> u16 {
 pub fn inl(port: u16) -> u32 {
     let (ghcb, Tracked(perm)) = current_ghcb();
     GuestHostCommucationBlock::ioin(ghcb, Tracked(perm), port, 3) as u32
+}
+
+#[derive(DekoDebug)]
+pub struct SevFWMetaData {
+    pub cpuid_page: Option<PhysAddr>,
+    pub secrets_page: Option<PhysAddr>,
+    pub caa_page: Option<PhysAddr>,
+    pub valid_mem: Vec<PaddrRange>,
+}
+
+impl WellFormed for SevFWMetaData {
+    /// Please note that we do not requires that
+    /// all valid memories in the `valid_mem` are properly sorted.
+    open spec fn wf(&self) -> bool {
+        &&& self.secrets_page.wf()
+        &&& self.secrets_page matches Some(p) ==> p@ % PAGE_SIZE == 0 && p@ <= 0x8000_0000
+        &&& self.cpuid_page.wf()
+        &&& self.cpuid_page matches Some(p) ==> p@ % PAGE_SIZE == 0 && p@ <= 0x8000_0000
+        &&& self.caa_page.wf()
+        &&& self.caa_page matches Some(p) ==> p@ % PAGE_SIZE == 0 && p@ <= 0x8000_0000
+        &&& forall|i: int|
+        // 1. Each should be well-formed.
+
+            #![trigger self.valid_mem[i]]
+            0 <= i < self.valid_mem@.len() as int ==> {
+                &&& self.valid_mem@[i].wf()
+                &&& self.valid_mem@[i].start@ % PAGE_SIZE == 0
+                &&& self.valid_mem@[i].end@ % PAGE_SIZE == 0
+                &&& self.cpuid_page matches Some(cpuid_p) ==> !(self.valid_mem@[i].start@
+                    <= cpuid_p@ && cpuid_p@ < self.valid_mem@[i].end@)
+                &&& self.secrets_page matches Some(secrets_p) ==> !(self.valid_mem@[i].start@
+                    <= secrets_p@ && secrets_p@ < self.valid_mem@[i].end@)
+                &&& self.caa_page matches Some(caa_p) ==> !(self.valid_mem@[i].start@ <= caa_p@
+                    && caa_p@ < self.valid_mem@[i].end@)
+            }
+            // 2. these cpuid_page should never overlap.
+        &&& forall|i: int, j: int|
+            #![trigger self.valid_mem@[i], self.valid_mem@[j]]
+            0 <= i < self.valid_mem@.len() as int && 0 <= j < self.valid_mem@.len() as int && i != j
+                ==> self.valid_mem@[i].start@ >= self.valid_mem@[j].end@
+                || self.valid_mem@[j].start@ >= self.valid_mem@[i].end@
+    }
+}
+
+/// Fetches the SEV firmware metadata from the IGVM parameter block.
+#[verus_spec(r =>
+    requires
+        igvm_params.wf(),
+    ensures
+        r.wf(),
+)]
+pub fn get_sev_fw_metadata(igvm_params: &IgvmParamBlock) -> Option<SevFWMetaData> {
+    if igvm_params.firmware.size != 0 {
+        if igvm_params.firmware.prevalidated_count > 8 {
+            return None;
+        }
+        let mut cpuid_page = None;
+        let mut secrets_page = None;
+        let mut caa_page = None;
+        let mut valid_mem: alloc::vec::Vec<
+            Range<PhysAddr>,
+            crate::mm::frame_allocator::DekoAllocatorApi,
+        > = vec![];
+
+        if igvm_params.firmware.caa_page != 0 {
+            if igvm_params.firmware.caa_page as u64 % PAGE_SIZE != 0 {
+                kwarn!("SEV FW Metadata: CAA page is not aligned to PAGE_SIZE");
+                return None;
+            }
+            caa_page = Some(PhysAddr(igvm_params.firmware.caa_page as u64));
+        }
+        if igvm_params.firmware.cpuid_page != 0 {
+            if igvm_params.firmware.cpuid_page as u64 % PAGE_SIZE != 0 {
+                kwarn!("SEV FW Metadata: CPUID page is not aligned to PAGE_SIZE");
+                return None;
+            }
+            cpuid_page = Some(PhysAddr(igvm_params.firmware.cpuid_page as u64));
+        }
+        if igvm_params.firmware.secrets_page != 0 {
+            if igvm_params.firmware.secrets_page as u64 % PAGE_SIZE != 0 {
+                kwarn!("SEV FW Metadata: Secrets page is not aligned to PAGE_SIZE");
+                return None;
+            }
+            secrets_page = Some(PhysAddr(igvm_params.firmware.secrets_page as u64));
+        }
+        for i in 0..igvm_params.firmware.prevalidated_count as usize
+            invariant
+                i <= igvm_params.firmware.prevalidated_count as usize,
+                igvm_params.wf(),
+                valid_mem@.len() == i as int,
+                // This is sufficient for deriving that the final result is well-formed.
+                forall|j: int|
+                    #![trigger valid_mem@[j]]
+                    0 <= j < valid_mem@.len() ==> {
+                        &&& valid_mem@[j].start@
+                            == igvm_params.firmware.prevalidated@[j].base as u64
+                        &&& valid_mem@[j].end@ == (igvm_params.firmware.prevalidated@[j].base as u64
+                            + igvm_params.firmware.prevalidated@[j].size as u64)
+                    },
+        {
+            let this = igvm_params.firmware.prevalidated.index(i);
+
+            // This is by guarantee of the igvmbuilder and also stated in the
+            // verification precondition and this can be very rare; for safety
+            // we just skip this entry and make this path cold.
+            if core::hint::unlikely(this.size == 0) {
+                kwarn!("SEV FW Metadata: Prevalidated memory region has size 0");
+                return None;
+            }
+            if core::hint::unlikely(
+                this.base as u64 % PAGE_SIZE != 0 || this.size as u64 % PAGE_SIZE != 0,
+            ) {
+                kwarn!("SEV FW Metadata: Prevalidated memory region is not aligned to `PAGE_SIZE`");
+                return None;
+            }
+            let prange = PaddrRange {
+                start: PhysAddr(this.base as u64),
+                end: PhysAddr(this.base as u64 + this.size as u64),
+            };
+            proof {
+                assert(prange.wf()) by {
+                    assert(this.base + this.base <= 0x000f_ffff_ffff_f000u64);
+                    assert(this.size > 0);
+                }
+            }
+
+            valid_mem.push(prange);
+        }
+
+        Some(SevFWMetaData { cpuid_page, secrets_page, caa_page, valid_mem })
+    } else {
+        None
+    }
+}
+
+/// Performs the necessary preparations for launching guest boot firmware.
+///
+/// This probes the IGVM parameters to locate the SEV firmware metadata
+/// and try to make these pages as private to the guest.
+#[verus_spec(
+    requires
+        header.wf(),
+        igvm_params.wf(),
+        kernel_prange.wf(),
+)]
+pub fn prepare_guest_fw(
+    header: &DekoKernelLaunchInfo,
+    igvm_params: &IgvmParams<'_>,
+    kernel_prange: PaddrRange,
+) {
+    // Many things to be done inside the function.
+    if let Some(fw_meta) = get_sev_fw_metadata(igvm_params.igvm_param_block) {
+        kinfo!("SEV FW Metadata: \n\t", fw_meta);
+
+        // Now we need to make these pages accessible and mark them as valid in RMP.
+        let mut memories = fw_meta.valid_mem.clone();
+        if let Some(cpuid_page) = fw_meta.cpuid_page {
+            memories.push(
+                PaddrRange { start: cpuid_page, end: PhysAddr(cpuid_page.0 + PAGE_SIZE as u64) },
+            );
+        }
+        if let Some(secrets_page) = fw_meta.secrets_page {
+            memories.push(
+                PaddrRange {
+                    start: secrets_page,
+                    end: PhysAddr(secrets_page.0 + PAGE_SIZE as u64),
+                },
+            );
+        }
+        if let Some(caa_page) = fw_meta.caa_page {
+            memories.push(
+                PaddrRange { start: caa_page, end: PhysAddr(caa_page.0 + PAGE_SIZE as u64) },
+            );
+        }
+        // We know that they do not overflap.
+
+    }
+}
+
+/// Launches the guest boot firmware.
+#[verus_spec(
+    requires
+        header.wf(),
+)]
+pub fn launch_guest_fw(header: &DekoKernelLaunchInfo) {
 }
 
 } // verus!

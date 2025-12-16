@@ -645,6 +645,7 @@ impl GuestHostCommucationBlock {
         sev_features: u64,
         vmpl: u64,
         vmsa: PhysAddr,
+        how: u64,
     ) -> (r: Tracked<DekoPointsTo<Self>>)
         requires
             perm.wf(),
@@ -657,7 +658,7 @@ impl GuestHostCommucationBlock {
     {
         let Tracked(perm) = Self::clear(ptr, Tracked(perm));
 
-        let info_1 = ((apic_id as u64) << 32) | (vmpl & 0xf) << 16 | 1 /* (VMRUN) */;
+        let info_1 = ((apic_id as u64) << 32) | (vmpl & 0xf) << 16 | (how & 0b11) /* (VMRUN) */;
         let info_2 = vmsa.0 ;
         let Tracked(perm) = Self::set_rax(ptr, Tracked(perm), sev_features);
 

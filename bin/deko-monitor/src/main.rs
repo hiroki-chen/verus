@@ -32,7 +32,7 @@ use deko_core::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR};
 use deko_core::snp::ghcb::GuestHostCommucationBlock;
 use deko_core::snp::logging::init_ghcb_logging;
 use deko_core::snp::req::init_snp_guest_driver;
-use deko_core::snp::{init_guest_host, setup_apic};
+use deko_core::snp::{init_guest_host, prepare_guest_fw, setup_apic};
 use deko_core::{get_igvm_params, kdebug, kerror, kinfo, kpanic_if, kwarn, DekoKernelLaunchInfo};
 use deko_std::prelude::*;
 use vstd::prelude::*;
@@ -44,12 +44,20 @@ verus! {
 // TODO: Replace the real thing.
 axiom fn dummy_perm() -> tracked DekoCpuCtxPermission;
 
+struct DekoKernelLaunchInfoPred;
+
+impl Predicate<DekoAtomicData<DekoKernelLaunchInfo, ()>> for DekoKernelLaunchInfoPred {
+    open spec fn inv(self, data: DekoAtomicData<DekoKernelLaunchInfo, ()>) -> bool {
+        data.wf()
+    }
+}
+
 /// Populated later.
-exec static LAUNCH_INFO: DekoSimpleOnceCell<DekoKernelLaunchInfo>
+exec static LAUNCH_INFO: DekoOnceCell<DekoKernelLaunchInfo, (), DekoKernelLaunchInfoPred>
     ensures
         LAUNCH_INFO.wf(),
 {
-    DekoSimpleOnceCell::new(Ghost(()))
+    DekoOnceCell::new(Ghost(DekoKernelLaunchInfoPred {  }))
 }
 
 exec static CPUID_PAGE: DekoSimpleOnceCell<CpuidTable>
@@ -67,7 +75,7 @@ exec static CPUID_PAGE: DekoSimpleOnceCell<CpuidTable>
         ctx_perm.pgtable_perm.mapped(addr),
 )]
 fn init_cpuid_table(addr: VirtAddr) {
-    // stub: do nothing for now.
+    // stub`: do nothing` for now.
 }
 
 /// Starts all application processors.
@@ -75,7 +83,7 @@ fn init_cpuid_table(addr: VirtAddr) {
     requires
         igvm_params.wf(),
 )]
-fn start_application_processors<'a>(igvm_params: IgvmParams<'a>) {
+fn start_application_processors(igvm_params: &IgvmParams<'_>) {
     kinfo!("igvm_params.madt_data", igvm_params.igvm_madt);
 
     // CPU topology can be either from IGVM MADT or from firmware ACPI tables, but
@@ -506,7 +514,7 @@ extern "C" fn deko_entry(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInf
         header.wf(),
 )]
 fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
-    LAUNCH_INFO.init(header.clone());
+    LAUNCH_INFO.init(DekoAtomicData::new(header.clone()));
 
     GLOBAL_GDT.load_selectors();
 
@@ -621,7 +629,7 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
 fn deko_main(cpu_index: usize) {
     kinfo!("deko_main: entered");
 
-    if let Some(launch_info) = LAUNCH_INFO.get() {
+    if let Some(DekoAtomicData { data: launch_info, .. }) = LAUNCH_INFO.get() {
         let igvm_addr = VirtAddr::new(launch_info.igvm_params_virt_addr as u64);
 
         assume(cpu_ctx_perm.pgtable_perm.mapped(igvm_addr));
@@ -629,7 +637,16 @@ fn deko_main(cpu_index: usize) {
         proof_with!(Tracked(&cpu_ctx_perm));
         let igvm_params = deko_core::get_igvm_params(igvm_addr);
 
-        start_application_processors(igvm_params);
+        let kernel_prange = PaddrRange {
+            start: PhysAddr(launch_info.kernel_region_phys_start),
+            end: PhysAddr(launch_info.kernel_region_phys_end),
+        };
+
+        assume(kernel_prange.wf());
+
+        prepare_guest_fw(launch_info, &igvm_params, kernel_prange);
+
+        start_application_processors(&igvm_params);
 
         // Initialize the guest driver.
         init_snp_guest_driver();

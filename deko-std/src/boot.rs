@@ -517,18 +517,56 @@ impl WellFormed for IgvmParamBlock {
         &&& self.debug_serial_port + 8 <= u16::MAX
         &&& self.param_area_size as u64 % PAGE_SIZE == 0
         &&& self.param_area_size != 0
+        &&& self.firmware.wf()
     }
 }
 
 impl WellFormed for IgvmParamBlockFwInfo {
     open spec fn wf(&self) -> bool {
-        true
+        &&& self.size as u64 % PAGE_SIZE == 0
+        &&& (self.size != 0 ==> self.start as u64 % PAGE_SIZE == 0)
+        &&& self.secrets_page as u64 % PAGE_SIZE == 0
+        &&& self.cpuid_page as u64 % PAGE_SIZE == 0
+        &&& self.caa_page as u64 % PAGE_SIZE == 0
+        &&& self.memory_map_page as u64 % PAGE_SIZE == 0
+        &&& self.secrets_page <= 0x8000_0000
+        &&& self.cpuid_page <= 0x8000_0000
+        &&& self.caa_page <= 0x8000_0000
+        &&& self.memory_map_page <= 0x8000_0000
+        &&& forall|i: int|
+            #![trigger self.prevalidated@[i]]
+            0 <= i < self.prevalidated_count as int ==> {
+                let start = self.prevalidated@[i].base as u64;
+                let end = start + self.prevalidated@[i].size as u64;
+
+                // All pages should not overlap
+                &&& self.secrets_page as u64 + PAGE_SIZE <= start || end <= self.secrets_page as u64
+                &&& self.cpuid_page as u64 + PAGE_SIZE <= start || end <= self.cpuid_page as u64
+                &&& self.caa_page as u64 + PAGE_SIZE <= start || end <= self.caa_page as u64
+                &&& self.memory_map_page as u64 + (self.memory_map_page_count as u64 * PAGE_SIZE)
+                    <= start || end <= self.memory_map_page as u64
+            }
+        &&& self.prevalidated_count as usize <= self.prevalidated@.len() as usize
+        &&& Array::<IgvmParamBlockFwMem, 8>::size_wf()
+        &&& self.prevalidated.wf()
+        &&& forall|i: int|
+            #![trigger self.prevalidated@[i]]
+            0 <= i < self.prevalidated_count as int ==> self.prevalidated@[i].wf()
+        &&& forall|i: int, j: int|
+            #![trigger self.prevalidated@[i], self.prevalidated@[j]]
+            0 <= i < self.prevalidated_count as int && 0 <= j < self.prevalidated_count as int && i
+                != j ==> self.prevalidated@[i].base + self.prevalidated@[i].size
+                <= self.prevalidated@[j].base || self.prevalidated@[j].base
+                + self.prevalidated@[j].size <= self.prevalidated@[i].base
     }
 }
 
 impl WellFormed for IgvmParamBlockFwMem {
     open spec fn wf(&self) -> bool {
-        true
+        &&& self.base as u64 % PAGE_SIZE == 0
+        &&& self.size as u64 % PAGE_SIZE == 0
+        &&& self.size != 0
+        &&& self.base + self.size <= 0x000f_ffff_ffff_f000u64
     }
 }
 

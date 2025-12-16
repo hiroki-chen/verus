@@ -22,6 +22,7 @@ use crate::cpu::task::{
     DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred, DekoRunnable, DekoRunnablePred,
     DekoTaskArgs,
 };
+use crate::imp::RmpFlags;
 use crate::mm::paging::{
     bit_not_in_addr_region, bit_not_overlapping, Mapping, Page, PageTable, PageTablePermission,
     PteFlags,
@@ -30,7 +31,9 @@ use crate::mm::stack::{DekoIstStack, DekoKernelStack};
 use crate::mm::vm::{VirtualMemoryRegion, VirtualMemoryRegionPermission};
 use crate::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR};
 use crate::snp::ghcb::GuestHostCommucationBlock;
-use crate::{kinfo, kpanic_if};
+use crate::snp::vmsa::{VmsaPage, VmsaPagePermission};
+use crate::snp::Rmp_ALL_BITS;
+use crate::{kinfo, kpanic_if, kunimplemented};
 
 verus! {
 
@@ -770,6 +773,54 @@ impl DekoCpuCtx {
         );
     }
 
+    /// Allocates a VMSA for the given entry point.
+    pub fn allocate_vmsa(
+        ptr: DekoPPtr<Self>,
+        Tracked(perm): Tracked<&mut DekoPointsTo<Self>>,
+        Tracked(pgtable_perm): Tracked<&PageTablePermission>,
+        entry: u64,
+    ) -> (r: (PhysAddr, u64))
+        requires
+            old(perm).wf(),
+            old(perm).pptr() == ptr@,
+            old(perm).is_init(),
+            old(perm).value().private_bit_spec() == pgtable_perm.private_bit,
+            old(perm).value().shared_bit_spec() == pgtable_perm.shared_bit,
+            pgtable_perm.wf(),
+        ensures
+            perm.wf(),
+            perm.pptr() == ptr@,
+    {
+        proof_decl! {
+            let tracked mut vmsa_perm: VmsaPagePermission;
+        }
+
+        broadcast use crate::snp::RmpFlags::lemma_each_bit_is_valid;
+
+        let flags = RmpFlags::vmpl1();
+        proof {
+            assert(flags.bits() & Rmp_ALL_BITS == flags.bits()) by {
+                bit_u64_and_auto();
+            }
+        }
+
+        let cpu_borrow = ptr.borrow(Tracked(perm));
+        let private_bit = cpu_borrow.private_bit;
+        let shared_bit = cpu_borrow.shared_bit;
+
+        #[verus_spec(with => Tracked(vmsa_perm))]
+        let vmsa = VmsaPage::alloc(flags);
+        let paddr = virt_to_phys(
+            private_bit,
+            shared_bit,
+            VirtAddr::new(vmsa.page.addr() as u64),
+            Tracked(pgtable_perm),
+        );
+        // Now we need to initialize the VMSA.
+
+        kunimplemented!()
+    }
+
     #[verifier::external_body]
     pub fn map_page_4k(
         ptr: DekoPPtr<Self>,
@@ -944,9 +995,31 @@ pub fn start_application_processor(which: &PerCpuShared) {
         bsp.shared_bit(),
         Ghost(&bsp.kernel_mapping_spec()),
     );
+
+    let old_pte_value = *bsp.pgtable.borrow(Tracked(&bsp_perm.pgtable_perm.pgtable_perm)).0.index(
+        PGTABLE_LVL3_IDX_SHARED as usize,
+    );
+
+    // Copy the shared mappings from the kernel page table.
+    PageTable::update_entry_by_ptr(
+        pgtable,
+        Tracked(&mut pgtable_perm.pgtable_perm),
+        PGTABLE_LVL3_IDX_SHARED as usize,
+        old_pte_value,
+    );
+
+    // Move below code into `crate::imp``.
+    let (vmsa, sev_features) = DekoCpuCtx::allocate_vmsa(
+        cpu_ctx,
+        Tracked(&mut cpu_perm),
+        Tracked(&pgtable_perm),
+        cpu_entry,
+    );
+
 }
 
 /// Other APs will start execution from here.
+#[allow(improper_ctypes_definitions)]
 #[no_mangle]
 #[verus_spec(
     with

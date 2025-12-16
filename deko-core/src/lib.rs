@@ -7,6 +7,7 @@
 #![feature(trait_alias)]
 #![feature(likely_unlikely)]
 #![feature(specialization)]
+#![allow(incomplete_features)]
 #![allow(named_asm_labels)]
 #![allow(binary_asm_labels)]
 #![allow(mismatched_lifetime_syntaxes)]
