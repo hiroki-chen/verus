@@ -16,13 +16,88 @@ use core::ops::Range;
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
+use crate::collections::Vec;
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
+use crate::imp::{page_state_change, PageStateChangeOp};
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
 use crate::mm::paging::{PageTable, PageTablePermission, PteFlags};
-use crate::{kerror, DekoKernelLaunchInfo};
+use crate::mm::vm::TempMapping;
+use crate::{kerror, kinfo, vec, DekoKernelLaunchInfo};
 
 verus! {
 
+/// This bookkeeps the global memory maps for physical memory regions, i.e.,
+/// valid memories that can be used system-wide.
+#[doc(hidden)]
+exec static MMAP: DekoSimpleRwLock<Vec<PaddrRange>>
+    ensures
+        MMAP.wf(),
+{
+    let r = DekoSimpleRwLock::new(DekoAtomicData::new(vec![]), (), Ghost(TrivialPredicate::new()));
+
+    proof {
+        use_type_invariant(&r);
+    }
+
+    r
+}
+
+/// This function populates [`MMAP`] with the initial memory regions provided
+/// by the bootloader.
+#[verus_spec(
+    requires
+        header.wf(),
+)]
+pub fn init_mmap(header: &DekoKernelLaunchInfo) {
+    let (DekoAtomicData { mut data, perm }, write_handle) = MMAP.acquire_write();
+
+    // TODO: FILL ME.
+
+    write_handle.release_write(DekoAtomicData { data, perm });
+}
+
+/// This slightly differs from [`init_mmap`] as this will also inserts mappings
+/// collected from IGVM parameters into the guest physical memory regions.
+#[verus_spec(
+    requires
+        igvm_params.wf(),
+)]
+pub fn init_guest_mmap(igvm_params: &IgvmParams<'_>) {
+    kinfo!("init_guest_mmap: initializing guest memory map");
+
+    let mmap_count = igvm_params.igvm_param_block.firmware.memory_map_page_count;
+    let mmap_addr = igvm_params.igvm_param_block.firmware.memory_map_page;
+    let mmap_prevalidated = igvm_params.igvm_param_block.firmware.mmap_prevalidated;
+    let need_psc = igvm_params.igvm_param_page.environment_info & 0x1 != 0;
+
+    // If no extra memory mappings, return early.
+    if mmap_count != 0 {
+        // Now we read the memory map entries.
+        let mmap_paddr = PhysAddr(mmap_addr as u64);
+        let mmap_region = mmap_paddr..PhysAddr(mmap_addr as u64 + mmap_count as u64);  // no overflow checks needed as u32 cannot overflow u64
+        kinfo!("init_guest_mmap: added guest memory map region:", mmap_region);
+
+        let Some(temp_mm_mapping) = TempMapping::new(mmap_region.clone()) else {
+            kerror!("init_guest_mmap: failed to create temp mapping for mmap region");
+            return ;
+        };
+
+        // Will be used for rmpadjust/pvalidate operations.
+        let mmap_va = temp_mm_mapping.inner.start;
+        if mmap_prevalidated == 0 {
+            if need_psc {
+                // do a pre-validation of the memory map entries.
+                page_state_change(mmap_region, PageStateChangeOp::Private);
+
+            }
+        }
+        // TODO: FILL ME.
+
+    }
+}
+
+/// Dummy allocator type to prevent accidental usage of the global allocator.
+#[doc(hidden)]
 struct Allocator;
 
 /// Forbidden global allocator implementation to avoid accidental usage.
@@ -155,6 +230,11 @@ pub fn virt_to_phys_checked(
     }
 }
 
+/// This function translates a virtual address to a physical address
+/// using the given page table permission.
+///
+/// This does NOT add back the page offset, so the caller should
+/// handle that if necessary.
 #[inline(always)]
 pub fn virt_to_phys(
     private_bit: u64,

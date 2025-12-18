@@ -44,14 +44,14 @@ pub const CPUID_MAX_COUNT: usize = 32;
 pub const CPU_AREA_MAGIC: u64 = 0x114514;
 
 pub struct GuestVmsaRef {
-    vmsa: Option<PhysAddr>,
-    caa: Option<PhysAddr>,
-    generation: u64,
-    gen_in_use: u64,
+    pub vmsa: Option<PhysAddr>,
+    pub caa: Option<PhysAddr>,
+    pub generation: u64,
+    pub gen_in_use: u64,
 }
 
 impl WellFormed for GuestVmsaRef {
-    closed spec fn wf(&self) -> bool {
+    open spec fn wf(&self) -> bool {
         &&& self.vmsa matches Some(p) ==> p.wf()
         &&& self.caa matches Some(p) ==> p.wf()
     }
@@ -60,13 +60,13 @@ impl WellFormed for GuestVmsaRef {
 #[repr(C, packed(4))]
 #[derive(DekoDebug)]
 pub struct X86Tss {
-    reserved0: u32,
-    stacks: Array<u64, 3>,
-    _reserved1: u64,
-    ist_stacks: Array<u64, 7>,
-    _reserved2: u64,
-    _reserved3: u16,
-    io_bmp_base: u16,
+    pub reserved0: u32,
+    pub stacks: Array<u64, 3>,
+    pub _reserved1: u64,
+    pub ist_stacks: Array<u64, 7>,
+    pub _reserved2: u64,
+    pub _reserved3: u16,
+    pub io_bmp_base: u16,
 }
 
 #[derive(DekoDebug)]
@@ -90,7 +90,7 @@ pub struct PerCpuShared {
 }
 
 impl WellFormed for PerCpuShared {
-    closed spec fn wf(&self) -> bool {
+    open spec fn wf(&self) -> bool {
         &&& self.apic_id == self.cpu_index
         &&& self.cpu_index < CPUID_MAX_COUNT
         &&& self.guest_vmsa.wf()
@@ -204,7 +204,7 @@ impl PerCpuAreas {
 impl View for PerCpuAreas {
     type V = Seq<PerCpuShared>;
 
-    closed spec fn view(&self) -> Self::V {
+    open spec fn view(&self) -> Self::V {
         self.0@
     }
 }
@@ -319,31 +319,31 @@ pub struct DekoCpuCtx {
     #[deko(hex)]
     pub cpu_id: u64,
     /// The GHCB block for this CPU.
-    ghcb: DekoPPtr<GuestHostCommucationBlock>,
+    pub ghcb: DekoPPtr<GuestHostCommucationBlock>,
     pub tss: X86Tss,
     /// The page table for this CPU.
-    shared_area: DekoPPtr<PerCpuShared>,
+    pub shared_area: DekoPPtr<PerCpuShared>,
     /// The page table of this CPU.
-    pgtable: DekoPPtr<PageTable>,
+    pub pgtable: DekoPPtr<PageTable>,
     /// The stack for doing context switches.
-    ctx_switch_stack: Option<VirtAddr>,
+    pub ctx_switch_stack: Option<VirtAddr>,
     /// The stack for handling interrupts.
-    ist_stack: Option<DekoIstStack>,
+    pub ist_stack: Option<DekoIstStack>,
     /// The private bit of the PTE of this core.
     #[deko(hex)]
-    private_bit: u64,
+    pub private_bit: u64,
     /// The shared bit of the PTE of this core.
     #[deko(hex)]
-    shared_bit: u64,
+    pub shared_bit: u64,
     /// The high-level kernel mapping context for this CPU.
-    kernel_mapping: MappingSpace,
+    pub kernel_mapping: MappingSpace,
     /// The virtual memory region used for per-cpu area.
     /// At stage2 this is [`Option::None`].
-    vm_region: Option<VirtualMemoryRegion>,
+    pub vm_region: Option<VirtualMemoryRegion>,
     /// APIC interface for this CPU.
-    apic: X86Apic,
+    pub apic: X86Apic,
     /// Runqueue
-    run_queue: Option<DekoRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred>>,
+    pub run_queue: Option<DekoRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred>>,
     /// Temporary mapping.
     pub temp_mapping: VirtualMemoryTemporary,
 }
@@ -404,16 +404,25 @@ impl WellFormed for DekoCpuCtxPermission {
 }
 
 #[repr(C, packed)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, DekoDebug)]
 pub struct CpuidFn {
+    #[deko(hex)]
     pub eax_in: u32,
+    #[deko(hex)]
     pub ecx_in: u32,
+    #[deko(hex)]
     pub xcr0_in: u64,
+    #[deko(hex)]
     pub xss_in: u64,
+    #[deko(hex)]
     pub eax_out: u32,
+    #[deko(hex)]
     pub ebx_out: u32,
+    #[deko(hex)]
     pub ecx_out: u32,
+    #[deko(hex)]
     pub edx_out: u32,
+    #[deko(skip)]
     pub reserved_1: u64,
 }
 
@@ -453,10 +462,14 @@ impl Default for CpuidFn {
 }
 
 #[repr(C, packed)]
+#[derive(DekoDebug, Clone)]
 pub struct CpuidTable {
     pub count: u32,
+    #[deko(skip)]
     pub reserved_1: u32,
+    #[deko(skip)]
     pub reserved_2: u64,
+    #[deko(hex)]
     pub func: Array<CpuidFn, CPUID_MAX_COUNT>,
 }
 
@@ -511,14 +524,15 @@ impl WellFormed for CpuidTable {
 }
 
 impl WellFormed for X86Tss {
-    closed spec fn wf(&self) -> bool {
+    open spec fn wf(&self) -> bool {
         &&& self.stacks.wf()
         &&& self.ist_stacks.wf()
     }
 }
 
 impl WellFormed for DekoCpuCtx {
-    closed spec fn wf(&self) -> bool {
+    #[verifier::inline]
+    open spec fn wf(&self) -> bool {
         &&& self.tss.wf()
         &&& self.cpu_id < CPUID_MAX_COUNT as u64
         &&& self.magic == CPU_AREA_MAGIC
@@ -553,35 +567,39 @@ impl X86Tss {
 impl DekoCpuCtx {
     uninterp spec fn addr(&self) -> u64;
 
-    pub closed spec fn vm_region_spec(&self) -> &Option<VirtualMemoryRegion> {
+    pub open spec fn vm_region_spec(&self) -> &Option<VirtualMemoryRegion> {
         &self.vm_region
     }
 
-    pub closed spec fn shared_bit_spec(&self) -> u64 {
+    pub open spec fn temp_mapping_spec(&self) -> &VirtualMemoryTemporary {
+        &self.temp_mapping
+    }
+
+    pub open spec fn shared_bit_spec(&self) -> u64 {
         self.shared_bit
     }
 
-    pub closed spec fn private_bit_spec(&self) -> u64 {
+    pub open spec fn private_bit_spec(&self) -> u64 {
         self.private_bit
     }
 
-    pub closed spec fn pgtable_spec(&self) -> DekoPPtr<PageTable> {
+    pub open spec fn pgtable_spec(&self) -> DekoPPtr<PageTable> {
         self.pgtable
     }
 
-    pub closed spec fn kernel_mapping_spec(&self) -> MappingSpace {
+    pub open spec fn kernel_mapping_spec(&self) -> MappingSpace {
         self.kernel_mapping
     }
 
-    pub closed spec fn ctx_switch_stack_spec(&self) -> Option<VirtAddr> {
+    pub open spec fn ctx_switch_stack_spec(&self) -> Option<VirtAddr> {
         self.ctx_switch_stack
     }
 
-    pub closed spec fn apic_spec(&self) -> &X86Apic {
+    pub open spec fn apic_spec(&self) -> &X86Apic {
         &self.apic
     }
 
-    pub closed spec fn run_queue_spec(&self) -> Option<
+    pub open spec fn run_queue_spec(&self) -> Option<
         &DekoRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred>,
     > {
         match &self.run_queue {
@@ -601,6 +619,19 @@ impl DekoCpuCtx {
         &self.apic
     }
 
+    #[verifier::when_used_as_spec(temp_mapping_spec)]
+    #[inline]
+    pub fn temp_mapping(&self) -> (r: &VirtualMemoryTemporary)
+        requires
+            self.wf(),
+        ensures
+            r == self.temp_mapping_spec(),
+        opens_invariants none
+        no_unwind
+    {
+        &self.temp_mapping
+    }
+
     #[verifier::when_used_as_spec(shared_bit_spec)]
     #[inline]
     pub fn shared_bit(&self) -> (r: u64)
@@ -608,6 +639,8 @@ impl DekoCpuCtx {
             self.wf(),
         ensures
             r == self.shared_bit_spec(),
+        opens_invariants none
+        no_unwind
     {
         self.shared_bit
     }
@@ -619,6 +652,8 @@ impl DekoCpuCtx {
             self.wf(),
         ensures
             r == self.private_bit_spec(),
+        opens_invariants none
+        no_unwind
     {
         self.private_bit
     }
@@ -630,6 +665,8 @@ impl DekoCpuCtx {
             self.wf(),
         ensures
             r == self.kernel_mapping_spec(),
+        opens_invariants none
+        no_unwind
     {
         self.kernel_mapping
     }
@@ -663,6 +700,8 @@ impl DekoCpuCtx {
             r.0@ == r.1@.ptr_perm().pptr(),
             r.0.addr() as u64 == PERCPU_BASE@,
             r.1@.wf_with(r.0),
+        opens_invariants none
+        no_unwind
     {
         // SAFETY: The PerCPU area is always mapped at the same virtual address, so
         // dereferencing a pointer to that address is safe. The PerCPU area is also
@@ -866,11 +905,11 @@ impl DekoCpuCtx {
         );
     }
 
-    pub closed spec fn cpu_id(&self) -> u64 {
+    pub open spec fn cpu_id(&self) -> u64 {
         self.cpu_id
     }
 
-    pub closed spec fn ghcb_spec(&self) -> DekoPPtr<GuestHostCommucationBlock> {
+    pub open spec fn ghcb_spec(&self) -> DekoPPtr<GuestHostCommucationBlock> {
         self.ghcb
     }
 
@@ -893,6 +932,8 @@ impl DekoCpuCtx {
             self.wf(),
         ensures
             r == self.pgtable_spec(),
+        opens_invariants none
+        no_unwind
     {
         self.pgtable
     }

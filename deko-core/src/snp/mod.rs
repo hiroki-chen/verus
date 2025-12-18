@@ -12,17 +12,19 @@ use crate::collections::Vec;
 use crate::cpu::apic::Apic;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
 use crate::cpu::{
-    DekoCpuCtx, DekoCpuCtxPermission, PerCpuAreas, PerCpuShared, CPUID_MAX_COUNT, CPU_AREA_MAGIC,
-    PERCPU_AREAS,
+    CpuidTable, DekoCpuCtx, DekoCpuCtxPermission, PerCpuAreas, PerCpuShared, CPUID_MAX_COUNT,
+    CPU_AREA_MAGIC, PERCPU_AREAS,
 };
 use crate::mm::paging::{PageTablePermission, PteFlags};
+use crate::mm::vm::TempMapping;
 use crate::mm::{
-    phys_to_virt, virt_to_phys, PageEncryptionMasks, DEKO_FRAME_ALLOCATOR, FEATURE_MASK,
-    MAX_PHYS_ADDR, PHYS_ADDR_SIZE, PTE_MASK_PRIVATE, PTE_MASK_SHARED,
+    init_guest_mmap, phys_to_virt, virt_to_phys, PageEncryptionMasks, DEKO_FRAME_ALLOCATOR,
+    FEATURE_MASK, MAX_PHYS_ADDR, PHYS_ADDR_SIZE, PTE_MASK_PRIVATE, PTE_MASK_SHARED,
 };
 use crate::snp::ghcb::{current_ghcb, msr_register_ghcb_gpa, GuestHostCommucationBlock};
-use crate::{kinfo, kpanic_if, kwarn, vec, DekoKernelLaunchInfo, Stage2LaunchInfo};
+use crate::{die, kerror, kinfo, kpanic_if, kwarn, vec, DekoKernelLaunchInfo, Stage2LaunchInfo};
 
+pub mod doorbell;
 pub mod ghcb;
 pub mod logging;
 pub mod req;
@@ -898,6 +900,7 @@ pub fn prepare_guest_fw(
     header: &DekoKernelLaunchInfo,
     igvm_params: &IgvmParams<'_>,
     kernel_prange: PaddrRange,
+    cpuid_table: &CpuidTable,
 ) {
     // Many things to be done inside the function.
     if let Some(fw_meta) = get_sev_fw_metadata(igvm_params.igvm_param_block) {
@@ -924,7 +927,50 @@ pub fn prepare_guest_fw(
             );
         }
         validate_fw_memories(header, igvm_params, &memories);
+
+        init_guest_mmap(igvm_params);
+        // copy the ACPI table into the fw so that
+        // the guest fw can use it.
+        copy_apci_tables_to_fw(&fw_meta, kernel_prange, cpuid_table);
+        // validate fw.
+        // prepare the fw launch (caa initialization.).
     }
+}
+
+/// Copies the CPUID page to the SEV firmware metadata location.
+///
+/// This method is necessary as guest boot firmware expects the CPUID page
+/// to be located at a specific physical address provided in the SEV firmware
+/// metadata.
+#[verus_spec(
+    requires
+        fw_meta.wf(),
+        kernel_region.wf(),
+)]
+fn copy_apci_tables_to_fw(
+    fw_meta: &SevFWMetaData,
+    kernel_region: PaddrRange,
+    cpuid_table: &CpuidTable,
+) {
+    if let Some(cpuid) = fw_meta.cpuid_page {
+        kinfo!("Copying CPUID page to firmware location at ", cpuid);
+        kinfo!("\t cpuid_table: ", cpuid_table);
+
+        // Create a temporary mapping.
+        let Some(cpuid_mapping) = TempMapping::new(cpuid..PhysAddr(cpuid.0 + PAGE_SIZE)) else {
+            kerror!("Failed to create temporary mapping for CPUID page copy");
+            die("");
+        };
+
+        let vaddr = cpuid_mapping.inner.start;
+
+        do_copy_cpuid_to_fw(cpuid_table, vaddr);
+    }
+    kpanic_if!(fw_meta.caa_page.is_none(), "SEV FW Metadata: CAA page is required for ACPI table copy");
+    kpanic_if!(fw_meta.secrets_page.is_none(), "SEV FW Metadata: Secrets page is required for ACPI table copy");
+
+    let caa_page = fw_meta.caa_page.unwrap();
+    let secrets_page = fw_meta.secrets_page.unwrap();
 }
 
 /// This functon validates the prevalidated memory regions specified
@@ -1020,6 +1066,30 @@ fn validate_fw_memory_region(prange: PaddrRange) {
         header.wf(),
 )]
 pub fn launch_guest_fw(header: &DekoKernelLaunchInfo) {
+}
+
+#[inline]
+#[verus_spec(
+    requires
+        mm.wf(),
+        mm.start@ % PAGE_SIZE == 0,
+        mm.end@ % PAGE_SIZE == 0,
+)]
+pub fn page_state_change(mm: PaddrRange, op: PageStateChangeOp) {
+    let (ghcb, Tracked(perm)) = current_ghcb();
+    GuestHostCommucationBlock::pstate_change(ghcb, Tracked(perm), mm, op);
+}
+
+#[verifier::external_body]
+#[verus_spec(
+    requires
+        to.wf(),
+        to@ % PAGE_SIZE == 0,
+)]
+fn do_copy_cpuid_to_fw(cpuid_table: &CpuidTable, to: VirtAddr) {
+    unsafe {
+        core::ptr::copy_nonoverlapping(cpuid_table as _, to.0 as *mut CpuidTable, 1);
+    }
 }
 
 } // verus!

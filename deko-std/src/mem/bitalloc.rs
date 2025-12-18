@@ -9,7 +9,26 @@ verus! {
 pub type DekoBitmapAllocator1024 = DekoBitmapAllocatorTree<BitmapAllocator64>;
 
 pub assume_specification[ u64::count_ones ](b: u64) -> (r: u32)
+    ensures
+        r as int == count_ones_spec(b),
 ;
+
+pub open spec fn count_ones_spec(b: u64) -> int
+    decreases b,
+{
+    if b == 0 {
+        0
+    } else {
+        proof {
+            assert(b & ((b - 1) as u64) < b) by (bit_vector)
+                requires
+                    b > 0,
+            ;
+        }
+
+        1 + count_ones_spec(b & (b - 1) as u64)
+    }
+}
 
 pub broadcast axiom fn alloc_bits_size_wf<T: DekoBitAlloc + WellFormed>()
     ensures
@@ -63,6 +82,8 @@ pub trait DekoBitAlloc: Sized + WellFormed {
     }
 
     spec fn cap_spec() -> int;
+
+    spec fn used_spec(&self) -> int;
 
     /// The capacity of the allocator in number of bits.
     /// This function replaces the associated constant as
@@ -134,6 +155,8 @@ pub trait DekoBitAlloc: Sized + WellFormed {
         requires
             self.wf(),
             Self::size_wf(),
+        returns
+            self.used_spec() as usize,
     ;
 }
 
@@ -141,6 +164,11 @@ impl DekoBitAlloc for BitmapAllocator64 {
     #[verifier::inline]
     open spec fn cap_spec() -> int {
         u64::BITS as int
+    }
+
+    #[verifier::inline]
+    open spec fn used_spec(&self) -> int {
+        count_ones_spec(self.bits)
     }
 
     fn cap() -> usize {
@@ -280,6 +308,11 @@ impl<T: DekoBitAlloc + deko_std::fmt::DekoDebug> DekoBitAlloc for DekoBitmapAllo
         (16 * T::cap_spec())
     }
 
+    open spec fn used_spec(&self) -> int {
+        let s = Seq::new(16, |i: int| self.child@[i].used_spec());
+        s.fold_left(0, |acc: int, x: int| acc + x)
+    }
+
     fn cap() -> usize {
         proof {
             assert(Self::size_wf());
@@ -297,8 +330,12 @@ impl<T: DekoBitAlloc + deko_std::fmt::DekoDebug> DekoBitAlloc for DekoBitmapAllo
     fn alloc(&mut self, entries: usize, align: usize) -> (r: Option<usize>)
         ensures
             self.wf(),
+            r matches Some(r) ==> {
+                &&& r % align == 0
+                &&& r + entries <= Self::cap_spec()
+            },
     {
-        Some(1)
+        vstd::vpanic!("todo")
     }
 
     fn free(&mut self, start: usize, entries: usize)
@@ -332,7 +369,7 @@ impl<T: DekoBitAlloc + deko_std::fmt::DekoDebug> DekoBitAlloc for DekoBitmapAllo
     }
 
     fn used(&self) -> usize {
-        0
+        vstd::vpanic!("todo")
     }
 }
 

@@ -159,6 +159,12 @@ pub assume_specification[ u64::next_power_of_two ](n: u64) -> (result: u64)
         next_power_of_two_correct(n as nat, result as nat),
 ;
 
+pub assume_specification[ usize::next_power_of_two ](n: usize) -> (result: usize)
+    ensures
+        result == next_power_of_two_spec(n as nat),
+        next_power_of_two_correct(n as nat, result as nat),
+;
+
 pub assume_specification[ u64::pow ](n: u64, exp: u32) -> (result: u64)
     ensures
         result == vstd::arithmetic::power::pow(n as int, exp as nat),

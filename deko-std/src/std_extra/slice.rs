@@ -4,8 +4,19 @@ use vstd::prelude::*;
 use vstd::std_specs::cmp::OrdSpec;
 
 use crate::cmp::is_sorted_spec;
+use crate::WellFormed;
 
 verus! {
+
+pub open spec fn slice_wf<T: WellFormed>(s: Seq<T>) -> bool {
+    forall|i: int| 0 <= i < s.len() ==> (#[trigger] s[i]).wf()
+}
+
+pub assume_specification<T, U, const N: usize>[ <[T; N] as core::cmp::PartialEq<[U; N]>>::eq ](
+    _0: &[T; N],
+    _1: &[U; N],
+) -> bool where T: core::cmp::PartialEq<U>
+;
 
 pub assume_specification[ core::primitive::str::as_bytes ](s: &str) -> (r: &[u8])
     ensures

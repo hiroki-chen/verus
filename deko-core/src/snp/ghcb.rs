@@ -22,6 +22,7 @@ use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::paging::{PageTable, PteFlags};
 use crate::mm::{virt_to_phys, virt_to_phys_checked};
 use crate::prelude::*;
+use crate::snp::doorbell::{self, HVDoorbell};
 use crate::snp::{
     PageStateChangeOp, GHCB_BUFFER_SIZE, PSC_GFN_MASK, PSC_OP_PRIVATE, PSC_OP_PSMASH,
     PSC_OP_SHARED, PSC_OP_UNSMASH,
@@ -803,7 +804,31 @@ impl GuestHostCommucationBlock {
             entries += 1;
         }
 
-        kunimplemented!()
+        Tracked(perm)
+    }
+
+    /// Register a HV doorbell via GHCB.
+    pub fn register_hv_doorbell(
+        ptr: DekoPPtr<Self>,
+        Tracked(perm): Tracked<DekoPointsTo<Self>>,
+        doorbell_paddr: PhysAddr,
+    ) -> (r: Tracked<DekoPointsTo<Self>>)
+        requires
+            perm.wf(),
+            perm.is_init(),
+            perm.pptr() == ptr@,
+            doorbell_paddr.wf(),
+            doorbell_paddr@ % PAGE_SIZE == 0,
+        ensures
+            r@.wf(),
+            r@.is_init(),
+            r@.pptr() == ptr@,
+    {
+        let doorbell_gpa_val = doorbell_paddr.0;
+
+        let Tracked(perm) = Self::clear(ptr, Tracked(perm));
+
+        Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::HV_DOORBELL, 1, /* set */ doorbell_gpa_val /* guest gPA */)
     }
 
     /// Write a slice into the GHCB shared buffer.

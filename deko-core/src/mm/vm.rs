@@ -2,7 +2,7 @@ use core::cmp::Ordering;
 use core::ops::{Range, RangeBounds};
 
 use deko_macros::{with_atomic_pred, DekoDebug};
-use deko_std::mem::bitalloc::DekoBitmapAllocator1024;
+use deko_std::mem::bitalloc::{DekoBitAlloc, DekoBitmapAllocator1024};
 use deko_std::prelude::*;
 use deko_std::std_extra::cmp::{is_sorted_spec, lemma_cmp_pivot_monotonic};
 use deko_std::std_extra::slice::comparator_consistent_spec;
@@ -12,6 +12,7 @@ use vstd::std_specs::cmp::*;
 
 use super::frame_allocator::DekoAllocatorApi;
 use crate::collections::Vec;
+use crate::cpu::DekoCpuCtx;
 use crate::mm::paging::{
     all_in_range_paddrs, all_normalized_vaddrs, bit_not_in_addr_region, bit_not_overlapping,
     index_at_level, make_private_address, PageTable, PageTableEntry, PageTablePermission, PteFlags,
@@ -45,12 +46,127 @@ pub struct VirtualMemoryTemporary {
 }
 
 impl WellFormed for VirtualMemoryTemporary {
+    #[verifier::inline]
     open spec fn wf(&self) -> bool {
         &&& self.vaddr_start.wf()
+        &&& self.vaddr_start@ >= VADDR_UPPER_MASK
         &&& self.vaddr_start@ % PAGE_SIZE == 0
         &&& self.nr_pages >= 0
         &&& self.vaddr_start@ + (self.nr_pages as u64) * PAGE_SIZE < u64::MAX
         &&& self.alloc.wf()
+    }
+}
+
+/// A temporary mapping created by [`VirtualMemoryTemporary`].
+///
+/// This implements [`Drop`] to automatically unmap the mapping
+/// when it goes out of scope.
+#[must_use = "Temporary mappings must be used or they will be droppped immediately."]
+pub struct TempMapping {
+    pub inner: VaddrRange,
+}
+
+impl Drop for TempMapping {
+    fn drop(&mut self)
+        opens_invariants none
+        no_unwind
+    {
+        let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
+        let cpu = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+        let pgtable = cpu.pgtable();
+        let private_bit = cpu.private_bit();
+        let shared_bit = cpu.shared_bit();
+
+        // PageTable::unmap_multiple_pages(pgtable, Tracked(&mut cpu_perm.pgtable_perm), vaddr, ms, private_bit, shared_bit)...
+    }
+}
+
+#[verus_verify]
+impl TempMapping {
+    /// Attempts to create a new temporary mapping for the given physical address range.
+    ///
+    /// Please note this assumes the page is always aligned to 4KiB and we do not intend
+    /// to support huge pages here.
+    #[verus_spec(r =>
+        requires
+            prange.wf(),
+            prange.start@ % PAGE_SIZE == 0,
+            prange.end@ % PAGE_SIZE == 0,
+            prange.end@ <= 0x000f_ffff_ffff_f000,
+        ensures
+            r matches Some(tm) ==> {
+                &&& tm.wf()
+                &&& tm.inner.start@ >= VADDR_UPPER_MASK
+                &&& tm.inner.start@ % PAGE_SIZE == 0
+            }
+    )]
+    pub fn new(prange: PaddrRange) -> Option<Self> {
+        broadcast use crate::mm::PteFlags::lemma_each_bit_is_valid;
+
+        let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
+        let max_nr_pages = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).temp_mapping().nr_pages;
+
+        let nr_pages = ((prange.end.0 - prange.start.0) / PAGE_SIZE) as usize;
+        if nr_pages == 0 || nr_pages > max_nr_pages - 1 {
+            kwarn!("TempMapping::new: invalid number of pages requested:", nr_pages);
+            return None;
+        }
+        let flags = PteFlags::data();
+        let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
+
+        let vaddr = match cpu_taken.temp_mapping.allocate(nr_pages, PAGE_SIZE as usize) {
+            Some(vaddr) => vaddr,
+            None => {
+                kwarn!("TempMapping::new: unable to allocate temporary mapping of", nr_pages, "pages");
+
+                // Remember to put back the cpu permission
+                cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
+                return None;
+            },
+        };
+        let vrange = VaddrRange {
+            start: vaddr,
+            end: VirtAddr(vaddr.0 + (nr_pages as u64) * PAGE_SIZE),
+        };
+
+        proof {
+            assert(flags.bits() & Pte_ALL_BITS == flags.bits()) by {
+                bit_u64_and_auto();
+            }
+            assert(vrange.end@ % PAGE_SIZE == 0) by (compute);
+
+            // Leave this as assumptions for now.
+            // another way is to leave these as runtime checks.
+            assume(all_normalized_vaddrs(vrange));
+            assume(all_in_range_paddrs(&cpu_taken.kernel_mapping_spec(), prange.start, vrange));
+            assume(vrange.end@ + PAGE_SIZE_2M <= u64::MAX);
+            assume(prange.start@ + (vrange.end@ - vrange.start@) < 0x000f_ffff_ffff_f000);
+        }
+
+        // Map the page.
+        PageTable::map_page_multiple(
+            cpu_taken.pgtable(),
+            vrange.clone(),
+            prange.start,
+            flags,
+            &cpu_taken.kernel_mapping(),
+            cpu_taken.private_bit(),
+            cpu_taken.shared_bit(),
+            Tracked(&mut cpu_perm.pgtable_perm),
+        );
+
+        cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
+
+        Some(Self { inner: vrange })
+    }
+}
+
+impl WellFormed for TempMapping {
+    #[verifier::inline]
+    open spec fn wf(&self) -> bool {
+        &&& self.inner.wf()
+        &&& self.inner.start@ % PAGE_SIZE == 0
+        &&& self.inner.end@ % PAGE_SIZE == 0
     }
 }
 
@@ -61,6 +177,7 @@ impl VirtualMemoryTemporary {
     #[verus_spec(r =>
         requires
             vaddr_start.wf(),
+            vaddr_start@ >= VADDR_UPPER_MASK,
             vaddr_start@ % PAGE_SIZE == 0,
             nr_pages > 0,
             vaddr_start@ + (nr_pages as u64) * PAGE_SIZE < u64::MAX,
@@ -80,7 +197,65 @@ impl VirtualMemoryTemporary {
             r.wf(),
     )]
     pub fn new_zeroed() -> Self {
-        Self { vaddr_start: VirtAddr(0), nr_pages: 0, alloc: DekoBitmapAllocator1024::new_full() }
+        Self {
+            vaddr_start: VirtAddr(VADDR_UPPER_MASK),
+            nr_pages: 0,
+            alloc: DekoBitmapAllocator1024::new_full(),
+        }
+    }
+
+    /// Queries the inner bitmap allocator for available temporary mappings and
+    /// return the starting virtual address if successful. This function does
+    /// NOT actually map any pages, it only allocates the virtual address space.
+    #[inline]
+    #[verus_spec(r =>
+        requires
+            old(self).wf(),
+            nr_pages < old(self).nr_pages,
+        ensures
+            self.wf(),
+            r matches Some(vaddr) ==> {
+                &&& vaddr.wf()
+                &&& vaddr@ % align as u64 == 0
+                &&& vaddr@ >= old(self).vaddr_start@
+                &&& vaddr@ + (nr_pages as u64) * PAGE_SIZE <= old(self).vaddr_start@ + (old(self).nr_pages as u64) * PAGE_SIZE
+            }
+    )]
+    pub fn allocate(&mut self, nr_pages: usize, align: usize) -> Option<VirtAddr> {
+        let align = align.next_power_of_two();
+        if align > (<DekoBitmapAllocator1024 as DekoBitAlloc>::cap()) {
+            return None;
+        }
+        let r = self.alloc.alloc(nr_pages + 1, align)?;
+
+        proof {
+            //
+        }
+
+        Some(VirtAddr(self.vaddr_start.0 + r as u64))
+    }
+
+    #[verus_spec(
+        requires
+            old(self).wf(),
+            vaddr.wf(),
+            vaddr@ % PAGE_SIZE == 0,
+            nr_pages <= old(self).nr_pages,
+        ensures
+            self.wf(),
+    )]
+    pub fn deallocate(&mut self, vaddr: VirtAddr, nr_pages: usize) {
+        kunimplemented!()
+    }
+
+    #[inline]
+    #[verus_spec(r =>
+        requires
+            self.wf(),
+        ensures
+    )]
+    pub fn used_pages(&self) -> usize {
+        kunimplemented!()
     }
 }
 

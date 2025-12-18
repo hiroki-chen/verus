@@ -67,6 +67,7 @@ exec static CPUID_PAGE: DekoSimpleOnceCell<CpuidTable>
     DekoSimpleOnceCell::new(Ghost(()))
 }
 
+#[verifier::external_body]
 #[verus_spec(
     with
         Tracked(ctx_perm): Tracked<&DekoCpuCtxPermission>,
@@ -75,7 +76,15 @@ exec static CPUID_PAGE: DekoSimpleOnceCell<CpuidTable>
         ctx_perm.pgtable_perm.mapped(addr),
 )]
 fn init_cpuid_table(addr: VirtAddr) {
-    // stub`: do nothing` for now.
+    let cpuid_tables = unsafe { &mut *(addr.0 as *mut CpuidTable) };
+
+    for fns in cpuid_tables.func.0.iter_mut() {
+        if fns.eax_in == 0x8000_001f {
+            fns.eax_out |= 1 << 28;
+        }
+    }
+
+    CPUID_PAGE.init(cpuid_tables.clone());
 }
 
 /// Starts all application processors.
@@ -488,6 +497,10 @@ fn init_mem(header: &DekoKernelLaunchInfo) {
     with
         Tracked(ctx_perm): Tracked<DekoCpuCtxPermission>,
     requires
+        ctx_perm.pgtable_perm.mapped(VirtAddr(header.secrets_page)),
+        ctx_perm.pgtable_perm.mapped(VirtAddr(header.cpuid_page)),
+        VirtAddr(header.secrets_page).wf(),
+        VirtAddr(header.cpuid_page).wf(),
         ctx_perm.wf_with(ctx),
         header.wf(),
 )]
@@ -516,6 +529,10 @@ extern "C" fn deko_entry(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInf
         Tracked(ctx_perm): Tracked<DekoCpuCtxPermission>,
     requires
         ctx_perm.wf_with(ctx),
+        ctx_perm.pgtable_perm.mapped(VirtAddr(header.secrets_page)),
+        ctx_perm.pgtable_perm.mapped(VirtAddr(header.cpuid_page)),
+        VirtAddr(header.secrets_page).wf(),
+        VirtAddr(header.cpuid_page).wf(),
         header.wf(),
 )]
 fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
@@ -525,6 +542,9 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
 
     let mut early_idt = Idt { entries: create_early_idt() };
     init_early_idt(&mut early_idt);
+
+    proof_with!(Tracked(&ctx_perm));
+    init_cpuid_table(VirtAddr(header.cpuid_page));
 
     let debug_serial_port = header.debug_serial_port;
     let secrets_page_virt = VirtAddr(header.secrets_page);
@@ -649,7 +669,12 @@ fn deko_main(cpu_index: usize) {
 
         assume(kernel_prange.wf());
 
-        prepare_guest_fw(launch_info, &igvm_params, kernel_prange);
+        let Some(cpuid_table) = CPUID_PAGE.get() else {
+            kerror!("deko_main: CPUID page not initialized; this is a fatal error");
+            early_die();
+        };
+
+        prepare_guest_fw(launch_info, &igvm_params, kernel_prange, cpuid_table);
 
         start_application_processors(&igvm_params);
 

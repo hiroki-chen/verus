@@ -425,8 +425,10 @@ pub struct IgvmParamBlockFwInfo {
     /// Indicates that the initial location of firmware is at the base of
     /// memory and will not be loaded into the ROM range.
     pub in_low_memory: u8,
+    /// Indicates that the memory map provided by the firmware is prevalidated
+    pub mmap_prevalidated: u8,
     #[doc(hidden)]
-    pub _reserved: [u8; 7],
+    pub _reserved: [u8; 6],
     /// The guest physical address at which the firmware expects to find the
     /// secrets page.
     pub secrets_page: u32,
@@ -529,10 +531,11 @@ impl WellFormed for IgvmParamBlockFwInfo {
         &&& self.cpuid_page as u64 % PAGE_SIZE == 0
         &&& self.caa_page as u64 % PAGE_SIZE == 0
         &&& self.memory_map_page as u64 % PAGE_SIZE == 0
+        &&& self.memory_map_page_count as u64 % PAGE_SIZE == 0
         &&& self.secrets_page <= 0x8000_0000
         &&& self.cpuid_page <= 0x8000_0000
         &&& self.caa_page <= 0x8000_0000
-        &&& self.memory_map_page <= 0x8000_0000
+        &&& self.memory_map_page + self.memory_map_page_count <= 0x8000_0000
         &&& forall|i: int|
             #![trigger self.prevalidated@[i]]
             0 <= i < self.prevalidated_count as int ==> {

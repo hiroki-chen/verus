@@ -248,7 +248,7 @@ impl<V: WellFormed> DekoPPtr<V> {
         ensures
             perm.pptr() == old(perm).pptr(),  // the pointer remains the same
             v == old(perm).value(),
-            perm.is_uninit(),
+            v.wf(),
             perm.mem_wf(),
             perm.wf(),
         opens_invariants none

@@ -43,6 +43,12 @@ fn main() {
     };
 
     // Set environment variables for the compiled code
+    println!("cargo::rustc-check-cfg=cfg(log_level_info)");
+    println!("cargo::rustc-check-cfg=cfg(log_level_warn)");
+    println!("cargo::rustc-check-cfg=cfg(log_level_error)");
+    println!("cargo::rustc-check-cfg=cfg(log_level_debug)");
+    println!("cargo::rustc-check-cfg=cfg(log_level_trace)");
+
     println!("cargo:rustc-env=DEKO_GIT_HASH={}", git_hash);
     println!("cargo:rustc-env=DEKO_BUILD_TIME={}", build_time);
     println!("cargo:rustc-env=DEKO_LOG_LEVEL={}", log_level);
