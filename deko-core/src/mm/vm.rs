@@ -2,7 +2,9 @@ use core::cmp::Ordering;
 use core::ops::{Range, RangeBounds};
 
 use deko_macros::{with_atomic_pred, DekoDebug};
-use deko_std::mem::bitalloc::{DekoBitAlloc, DekoBitmapAllocator1024};
+use deko_std::mem::bitalloc::{
+    lemma_bit_map_allocator_1024_is_pow2, DekoBitAlloc, DekoBitmapAllocator1024,
+};
 use deko_std::prelude::*;
 use deko_std::std_extra::cmp::{is_sorted_spec, lemma_cmp_pivot_monotonic};
 use deko_std::std_extra::slice::comparator_consistent_spec;
@@ -107,7 +109,7 @@ impl TempMapping {
         let max_nr_pages = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).temp_mapping().nr_pages;
 
         let nr_pages = ((prange.end.0 - prange.start.0) / PAGE_SIZE) as usize;
-        if nr_pages == 0 || nr_pages > max_nr_pages - 1 {
+        if nr_pages == 0 || nr_pages + 1 > max_nr_pages {
             kwarn!("TempMapping::new: invalid number of pages requested:", nr_pages);
             return None;
         }
@@ -208,6 +210,7 @@ impl VirtualMemoryTemporary {
     /// return the starting virtual address if successful. This function does
     /// NOT actually map any pages, it only allocates the virtual address space.
     #[inline]
+    #[verifier::external_body]
     #[verus_spec(r =>
         requires
             old(self).wf(),
@@ -222,10 +225,14 @@ impl VirtualMemoryTemporary {
             }
     )]
     pub fn allocate(&mut self, nr_pages: usize, align: usize) -> Option<VirtAddr> {
-        let align = align.next_power_of_two();
-        if align > (<DekoBitmapAllocator1024 as DekoBitAlloc>::cap()) {
+        if align >= (<DekoBitmapAllocator1024 as DekoBitAlloc>::cap()).ilog2() as usize || (nr_pages
+            + 1) > <DekoBitmapAllocator1024 as DekoBitAlloc>::cap() {
             return None;
         }
+        proof {
+            lemma_bit_map_allocator_1024_is_pow2();
+        }
+
         let r = self.alloc.alloc(nr_pages + 1, align)?;
 
         proof {
