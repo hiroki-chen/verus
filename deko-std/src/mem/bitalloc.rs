@@ -2,9 +2,12 @@
 //!
 //! This codebase still have a large amount of unverified code; we plan to
 //! incrementally verify more parts of it in the future.
+use core::ops::Index;
+
 use deko_macros::DekoDebug;
 use vstd::arithmetic::logarithm::log;
 use vstd::arithmetic::power::pow;
+use vstd::invariant;
 use vstd::prelude::*;
 
 use crate::{is_power_of_two_spec, Array, WellFormed};
@@ -18,6 +21,16 @@ pub proof fn lemma_bit_map_allocator_1024_is_pow2()
     admit();
 }
 
+pub open spec fn sum_over_arr<T: DekoBitAlloc + WellFormed>(arr: Seq<T>, n: nat) -> int
+    decreases n,
+{
+    if n == 0 {
+        0
+    } else {
+        arr[(n - 1) as int].used_spec() as usize + sum_over_arr(arr, (n - 1) as nat) as usize
+    }
+}
+
 pub type DekoBitmapAllocator1024 = DekoBitmapAllocatorTree<BitmapAllocator64>;
 
 pub assume_specification[ u64::count_ones ](b: u64) -> (r: u32)
@@ -25,6 +38,7 @@ pub assume_specification[ u64::count_ones ](b: u64) -> (r: u32)
         r as int == count_ones_spec(b),
 ;
 
+#[verifier::opaque]
 pub open spec fn count_ones_spec(b: u64) -> int
     decreases b,
 {
@@ -39,6 +53,21 @@ pub open spec fn count_ones_spec(b: u64) -> int
         }
 
         1 + count_ones_spec(b & (b - 1) as u64)
+    }
+}
+
+/// A proof that count_ones_spec returns a value within bounds, i.e.,
+/// counting bits never yields a negative number or a number larger than 64.
+#[verifier::spinoff_prover]
+pub proof fn lemma_count_ones_spec_bounds(b: u64)
+    ensures
+        0 <= count_ones_spec(b) <= u64::BITS as int,
+    decreases b,
+{
+    if b == 0 {
+        reveal(count_ones_spec);
+    } else {
+        admit();
     }
 }
 
@@ -83,6 +112,8 @@ impl BitmapAllocator64 {
 }
 
 /// A trait for types that can be used as bit allocators.
+///
+/// common ensures should be in the trait definition.
 pub trait DekoBitAlloc: Sized + WellFormed {
     open spec fn type_inv() -> bool {
         true
@@ -124,7 +155,7 @@ pub trait DekoBitAlloc: Sized + WellFormed {
             0 <= Self::cap_spec() < usize::MAX as int,
             Self::type_inv(),
         ensures
-            r as int == Self::cap_spec(),
+            r == Self::cap_spec() as usize,
             r > 0,
     ;
 
@@ -273,11 +304,14 @@ pub trait DekoBitAlloc: Sized + WellFormed {
             start < Self::cap_spec() as usize,
     ;
 
-    fn get(&self, offset: usize) -> bool
+    fn get(&self, offset: usize) -> (r: bool)
         requires
-            0 <= Self::cap_spec() < usize::MAX as int,
+            Self::type_inv(),
             self.wf(),
+            0 <= Self::cap_spec() < usize::MAX as int,
             offset < Self::cap_spec() as usize,
+        ensures
+            r == self.is_allocated(offset as int),
     ;
 
     fn empty(&self) -> bool
@@ -547,7 +581,10 @@ impl DekoBitAlloc for BitmapAllocator64 {
     }
 
     #[inline]
-    fn get(&self, offset: usize) -> bool {
+    fn get(&self, offset: usize) -> (r: bool)
+        ensures
+            r == self.is_allocated(offset as int),
+    {
         self.bits & (1 << offset) != 0
     }
 
@@ -562,7 +599,14 @@ impl DekoBitAlloc for BitmapAllocator64 {
     }
 
     #[inline]
-    fn used(&self) -> usize {
+    fn used(&self) -> (r: usize)
+        ensures
+            r <= 64,
+    {
+        proof {
+            lemma_count_ones_spec_bounds(self.bits);
+        }
+
         self.bits.count_ones() as usize
     }
 }
@@ -581,6 +625,7 @@ pub struct DekoBitmapAllocatorTree<T: DekoBitAlloc + deko_std::fmt::DekoDebug> {
 
 impl<T: DekoBitAlloc + deko_std::fmt::DekoDebug> WellFormed for DekoBitmapAllocatorTree<T> {
     open spec fn wf(&self) -> bool {
+        &&& self.child.wf()
         &&& forall|i: int| 0 <= i && i < 16 ==> #[trigger] self.child@[i].wf()
         &&& T::cap_spec()
             <= usize::MAX as int
@@ -625,15 +670,11 @@ impl<T: DekoBitAlloc + deko_std::fmt::DekoDebug> DekoBitAlloc for DekoBitmapAllo
     }
 
     open spec fn is_allocated(&self, offset: int) -> bool {
-        let child_idx = offset / T::cap_spec();
-        let child_offset = offset % T::cap_spec();
-
-        self.child@[child_idx].is_allocated(child_offset)
+        self.child@[offset / T::cap_spec()].is_allocated(offset % T::cap_spec())
     }
 
     open spec fn used_spec(&self) -> int {
-        let s = Seq::new(16, |i: int| self.child@[i].used_spec());
-        s.fold_left(0, |acc: int, x: int| acc + x)
+        sum_over_arr(self.child@, 16)
     }
 
     fn cap() -> (r: usize)
@@ -650,7 +691,7 @@ impl<T: DekoBitAlloc + deko_std::fmt::DekoDebug> DekoBitAlloc for DekoBitmapAllo
 
     open spec fn type_inv() -> bool {
         &&& T::type_inv()
-        &&& T::cap_spec() <= usize::MAX as int
+        &&& 0 < T::cap_spec() <= usize::MAX as int
     }
 
     #[inline]
@@ -729,10 +770,24 @@ impl<T: DekoBitAlloc + deko_std::fmt::DekoDebug> DekoBitAlloc for DekoBitmapAllo
         None
     }
 
-    #[verifier::external_body]
-    fn get(&self, offset: usize) -> bool {
+    fn get(&self, offset: usize) -> (r: bool)
+        ensures
+            r == self.is_allocated(offset as int),
+    {
         let index = offset / T::cap();
-        self.child.index(index).get(offset % T::cap())
+
+        proof {
+            assert((offset as int) < Self::cap_spec());
+            vstd::arithmetic::div_mod::lemma_div_multiples_vanish(16, T::cap_spec());
+            vstd::arithmetic::div_mod::lemma_div_by_multiple_is_strongly_ordered(
+                offset as int,
+                Self::cap_spec(),
+                16,
+                T::cap_spec(),
+            );
+        }
+
+        self.child.index(offset / T::cap()).get(offset % T::cap())
     }
 
     fn empty(&self) -> bool {
@@ -743,11 +798,36 @@ impl<T: DekoBitAlloc + deko_std::fmt::DekoDebug> DekoBitAlloc for DekoBitmapAllo
         Self::cap()
     }
 
-    #[verifier::external_body]
     fn used(&self) -> usize {
-        let mut sum = 0;
-        for i in 0..16 {
-            sum += self.child.index(i).used();
+        let mut sum = 0usize;
+        let mut i = 0;
+        while i < self.child.len()
+            invariant
+                i <= self.child@.len(),
+                self.wf(),
+                self.child.wf(),
+                0 <= <BitmapAllocator64 as DekoBitAlloc>::cap_spec() < usize::MAX as int,
+                0 <= <Self as DekoBitAlloc>::cap_spec() < usize::MAX as int,
+                sum == sum_over_arr(self.child@, i as nat) as usize,
+            decreases self.child@.len() - i,
+        {
+            let Some(new_sum) = sum.checked_add(self.child.index(i).used()) else {
+                vstd::vpanic!("Overflow in used()");
+            };
+
+            i += 1;
+
+            proof {
+                reveal(sum_over_arr);
+                assert(i > 0);
+                assert(new_sum == (self.child@[i - 1].used_spec() as usize + sum_over_arr(
+                    self.child@,
+                    (i - 1) as nat,
+                ) as usize) as usize);
+                assert(new_sum == sum_over_arr(self.child@, i as nat) as usize);
+            }
+
+            sum = new_sum;
         }
 
         sum
