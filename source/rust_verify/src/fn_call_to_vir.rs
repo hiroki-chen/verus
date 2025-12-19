@@ -1,4 +1,5 @@
 use crate::attributes::{GhostBlockAttr, get_ghost_block_opt};
+use crate::config::Vstd;
 use crate::context::BodyCtxt;
 use crate::erase::{CompilableOperator, ResolvedCall};
 use crate::resolve_traits::{ResolutionResult, ResolvedItem, resolve_trait_item};
@@ -31,11 +32,11 @@ use rustc_span::source_map::Spanned;
 use rustc_trait_selection::infer::InferCtxtExt;
 use std::sync::Arc;
 use vir::ast::{
-    ArithOp, AssertQueryMode, AutospecUsage, BinaryOp, BitshiftBehavior, BitwiseOp, BuiltinSpecFun,
-    CallTarget, ChainedOp, ComputeMode, Constant, Div0Behavior, ExprX, FieldOpr, FunX, HeaderExpr,
-    HeaderExprX, InequalityOp, IntRange, IntegerTypeBoundKind, Mode, ModeCoercion, ModeWrapperMode,
-    MultiOp, OverflowBehavior, PlaceX, Quant, Typ, TypDecoration, TypX, UnaryOp, UnaryOpr, VarAt,
-    VarBinder, VarBinderX, VarIdent, VariantCheck, VirErr,
+    ArithOp, ArrayKind, AssertQueryMode, AutospecUsage, BinaryOp, BitshiftBehavior, BitwiseOp,
+    BoundsCheck, BuiltinSpecFun, CallTarget, ChainedOp, ComputeMode, Constant, Div0Behavior, ExprX,
+    FieldOpr, FunX, HeaderExpr, HeaderExprX, InequalityOp, IntRange, IntegerTypeBoundKind, Mode,
+    ModeCoercion, ModeWrapperMode, MultiOp, OverflowBehavior, PlaceX, Quant, Typ, TypDecoration,
+    TypX, UnaryOp, UnaryOpr, VarAt, VarBinder, VarBinderX, VarIdent, VariantCheck, VirErr,
 };
 use vir::ast_util::{
     const_int_from_string, mk_tuple_typ, mk_tuple_x, typ_to_diagnostic_str, types_equal,
@@ -240,6 +241,12 @@ pub(crate) fn fn_call_to_vir<'tcx>(
                     impl_paths,
                     is_trait_default: true,
                 }
+            }
+            ResolutionResult::Builtin(
+                rustc_trait_selection::traits::BuiltinImplSource::Object(_),
+            ) => {
+                // dyn T dispatch
+                vir::ast::CallTargetKind::Dynamic
             }
             ResolutionResult::Builtin(b) => {
                 unsupported_err!(expr.span, format!("built-in instance {:?}", b));
@@ -593,12 +600,12 @@ fn verus_item_to_vir<'tcx, 'a>(
                     &Arc::new(TypX::Bool),
                     ExprX::Const(Constant::Bool(false)),
                 );
-                mk_expr(ExprX::AssertAssume { is_assume: true, expr: f })
+                mk_expr(ExprX::AssertAssume { is_assume: true, expr: f, msg: None })
             }
             SpecItem::Assume => {
                 record_spec_fn_no_proof_args(bctx, expr);
                 let arg = mk_one_vir_arg(bctx, expr.span, &args)?;
-                mk_expr(ExprX::AssertAssume { is_assume: true, expr: arg })
+                mk_expr(ExprX::AssertAssume { is_assume: true, expr: arg, msg: None })
             }
         },
         VerusItem::Quant(quant_item) => {
@@ -725,7 +732,11 @@ fn verus_item_to_vir<'tcx, 'a>(
                         let arg1 = &args[1];
                         let arg1 = expr_to_vir_consume(bctx, arg1, ExprModifier::REGULAR)
                             .expect("invalid parameter for verus_builtin::array_index at arg1; arg1 must be an integer");
-                        mk_expr(ExprX::Binary(BinaryOp::ArrayIndex, arg0, arg1))
+                        mk_expr(ExprX::Binary(
+                            BinaryOp::Index(ArrayKind::Array, BoundsCheck::Allow),
+                            arg0,
+                            arg1,
+                        ))
                     }
                     _ => panic!(
                         "Expected a call for verus_builtin::array_index with two argument but did not receive it"
@@ -1060,7 +1071,7 @@ fn verus_item_to_vir<'tcx, 'a>(
                 AssertItem::Assert => {
                     unsupported_err_unless!(args_len == 1, expr.span, "expected assert", &args);
                     let exp = expr_to_vir_consume(bctx, &args[0], ExprModifier::REGULAR)?;
-                    mk_expr(ExprX::AssertAssume { is_assume: false, expr: exp })
+                    mk_expr(ExprX::AssertAssume { is_assume: false, expr: exp, msg: None })
                 }
                 AssertItem::AssertBy => {
                     unsupported_err_unless!(args_len == 2, expr.span, "expected assert_by", &args);
@@ -1753,30 +1764,30 @@ fn verus_item_to_vir<'tcx, 'a>(
                 format!("this builtin item should not appear in user code",),
             );
         }
-        VerusItem::Resolve | VerusItem::HasResolved | VerusItem::HasResolvedUnsized => {
-            if !bctx.ctxt.cmd_line_args.new_mut_ref {
+        item @ (VerusItem::HasResolved | VerusItem::HasResolvedUnsized) => {
+            if !bctx.ctxt.cmd_line_args.new_mut_ref
+                && !matches!(bctx.ctxt.cmd_line_args.vstd, Vstd::IsVstd | Vstd::IsCore)
+            {
                 unsupported_err!(expr.span, "resolve/has_resolved without '-V new-mut-ref'", &args);
             }
-            if matches!(verus_item, VerusItem::Resolve) {
-                record_compilable_operator(bctx, expr, CompilableOperator::Resolve);
-            } else {
-                record_spec_fn_no_proof_args(bctx, expr);
-            }
+            record_spec_fn_no_proof_args(bctx, expr);
             if !bctx.in_ghost {
-                if matches!(verus_item, VerusItem::Resolve) {
-                    return err_span(expr.span, "resolve must be in a 'proof' block");
-                } else {
-                    return err_span(expr.span, "has_resolved must be in a 'proof' block");
-                }
+                return err_span(expr.span, "has_resolved must be in a 'proof' block");
             }
             let exp = expr_to_vir_consume(bctx, &args[0], ExprModifier::REGULAR)?;
             let arg_typ = bctx.types.expr_ty_adjusted(&args[0]);
+            let arg_typ = match item {
+                VerusItem::HasResolved => arg_typ,
+                VerusItem::HasResolvedUnsized => match arg_typ.kind() {
+                    TyKind::Ref(_, t, rustc_middle::ty::Mutability::Not) => *t,
+                    _ => {
+                        return err_span(expr.span, "has_resolved_unsized expects shared ref");
+                    }
+                },
+                _ => unreachable!(),
+            };
             let t = bctx.mid_ty_to_vir(expr.span, &arg_typ, false)?;
-            if matches!(verus_item, VerusItem::Resolve) {
-                mk_expr(ExprX::AssumeResolved(exp, t))
-            } else {
-                mk_expr(ExprX::UnaryOpr(UnaryOpr::HasResolved(t), exp))
-            }
+            mk_expr(ExprX::UnaryOpr(UnaryOpr::HasResolved(t), exp))
         }
         VerusItem::MutRefCurrent | VerusItem::MutRefFuture => {
             if !bctx.ctxt.cmd_line_args.new_mut_ref {

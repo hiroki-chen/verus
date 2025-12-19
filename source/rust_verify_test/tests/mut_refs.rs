@@ -226,6 +226,10 @@ test_verify_one_file_with_options! {
     #[test] test_resolve_axioms_in_context ["new-mut-ref"] => verus_code! {
         use vstd::prelude::*;
 
+        fn resolve<T>(t: T)
+            ensures has_resolved(t)
+        { }
+
         fn box_with_mut_ref() {
             let mut x: u64 = 0;
 
@@ -234,7 +238,11 @@ test_verify_one_file_with_options! {
 
             **x_ref_box = 13;
 
-            proof { resolve(x_ref_box); }
+            resolve(x_ref_box);
+
+            // TODO(new_mut_ref): without this line, Verus doesn't emit the axiom for
+            // has_resolved::<Box<_>>
+            assert(has_resolved(x_ref_box));
 
             assert(x == 13);
         }
@@ -245,12 +253,12 @@ test_verify_one_file_with_options! {
             let x_ref = &mut x;
             let x_ref_ref = &x_ref;
 
-            proof { resolve(x_ref_ref); }
+            resolve(x_ref_ref);
 
             assert(has_resolved(x_ref)); // FAILS
 
             *x_ref = 20;
-            proof { resolve(x_ref); }
+            resolve(x_ref);
         }
 
         fn mut_ref_with_mut_ref() {
@@ -261,12 +269,12 @@ test_verify_one_file_with_options! {
 
             **x_ref_ref = 20;
 
-            proof { resolve(x_ref_ref); }
+            resolve(x_ref_ref);
 
             assert(has_resolved(x_ref)); // FAILS
 
             *x_ref = 30;
-            proof { resolve(x_ref); }
+            resolve(x_ref);
         }
     } => Err(err) => assert_fails(err, 2)
 }
@@ -1447,8 +1455,11 @@ test_verify_one_file_with_options! {
 }
 
 test_verify_one_file_with_options! {
-    // TODO(new_mut_ref) un-ignore this when temporaries are supported
-    #[ignore] #[test] temporaries_with_semantically_trivial_ops ["new-mut-ref"] => verus_code! {
+    #[test] temporaries_with_semantically_trivial_ops ["new-mut-ref"] => verus_code! {
+        use std::sync::Arc;
+        use std::rc::Rc;
+        use vstd::prelude::*;
+
         // the goal of this test is to make sure these are all properly temporaries
         // and that we aren't modifying the original local variable
         fn test_temp_shared_ref() {
@@ -1502,7 +1513,7 @@ test_verify_one_file_with_options! {
 
             *(&mut (x as *const u64)) = p2;
 
-            assert(x == p1); // FAILS
+            assert(x == p2); // FAILS
         }
 
         fn test_ptr_conversion_mut_to_const() {
@@ -1513,7 +1524,7 @@ test_verify_one_file_with_options! {
 
             *(&mut (x as *mut u64)) = p1;
 
-            assert(x == p2); // FAILS
+            assert(x == p1); // FAILS
         }
 
         fn test_int_casting() {
@@ -2198,7 +2209,7 @@ test_verify_one_file_with_options! {
                 mut_ref_current(j)[0] == (X { a: 0, b: 1 }),
         {
             j[0].method_call(j[0].a);
-            assert(mut_ref_current(j)[0] == (X { a: 20, b: 0 }));
+            assert(mut_ref_current(j)[0] == (X { a: 0, b: 0 }));
         }
 
         fn test_array_fail(j: &mut [X; 2])
@@ -2206,7 +2217,7 @@ test_verify_one_file_with_options! {
                 mut_ref_current(j)[0] == (X { a: 0, b: 1 }),
         {
             j[0].method_call(j[0].a);
-            assert(mut_ref_current(j)[0] == (X { a: 20, b: 0 }));
+            assert(mut_ref_current(j)[0] == (X { a: 0, b: 0 }));
             assert(false); // FAILS
         }
 
@@ -2216,7 +2227,7 @@ test_verify_one_file_with_options! {
                 X { a: 5, b: 10 },
             ];
 
-            j[0].method_call(j[0].a);
+            j[0].method_call(j[0].a + 20);
             assert(j[0] == (X { a: 20, b: 0 }));
         }
 
@@ -2226,7 +2237,7 @@ test_verify_one_file_with_options! {
                 X { a: 5, b: 10 },
             ];
 
-            j[0].method_call(j[0].a);
+            j[0].method_call(j[0].a + 20);
             assert(j[0] == (X { a: 20, b: 0 }));
             assert(false); // FAILS
         }
@@ -2238,7 +2249,7 @@ test_verify_one_file_with_options! {
             ];
             let j_ref = &mut j;
 
-            j_ref[0].method_call(j_ref[0].a);
+            j_ref[0].method_call(j_ref[0].a + 20);
             assert(j[0] == (X { a: 20, b: 0 }));
         }
 
@@ -2249,12 +2260,11 @@ test_verify_one_file_with_options! {
             ];
             let j_ref = &mut j;
 
-            j_ref[0].method_call(j_ref[0].a);
+            j_ref[0].method_call(j_ref[0].a + 20);
             assert(j[0] == (X { a: 20, b: 0 }));
             assert(false); // FAILS
         }
-    //} => Err(err) => assert_fails(err, 6) // TODO(new_mut_ref)
-    } => Err(err) => assert_vir_error_msg(err, "index for &mut not supported")
+    } => Err(err) => assert_fails(err, 6) // TODO(new_mut_ref)
 }
 
 test_verify_one_file_with_options! {
@@ -2284,7 +2294,7 @@ test_verify_one_file_with_options! {
             j[0].method_call(j[0].a);
         }
     //} => Err(err) => assert_rust_error_msg(err, "cannot use `j` because it was mutably borrowed")
-    } => Err(err) => assert_vir_error_msg(err, "index for &mut not supported")
+    } => Err(err) => assert_vir_error_msg(err, "overloaded index new-mut-ref")
 }
 
 test_verify_one_file_with_options! {
@@ -2672,4 +2682,22 @@ test_verify_one_file_with_options! {
             assert(has_resolved(p.b));
         }
     } => Err(err) => assert_fails(err, 2)
+}
+
+test_verify_one_file_with_options! {
+    #[test] shr_bor_of_pair_of_mut_bor ["new-mut-ref"] => verus_code! {
+        enum BigEnum<'a, 'b> {
+            A(&'a (u64, &'b mut u64)),
+        }
+
+        fn test_fails() {
+            let mut pair = 2;
+            let mut big_pair = (4, &mut pair);
+            let mut big = BigEnum::A(&big_pair);
+
+            *big_pair.1 = 10;
+
+            assert(false); // FAILS
+        }
+    } => Err(err) => assert_fails(err, 1)
 }

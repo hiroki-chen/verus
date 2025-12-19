@@ -1918,16 +1918,18 @@ pub fn dummy_capture_consume<'a>(_dc: DummyCapture<'a>) {
 }
 
 #[cfg(verus_keep_ghost)]
-#[rustc_diagnostic_item = "verus::verus_builtin::resolve"]
-#[verifier::spec]
-pub fn resolve<T>(_t: T) {
-    unimplemented!()
-}
-
-#[cfg(verus_keep_ghost)]
 #[rustc_diagnostic_item = "verus::verus_builtin::has_resolved"]
 #[verifier::spec]
 pub fn has_resolved<T>(_t: T) -> bool {
+    unimplemented!()
+}
+
+// Alternate form of has_resolved for when you need to work with an unsized type
+// (note that has_resolved::<&T> is usually not the same as has_resolved::<T>
+#[cfg(verus_keep_ghost)]
+#[rustc_diagnostic_item = "verus::verus_builtin::has_resolved_unsized"]
+#[verifier::spec]
+pub fn has_resolved_unsized<T: ?Sized>(_t: &T) -> bool {
     unimplemented!()
 }
 

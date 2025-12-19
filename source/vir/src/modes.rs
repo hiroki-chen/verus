@@ -122,6 +122,7 @@ struct Ctxt {
     pub(crate) check_ghost_blocks: bool,
     pub(crate) fun_mode: Mode,
     pub(crate) special_paths: SpecialPaths,
+    pub(crate) new_mut_ref: bool,
 }
 
 pub(crate) struct TypeInvInfo {
@@ -131,14 +132,16 @@ pub(crate) struct TypeInvInfo {
 
 pub type ReadKindFinals = HashMap<u64, ReadKind>;
 
-// Accumulated data recorded during mode checking
+/// Accumulated data recorded during mode checking
 struct Record {
     pub(crate) erasure_modes: ErasureModes,
-    // Modes of InferSpecForLoopIter
+    /// Modes of InferSpecForLoopIter
     infer_spec_for_loop_iter_modes: Option<Vec<(Span, Mode)>>,
     type_inv_info: TypeInvInfo,
     read_kind_finals: ReadKindFinals,
     var_modes: HashMap<VarIdent, Mode>,
+    /// Modes of all PlaceX::Temporary nodes
+    temporary_modes: HashMap<crate::messages::AstId, Mode>,
 }
 
 #[derive(Debug)]
@@ -895,10 +898,53 @@ fn check_place_rec_inner(
             Ok(Mode::Exec)
         }
         PlaceX::Local(var) => typing.get(var, &place.span),
-        PlaceX::Temporary(e) => check_expr(ctxt, record, typing, outer_mode, e),
+        PlaceX::Temporary(e) => {
+            let mode = check_expr(ctxt, record, typing, outer_mode, e)?;
+            if ctxt.new_mut_ref {
+                if record.temporary_modes.contains_key(&place.span.id) {
+                    return Err(error(
+                        &place.span,
+                        &format!("Verus Internal Error: duplicate PlaceX::Temporary ID"),
+                    ));
+                }
+                record.temporary_modes.insert(place.span.id, mode);
+            }
+            Ok(mode)
+        }
         PlaceX::ModeUnwrap(p, wrapper_mode) => {
             let mode = check_place_rec(ctxt, record, typing, outer_mode, p, access)?;
             Ok(mode_join(mode, wrapper_mode.to_mode()))
+        }
+        PlaceX::WithExpr(..) => {
+            return Err(error(
+                &place.span,
+                &format!("Verus Internal Error: WithExpr node shouldn't exist yet"),
+            ));
+        }
+        PlaceX::Index(p, idx, _kind, _needs_bounds_check) => {
+            let place_mode = check_place_rec(ctxt, record, typing, outer_mode, p, access)?;
+            let idx_mode = check_expr(ctxt, record, typing, outer_mode, idx)?;
+
+            if ctxt.check_ghost_blocks
+                && matches!(typing.block_ghostness, Ghost::Exec)
+                && idx_mode != Mode::Exec
+            {
+                return Err(error(
+                    &place.span,
+                    format!("cannot use {idx_mode}-mode expression in executable context"),
+                ));
+            }
+
+            // Why not return mode_join(place_mode, idx_mode)?
+            // This function returns the mode of the place itself, not the mode of the
+            // expression, so the mode of the indexed place is the same as the mode
+            // of the slice/array place.
+            // e.g.,
+            //   tracked[spec] -> tracked
+            //   exec[spec] -> exec
+            // If we try to do `exec[spec]` outside a ghost block, it will get caught by
+            // the above check.
+            Ok(place_mode)
         }
     }
 }
@@ -1598,7 +1644,7 @@ fn check_expr_handle_mut_arg(
         ExprX::AssertAssumeUserDefinedTypeInvariant { .. } => {
             panic!("internal error: AssertAssumeUserDefinedTypeInvariant shouldn't exist here")
         }
-        ExprX::AssertAssume { is_assume: _, expr: e } => {
+        ExprX::AssertAssume { is_assume: _, expr: e, msg: _ } => {
             if ctxt.check_ghost_blocks && typing.block_ghostness == Ghost::Exec {
                 return Err(error(&expr.span, "cannot use assert or assume in exec mode"));
             }
@@ -2067,6 +2113,7 @@ fn check_function(
     record.type_inv_info =
         TypeInvInfo { ctor_needs_check: HashMap::new(), field_loc_needs_check: HashMap::new() };
     record.var_modes = HashMap::new();
+    record.temporary_modes = HashMap::new();
 
     let mut fun_typing0 = typing.push_var_scope();
 
@@ -2270,6 +2317,7 @@ fn check_function(
                         &ctxt.datatypes,
                         &ctxt.funs,
                         &record.var_modes,
+                        &record.temporary_modes,
                     ));
                 }
             }
@@ -2310,6 +2358,7 @@ pub fn check_crate(
         check_ghost_blocks: false,
         fun_mode: Mode::Exec,
         special_paths,
+        new_mut_ref,
     };
     let type_inv_info =
         TypeInvInfo { ctor_needs_check: HashMap::new(), field_loc_needs_check: HashMap::new() };
@@ -2319,6 +2368,7 @@ pub fn check_crate(
         type_inv_info,
         read_kind_finals: HashMap::new(),
         var_modes: HashMap::new(),
+        temporary_modes: HashMap::new(),
     };
     let mut state = State {
         vars: ScopeMap::new(),
