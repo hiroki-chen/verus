@@ -12,6 +12,7 @@ use super::prelude::*;
 pub use super::raw_ptr::MemContents;
 use super::set::*;
 use super::*;
+use super::simple_pptr::*;
 
 verus! {
 
@@ -246,6 +247,17 @@ impl<V> PCell<V> {
         no_unwind
     {
         unsafe { (*self.ucell.get()).assume_init_ref() }
+    }
+
+    #[inline(always)]
+    #[verifier::external_body]
+    pub fn as_ptr(&self) -> (r: PPtr<V>)
+    {
+        let addr = unsafe {
+            (*self.ucell.get()).as_ptr() as usize
+        };
+
+        PPtr(addr, core::marker::PhantomData)
     }
 
     //////////////////////////////////
