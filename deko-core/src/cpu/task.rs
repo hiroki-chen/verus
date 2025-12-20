@@ -78,7 +78,8 @@ pub const fn deko_rsp_offset() -> u64 {
         }
 )]
 pub fn request_vm_region() -> Option<(usize, VaddrRange)> {
-    let (mut alloc, write_handle) = DEKO_KTASK_BIT_ALLOC.acquire_write();
+    let mut write_handle = DEKO_KTASK_BIT_ALLOC.acquire_write();
+    let mut alloc = write_handle.get();
 
     let r = alloc.data.alloc(1, 0);
     write_handle.release_write(alloc);
@@ -396,8 +397,8 @@ impl DekoRunQueue {
         }
 
         // Update the global task list too.
-        let (DekoAtomicData { mut data, perm: Tracked(mut perm) }, handle) =
-            DEKO_TASK_LIST.acquire_write();
+        let mut handle = DEKO_TASK_LIST.acquire_write();
+        let DekoAtomicData { mut data, perm: Tracked(mut perm) } = handle.get();
         proof {
             assert(data.wf_with(perm));
             assert(data.run_list.wf());
@@ -1028,20 +1029,21 @@ pub unsafe fn schedule_init() {
 
                 match &cpu.run_queue {
                     Some(runqueue) => {
-                        let (DekoAtomicData { data: mut runqueue, mut perm }, handle) =
-                            runqueue.acquire_write();
+                        let mut handle = runqueue.acquire_write();
+                        let DekoAtomicData { data: mut runqueue, perm: Tracked(mut perm) } =
+                            handle.get();
 
                         kpanic_if!(!runqueue.is_scheduleable(),
                                    "No scheduleable task is found.");
 
-                        proof_with!(Tracked(perm.borrow_mut()));
+                        proof_with!(Tracked(&mut perm));
                         let task = runqueue.schedule_init();
 
                         proof {
                             use_type_invariant(&task);
                         }
 
-                        handle.release_write(DekoAtomicData::new_with(runqueue, perm));
+                        handle.release_write(DekoAtomicData::new_with(runqueue, Tracked(perm)));
 
                         // perform the actual context switch
                         kinfo!("next task to schedule: ", task.as_ref().data);

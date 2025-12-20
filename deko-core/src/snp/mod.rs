@@ -245,11 +245,10 @@ impl SecretsPage {
         from.wf(),
 )]
 pub fn secrets_page_init(from: VirtAddr) {
-    let (DekoAtomicData { mut data, perm }, handle) = SECRETS_PAGE.acquire_write();
-
-    proof_with!(Tracked(pgtable_perm));
-    data.copy_from(from);
-    handle.release_write(DekoAtomicData { data, perm });
+    // let mut handle = SECRETS_PAGE.acquire_write();
+    // // proof_with!(Tracked(pgtable_perm));
+    // // data.copy_from(from);
+    // handle.release_write(DekoAtomicData { data, perm });
 }
 
 impl WellFormed for SecretsPage {

@@ -988,7 +988,8 @@ impl DekoCpuCtx {
         );
 
         let lock = cpu_ctx.run_queue.as_ref().unwrap();
-        let (DekoAtomicData { data: mut runqueue, mut perm }, write_handle) = lock.acquire_write();
+        let mut write_handle = lock.acquire_write();
+        let DekoAtomicData { data: mut runqueue, mut perm } = write_handle.get();
 
         kpanic_if!(core::hint::unlikely(runqueue.run_list.len() >= usize::MAX - 1),
             "Runqueue is full for CPU",

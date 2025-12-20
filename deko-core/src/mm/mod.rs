@@ -49,7 +49,8 @@ exec static MMAP: DekoSimpleRwLock<Vec<PaddrRange>>
         header.wf(),
 )]
 pub fn init_mmap(header: &DekoKernelLaunchInfo) {
-    let (DekoAtomicData { mut data, perm }, write_handle) = MMAP.acquire_write();
+    let mut write_handle = MMAP.acquire_write();
+    let DekoAtomicData { mut data, perm } = write_handle.get();
 
     // TODO: FILL ME.
 
