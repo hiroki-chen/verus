@@ -1,4 +1,5 @@
 //! A verified implementation of a reader-writer lock (RwLock).
+use core::borrow::Borrow;
 use core::marker::PhantomData;
 
 use verus_state_machines_macros::tokenized_state_machine;
@@ -9,6 +10,7 @@ use vstd::modes::*;
 use vstd::multiset::*;
 use vstd::prelude::*;
 use vstd::set::*;
+use vstd::simple_pptr::PPtr;
 
 use crate::prelude::*;
 use crate::sync::mutex::Spin;
@@ -398,23 +400,61 @@ pub struct ReadHandle<'a, V, S: Spin, Pred: RwLockPredicate<V>> {
 impl<'a, V, S: Spin, Pred: RwLockPredicate<V>> WriteHandle<'a, V, S, Pred> {
     #[verifier::type_invariant]
     spec fn wf_write_handle(self) -> bool {
-        equal(self.perm@.id(), self.rwlock.cell.id()) && self.perm@.is_uninit() && equal(
+        equal(self.perm@.id(), self.rwlock.cell.id()) && equal(
             self.handle@.instance_id(),
             self.rwlock.inst@.id(),
-        ) && self.rwlock.wf()
+        ) && self.rwlock.wf() && (self.perm@.is_init() ==> self.rwlock.inv(self.perm@.value()))
     }
 
     pub closed spec fn rwlock(self) -> RwLock<V, S, Pred> {
         *self.rwlock
     }
 
+    pub closed spec fn view(self) -> V {
+        self.perm@.value()
+    }
+
+    pub closed spec fn is_init(self) -> bool {
+        self.perm@.is_init()
+    }
+
+    /// Borrows a pointer to the lock-protected object.
+    #[inline]
+    pub fn as_ptr(&self) -> (p: PPtr<V>) {
+        self.rwlock.cell.as_ptr()
+    }
+
+    /// Obtain ownership of the lock-protected object.
+    #[inline]
+    pub fn get(&mut self) -> (val: V)
+        requires
+            old(self).is_init(),
+        ensures
+            old(self).rwlock().inv(val),
+            val == old(self).view(),
+            !self.is_init(),
+            self.rwlock() == old(self).rwlock(),
+    {
+        proof {
+            use_type_invariant(&*self);
+        }
+
+        self.rwlock.cell.take(Tracked(self.perm.borrow_mut()))
+    }
+
+    /// Release the write-lock, returning ownership of the lock-protected object.
+    ///
+    /// Note this function will require the inner cell to be uninitialized after
+    /// the caller has already taken the value out via [`get`](WriteHandle::get).
     pub fn release_write(self, new_val: V)
         requires
+            !self.is_init(),
             self.rwlock().inv(new_val),
     {
         proof {
             use_type_invariant(&self);
         }
+
         let WriteHandle { handle: Tracked(handle), perm: Tracked(mut perm), rwlock } = self;
         self.rwlock.cell.put(Tracked(&mut perm), new_val);
 
@@ -541,13 +581,16 @@ impl<V, S: Spin, Pred: RwLockPredicate<V>> RwLock<V, S, Pred> {
     /// is dropped. You must call [`WriteHandle::release_write`].
     /// Verus does not check that lock is released.
     #[verifier::exec_allows_no_decreases_clause]
-    pub fn acquire_write(&self) -> (ret: (V, WriteHandle<V, S, Pred>))
+    pub fn acquire_write(&self) -> (ret: WriteHandle<V, S, Pred>)
         ensures
             ({
-                let val = ret.0;
-                let write_handle = ret.1;
+                // let val = ret.0;
+                let write_handle = ret;
+
                 &&& write_handle.rwlock() == *self
-                &&& self.inv(val)
+                &&& write_handle.is_init()
+                // &&& self.inv(val)
+
             }),
     {
         proof {
@@ -618,7 +661,7 @@ impl<V, S: Spin, Pred: RwLockPredicate<V>> RwLock<V, S, Pred> {
                     Option::Some(t) => t,
                     Option::None => proof_from_false(),
                 };
-                let t = self.cell.take(Tracked(&mut perm));
+                // let t = self.cell.take(Tracked(&mut perm));
                 let write_handle = WriteHandle {
                     perm: Tracked(perm),
                     handle: Tracked(handle),
@@ -626,7 +669,7 @@ impl<V, S: Spin, Pred: RwLockPredicate<V>> RwLock<V, S, Pred> {
                 };
 
                 S::lock_epilogue(&flags);
-                return (t, write_handle);
+                return write_handle;
             }
         }
     }
@@ -729,8 +772,9 @@ impl<V, S: Spin, Pred: RwLockPredicate<V>> RwLock<V, S, Pred> {
         ensures
             self.inv(v),
     {
-        let (v, _write_handle) = self.acquire_write();
-        v
+        let mut write_handle = self.acquire_write();
+
+        write_handle.get()
     }
 }
 

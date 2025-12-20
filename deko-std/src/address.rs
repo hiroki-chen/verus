@@ -315,7 +315,6 @@ pub fn align_up(addr: u64, align: u64) -> (r: u64)
         r % align == 0,
         r < addr + align,
 {
-    broadcast use crate::math::lemma_is_power_of_two_equiv;
     broadcast use vstd::arithmetic::power2::lemma_pow2;
     broadcast use vstd::arithmetic::power::lemma_pow_increases;
 
@@ -323,6 +322,7 @@ pub fn align_up(addr: u64, align: u64) -> (r: u64)
     let r = (addr + mask) & !mask;
 
     proof {
+        crate::math::lemma_is_power_of_two_equiv(align);
         // First prove the bitwise property
         assert(r >= addr && (r & mask) == 0 && r < addr + align) by (bit_vector)
             requires
@@ -1194,6 +1194,52 @@ impl WellFormed for PaddrRange {
     open spec fn wf(&self) -> bool {
         &&& self.start@ < self.end@ < 0x000f_ffff_ffff_f000u64
     }
+}
+
+#[inline]
+pub fn create_vaddr_range(start: VirtAddr, len: usize) -> (r: VaddrRange)
+    requires
+        start@ % PAGE_SIZE == 0,
+        len * PAGE_SIZE <= u64::MAX - start@,
+    ensures
+        r.start == start,
+        r.end@ == start@ + (len as u64) * PAGE_SIZE,
+        r.end@ % PAGE_SIZE == 0,
+{
+    proof {
+        assert((start@ + len * PAGE_SIZE) % PAGE_SIZE as int == 0) by {
+            vstd::arithmetic::div_mod::lemma_mod_multiples_vanish(
+                len as int,
+                start@ as int,
+                PAGE_SIZE as int,
+            );
+        }
+    }
+
+    VaddrRange { start, end: VirtAddr(start.0 + (len as u64) * PAGE_SIZE) }
+}
+
+#[inline]
+pub fn create_paddr_range(start: PhysAddr, len: usize) -> (r: PaddrRange)
+    requires
+        start@ % PAGE_SIZE == 0,
+        len * PAGE_SIZE <= u64::MAX - start@,
+    ensures
+        r.start == start,
+        r.end@ == start@ + (len as u64) * PAGE_SIZE,
+        r.end@ % PAGE_SIZE == 0,
+{
+    proof {
+        assert((start@ + len * PAGE_SIZE) % PAGE_SIZE as int == 0) by {
+            vstd::arithmetic::div_mod::lemma_mod_multiples_vanish(
+                len as int,
+                start@ as int,
+                PAGE_SIZE as int,
+            );
+        }
+    }
+
+    PaddrRange { start, end: PhysAddr(start.0 + (len as u64) * PAGE_SIZE) }
 }
 
 } // verus!

@@ -78,6 +78,7 @@ pub broadcast axiom fn alloc_bits_size_wf<T: DekoBitAlloc + WellFormed>()
 
 #[derive(Clone, Copy, DekoDebug)]
 pub struct BitmapAllocator64 {
+    #[deko(hex)]
     pub bits: u64,
 }
 
@@ -240,7 +241,11 @@ pub trait DekoBitAlloc: Sized + WellFormed {
             if let Some(offset_free) = self.next_free(offset) {
                 // If the next free offset doesn't satisfy the alignment, skip ahead.
                 if offset_free != offset {
-                    offset = (offset_free - 1) & !align_mask + (1 << align);
+                    proof {
+                        // TODO: Prove that offset is bounded via below operation.
+                    }
+
+                    offset = ((offset_free - 1) & !align_mask) + (1 << align);
                     continue ;
                 }
                 // The aligned offset is free. Keep checking the next bit until we
@@ -619,7 +624,9 @@ impl DekoBitAlloc for BitmapAllocator64 {
 #[derive(DekoDebug)]
 #[verifier::reject_recursive_types(T)]
 pub struct DekoBitmapAllocatorTree<T: DekoBitAlloc + deko_std::fmt::DekoDebug> {
+    #[deko(hex)]
     pub bitset: u16,
+    #[deko(hex)]
     pub child: Array<T, 16>,
 }
 

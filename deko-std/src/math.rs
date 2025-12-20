@@ -26,9 +26,8 @@ pub open spec fn is_power_of_two(n: u64) -> bool {
 ///
 /// This proof establishes the connection between the two definitions in case
 /// there might be deifferent usages to state the same fact.
-pub broadcast proof fn lemma_is_power_of_two_equiv(n: u64)
+pub proof fn lemma_is_power_of_two_equiv(n: u64)
     ensures
-        #![auto]
         is_power_of_two(n) <==> is_power_of_two_spec(n as nat),
     decreases n,
 {

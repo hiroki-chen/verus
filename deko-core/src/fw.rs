@@ -1,16 +1,19 @@
 use core::ptr::eq;
 
 use deko_macros::DekoDebug;
+use deko_std::address::PaddrRange;
 use deko_std::array::Array;
 use deko_std::boot::{
-    ACPICPUInfo, ACPITable, ACPITableBuffer, ACPITableHeader, ACPITableMeta, RSDPDesc,
+    ACPICPUInfo, ACPITable, ACPITableBuffer, ACPITableHeader, ACPITableMeta, IgvmParams, RSDPDesc,
+    LOWMEM_END,
 };
+use deko_std::prelude::PhysAddr;
 use deko_std::wf::WellFormed;
 use vstd::prelude::*;
 
 use crate::collections::{update_vec, Vec};
 use crate::mm::frame_allocator::DekoAllocatorApi;
-use crate::{die, kerror, kinfo, kpanic_if, kunimplemented};
+use crate::{die, kerror, kinfo, kpanic_if, kunimplemented, vec};
 
 verus! {
 
@@ -331,6 +334,43 @@ pub fn read_acpi_table(buf: &[u8], offset: usize) -> Option<ACPITable> {
     hdr.len as usize)];
 
     Some(ACPITable { header: hdr, buf: content })
+}
+
+/// Find scattered firmware regions from the IGVM parameters.
+#[verus_spec(r =>
+    requires
+        igvm_params.wf(),
+        kernel_region.wf(),
+    ensures
+        // r.wf(),
+)]
+pub fn get_fw_regions_from_igvm(igvm_params: &IgvmParams<'_>, kernel_region: PaddrRange) -> Vec<
+    PaddrRange,
+> {
+    let mut v: Vec<PaddrRange> = vec![];
+    let fw_is_in_low_mem = igvm_params.igvm_param_block.firmware.in_low_memory != 0;
+
+    // Do extra care if the firmware is in low memory.
+    if fw_is_in_low_mem {
+        v.push(PaddrRange { start: PhysAddr(0), end: PhysAddr(LOWMEM_END as u64) });
+    }
+    v.push(
+        PaddrRange {
+            start: PhysAddr(igvm_params.igvm_param_block.firmware.start as u64),
+            end: PhysAddr(
+                igvm_params.igvm_param_block.firmware.size as u64
+                    + igvm_params.igvm_param_block.firmware.start as u64,
+            ),
+        },
+    );
+
+    // If this firmware expects an IGVM memory map but the IGVM memory
+    // map is not within any of the firmware GPA ranges, then add the IGVM
+    // memory map to the set of firmware regions.
+    if igvm_params.igvm_param_block.firmware.memory_map_page_count != 0 {
+        v.push(kernel_region);
+    }
+    v
 }
 
 } // verus!

@@ -13,6 +13,9 @@ verus! {
 ///
 /// Some lemmas and proofs imported directly from `vstd` will broken as [`alloc::vec::Vec<T>`] is
 /// _not_ the same thing as [`alloc::vec::Vec<T, A>`].
+///
+/// Most of the APIs are defined on the auto-djusted slice type `[T]`, so you can call those APIs
+/// after converting the vector to a slice via [`Vec::as_slice`] or just call `&`.
 pub type Vec<T> = alloc::vec::Vec<T, DekoAllocatorApi>;
 
 /// A type alias for a vector declaration that uses the Deko page frame allocator as its allocator.

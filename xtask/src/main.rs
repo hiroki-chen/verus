@@ -248,7 +248,7 @@ impl Builder {
         }
 
         // Check tools/verus in project
-        let tools_verus = self.config.root.join("tools").join("verus");
+        let tools_verus = self.config.root.join("tools").join("cargo-verus");
         if tools_verus.exists() {
             println!(
                 "✓ Found verus in project tools: {}",
@@ -453,8 +453,6 @@ impl Builder {
         std::env::set_current_dir(&stage2_path)
             .context("Failed to change directory to bin directory")?;
 
-        // Build stage2 using discovered verus binary
-        let mut cmd = Command::new("cargo");
         // Set the verus binary path in PATH or use custom cargo subcommand
         if verus_binary != PathBuf::from("verus") {
             // If verus is not in PATH, we need to set up the environment
@@ -464,8 +462,8 @@ impl Builder {
             std::env::set_var("PATH", new_path);
         }
 
-        cmd.arg("verus")
-            .arg("build")
+        let mut cmd = Command::new("cargo-verus");
+        cmd.arg("build")
             .arg("--target")
             .arg(self.config.custom_target_json())
             .arg("--features")

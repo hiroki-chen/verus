@@ -120,7 +120,12 @@ impl<V: WellFormed + Heap> DekoBuddyAllocator<V> {
             self.wf(),
             crate::heap::valid_heap_param(heap_start, heap_size, HEAP_SIZE as u64),
     {
-        let (mut allocator, write_handle) = self.allocator.acquire_write();
+        let mut write_handle = self.allocator.acquire_write();
+        let mut allocator = write_handle.get();
+
+        // proof {
+        //     use_type_invariant(&write_handle);
+        // }
 
         // If already initialized, we do nothing.
         if allocator.data.is_init_impl() {
@@ -193,7 +198,8 @@ impl<V: WellFormed + Heap> DekoBuddyAllocator<V> {
         requires
             self.wf(),
     {
-        let (mut allocator, write_handle) = self.allocator.acquire_write();
+        let mut write_handle = self.allocator.acquire_write();
+        let mut allocator = write_handle.get();
 
         if allocator.data.check_allocation_size(size as u64, align as u64) {
             let res = allocator.data.allocate(size as u64, align as u64);
@@ -211,7 +217,8 @@ impl<V: WellFormed + Heap> DekoBuddyAllocator<V> {
         requires
             self.wf(),
     {
-        let (mut allocator, write_handle) = self.allocator.acquire_write();
+        let mut write_handle = self.allocator.acquire_write();
+        let mut allocator = write_handle.get();
 
         if allocator.data.check_allocation_size(size as u64, align as u64) {
             // TODO: Since the allocator itself is globally shared and protected

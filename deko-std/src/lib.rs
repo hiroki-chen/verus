@@ -81,7 +81,7 @@ pub exec static TRACE_ON: DekoSimpleRwLock<bool> = DekoSimpleRwLock::new_simple(
 
 #[verifier::external_body]
 pub fn trace_enable(enabled: bool) {
-    let (_, write_handle) = TRACE_ON.acquire_write();
+    let write_handle = TRACE_ON.acquire_write();
     write_handle.release_write(DekoAtomicData::new(enabled));
 }
 

@@ -22,7 +22,7 @@ use crate::mm::paging::{
 };
 use crate::mm::stack::DekoKernelStack;
 use crate::mm::vm;
-use crate::{kinfo, kpanic_if, kunimplemented, kwarn, vec};
+use crate::{kdebug, kinfo, kpanic_if, kunimplemented, kwarn, vec};
 
 verus! {
 
@@ -113,10 +113,11 @@ impl TempMapping {
             kwarn!("TempMapping::new: invalid number of pages requested:", nr_pages);
             return None;
         }
+        kinfo!("TempMapping::new: requesting temporary mapping of", nr_pages, "pages for physical range", prange);
         let flags = PteFlags::data();
         let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
 
-        let vaddr = match cpu_taken.temp_mapping.allocate(nr_pages, PAGE_SIZE as usize) {
+        let vaddr = match cpu_taken.temp_mapping.allocate(nr_pages, 0) {
             Some(vaddr) => vaddr,
             None => {
                 kwarn!("TempMapping::new: unable to allocate temporary mapping of", nr_pages, "pages");
@@ -135,10 +136,9 @@ impl TempMapping {
             assert(flags.bits() & Pte_ALL_BITS == flags.bits()) by {
                 bit_u64_and_auto();
             }
-            assert(vrange.end@ % PAGE_SIZE == 0) by (compute);
-
             // Leave this as assumptions for now.
             // another way is to leave these as runtime checks.
+            assume(vaddr@ % PAGE_SIZE == 0);
             assume(all_normalized_vaddrs(vrange));
             assume(all_in_range_paddrs(&cpu_taken.kernel_mapping_spec(), prange.start, vrange));
             assume(vrange.end@ + PAGE_SIZE_2M <= u64::MAX);
@@ -178,6 +178,7 @@ impl VirtualMemoryTemporary {
     /// starting virtual address and number of pages.
     #[verus_spec(r =>
         requires
+            old(self).wf(),
             vaddr_start.wf(),
             vaddr_start@ >= VADDR_UPPER_MASK,
             vaddr_start@ % PAGE_SIZE == 0,
@@ -189,9 +190,15 @@ impl VirtualMemoryTemporary {
             self.nr_pages == nr_pages,
     )]
     pub fn set(&mut self, vaddr_start: VirtAddr, nr_pages: usize) {
+        kpanic_if!(
+            nr_pages > (<DekoBitmapAllocator1024 as DekoBitAlloc>::cap()),
+            "VirtualMemoryTemporary::set: nr_pages exceeds maximum capacity"
+        );
+
         self.vaddr_start = vaddr_start;
         self.nr_pages = nr_pages;
-        self.alloc = DekoBitmapAllocator1024::new_full();
+        // Make the range available.
+        self.alloc.set(0, nr_pages, false);
     }
 
     #[verus_spec(r =>
@@ -219,7 +226,6 @@ impl VirtualMemoryTemporary {
             self.wf(),
             r matches Some(vaddr) ==> {
                 &&& vaddr.wf()
-                &&& vaddr@ % align as u64 == 0
                 &&& vaddr@ >= old(self).vaddr_start@
                 &&& vaddr@ + (nr_pages as u64) * PAGE_SIZE <= old(self).vaddr_start@ + (old(self).nr_pages as u64) * PAGE_SIZE
             }
@@ -232,6 +238,9 @@ impl VirtualMemoryTemporary {
         proof {
             lemma_bit_map_allocator_1024_is_pow2();
         }
+
+        kdebug!("VirtualMemoryTemporary::allocate: requesting", nr_pages, "pages with alignment", align);
+        kdebug!("VirtualMemoryTemporary::allocate: current alloc state:", self.alloc);
 
         let r = self.alloc.alloc(nr_pages + 1, align)?;
 

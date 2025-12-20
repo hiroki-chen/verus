@@ -15,6 +15,7 @@ use crate::cpu::{
     CpuidTable, DekoCpuCtx, DekoCpuCtxPermission, PerCpuAreas, PerCpuShared, CPUID_MAX_COUNT,
     CPU_AREA_MAGIC, PERCPU_AREAS,
 };
+use crate::fw::get_fw_regions_from_igvm;
 use crate::mm::paging::{PageTablePermission, PteFlags};
 use crate::mm::vm::TempMapping;
 use crate::mm::{
@@ -22,7 +23,9 @@ use crate::mm::{
     FEATURE_MASK, MAX_PHYS_ADDR, PHYS_ADDR_SIZE, PTE_MASK_PRIVATE, PTE_MASK_SHARED,
 };
 use crate::snp::ghcb::{current_ghcb, msr_register_ghcb_gpa, GuestHostCommucationBlock};
-use crate::{die, kerror, kinfo, kpanic_if, kwarn, vec, DekoKernelLaunchInfo, Stage2LaunchInfo};
+use crate::{
+    die, kdebug, kerror, kinfo, kpanic_if, kwarn, vec, DekoKernelLaunchInfo, Stage2LaunchInfo,
+};
 
 pub mod doorbell;
 pub mod ghcb;
@@ -103,6 +106,35 @@ pub const VMPCK_SIZE: usize = 32;
 
 pub const VMPL_MAX: usize = 4;
 
+/// Initialize the secrets page at the given virtual address.
+#[verifier::external_body]
+#[verus_spec(
+    with
+        Tracked(cpu_ctx): Tracked<&DekoCpuCtxPermission>,
+    requires
+        addr.wf(),
+        cpu_ctx.pgtable_perm.mapped(addr),
+)]
+pub fn init_secrets_page(addr: VirtAddr) {
+    // let (_, write_handle) = SECRETS_PAGE.acquire_write();
+    // FIXME: This overflows the stack.
+    // This is not efficient because this copies the entire page
+    // onto the currnet function stack and then move it to the
+    // heap. A better way might be to expose `into_raw` for
+    // locks and then we can obtain the *mut SecretsPage directly.
+    // write_handle.release_write(
+    //     DekoAtomicData {
+    //         data: unsafe { &*(addr.0 as *mut SecretsPage) }.clone(),
+    //         perm: Tracked(SecretsPagePermission {  }),
+    //     },
+    // );
+    unsafe {
+        // Zero out the source secrets page to avoid leakage.
+        core::ptr::write_bytes(addr.0 as *mut u8, 0, core::mem::size_of::<SecretsPage>());
+    }
+}
+
+// FIXME:This needs heap allocation.
 pub exec static SECRETS_PAGE: DekoRwLock<SecretsPage, SecretsPagePermission, SecretsPagePred>
     ensures
         SECRETS_PAGE.wf(),
@@ -953,8 +985,8 @@ fn copy_apci_tables_to_fw(
     cpuid_table: &CpuidTable,
 ) {
     if let Some(cpuid) = fw_meta.cpuid_page {
-        kinfo!("Copying CPUID page to firmware location at ", cpuid);
-        kinfo!("\t cpuid_table: ", cpuid_table);
+        kinfo!("Copying CPUID page to firmware location at", cpuid);
+        kdebug!("\t cpuid_table:、t", cpuid_table);
 
         // Create a temporary mapping.
         let Some(cpuid_mapping) = TempMapping::new(cpuid..PhysAddr(cpuid.0 + PAGE_SIZE)) else {
@@ -971,6 +1003,41 @@ fn copy_apci_tables_to_fw(
 
     let caa_page = fw_meta.caa_page.unwrap();
     let secrets_page = fw_meta.secrets_page.unwrap();
+
+    copy_secrets_page_to_fw(secrets_page, caa_page, kernel_region);
+}
+
+#[verus_spec(
+    requires
+        kernel_region.wf(),
+        secrets_page@ <= 0x8000_0000,
+        secrets_page@ % PAGE_SIZE == 0,
+        caa_page@ % PAGE_SIZE == 0,
+)]
+fn copy_secrets_page_to_fw(secrets_page: PhysAddr, caa_page: PhysAddr, kernel_region: PaddrRange) {
+    kinfo!("Copying Secrets page to firmware location at", secrets_page);
+    kinfo!("Copying CAA page to firmware location at", caa_page);
+
+    let Some(temp_mapping) = TempMapping::new(create_paddr_range(secrets_page, 1)) else {
+        kerror!("Failed to create temporary mapping for Secrets page copy");
+        die("");
+    };
+
+    let lock = SECRETS_PAGE.acquire_read();
+    let secrets_page_data = &lock.borrow().data;
+
+    lock.release_read();
+
+    // secrets_page.vmpck[0] = [0u8; VMPCK_SIZE];
+    // secrets_page.vmpck[1] = [0u8; VMPCK_SIZE];
+    // secrets_page.svsm_base = kernel_region.start.0;
+    // secrets_page.svsm_size = (kernel_region.end.0 - kernel_region.start.0) as u64;
+    // secrets_page.svsm_caa = caa_page.0;
+    // secrets_page.svsm_max_version = 1;
+    // secrets_page.svsm_guest_vmpl = 2; // guest == 2.
+
+    // // Do nove move `secrets_page` as this overflows the stack.
+    // do_copy_secrets_page_to_fw(&secrets_page, &temp_mapping.inner.start);
 }
 
 /// This functon validates the prevalidated memory regions specified
@@ -1060,6 +1127,16 @@ fn validate_fw_memory_region(prange: PaddrRange) {
     }
 }
 
+/// This function validates the Firmware's content but not its memory.
+#[verus_spec(
+    requires
+        igvm_params.wf(),
+        kernel_region.wf(),
+)]
+fn validate_fw(igvm_params: &IgvmParams<'_>, kernel_region: PaddrRange) {
+    let fw_flash = get_fw_regions_from_igvm(igvm_params, kernel_region);
+}
+
 /// Launches the guest boot firmware.
 #[verus_spec(
     requires
@@ -1080,6 +1157,7 @@ pub fn page_state_change(mm: PaddrRange, op: PageStateChangeOp) {
     GuestHostCommucationBlock::pstate_change(ghcb, Tracked(perm), mm, op);
 }
 
+#[inline]
 #[verifier::external_body]
 #[verus_spec(
     requires
@@ -1089,6 +1167,20 @@ pub fn page_state_change(mm: PaddrRange, op: PageStateChangeOp) {
 fn do_copy_cpuid_to_fw(cpuid_table: &CpuidTable, to: VirtAddr) {
     unsafe {
         core::ptr::copy_nonoverlapping(cpuid_table as _, to.0 as *mut CpuidTable, 1);
+    }
+}
+
+#[inline]
+#[verifier::external_body]
+#[verus_spec(
+    requires
+        from.wf(),
+        to.wf(),
+        to@ % PAGE_SIZE == 0,
+)]
+fn do_copy_secrets_page_to_fw(from: &SecretsPage, to: &VirtAddr) {
+    unsafe {
+        core::ptr::copy_nonoverlapping(from as *const SecretsPage, to.0 as *mut SecretsPage, 1);
     }
 }
 

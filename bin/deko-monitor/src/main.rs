@@ -32,7 +32,7 @@ use deko_core::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR};
 use deko_core::snp::ghcb::GuestHostCommucationBlock;
 use deko_core::snp::logging::init_ghcb_logging;
 use deko_core::snp::req::init_snp_guest_driver;
-use deko_core::snp::{init_guest_host, prepare_guest_fw, setup_apic};
+use deko_core::snp::{init_guest_host, init_secrets_page, prepare_guest_fw, setup_apic};
 use deko_core::{get_igvm_params, kdebug, kerror, kinfo, kpanic_if, kwarn, DekoKernelLaunchInfo};
 use deko_std::prelude::*;
 use vstd::prelude::*;
@@ -546,10 +546,11 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
     proof_with!(Tracked(&ctx_perm));
     init_cpuid_table(VirtAddr(header.cpuid_page));
 
+    proof_with!(Tracked(&ctx_perm));
+    deko_core::imp::init_secrets_page(VirtAddr(header.secrets_page));
+
     let debug_serial_port = header.debug_serial_port;
     let secrets_page_virt = VirtAddr(header.secrets_page);
-
-    // TODO: Copy the secrets page to the safe location.
 
     cr0_init();
     cr4_init();
