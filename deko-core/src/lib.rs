@@ -70,7 +70,10 @@ verus! {
 #[track_caller]
 #[inline(always)]
 #[verifier::external_body]
-pub fn die(s: &str) -> ! {
+pub fn die(s: &str) -> !
+    opens_invariants none
+    no_unwind
+{
     core::panic!("{}", s);
 }
 
@@ -295,14 +298,14 @@ macro_rules! ktodo {
 macro_rules! kpanic_if {
     ($cond:expr, $($msg:expr),* $(,)?) => {
         if $cond {
-            $crate::kerror!("Panic at ", core::file!(), ":", core::line!(), ": ", $($msg,)*);
+            $crate::kerror!("Panic at", core::file!(), ":", core::line!(), ": ", $($msg,)*);
             $crate::die("");
         }
     };
 
     ($cond:expr) => {
         if $cond {
-            $crate::kerror!("Panic at ", core::file!(), ":", core::line!());
+            $crate::kerror!("Panic at", core::file!(), ":", core::line!());
             $crate::die("");
         }
     };

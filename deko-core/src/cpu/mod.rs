@@ -321,8 +321,6 @@ pub struct DekoCpuCtx {
     /// The GHCB block for this CPU.
     pub ghcb: DekoPPtr<GuestHostCommucationBlock>,
     pub tss: X86Tss,
-    /// The page table for this CPU.
-    pub shared_area: DekoPPtr<PerCpuShared>,
     /// The page table of this CPU.
     pub pgtable: DekoPPtr<PageTable>,
     /// The stack for doing context switches.
@@ -728,7 +726,6 @@ impl DekoCpuCtx {
     /// Creates a new CPU data structure.
     pub fn new(
         pgtable: DekoPPtr<PageTable>,
-        shared_area: DekoPPtr<PerCpuShared>,
         ghcb: DekoPPtr<GuestHostCommucationBlock>,
         cpu_id: u64,
         shared_bit: u64,
@@ -759,7 +756,6 @@ impl DekoCpuCtx {
                 io_bmp_base: 0,
             },
             pgtable,
-            shared_area,
             cpu_id,
             private_bit,
             shared_bit,

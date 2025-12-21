@@ -22,7 +22,7 @@ use crate::mm::paging::{
 };
 use crate::mm::stack::DekoKernelStack;
 use crate::mm::vm;
-use crate::{kdebug, kinfo, kpanic_if, kunimplemented, kwarn, vec};
+use crate::{die, kdebug, kinfo, kpanic_if, kunimplemented, kwarn, vec};
 
 verus! {
 
@@ -73,11 +73,30 @@ impl Drop for TempMapping {
         opens_invariants none
         no_unwind
     {
-        let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
-        let cpu = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+        let (cpu_ptr, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
+        let cpu: &DekoCpuCtx = cpu_ptr.borrow(Tracked(&cpu_perm.ptr_perm));
         let pgtable = cpu.pgtable();
         let private_bit = cpu.private_bit();
         let shared_bit = cpu.shared_bit();
+
+        let mut cpu_taken = cpu_ptr.take(Tracked(&mut cpu_perm.ptr_perm));
+
+        if core::hint::unlikely(
+            self.inner.end.0 < self.inner.start.0 || self.inner.start.0 % PAGE_SIZE != 0
+                || self.inner.end.0 % PAGE_SIZE != 0 || self.inner.start.0 < VADDR_UPPER_MASK || (
+            self.inner.end.0 - self.inner.start.0) / PAGE_SIZE
+                > cpu_taken.temp_mapping.nr_pages as u64 || self.inner.start.0
+                < cpu_taken.temp_mapping.vaddr_start.0,
+        // make verus happy
+        ) {
+            return ;
+        }
+        cpu_taken.temp_mapping.deallocate(
+            self.inner.start,
+            ((self.inner.end.0 - self.inner.start.0) / PAGE_SIZE) as usize,
+        );
+
+        cpu_ptr.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
 
         // PageTable::unmap_multiple_pages(pgtable, Tracked(&mut cpu_perm.pgtable_perm), vaddr, ms, private_bit, shared_bit)...
     }
@@ -100,6 +119,7 @@ impl TempMapping {
                 &&& tm.wf()
                 &&& tm.inner.start@ >= VADDR_UPPER_MASK
                 &&& tm.inner.start@ % PAGE_SIZE == 0
+                &&& (tm.inner.end@ - tm.inner.start@) == (prange.end@ - prange.start@)
             }
     )]
     pub fn new(prange: PaddrRange) -> Option<Self> {
@@ -113,7 +133,7 @@ impl TempMapping {
             kwarn!("TempMapping::new: invalid number of pages requested:", nr_pages);
             return None;
         }
-        kinfo!("TempMapping::new: requesting temporary mapping of", nr_pages, "pages for physical range", prange);
+        kdebug!("TempMapping::new: requesting temporary mapping of", nr_pages, "pages for physical range", prange);
         let flags = PteFlags::data();
         let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
 
@@ -143,6 +163,22 @@ impl TempMapping {
             assume(all_in_range_paddrs(&cpu_taken.kernel_mapping_spec(), prange.start, vrange));
             assume(vrange.end@ + PAGE_SIZE_2M <= u64::MAX);
             assume(prange.start@ + (vrange.end@ - vrange.start@) < 0x000f_ffff_ffff_f000);
+
+            assert(vrange.end@ - vrange.start@ == prange.end@ - prange.start@) by {
+                vstd::arithmetic::div_mod::lemma_fundamental_div_mod(
+                    prange.end@ - prange.start@,
+                    PAGE_SIZE as int,
+                );
+                assert(PAGE_SIZE * (nr_pages as int) + (prange.end@ - prange.start@)
+                    % PAGE_SIZE as int == prange.end@ - prange.start@);
+                assert((prange.end@ - prange.start@) % PAGE_SIZE as int == 0) by {
+                    vstd::arithmetic::div_mod::lemma_mod_equivalence(
+                        prange.end@ as int,
+                        prange.start@ as int,
+                        PAGE_SIZE as int,
+                    );
+                }
+            }
         }
 
         // Map the page.
@@ -248,20 +284,24 @@ impl VirtualMemoryTemporary {
             //
         }
 
-        Some(VirtAddr(self.vaddr_start.0 + r as u64))
+        Some(VirtAddr(self.vaddr_start.0 + r as u64 * PAGE_SIZE as u64))
     }
 
+    #[verifier::external_body]
     #[verus_spec(
         requires
             old(self).wf(),
             vaddr.wf(),
             vaddr@ % PAGE_SIZE == 0,
-            nr_pages <= old(self).nr_pages,
+            vaddr@ >= old(self).vaddr_start@,
         ensures
             self.wf(),
+        opens_invariants none
+        no_unwind
     )]
     pub fn deallocate(&mut self, vaddr: VirtAddr, nr_pages: usize) {
-        kunimplemented!()
+        let offset = (vaddr.0 - self.vaddr_start.0) / PAGE_SIZE as u64;
+        self.alloc.free(offset as usize, nr_pages + 1);
     }
 
     #[inline]

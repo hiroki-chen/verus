@@ -158,7 +158,8 @@ fn start_application_processors(igvm_params: &IgvmParams<'_>) {
 /// be separate functions.
 fn do_make_ap_online(cpus: &[ACPICPUInfo]) {
     // FIXME: This overflows the stack again.
-    let (mut percpu_area, write_handle) = PERCPU_AREAS.acquire_write();
+    let mut write_handle = PERCPU_AREAS.acquire_write();
+    let mut percpu_area = write_handle.get();
 
     let mut i = 0;
     #[verus_spec(
@@ -215,19 +216,8 @@ fn setup_bsp_cpu(
     broadcast use VirtAddr::lemma_page_size_eq_shifts;
     broadcast use VirtAddr::lemma_page_shift_le_max;
     broadcast use VirtAddr::lemma_pfn_roundtrip;
-
-    let shared_area_ptr = {
-        let read_handle = PERCPU_AREAS.acquire_read();
-        // The permission is discarded; you can only obtain this permission
-        // if you own this.
-        let (ptr, _) = read_handle.borrow().data.0.index_as_ptr(0);
-
-        read_handle.release_read();
-
-        ptr
-    };
-
     // We first allocate a new CPU context for the BSP.
+
     let (bsp_ctx_ptr, Tracked(ctx_perm)) = boxed_ptr!(DekoCpuCtx, &DEKO_FRAME_ALLOCATOR.0);
     let (ghcb, Tracked(ghch_perm)) = boxed_ptr!(GuestHostCommucationBlock, &DEKO_FRAME_ALLOCATOR.0);
 
@@ -438,7 +428,6 @@ fn setup_bsp_cpu(
 
     let mut cpu_ctx = DekoCpuCtx::new(
         init_pgtable,
-        shared_area_ptr,
         ghcb,
         0,
         shared_bit,
@@ -656,6 +645,7 @@ fn deko_main(cpu_index: usize) {
     kinfo!("deko_main: entered");
 
     if let Some(DekoAtomicData { data: launch_info, .. }) = LAUNCH_INFO.get() {
+        let tracked mut cpu_ctx_perm = cpu_ctx_perm;
         let igvm_addr = VirtAddr::new(launch_info.igvm_params_virt_addr as u64);
 
         assume(cpu_ctx_perm.pgtable_perm.mapped(igvm_addr));
@@ -675,7 +665,8 @@ fn deko_main(cpu_index: usize) {
             early_die();
         };
 
-        prepare_guest_fw(launch_info, &igvm_params, kernel_prange, cpuid_table);
+        proof_with!(Tracked(&mut cpu_ctx_perm.pgtable_perm));
+        deko_core::imp::prepare_guest_fw(launch_info, &igvm_params, kernel_prange, cpuid_table);
 
         start_application_processors(&igvm_params);
 

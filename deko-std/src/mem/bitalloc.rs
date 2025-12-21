@@ -158,6 +158,8 @@ pub trait DekoBitAlloc: Sized + WellFormed {
         ensures
             r == Self::cap_spec() as usize,
             r > 0,
+        opens_invariants none
+        no_unwind
     ;
 
     /// The common implementation for aligned allocation.
@@ -291,6 +293,8 @@ pub trait DekoBitAlloc: Sized + WellFormed {
             start + entries <= Self::cap_spec() as usize,
         ensures
             self.wf(),
+        opens_invariants none
+        no_unwind
     ;
 
     fn set(&mut self, start: usize, entries: usize, value: bool)
@@ -299,6 +303,8 @@ pub trait DekoBitAlloc: Sized + WellFormed {
             0 <= Self::cap_spec() < usize::MAX as int,
             entries > 0,
             start + entries <= Self::cap_spec() as usize,
+        opens_invariants none
+        no_unwind
     ;
 
     fn next_free(&self, start: usize) -> Option<usize>

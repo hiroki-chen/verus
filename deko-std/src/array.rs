@@ -91,6 +91,8 @@ impl<T: WellFormed, const N: usize> Array<T, N> {
         ensures
             *t == self@.index(i as int),
             t.wf(),
+        opens_invariants none
+        no_unwind
     {
         &self.0[i]
     }

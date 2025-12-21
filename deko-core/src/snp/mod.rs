@@ -7,6 +7,7 @@ use deko_std::wf::WellFormed;
 use vstd::cell::PCell;
 use vstd::invariant;
 use vstd::prelude::*;
+use vstd::simple_pptr::PPtr;
 
 use crate::collections::Vec;
 use crate::cpu::apic::Apic;
@@ -100,6 +101,7 @@ deko_bitflags_quick! {
     vmpl3: { VMPL_LOW, VMPL_HIGH },
     vmsa: { BIT_VMSA, READ },
     rwx: { READ, WRITE, X_USER, X_SUPER },
+    rwx_guest_vmpl2: { VMPL_HIGH, READ, WRITE, X_USER, X_SUPER },
 }
 
 pub const VMPCK_SIZE: usize = 32;
@@ -116,18 +118,10 @@ pub const VMPL_MAX: usize = 4;
         cpu_ctx.pgtable_perm.mapped(addr),
 )]
 pub fn init_secrets_page(addr: VirtAddr) {
-    // let (_, write_handle) = SECRETS_PAGE.acquire_write();
-    // FIXME: This overflows the stack.
-    // This is not efficient because this copies the entire page
-    // onto the currnet function stack and then move it to the
-    // heap. A better way might be to expose `into_raw` for
-    // locks and then we can obtain the *mut SecretsPage directly.
-    // write_handle.release_write(
-    //     DekoAtomicData {
-    //         data: unsafe { &*(addr.0 as *mut SecretsPage) }.clone(),
-    //         perm: Tracked(SecretsPagePermission {  }),
-    //     },
-    // );
+    let mut write_handle = SECRETS_PAGE.acquire_write();
+    SecretsPage::copy_from_rwlock(&mut write_handle, addr);
+    write_handle.release_write_no_val();
+
     unsafe {
         // Zero out the source secrets page to avoid leakage.
         core::ptr::write_bytes(addr.0 as *mut u8, 0, core::mem::size_of::<SecretsPage>());
@@ -221,16 +215,48 @@ impl SecretsPage {
             Tracked(pgtable_perm): Tracked<&PageTablePermission>
         requires
             pgtable_perm.mapped(from),
-            old(self).wf(),
             from.wf(),
+            old(this).is_init(),
         ensures
-            self.wf(),
+            this.is_init(),
     )]
-    pub fn copy_from(&mut self, from: VirtAddr) {
+    pub fn copy_from_rwlock(
+        this: &mut WriteHandle<
+            '_,
+            DekoAtomicData<Self, SecretsPagePermission>,
+            (),
+            SecretsPagePred,
+        >,
+        from: VirtAddr,
+    ) {
+        proof_with!(Tracked(pgtable_perm));
+        Self::copy_from_ptr(this.as_ptr(), from);
+    }
+
+    /// Copy the secrets page from the given virtual address.
+    ///
+    /// This function expects a [`PPtr`] to the atomic data so
+    /// we do not need to acquire [`vstd::simple_pptr::PointsTo<V>`]
+    /// permission again since the safety is already guaranteed by
+    /// the sync primitives (we do not have other ways to obtain the
+    /// raw pointer unless a lock is acquired).
+    #[inline(always)]
+    #[verifier::external_body]
+    #[verus_spec(
+        with
+            Tracked(pgtable_perm): Tracked<&PageTablePermission>
+        requires
+            pgtable_perm.mapped(from),
+            from.wf(),
+    )]
+    fn copy_from_ptr(
+        this: PPtr<DekoAtomicData<SecretsPage, SecretsPagePermission>>,
+        from: VirtAddr,
+    ) {
         unsafe {
             core::ptr::copy_nonoverlapping(
                 from.0 as *const SecretsPage,
-                self as *mut SecretsPage,
+                this.addr() as *mut SecretsPage,
                 1,
             );
         }
@@ -245,10 +271,10 @@ impl SecretsPage {
         from.wf(),
 )]
 pub fn secrets_page_init(from: VirtAddr) {
-    // let mut handle = SECRETS_PAGE.acquire_write();
-    // // proof_with!(Tracked(pgtable_perm));
-    // // data.copy_from(from);
-    // handle.release_write(DekoAtomicData { data, perm });
+    let mut handle = SECRETS_PAGE.acquire_write();
+    proof_with!(Tracked(pgtable_perm));
+    SecretsPage::copy_from_rwlock(&mut handle, from);
+    handle.release_write_no_val();
 }
 
 impl WellFormed for SecretsPage {
@@ -472,17 +498,6 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
         r.1@.pgtable_perm.shared_bit == ctx_perm.shared_bit(),
         r.1@.pgtable_perm.mapping_space == ctx_perm.mapping_space,
 {
-    let shared_area_ptr = {
-        let read_handle = PERCPU_AREAS.acquire_read();
-        // The permission is discarded; you can only obtain this permission
-        // if you own this.
-        let (ptr, _) = read_handle.borrow().data.0.index_as_ptr(0);
-
-        read_handle.release_read();
-
-        ptr
-    };
-
     // 1. First we set up the GHCB page for this CPU.
     // Get the page table from the context that was passed in
     let bsp_pgtable = ctx.borrow(Tracked(&ctx_perm.deko_ctx_ptr_perm)).pgtable;
@@ -510,7 +525,6 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
     // This context already has the proper stage2_launch_info and other components
     let bsp_percpu = DekoCpuCtx::new(
         bsp_pgtable,
-        shared_area_ptr,
         ghcb,
         0,  // cpu_id
         ctx.borrow(Tracked(&ctx_perm.deko_ctx_ptr_perm)).shared_bit,
@@ -664,29 +678,38 @@ pub fn pvalidate(
             options(att_syntax));
     }
 
-    (ret, cf == 0)
+    (ret, cf != 0)
 }
 
+/// Adjusts the RMP entry for the given virtual address range => RMP can be used to
+/// change the permissions of a page (e.g., from private to shared).
 #[verifier::external_body]
-pub fn rmpadjust(vaddr: u64, psize: u64, Tracked(perm): Tracked<&mut DekoCtxPermission>) -> (ret:
-    u64)
+pub fn rmpadjust(
+    vaddr: VirtAddr,
+    psize: u64,
+    flags: RmpFlags,
+    Tracked(pgtable_perm): Tracked<&mut PageTablePermission>,
+) -> (r: u64)
     requires
-        old(perm).wf(),
+        vaddr.wf(),
+        vaddr@ % PAGE_SIZE == 0,
+        old(pgtable_perm).wf(),
+        old(pgtable_perm).mapped(vaddr),
+        flags.wf(),
+        flags.bits() & Rmp_ALL_BITS == flags.bits(),
+        psize == PAGE_SIZE || psize == PAGE_SIZE_2M,
     ensures
-        perm.wf(),
-        old(perm).deko_ctx_ptr_perm.pptr()
-            === perm.deko_ctx_ptr_perm.pptr(),
-// todo: old(perm).rmpadjust_spec == perm.
-
+        old(pgtable_perm) == pgtable_perm,
 {
     let ret: u64;
 
     unsafe {
         core::arch::asm!(
-            ".byte 0xf3,0x0f,0x01,0xf1",
-            in("rax") vaddr, in("rcx") psize,
-            lateout("rax") ret,
-            options(nostack)
+            "rmpadjust",
+            inout("rax") vaddr.0 => ret,
+            inout("rcx") psize => _,
+            in("rdx") flags.bits(),
+            options(nostack, att_syntax)
         );
     }
 
@@ -723,7 +746,7 @@ pub fn setup_apic(ctx: DekoPPtr<DekoCpuCtx>, Tracked(ctx_perm): Tracked<&mut Dek
     apic.enable();
 }
 
-} // verus!
+// verus!
 deko_bitflags! {
     pub struct SnpStatus: u32 {
         const SEV = 0;
@@ -922,7 +945,10 @@ pub fn get_sev_fw_metadata(igvm_params: &IgvmParamBlock) -> Option<SevFWMetaData
 /// This probes the IGVM parameters to locate the SEV firmware metadata
 /// and try to make these pages as private to the guest.
 #[verus_spec(
+    with
+        Tracked(pgtable_perm): Tracked<&mut PageTablePermission>
     requires
+        old(pgtable_perm).wf(),
         header.wf(),
         igvm_params.wf(),
         kernel_prange.wf(),
@@ -957,15 +983,46 @@ pub fn prepare_guest_fw(
                 PaddrRange { start: caa_page, end: PhysAddr(caa_page.0 + PAGE_SIZE as u64) },
             );
         }
+        proof_with!(Tracked(pgtable_perm));
         validate_fw_memories(header, igvm_params, &memories);
 
         init_guest_mmap(igvm_params);
         // copy the ACPI table into the fw so that
         // the guest fw can use it.
-        copy_apci_tables_to_fw(&fw_meta, kernel_prange, cpuid_table);
+        copy_apci_tables_to_fw(&fw_meta, kernel_prange.clone(), cpuid_table);
         // validate fw.
+        proof_with!(Tracked(pgtable_perm));
+        validate_fw(igvm_params, kernel_prange);
         // prepare the fw launch (caa initialization.).
+        prepare_fw_launch(&fw_meta);
     }
+}
+
+#[verus_spec(
+    requires
+        fw_meta.wf(),
+)]
+fn prepare_fw_launch(
+    fw_meta: &SevFWMetaData,
+) {
+    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpuid = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).cpu_id;
+
+    if let Some(caa) = fw_meta.caa_page {
+        let shared_handle = PERCPU_AREAS.acquire_read();
+        let shared = shared_handle.borrow();
+
+        let cpu_shared = shared.data.0.index(cpuid as usize);
+        let mut guest_vmsa = cpu_shared.guest_vmsa.acquire_write();
+        let DekoAtomicData { data: mut v, .. } = guest_vmsa.get();
+        v.generation = v.generation.saturating_add(1);
+        v.caa = Some(caa);
+        guest_vmsa.release_write(DekoAtomicData::new(v));
+        shared_handle.release_read();
+    }
+
+    // Allocate new VMSA for this CPU and then
+    // update the guest mappings.
 }
 
 /// Copies the CPUID page to the SEV firmware metadata location.
@@ -1025,24 +1082,73 @@ fn copy_secrets_page_to_fw(secrets_page: PhysAddr, caa_page: PhysAddr, kernel_re
     let lock = SECRETS_PAGE.acquire_read();
     let secrets_page_data = &lock.borrow().data;
 
+    // SAFETY: We have ensured that the temporary mapping is valid.
+    unsafe {
+        do_modify_fw_secrets_page(&secrets_page_data, temp_mapping, kernel_region, caa_page);
+    }
     lock.release_read();
+}
 
-    // secrets_page.vmpck[0] = [0u8; VMPCK_SIZE];
-    // secrets_page.vmpck[1] = [0u8; VMPCK_SIZE];
-    // secrets_page.svsm_base = kernel_region.start.0;
-    // secrets_page.svsm_size = (kernel_region.end.0 - kernel_region.start.0) as u64;
-    // secrets_page.svsm_caa = caa_page.0;
-    // secrets_page.svsm_max_version = 1;
-    // secrets_page.svsm_guest_vmpl = 2; // guest == 2.
+/// This modifies the target secret page in place to avoid stack overflow.
+///
+/// As this requires raw pointer dereferencing, we mark this as `external_body`.
+///
+/// # Safety
+///
+/// This function performs raw pointer dereferencing and modifies memory directly.
+/// The caller must ensure that the provided pointers are valid and point to
+/// appropriate memory regions. However, since the input param is `&SecretsPage`
+/// and a temporary mapping, this is safe.
+#[verifier::external_body]
+#[verus_spec(
+    // with
+        // something
+    requires
+        src.wf(),
+        to.wf(),
+        kernel_region.wf(),
+        caa_page.wf(),
+        to.inner.start@ % PAGE_SIZE == 0,
+        to.inner.end@ - to.inner.start@ >= PAGE_SIZE as int,
+        caa_page@ % PAGE_SIZE == 0,
+        // TODO: Mapped.
+)]
+unsafe fn do_modify_fw_secrets_page(
+    src: &SecretsPage,
+    to: TempMapping,
+    kernel_region: PaddrRange,
+    caa_page: PhysAddr,
+) {
+    kinfo!("Modifying firmware secrets page at temporary mapping ", to.inner.start);
 
-    // // Do nove move `secrets_page` as this overflows the stack.
-    // do_copy_secrets_page_to_fw(&secrets_page, &temp_mapping.inner.start);
+    // Zero out the secrets page first.
+    core::ptr::write_bytes(to.inner.start.0 as *mut u8, 0, PAGE_SIZE as usize);
+    // Copy the secrets page data.
+    core::ptr::copy_nonoverlapping(
+        src as *const SecretsPage,
+        to.inner.start.0 as *mut SecretsPage,
+        1,
+    );
+
+    // Then set up the necessary fields.
+    let secrets_page = &mut *(to.inner.start.0 as *mut SecretsPage);
+
+    secrets_page.vmpck[0] = [0u8;VMPCK_SIZE];
+    secrets_page.vmpck[1] = [0u8;VMPCK_SIZE];
+    secrets_page.svsm_base = kernel_region.start.0;
+    secrets_page.svsm_size = (kernel_region.end.0 - kernel_region.start.0) as u64;
+    secrets_page.svsm_caa = caa_page.0;
+    secrets_page.svsm_max_version = 1;
+    secrets_page.svsm_guest_vmpl = 2;  // guest == 2.
 }
 
 /// This functon validates the prevalidated memory regions specified
 /// in the SEV firmware metadata.
 #[verus_spec(
+    with
+        Tracked(pgtable_perm): Tracked<&mut PageTablePermission>,
     requires
+        old(pgtable_perm).wf(),
         header.wf(),
         igvm_params.wf(),
         forall|i: int|
@@ -1052,6 +1158,8 @@ fn copy_secrets_page_to_fw(secrets_page: PhysAddr, caa_page: PhysAddr, kernel_re
                 &&& memories@[i].start@ % PAGE_SIZE == 0
                 &&& memories@[i].end@ % PAGE_SIZE == 0
             },
+    ensures
+        pgtable_perm.wf(),
 )]
 fn validate_fw_memories(
     header: &DekoKernelLaunchInfo,
@@ -1077,6 +1185,7 @@ fn validate_fw_memories(
                         &&& memories@[j].start@ % PAGE_SIZE == 0
                         &&& memories@[j].end@ % PAGE_SIZE == 0
                     },
+                pgtable_perm.wf(),
         {
             let this = &memories[i];
 
@@ -1090,6 +1199,7 @@ fn validate_fw_memories(
                     PageStateChangeOp::Private,
                 );
             }
+            proof_with!(Tracked(pgtable_perm));
             validate_fw_memory_region(this.clone());
         }
     }
@@ -1097,12 +1207,19 @@ fn validate_fw_memories(
 
 /// Validates a single memory region in the RMP table.
 #[verus_spec(
+    with
+        Tracked(pgtable_perm): Tracked<&mut PageTablePermission>,
     requires
+        old(pgtable_perm).wf(),
         prange.wf(),
         prange.start@ % PAGE_SIZE == 0,
         prange.end@ % PAGE_SIZE == 0,
+    ensures
+        pgtable_perm.wf(),
 )]
 fn validate_fw_memory_region(prange: PaddrRange) {
+    broadcast use RmpFlags::lemma_each_bit_is_valid;
+
     let mut cur = prange.start.0;
     let end = prange.end.0;
 
@@ -1115,25 +1232,128 @@ fn validate_fw_memory_region(prange: PaddrRange) {
             end == prange.end@,
             cur % PAGE_SIZE == 0,
             PAGE_SIZE == 0x1000,
+            pgtable_perm.wf(),
         decreases end - cur,
     {
-        // TODO: Allocate new virtual addresses for holding these pages.
-        // and lock them out for future allocation.
+        // Create a temporary mapping for the physical address.
+        let Some(temp_mapping) = TempMapping::new(
+            create_paddr_range(PhysAddr(cur), 1),
+        ) else {
+            kerror!("Failed to create temporary mapping for firmware memory validation at", PhysAddr(cur));
+            die("");
+        };
+
+        let flags = RmpFlags::rwx_guest_vmpl2();
+
+        proof {
+            assert(flags.bits() & Rmp_ALL_BITS == flags.bits()) by {
+                bit_u32_and_auto();
+            }
+            assume(pgtable_perm.mapped(temp_mapping.inner.start));
+        }
+
         // Then map these vaddrs into these paddrs.
-        // pvalidate(vaddr, psize, validate, tracked);
-        // rmpadjust(vaddr, psize, tracked);
+        // TODO: This seems inconsistent.
+        let (r, changed) = pvalidate(temp_mapping.inner.start.0, PAGE_SIZE, true, Tracked(pgtable_perm));
+        kpanic_if!(r != 0, "PVALIDATE failed for firmware memory validation at", PhysAddr(cur), "with return code", r);
+        kpanic_if!(!changed, "PVALIDATE CF indicates failure for firmware memory validation at", PhysAddr(cur));
+
+        let r = rmpadjust(temp_mapping.inner.start, PAGE_SIZE, flags, Tracked(pgtable_perm));
+        kpanic_if!(r != 0, "RMPADJUST failed for firmware memory validation at", PhysAddr(cur), "with return code", r);
         cur += PAGE_SIZE;
     }
 }
 
 /// This function validates the Firmware's content but not its memory.
 #[verus_spec(
+    with
+        Tracked(pgtable_perm): Tracked<&mut PageTablePermission>,
     requires
+        old(pgtable_perm).wf(),
         igvm_params.wf(),
         kernel_region.wf(),
 )]
 fn validate_fw(igvm_params: &IgvmParams<'_>, kernel_region: PaddrRange) {
-    let fw_flash = get_fw_regions_from_igvm(igvm_params, kernel_region);
+    broadcast use RmpFlags::lemma_each_bit_is_valid;
+
+    let fw_flash = get_fw_regions_from_igvm(igvm_params);
+    // I'm being lazy here: we need to check OVMF:
+    // Flash range is 3GiB-4GiB and one ends at 4GiB (0x100_000_000)
+
+    for i in 0..fw_flash.len()
+        invariant
+            i <= fw_flash.len(),
+            igvm_params.wf(),
+            kernel_region.wf(),
+            forall|j: int|
+                #![trigger fw_flash@[j]]
+                0 <= j < fw_flash@.len() ==> {
+                    &&& fw_flash@[j].wf()
+                    &&& fw_flash@[j].start@ % PAGE_SIZE == 0
+                    &&& fw_flash@[j].end@ % PAGE_SIZE == 0
+                    &&& fw_flash@[j].end@ < 0x000f_ffff_ffff_f000u64
+                },
+            pgtable_perm.wf(),
+    {
+        let this = &fw_flash[i];
+        let nr_pages = (this.end.0 - this.start.0) / PAGE_SIZE as u64;
+        kinfo!("Flash region", i, ":", this);
+
+        for i in 0..nr_pages as usize
+            invariant
+                nr_pages as int == (this.end.0 - this.start.0) / PAGE_SIZE as int,
+                i <= nr_pages as usize,
+                this.wf(),
+                this.start@ % PAGE_SIZE == 0,
+                this.end@ % PAGE_SIZE == 0,
+                this.end@ < 0x000f_ffff_ffff_f000u64,
+                this.end@ == nr_pages * PAGE_SIZE + this.start@,
+                igvm_params.wf(),
+                kernel_region.wf(),
+                PAGE_SIZE == 0x1000,
+                pgtable_perm.wf(),
+        {
+            let cur = i as u64 * PAGE_SIZE + this.start.0;
+            proof {
+                assert(cur % PAGE_SIZE == 0) by {
+                    vstd::arithmetic::div_mod::lemma_mod_multiples_vanish(
+                        i as int,
+                        this.start@ as int,
+                        PAGE_SIZE as int,
+                    );
+                }
+                assert(cur <= this.end@);
+            }
+
+            let Some(temp_mapping) = TempMapping::new(create_paddr_range(PhysAddr(cur), 1)) else {
+                kerror!("Failed to create temporary mapping for firmware validation");
+                die("");
+            };
+
+            let rmp_flags = RmpFlags::rwx_guest_vmpl2();
+
+            proof {
+                assert(rmp_flags.bits() & Rmp_ALL_BITS == rmp_flags.bits()) by {
+                    bit_u32_and_auto();
+                }
+
+                // Note this proof should comes from the precondition of
+                // deko_main that all fw memory regions are mapped on this
+                // cpu; I'm thinking about how to express this in a better way.
+                // Perhaps we will need a more high-level spec function to
+                // describe that regions are mapped in the page table; then
+                // we check if the given region is a subregion of these mapped regions.
+                // and if so we can conclude that each page in the region is mapped.
+                assume(pgtable_perm.mapped(temp_mapping.inner.start));
+            }
+
+            // Now we can validate the page at `cur`.
+            let r = rmpadjust(temp_mapping.inner.start, PAGE_SIZE, rmp_flags, Tracked(pgtable_perm));
+
+            // Panics the system since firmware validation failure is fatal.
+            kpanic_if!(r != 0, "RMPADJUST failed for firmware validation at", VirtAddr(cur), "with return code", r);
+        }
+    }
 }
 
 /// Launches the guest boot firmware.
@@ -1181,6 +1401,8 @@ fn do_copy_secrets_page_to_fw(from: &SecretsPage, to: &VirtAddr) {
     unsafe {
         core::ptr::copy_nonoverlapping(from as *const SecretsPage, to.0 as *mut SecretsPage, 1);
     }
+}
+
 }
 
 } // verus!

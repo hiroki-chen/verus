@@ -102,7 +102,10 @@ impl Console {
 }
 
 #[verifier::external_body]
-pub fn print_str(s: &str) {
+pub fn print_str(s: &str)
+    opens_invariants none
+    no_unwind
+{
     CONSOLE.write_bytes(s.as_bytes());
 }
 

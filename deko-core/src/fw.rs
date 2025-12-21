@@ -7,7 +7,7 @@ use deko_std::boot::{
     ACPICPUInfo, ACPITable, ACPITableBuffer, ACPITableHeader, ACPITableMeta, IgvmParams, RSDPDesc,
     LOWMEM_END,
 };
-use deko_std::prelude::PhysAddr;
+use deko_std::prelude::{PhysAddr, PAGE_SIZE};
 use deko_std::wf::WellFormed;
 use vstd::prelude::*;
 
@@ -340,35 +340,50 @@ pub fn read_acpi_table(buf: &[u8], offset: usize) -> Option<ACPITable> {
 #[verus_spec(r =>
     requires
         igvm_params.wf(),
-        kernel_region.wf(),
     ensures
-        // r.wf(),
+        forall |i: int|
+        #![trigger r@[i]]
+        0 <= i < r@.len() ==> {
+            &&& r@[i].wf()
+            &&& r@[i].start.0 <= r@[i].end.0
+            &&& r@[i].start@ % PAGE_SIZE == 0
+            &&& r@[i].end@ % PAGE_SIZE == 0
+            &&& r@[i].end.0 < 0x000f_ffff_ffff_f000u64
+        }
 )]
-pub fn get_fw_regions_from_igvm(igvm_params: &IgvmParams<'_>, kernel_region: PaddrRange) -> Vec<
-    PaddrRange,
-> {
+pub fn get_fw_regions_from_igvm(igvm_params: &IgvmParams<'_>) -> Vec<PaddrRange> {
     let mut v: Vec<PaddrRange> = vec![];
     let fw_is_in_low_mem = igvm_params.igvm_param_block.firmware.in_low_memory != 0;
+    let start = igvm_params.igvm_param_block.firmware.start as u64;
+    let size = igvm_params.igvm_param_block.firmware.size as u64;
+    let map_start = igvm_params.igvm_param_block.firmware.memory_map_page as u64;
+    let map_size = igvm_params.igvm_param_block.firmware.memory_map_page_count as u64;
 
     // Do extra care if the firmware is in low memory.
     if fw_is_in_low_mem {
         v.push(PaddrRange { start: PhysAddr(0), end: PhysAddr(LOWMEM_END as u64) });
     }
-    v.push(
-        PaddrRange {
-            start: PhysAddr(igvm_params.igvm_param_block.firmware.start as u64),
-            end: PhysAddr(
-                igvm_params.igvm_param_block.firmware.size as u64
-                    + igvm_params.igvm_param_block.firmware.start as u64,
-            ),
-        },
-    );
+    // Push the fw_region into the vector.
 
+    if size != 0 {
+        v.push(PaddrRange { start: PhysAddr(start), end: PhysAddr(start + size) });
+    }
     // If this firmware expects an IGVM memory map but the IGVM memory
     // map is not within any of the firmware GPA ranges, then add the IGVM
     // memory map to the set of firmware regions.
+
     if igvm_params.igvm_param_block.firmware.memory_map_page_count != 0 {
-        v.push(kernel_region);
+        let map_region = PaddrRange {
+            start: PhysAddr(map_start),
+            end: PhysAddr(map_start + map_size),
+        };
+
+        // Check if map_region is within any existing region.
+        if map_region.start.0 >= 0 && map_region.end.0 <= LOWMEM_END as _ {
+            v.push(map_region);
+        } else if map_region.start.0 >= start && map_region.end.0 <= start + size {
+            v.push(map_region);
+        }
     }
     v
 }

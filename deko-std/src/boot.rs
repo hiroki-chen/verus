@@ -536,6 +536,7 @@ impl WellFormed for IgvmParamBlockFwInfo {
         &&& self.cpuid_page <= 0x8000_0000
         &&& self.caa_page <= 0x8000_0000
         &&& self.memory_map_page + self.memory_map_page_count <= 0x8000_0000
+        &&& self.start + self.size <= 0x000f_ffff_ffff_f000u64
         &&& forall|i: int|
             #![trigger self.prevalidated@[i]]
             0 <= i < self.prevalidated_count as int ==> {

@@ -442,6 +442,33 @@ impl<'a, V, S: Spin, Pred: RwLockPredicate<V>> WriteHandle<'a, V, S, Pred> {
         self.rwlock.cell.take(Tracked(self.perm.borrow_mut()))
     }
 
+    /// Release the write-lock without returning ownership of the lock-protected object.
+    ///
+    /// This API is useful when the lock-protected object is `!Copy` but the owner needs
+    /// to modify it in place without taking ownership. Thus the modification needs to be
+    /// exposed in the `WriteHandle` itself, e.g., via `as_ptr()`.
+    ///
+    /// Due to the concurrency safety guarantees, the caller is safe to manipulate the
+    /// pointer returned by `as_ptr()` as long as the caller ensures that the modification
+    /// preserves the lock invariant.
+    pub fn release_write_no_val(self)
+        requires
+            self.is_init(),
+    {
+        proof {
+            use_type_invariant(&self);
+        }
+
+        let WriteHandle { handle: Tracked(handle), perm: Tracked(mut perm), rwlock } = self;
+
+        atomic_with_ghost!(
+            &rwlock.exc => store(false);
+            ghost g =>
+        {
+            self.rwlock.inst.borrow().release_exc(perm, &mut g, perm, handle);
+        });
+    }
+
     /// Release the write-lock, returning ownership of the lock-protected object.
     ///
     /// Note this function will require the inner cell to be uninitialized after
