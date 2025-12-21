@@ -194,4 +194,11 @@ impl<V: WellFormed, F: Predicate<V>> OnceCell<V, F> {
     }
 }
 
+impl<V: 'static + WellFormed + DekoDebug, F: Predicate<V>> DekoDebug for OnceCell<V, F> {
+    #[verifier::external_body]
+    fn deko_debug<W: DekoWriter>(&self, writer: &W) {
+        writer.write_str("OnceCell(...)");
+    }
+}
+
 } // verus!

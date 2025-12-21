@@ -829,6 +829,7 @@ impl DekoRunnable {
             apic,
             run_queue,
             temp_mapping,
+            deko_vmsa,
         } = cpu_taken;
         kpanic_if!(core::hint::unlikely(
             vm_region.is_none(),
@@ -915,6 +916,7 @@ impl DekoRunnable {
             apic,
             run_queue,
             temp_mapping,
+            deko_vmsa,
         };
         let tracked ctx_perm = DekoCpuCtxPermission {
             ptr_perm,

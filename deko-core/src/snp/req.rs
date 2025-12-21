@@ -7,6 +7,7 @@ use deko_std::wf::WellFormed;
 use deko_std::{boxed_ptr, with_permission};
 use vstd::prelude::*;
 
+use crate::kinfo;
 use crate::mm::DEKO_FRAME_ALLOCATOR;
 
 verus! {
@@ -240,6 +241,8 @@ pub exec static GUEST_DRIVER: DekoOnceCell<
 #[inline]
 #[verus_spec()]
 pub fn init_snp_guest_driver() {
+    kinfo!("Initializing SNP Guest Driver");
+
     proof_with!(=> Tracked(snp_driver_perm));
     let snp_driver = SnpGuestDriver::new();
 

@@ -92,7 +92,7 @@ impl<T: WellFormed, P> View for DekoAtomicData<T, P> {
     }
 }
 
-impl<V: WellFormed + crate::DekoDebug> crate::DekoDebug for DekoAtomicData<V, ()> {
+impl<V: crate::fmt::DekoDebug, P> crate::fmt::DekoDebug for DekoAtomicData<V, P> {
     #[verifier::external_body]
     fn deko_debug<W: deko_std::prelude::DekoWriter>(&self, writer: &W) {
         writer.write_str("DekoAtomicData{ data: ");

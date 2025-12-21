@@ -1,16 +1,51 @@
-use deko_macros::DekoDebug;
+use core::ops::Index;
+
+use deko_macros::{with_atomic_pred, DekoDebug};
 use deko_std::array::Array;
+use deko_std::bits::bit_u32_and_auto;
 use deko_std::mem::{PAGE_SIZE, PAGE_SIZE_2M};
-use deko_std::ptr::{DekoPPtr, DekoPointsTo};
+use deko_std::prelude::VirtAddr;
+use deko_std::ptr::{addr_of_ref, DekoPPtr, DekoPointsTo};
 use deko_std::wf::WellFormed;
 use deko_std::{boxed_ptr, with_permission};
 use vstd::prelude::*;
 
+use crate::cpu::gdt::GLOBAL_GDT;
+use crate::cpu::regs::{
+    read_cr0, read_cr4, read_efer, DEKO_DS, DEKO_DS_ATTRIBUTES, DEKO_TR_ATTRIBUTES, DEKO_TSS,
+};
+use crate::cpu::X86Tss;
 use crate::mm::DEKO_FRAME_ALLOCATOR;
-use crate::snp::{rmpadjust, DekoCpuCtxPermission, RmpFlags, Rmp_ALL_BITS};
+use crate::snp::{
+    rmpadjust, DekoCpuCtxPermission, PageTablePermission, RmpFlags, Rmp_ALL_BITS, SnpStatusFlags,
+    BIT_VMSA,
+};
 use crate::{die, kerror, kunimplemented};
 
 verus! {
+
+#[repr(C)]
+#[derive(DekoDebug, Clone, Copy)]
+pub struct VmsaInitialContext {
+    pub rip: u64,
+    pub rsp: u64,
+    pub rflags: u64,
+    pub cs: VMSASegment,
+    pub ds: VMSASegment,
+    pub es: VMSASegment,
+    pub fs: VMSASegment,
+    pub gs: VMSASegment,
+    pub ss: VMSASegment,
+    pub tr: VMSASegment,
+    pub ldtr: VMSASegment,
+    pub idtr: VmsaTableRegister,
+    pub gdtr: VmsaTableRegister,
+    pub efer: u64,
+    pub cr0: u64,
+    pub cr3: u64,
+    pub cr4: u64,
+    pub pat: u64,
+}
 
 #[repr(C, packed)]
 #[derive(DekoDebug, Clone, Copy)]
@@ -18,6 +53,14 @@ pub struct VMSASegment {
     pub selector: u16,
     pub flags: u16,
     pub limit: u32,
+    pub base: u64,
+}
+
+#[repr(C)]
+#[derive(DekoDebug, Clone, Copy)]
+pub struct VmsaTableRegister {
+    pub _rsvd: [u16; 3],
+    pub limit: u16,
     pub base: u64,
 }
 
@@ -169,11 +212,17 @@ pub struct VMSA {
 
 #[derive(DekoDebug)]
 pub struct VmsaPage {
-    pub page: DekoPPtr<Array<u8, 4096>>,
+    pub page: DekoPPtr<[VMSA; 2]>,
     pub idx: usize,
 }
 
 impl WellFormed for VmsaPage {
+    open spec fn wf(&self) -> bool {
+        &&& self.idx < 2
+    }
+}
+
+impl WellFormed for VMSA {
     open spec fn wf(&self) -> bool {
         true
     }
@@ -181,7 +230,72 @@ impl WellFormed for VmsaPage {
 
 with_permission! {
     VmsaPage,
-    ptr_perm: DekoPointsTo<Array<u8, 4096>>,
+    ptr_perm: DekoPointsTo<[VMSA; 2]>,
+}
+
+with_atomic_pred! {
+    VmsaPage,
+    VmsaPagePermission,
+    fields: { page },
+    perm_fields: { ptr_perm },
+    ptr_perm.pptr() == page.view() && ptr_perm.is_init() && ptr_perm.wf()
+}
+
+#[verus_verify]
+impl VmsaInitialContext {
+    /// Constructs a new initial VMSA context from the given RIP and CSS top.
+    #[verus_spec(r =>
+
+    )]
+    pub fn new_with(rip: u64, css_top: u64, cr3: u64, tss: &X86Tss) -> Self {
+        let ds = VMSASegment {
+            selector: DEKO_DS,
+            flags: DEKO_DS_ATTRIBUTES,
+            limit: 0xffff_ffff,
+            base: 0,
+        };
+        let cs = VMSASegment {
+            selector: DEKO_DS,
+            flags: DEKO_DS_ATTRIBUTES,
+            limit: 0xffff_ffff,
+            base: 0,
+        };
+        let tr = VMSASegment {
+            selector: DEKO_TSS,
+            flags: DEKO_TR_ATTRIBUTES,
+            limit: core::mem::size_of::<X86Tss>() as u32,
+            base: addr_of_ref(tss) as u64,
+        };
+
+        Self {
+            rip,
+            rsp: css_top,
+            rflags: 0x2,
+            cs,
+            ss: ds.clone(),
+            ds: ds.clone(),
+            es: ds.clone(),
+            fs: ds.clone(),
+            gs: ds.clone(),
+            cr0: read_cr0().bits(),
+            cr4: read_cr4().bits(),
+            cr3,
+            tr,
+            efer: read_efer().bits(),
+            ldtr: VMSASegment { selector: 0, flags: 0, limit: 0, base: 0 },
+            gdtr: VmsaTableRegister {
+                _rsvd: [0;3],
+                limit: 0,  // fix this.
+                base: 0,
+            },
+            idtr: VmsaTableRegister {
+                _rsvd: [0;3],
+                limit: 0,  // fix this.
+                base: 0,
+            },
+            pat: 0x0007040600070406u64,
+        }
+    }
 }
 
 #[verus_verify]
@@ -189,18 +303,29 @@ impl VmsaPage {
     /// Allocates a VMSA page.
     #[verus_spec(r =>
         with
-            -> perm: Tracked<VmsaPagePermission>,
+            Tracked(pgtable_perm): Tracked<&mut PageTablePermission>,
+                -> perm: Tracked<VmsaPagePermission>,
         requires
             rmp.wf(),
             rmp.bits() & Rmp_ALL_BITS == rmp.bits(),
+            old(pgtable_perm).wf(),
         ensures
+            old(pgtable_perm).pgtable_perm == pgtable_perm.pgtable_perm,
+            old(pgtable_perm).private_bit == pgtable_perm.private_bit,
+            old(pgtable_perm).shared_bit == pgtable_perm.shared_bit,
+            old(pgtable_perm).mapping_space == pgtable_perm.mapping_space,
+            pgtable_perm.pgtable_perm.wf(),
+            pgtable_perm.wf(),
+            pgtable_perm.pgtable_perm.is_init(),
             perm@.ptr_perm.wf(),
             perm@.ptr_perm.pptr() == r.page@,
             perm@.ptr_perm.is_init(),
+            r.wf(),
     )]
     pub fn alloc(rmp: RmpFlags) -> Self {
-        let (page, Tracked(perm)) = boxed_ptr!(Array<u8, 4096>, &DEKO_FRAME_ALLOCATOR.0);
-        assume(perm.is_init());
+        broadcast use RmpFlags::lemma_each_bit_is_valid;
+
+        let (page, Tracked(perm)) = boxed_ptr!([VMSA; 2], &DEKO_FRAME_ALLOCATOR.0);
 
         // Make sure the VMSA page is not 2M-aligned.
         // To ensure this property, we allocate 2 VMSAs.
@@ -214,13 +339,19 @@ impl VmsaPage {
             kerror!("VMSA page allocation overflow");
             die("aa");
         }
-        let vaddr = page.addr() as u64 + (idx as u64) * PAGE_SIZE;
+        let vaddr = VirtAddr(page.addr() as u64 + (idx as u64) * PAGE_SIZE);
+        let flags = RmpFlags::from_bits_truncate(rmp.bits() | BIT_VMSA);
+
+        proof {
+            assert(flags.bits() & Rmp_ALL_BITS == flags.bits()) by {
+                bit_u32_and_auto();
+            }
+            assume(perm.is_init());
+            assume(pgtable_perm.mapped(vaddr));
+        }
 
         // Perform a RMPADJUST to set the page as VMSA.
-        // FIXME: The input param takes a dekoctxpermission.
-        // need to change it; perhaps need a rmptable_perm?
-
-        // rmpadjust(vaddr, PAGE_SIZE, Tracked(cpu));
+        rmpadjust(vaddr, PAGE_SIZE, flags, Tracked(pgtable_perm));
 
         proof_with!(|= Tracked(
             VmsaPagePermission {
@@ -233,16 +364,78 @@ impl VmsaPage {
         }
     }
 
-    /// Initializes the VMSA page.
-    #[verus_spec(
+    /// Initializes the VMSA page from the initial context.
+    ///
+    /// # Note
+    ///
+    /// This function is marked as `external_body` because it involves low-level
+    /// operations that cannot be directly verified by Verus. We can copy the whole
+    /// page onto the stack which will then be overflown. This requires some unsafe
+    /// pointer manipulations instead. However, since we hold the permission to the VMSA
+    /// page, we can ensure that the operation is safe and does not violate memory safety.
+    #[verifier::external_body]
+    #[verus_spec(r =>
         with
             Tracked(perm): Tracked<&mut VmsaPagePermission>,
         requires
             old(perm).ptr_perm.wf(),
             old(perm).ptr_perm.pptr() == self.page@,
+            self.wf(),
+        ensures
+            perm.ptr_perm.wf(),
+            perm.ptr_perm.pptr() == self.page@,
+            perm.ptr_perm.is_init(),
     )]
-    pub fn init(&self) {
-        // let VMSA { es, cs, ss, ds, fs, gs, gdt, ldt, idt, tr, pl0_ssp, pl1_ssp, pl2_ssp, pl3_ssp, u_cet, reserved_0c8, vmpl, cpl, reserved_0cc, efer, reserved_0d8, xss, cr4, cr3, cr0, dr7, dr6, rflags, rip, dr0, dr1, dr2, dr3, dr0_mask, dr1_mask, dr2_mask, dr3_mask, reserved_1c0, rsp, s_cet, ssp, isst_addr, rax, star, lstar, cstar, sfmask, kernel_gs_base, sysenter_cs, sysenter_esp, sysenter_eip, cr2, reserved_248, g_pat, dbgctl, br_from, br_to, last_excp_from, last_excp_to, reserved_298, reserved_2e0, pkru, reserved_2ec, guest_tsc_scale, guest_tsc_offset, reg_prot_nonce, rcx, rdx, rbx, reserved_320, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15, reserved_380, guest_exitinfo1, guest_exitinfo2, guest_exitintinfo, guest_nrip, sev_features, vintr_ctrl, guest_exit_code, vtom, tlb_id, pcpu_id, event_inj, xcr0, reserved_3f0, x87_dp, mxcsr, x87_ftw, x87_fsw, x87_fcw, x87_fop, x87_ds, x87_cs, x87_rip, fpreg_x87, fpreg_xmm, fpreg_ymm, lbr_stack, lbr_select, ibs_fetch_ctl, ibs_fetch_linaddr, ibs_op_ctl, ibs_op_rip, ibs_op_data, ibs_op_data2, ibs_op_data3, ibs_dc_linaddr, bp_ibstgt_rip, ic_ibs_extd_ctl, reserved_7c8 };
+    pub fn init_from(&self, ctx: &VmsaInitialContext) -> u64 {
+        let this = unsafe {
+            &mut *(self.page.borrow(Tracked(&perm.ptr_perm)).as_ptr().wrapping_add(
+                self.idx * PAGE_SIZE as usize,
+            ) as *mut VMSA)
+        };
+
+        this.es = ctx.es;
+        this.cs = ctx.cs;
+        this.ss = ctx.ss;
+        this.ds = ctx.ds;
+        this.fs = ctx.fs;
+        this.gs = ctx.gs;
+        this.tr = ctx.tr;
+
+        this.rip = ctx.rip;
+        this.rsp = ctx.rsp;
+        this.rflags = ctx.rflags;
+
+        this.gdt = VMSASegment {
+            selector: 0,
+            flags: 0,
+            limit: ctx.gdtr.limit as u32,
+            base: ctx.gdtr.base,
+        };
+        this.idt = VMSASegment {
+            selector: 0,
+            flags: 0,
+            limit: ctx.idtr.limit as u32,
+            base: ctx.idtr.base,
+        };
+
+        this.cr0 = ctx.cr0;
+        this.cr3 = ctx.cr3;
+        this.cr4 = ctx.cr4;
+        this.efer = ctx.efer;
+
+        this.g_pat = ctx.pat;
+        this.dr6 = 0xffff_0ff0;
+        this.dr7 = 0x400;
+        this.xcr0 = 0x1;
+        this.mxcsr = 0x1f80;
+        this.x87_fcw = 0x404;
+        this.x87_fsw = 0x5555;
+        this.vmpl = 0;
+        this.vtom = 0;  // unsupported.
+        this.sev_features = SnpStatusFlags::get_status().bits() as _;
+
+        // Being lazy
+        this.sev_features
     }
 }
 

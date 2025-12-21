@@ -3,6 +3,22 @@ use vstd::prelude::*;
 
 verus! {
 
+pub const DEKO_CS: u16 = 1 * 8;
+
+pub const DEKO_DS: u16 = 2 * 8;
+
+pub const DEKO_USER_CS: u16 = 3 * 8;
+
+pub const DEKO_USER_DS: u16 = 4 * 8;
+
+pub const DEKO_TSS: u16 = 6 * 8;
+
+pub const DEKO_CS_ATTRIBUTES: u16 = 0xa09b;
+
+pub const DEKO_DS_ATTRIBUTES: u16 = 0xc093;
+
+pub const DEKO_TR_ATTRIBUTES: u16 = 0x89;
+
 deko_bitflags! {
     pub struct Cr0: u64 {
         const PE = 0; // Protection Enable
@@ -33,6 +49,22 @@ deko_bitflags! {
     }
 }
 
+deko_bitflags! {
+    pub struct Efer: u64 {
+        const SCE = 0; // System Call Extensions
+        const LME = 8; // Long Mode Enable
+        const LMA = 10; // Long Mode Active
+        const NXE = 11; // No-Execute Enable
+        const SVME = 12; // Secure Virtual Machine Enable
+        const LMSLE = 13; // Long Mode Segment Limit Enable
+        const FFXSR = 14; // Fast FXSAVE/FXRSTOR
+        const TCE = 15; // Translation Cache Extension
+        const MCOMMIT = 17; // MCOMMIT Enable
+        const INTWB = 18; // INTWB Enable
+        const UAIE = 20; // User Access Instruction Enable
+    }
+}
+
 /// Reads the current value of the CR0 register.
 #[inline]
 #[verifier::external_body]
@@ -56,6 +88,22 @@ pub fn read_cr0() -> Cr0Flags {
     Cr0Flags::from_bits_truncate(cr0)
 }
 
+#[inline]
+#[verifier::external_body]
+pub fn read_cr3() -> u64 {
+    let mut cr3: u64;
+
+    unsafe {
+        core::arch::asm!(
+            "movq %cr3, {}",
+            out(reg) cr3,
+            options(att_syntax)
+        );
+    }
+
+    cr3
+}
+
 /// Reads the current value of the CR4 register.
 #[inline]
 #[verifier::external_body]
@@ -77,6 +125,32 @@ pub fn read_cr4() -> Cr4Flags {
     }
 
     Cr4Flags::from_bits_truncate(cr4)
+}
+
+/// Reads the current value of the EFER MSR.
+#[inline]
+#[verifier::external_body]
+#[verus_spec(r =>
+    // with Tracked(cpu_core): Tracked<&mut DekoCpuCore>,
+    ensures
+        r.wf(),
+        r.bits() & Efer_ALL_BITS == r.bits(),
+)]
+pub fn read_efer() -> EferFlags {
+    let low: u32;
+    let high: u32;
+
+    unsafe {
+        core::arch::asm!(
+            "rdmsr",
+            in("ecx") 0xc0000080u32,
+            out("eax") low,
+            out("edx") high,
+            options(att_syntax),
+        );
+    }
+
+    EferFlags::from_bits_truncate(((high as u64) << 32) | (low as u64))
 }
 
 /// Writes the given value to the CR4 register.

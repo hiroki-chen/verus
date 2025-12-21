@@ -1732,7 +1732,7 @@ impl VirtualMemory {
                 self.range.end@ - self.range.start@ - offset,
         )]
         while offset < self.range.end.0 - self.range.start.0 {
-            kinfo!("Requesting mapping at offset ", offset);
+            kdebug!("Requesting mapping at offset ", offset);
 
             // Request if there is a physical address at this offset.
             if let Some(paddr) = mapping_data.phys_at(offset) {

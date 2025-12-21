@@ -8,6 +8,18 @@ use crate::WellFormed;
 
 verus! {
 
+impl<V: WellFormed, const N: usize> WellFormed for [V; N] {
+    open spec fn wf(&self) -> bool {
+        slice_wf(self@)
+    }
+}
+
+impl<'a, V: WellFormed> WellFormed for &'a [V] {
+    open spec fn wf(&self) -> bool {
+        slice_wf(self@)
+    }
+}
+
 pub open spec fn slice_wf<T: WellFormed>(s: Seq<T>) -> bool {
     forall|i: int| 0 <= i < s.len() ==> (#[trigger] s[i]).wf()
 }

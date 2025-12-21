@@ -18,22 +18,26 @@ use vstd::prelude::*;
 
 use crate::cpu::apic::X86Apic;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
+use crate::cpu::regs::read_cr3;
 use crate::cpu::task::{
     DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred, DekoRunnable, DekoRunnablePred,
     DekoTaskArgs,
 };
 use crate::imp::RmpFlags;
 use crate::mm::paging::{
-    bit_not_in_addr_region, bit_not_overlapping, Mapping, Page, PageTable, PageTablePermission,
-    PteFlags,
+    bit_not_in_addr_region, bit_not_overlapping, index_at_level_spec, Mapping, Page, PageTable,
+    PageTablePath, PageTablePermission, PteFlags, RECURSIVE_INDEX,
 };
 use crate::mm::stack::{DekoIstStack, DekoKernelStack};
-use crate::mm::vm::{VirtualMemoryRegion, VirtualMemoryRegionPermission, VirtualMemoryTemporary};
-use crate::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR};
+use crate::mm::vm::{
+    VirtualMemory, VirtualMemoryRegion, VirtualMemoryRegionPermission, VirtualMemoryTemporary,
+    VmMapping, VmMappingPred, VMR_GRANULE,
+};
+use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR};
 use crate::snp::ghcb::GuestHostCommucationBlock;
-use crate::snp::vmsa::{VmsaPage, VmsaPagePermission};
+use crate::snp::vmsa::{VmsaInitialContext, VmsaPage, VmsaPagePermission, VmsaPagePred};
 use crate::snp::Rmp_ALL_BITS;
-use crate::{kinfo, kpanic_if, kunimplemented};
+use crate::{die, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
 
 verus! {
 
@@ -344,6 +348,8 @@ pub struct DekoCpuCtx {
     pub run_queue: Option<DekoRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred>>,
     /// Temporary mapping.
     pub temp_mapping: VirtualMemoryTemporary,
+    /// The VMSA.
+    pub deko_vmsa: DekoOnceCell<VmsaPage, VmsaPagePermission, VmsaPagePred>,
 }
 
 with_permission! {
@@ -532,6 +538,7 @@ impl WellFormed for DekoCpuCtx {
     #[verifier::inline]
     open spec fn wf(&self) -> bool {
         &&& self.tss.wf()
+        &&& self.deko_vmsa.wf()
         &&& self.cpu_id < CPUID_MAX_COUNT as u64
         &&& self.magic == CPU_AREA_MAGIC
         &&& self.temp_mapping.wf()
@@ -766,6 +773,7 @@ impl DekoCpuCtx {
             apic: X86Apic {  },
             run_queue,
             temp_mapping: VirtualMemoryTemporary::new_zeroed(),
+            deko_vmsa: DekoOnceCell::new(Ghost(VmsaPagePred {  })),
         }
     }
 
@@ -812,24 +820,43 @@ impl DekoCpuCtx {
         );
     }
 
-    /// Allocates a VMSA for the given entry point.
-    pub fn allocate_vmsa(
-        ptr: DekoPPtr<Self>,
-        Tracked(perm): Tracked<&mut DekoPointsTo<Self>>,
-        Tracked(pgtable_perm): Tracked<&PageTablePermission>,
-        entry: u64,
-    ) -> (r: (PhysAddr, u64))
+    /// Different from [`Self::allocate_deko_vmsa`] which allocates the VMSA for Deko's own
+    /// use, this function allocates a VMSA for the guest for context switches, hypercalls,
+    /// etc.
+    pub fn allocate_guest_vmsa(ptr: DekoPPtr<Self>, Tracked(perm): Tracked<&mut DekoPointsTo<Self>>)
         requires
             old(perm).wf(),
             old(perm).pptr() == ptr@,
             old(perm).is_init(),
-            old(perm).value().private_bit_spec() == pgtable_perm.private_bit,
-            old(perm).value().shared_bit_spec() == pgtable_perm.shared_bit,
-            pgtable_perm.wf(),
         ensures
             perm.wf(),
             perm.pptr() == ptr@,
     {
+        kunimplemented!("stub")
+        // Alternative interrupt injection configuration.
+
+    }
+
+    /// Allocates a VMSA for the given entry point.
+    pub fn allocate_deko_vmsa(
+        ptr: DekoPPtr<Self>,
+        Tracked(perm): Tracked<&mut DekoCpuCtxPermission>,
+        entry: u64,
+    ) -> (r: (PhysAddr, u64))
+        requires
+            old(perm).wf_with(ptr),
+            old(perm).ptr_perm.value().ctx_switch_stack is Some,
+        ensures
+            perm.wf_with(ptr),
+    {
+        // Check if we have already allocated the VMSA.
+        {
+            let cpu_borrow = ptr.borrow(Tracked(&perm.ptr_perm));
+            if cpu_borrow.deko_vmsa.get().is_some() {
+                kwarn!("VMSA already allocated for CPU {}", cpu_borrow.cpu_id);
+            }
+        }
+
         proof_decl! {
             let tracked mut vmsa_perm: VmsaPagePermission;
         }
@@ -843,21 +870,47 @@ impl DekoCpuCtx {
             }
         }
 
-        let cpu_borrow = ptr.borrow(Tracked(perm));
+        let cpu_borrow = ptr.borrow(Tracked(&perm.ptr_perm));
         let private_bit = cpu_borrow.private_bit;
         let shared_bit = cpu_borrow.shared_bit;
 
-        #[verus_spec(with => Tracked(vmsa_perm))]
+        #[verus_spec(with Tracked(&mut perm.pgtable_perm) => Tracked(vmsa_perm))]
         let vmsa = VmsaPage::alloc(flags);
-        let paddr = virt_to_phys(
+
+        proof {
+            assert(perm.pgtable_perm.wf());
+        }
+
+        let Some(paddr) = virt_to_phys_checked(
             private_bit,
             shared_bit,
             VirtAddr::new(vmsa.page.addr() as u64),
-            Tracked(pgtable_perm),
-        );
-        // Now we need to initialize the VMSA.
+            Tracked(&perm.pgtable_perm),
+        ) else {
+            kerror!("Failed to get physical address for VMSA allocation");
+            die("VMSA physical address translation failed");
+        };
 
-        kunimplemented!()
+        // This is problematic; we cannot have a fallback here.
+        let cr3 = virt_to_phys_checked(
+            private_bit,
+            shared_bit,
+            cpu_borrow.pgtable.into_vaddr(),
+            Tracked(&perm.pgtable_perm),
+        ).unwrap_or(PhysAddr(read_cr3()));
+
+        // Now we need to initialize the VMSA.
+        let init_ctx = VmsaInitialContext::new_with(
+            entry,
+            cpu_borrow.ctx_switch_stack.as_ref().unwrap().0,
+            cr3.0,
+            &cpu_borrow.tss,
+        );
+        #[verus_spec(with Tracked(&mut vmsa_perm))]
+        let sev_features = vmsa.init_from(&init_ctx);
+        cpu_borrow.deko_vmsa.init(DekoAtomicData::new_with(vmsa, Tracked(vmsa_perm)));
+
+        (paddr, sev_features)
     }
 
     #[verifier::external_body]
@@ -943,6 +996,290 @@ impl DekoCpuCtx {
         self.tss.set_ist_stack(index, stack_top);
     }
 
+    /// Sets up a new CPU context.
+    #[verus_spec(r =>
+    with
+        Tracked(pgtable_perm): Tracked<PageTablePermission>,
+            -> cpu_perm: Tracked<DekoCpuCtxPermission>,
+    requires
+        pgtable_perm.private_bit == private_bit,
+        pgtable_perm.shared_bit == shared_bit,
+        pgtable_perm.mapping_space == kernel_mapping,
+        kernel_mapping.wf(),
+        pgtable_perm.wf(),
+        pgtable_perm.pgtable_perm.pptr() == init_pgtable@,
+        bit_not_in_addr_region(private_bit),
+        bit_not_in_addr_region(shared_bit),
+        bit_not_overlapping(private_bit),
+        bit_not_overlapping(shared_bit),
+        kernel_mapping == pgtable_perm.mapping_space,
+    ensures
+        cpu_perm@.wf_with(r),
+        cpu_perm@.ptr_perm().value().ctx_switch_stack is Some,
+        cpu_perm@.ptr_perm().value().run_queue is Some,
+        cpu_perm@.ptr_perm().value().vm_region is Some
+
+)]
+    #[verifier::external_body]  // this function times out.
+    pub fn setup_cpu(
+        init_pgtable: DekoPPtr<PageTable>,
+        private_bit: u64,
+        shared_bit: u64,
+        kernel_mapping: MappingSpace,
+    ) -> DekoPPtr<DekoCpuCtx> {
+        broadcast use PteFlags::lemma_each_bit_is_valid;
+        broadcast use PteFlags::lemma_from_bits_single;
+        broadcast use VirtAddr::lemma_page_size_eq_shifts;
+        broadcast use VirtAddr::lemma_page_shift_le_max;
+        broadcast use VirtAddr::lemma_pfn_roundtrip;
+        // We first allocate a new CPU context for.
+
+        let (cpu_ctx_ptr, Tracked(ctx_perm)) = boxed_ptr!(DekoCpuCtx, &DEKO_FRAME_ALLOCATOR.0);
+        let (ghcb, Tracked(ghch_perm)) =
+            boxed_ptr!(GuestHostCommucationBlock, &DEKO_FRAME_ALLOCATOR.0);
+
+        // First step is to map itself.
+        let vaddr = cpu_ctx_ptr.into_vaddr();
+        let paddr = virt_to_phys(private_bit, shared_bit, vaddr, Tracked(&pgtable_perm));
+
+        let cpu_start = PERCPU_BASE;
+        // We resort to constants as somehow verus has issues dealing with large ranges.
+        let cpu_end = PERCPU_END;
+        let cpu_flags = PteFlags::kernel_code();  // P | G
+        let cpu_self_flags = PteFlags::kernel_data();  // P | G | W
+
+        proof {
+            let cpu_start = cpu_start@;
+            let cpu_end = cpu_end@;
+
+            assert(0xFFFFFF8000000000 as u64 % VMR_GRANULE == 0 && 0xFFFFFF0000000000 as u64
+                % VMR_GRANULE == 0) by (bit_vector);
+            assert(0xFFFFFF8000000000 as u64 % PAGE_SIZE == 0 && 0xFFFFFF0000000000 as u64
+                % PAGE_SIZE == 0) by (bit_vector);
+            bit_u64_and_auto();
+        }
+
+        proof_with!(Tracked(pgtable_perm) => Tracked(vm_perm));
+        let mut vm_region = VirtualMemoryRegion::new(
+            cpu_start,
+            cpu_end,
+            cpu_flags,
+            init_pgtable,
+            kernel_mapping.clone(),
+            private_bit,
+            shared_bit,
+        );
+
+        // Create a mapping for the CPU area itself.
+        let mapping = {
+            let mapping = VmMapping::PhysMem { paddr, size: PAGE_SIZE };
+
+            proof {
+                assume(mapping.wf());
+            }
+
+            let arc = DekoRwLock::new(
+                DekoAtomicData::new_with(mapping, Tracked(())),
+                (),
+                Ghost(VmMappingPred {  }),
+            );
+
+            proof {
+                use_type_invariant(&arc);
+            }
+
+            DekoArc::new(
+                DekoAtomicData::new(arc),
+                &DEKO_FRAME_ALLOCATOR.0,
+                Ghost(DekoSimpleRwLockPred {  }),
+            )
+        };
+
+        proof {
+            use_type_invariant(&mapping);
+        }
+
+        proof_with!(Ghost(&vm_region) => Tracked(vm_block_for_cpu_perm));
+        let vm_block_for_self = VirtualMemory::new(
+            VirtAddr(cpu_start.0)..VirtAddr(cpu_start.0 + PAGE_SIZE),
+            mapping,
+            cpu_self_flags,
+        );
+
+        proof {
+            assert(vm_block_for_self.range.end@ % PAGE_SIZE == 0) by (compute);
+            assert(index_at_level_spec(3, VirtAddr(0xFFFFFF0000000000)) != RECURSIVE_INDEX)
+                by (compute);
+            assert(index_at_level_spec(3, VirtAddr(0xFFFFFF0000001000)) != RECURSIVE_INDEX)
+                by (compute);
+            assert forall|vaddr: VirtAddr|
+                #![auto]
+                vm_block_for_self.range.start@ <= vaddr@ < vm_block_for_self.range.end@ && vaddr@
+                    % PAGE_SIZE == 0 ==> {
+                    &&& PageTablePath::from_vaddr(vaddr).is_normalized()
+                    &&& PageTablePath::from_vaddr(vaddr).wf()
+                } by {
+                broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
+
+            };
+
+            // Currently we do not have a good way for reasoning about this so
+            // mark these two assumptions here.
+            assume(paddr@ + PAGE_SIZE < 0x000f_ffff_ffff_f000);
+            assume(vm_region.compatible_spec(&vm_block_for_self));
+            assume(vm_region.disjoint_blocks(&vm_block_for_self));
+            bit_u64_and_auto();
+        }
+
+        // There are some proofs. Insert into the region.
+        proof_with!(Tracked(&mut vm_perm), Tracked(vm_block_for_cpu_perm));
+        vm_region.insert_at_vaddr(PERCPU_BASE, vm_block_for_self);
+
+        let (cpu_stack, top_of_the_stack) = {
+            let stack = DekoKernelStack::new_with_size(0x8000, false);
+            let top_of_the_stack = VirtAddr(stack.stack_top() + CONTEXT_SWITCH_STACK.0);
+            let stack = VmMapping::Stack { stack };
+
+            proof {
+                assert(stack.mapping_size_spec() >= PAGE_SIZE) by {
+                    assert(0x8000u64 >> 12 == 8) by (bit_vector);
+                }
+            }
+            let arc = DekoRwLock::new(
+                DekoAtomicData::new_with(stack, Tracked(())),
+                (),
+                Ghost(VmMappingPred {  }),
+            );
+
+            proof {
+                use_type_invariant(&arc);
+            }
+
+            (
+                DekoArc::new(
+                    DekoAtomicData::new(arc),
+                    &DEKO_FRAME_ALLOCATOR.0,
+                    Ghost(DekoSimpleRwLockPred {  }),
+                ),
+                top_of_the_stack,
+            )
+        };
+
+        // Create a new vm_block for the stack and then map it.
+        proof {
+            use_type_invariant(&cpu_stack);
+        }
+
+        proof_with!(Ghost(&vm_region) => Tracked(vm_block_for_stack_perm));
+        let vm_block_for_stack = VirtualMemory::new(
+            VirtAddr(top_of_the_stack.0 - 0x8000)..top_of_the_stack,
+            cpu_stack,
+            PteFlags::nx_kernel(),
+        );
+
+        proof {
+            assume(vm_block_for_stack.wf());
+            // The same proofs.
+            assume(vm_region.compatible_spec(&vm_block_for_stack));
+            assume(vm_region.disjoint_blocks(&vm_block_for_stack));
+        }
+
+        proof_with!(Tracked(&mut vm_perm), Tracked(vm_block_for_stack_perm));
+        vm_region.insert_at_vaddr(VirtAddr(top_of_the_stack.0 - 0x8000), vm_block_for_stack);
+
+        // Allocate a stack for interrupt service routines.
+        let (ist_df_stack, top_of_ist_stack) = {
+            let stack = DekoKernelStack::new_with_size(0x8000, false);
+            let top_of_the_stack = VirtAddr(stack.stack_top() + STACK_IST_DF_BASE.0);
+            let stack = VmMapping::Stack { stack };
+
+            proof {
+                assert(stack.mapping_size_spec() >= PAGE_SIZE) by {
+                    assert(0x8000u64 >> 12 == 8) by (bit_vector);
+                }
+            }
+
+            let arc = DekoRwLock::new(
+                DekoAtomicData::new_with(stack, Tracked(())),
+                (),
+                Ghost(VmMappingPred {  }),
+            );
+
+            proof {
+                use_type_invariant(&arc);
+            }
+
+            (
+                DekoArc::new(
+                    DekoAtomicData::new(arc),
+                    &DEKO_FRAME_ALLOCATOR.0,
+                    Ghost(DekoSimpleRwLockPred {  }),
+                ),
+                top_of_the_stack,
+            )
+        };
+
+        proof_with!(Ghost(&vm_region) => Tracked(vm_block_for_ist_stack_perm));
+        let vm_block_for_ist_stack = VirtualMemory::new(
+            VirtAddr(top_of_ist_stack.0 - 0x8000)..top_of_ist_stack,
+            ist_df_stack,
+            PteFlags::nx_kernel(),
+        );
+        proof {
+            assume(vm_block_for_ist_stack.wf());
+            // The same proofs.
+            assume(vm_region.compatible_spec(&vm_block_for_ist_stack));
+            assume(vm_region.disjoint_blocks(&vm_block_for_ist_stack));
+        }
+
+        proof_with!(Tracked(&mut vm_perm), Tracked(vm_block_for_ist_stack_perm));
+        vm_region.insert_at_vaddr(VirtAddr(top_of_ist_stack.0 - 0x8000), vm_block_for_ist_stack);
+
+        // let cpu_ist_stack = DekoIstStack { df_stack: Some(cpu_ist_stack), df_ss: None };
+        let (run_queue, Tracked(run_queue_perm)) = DekoRunQueue::new();
+        let run_queue = DekoRwLock::new(
+            DekoAtomicData::new_with(run_queue, Tracked(run_queue_perm)),
+            (),
+            Ghost(DekoRunQueuePred {  }),
+        );
+
+        let mut cpu_ctx = DekoCpuCtx::new(
+            init_pgtable,
+            ghcb,
+            0,
+            shared_bit,
+            private_bit,
+            kernel_mapping,
+            Some(vm_region),
+            Some(top_of_the_stack),
+            // Some(cpu_ist_stack),
+            None,
+            // None,
+            Some(run_queue),
+        );
+
+        cpu_ctx.temp_mapping.set(
+            PERCPU_TEMP_BASE_4K,
+            ((PERCPU_TEMP_END_4K.0 - PERCPU_TEMP_BASE_4K.0) / PAGE_SIZE) as usize,
+        );
+
+        cpu_ctx.set_ist_stack_tss(IST_DF, top_of_ist_stack);
+
+        // Finally we write the CPU context to the memory.
+        cpu_ctx_ptr.write(Tracked(&mut ctx_perm), cpu_ctx);
+
+        // Something to be done with the permissions.
+        // let cpu_ctx_perm = Tracked(DekoCpuCtxPermission {
+        //     ptr_perm: ctx_perm,
+        //     pgtable_perm: dummy_pgtable_perm(),
+        //     ghcb_perm: ghch_perm,
+        //     ctx_switch_stack_perm: Some(stack_perm),
+        //     vm_region_perm: Some(vm_perm),
+        // });
+        proof_with!(|= Tracked::assume_new());
+        cpu_ctx_ptr
+    }
+
     /// Setup the idle task for this CPU.
     #[verus_spec(r =>
         with
@@ -1022,6 +1359,7 @@ pub unsafe fn register_cpuid_table(addr: u32) -> (r: &'static CpuidTable)
 }
 
 /// Start an application processor given its per-cpu shared area.
+#[verus_spec()]
 pub fn start_application_processor(which: &PerCpuShared) {
     kinfo!("Starting application processor: ", which.apic_id);
 
@@ -1029,10 +1367,8 @@ pub fn start_application_processor(which: &PerCpuShared) {
     let bsp = bsp.borrow(Tracked(&bsp_perm.ptr_perm));
 
     let cpu_entry = ap_start_func_ptr();
-    // Allocate context for this cpu.
-    let (cpu_ctx, Tracked(cpu_perm)) = boxed_ptr!(DekoCpuCtx, &DEKO_FRAME_ALLOCATOR.0);
     // Also allocate a new page table for this cpu.
-    let (pgtable, _, Tracked(pgtable_perm)) = PageTable::new(
+    let (init_pgtable, _, Tracked(pgtable_perm)) = PageTable::new(
         bsp.private_bit(),
         bsp.shared_bit(),
         Ghost(&bsp.kernel_mapping_spec()),
@@ -1044,17 +1380,27 @@ pub fn start_application_processor(which: &PerCpuShared) {
 
     // Copy the shared mappings from the kernel page table.
     PageTable::update_entry_by_ptr(
-        pgtable,
+        init_pgtable,
         Tracked(&mut pgtable_perm.pgtable_perm),
         PGTABLE_LVL3_IDX_SHARED as usize,
         old_pte_value,
     );
 
+    assume(pgtable_perm.wf());  // prove this later.
+
+    // Allocate context for this cpu.
+    proof_with!(Tracked(pgtable_perm) => Tracked(mut cpu_perm));
+    let cpu_ctx = DekoCpuCtx::setup_cpu(
+        init_pgtable,
+        bsp.private_bit,
+        bsp.shared_bit,
+        bsp.kernel_mapping.clone(),
+    );
+
     // Move below code into `crate::imp``.
-    let (vmsa, sev_features) = DekoCpuCtx::allocate_vmsa(
+    let (vmsa, sev_features) = DekoCpuCtx::allocate_deko_vmsa(
         cpu_ctx,
         Tracked(&mut cpu_perm),
-        Tracked(&pgtable_perm),
         cpu_entry,
     );
 
