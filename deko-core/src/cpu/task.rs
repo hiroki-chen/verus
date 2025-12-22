@@ -97,6 +97,27 @@ pub fn request_vm_region() -> Option<(usize, VaddrRange)> {
     }
 }
 
+/// The interrupt frame saved during an x86 interrupt.
+#[repr(C, packed)]
+#[derive(DekoDebug, Clone, Copy)]
+pub struct X86InterruptFrame {
+    pub rip: usize,
+    pub cs: usize,
+    pub flags: usize,
+    pub rsp: usize,
+    pub ss: usize,
+}
+
+/// The context saved during an x86 exception.
+#[repr(C, packed)]
+#[derive(DekoDebug, Clone, Copy)]
+pub struct X86ExceptionContext {
+    pub ssp: usize,
+    pub regs: X86GeneralRegs,
+    pub error_code: usize,
+    pub frame: X86InterruptFrame,
+}
+
 /// The memory management information of a task.
 pub struct DekoTaskMM {
     /// The page table index covered by the MM for quick

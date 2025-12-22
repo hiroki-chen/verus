@@ -14,7 +14,8 @@ use vstd::prelude::*;
 use crate::cpu::gdt::GLOBAL_GDT;
 use crate::cpu::idt::GLOBAL_IDT;
 use crate::cpu::regs::{
-    read_cr0, read_cr4, read_efer, DEKO_DS, DEKO_DS_ATTRIBUTES, DEKO_TR_ATTRIBUTES, DEKO_TSS,
+    read_cr0, read_cr4, read_efer, DEKO_CS, DEKO_CS_ATTRIBUTES, DEKO_DS, DEKO_DS_ATTRIBUTES,
+    DEKO_TR_ATTRIBUTES, DEKO_TSS,
 };
 use crate::cpu::X86Tss;
 use crate::mm::DEKO_FRAME_ALLOCATOR;
@@ -52,17 +53,24 @@ pub struct VmsaInitialContext {
 #[repr(C, packed)]
 #[derive(DekoDebug, Clone, Copy)]
 pub struct VMSASegment {
+    #[deko(hex)]
     pub selector: u16,
+    #[deko(hex)]
     pub flags: u16,
+    #[deko(hex)]
     pub limit: u32,
+    #[deko(hex)]
     pub base: u64,
 }
 
 #[repr(C)]
 #[derive(DekoDebug, Clone, Copy)]
 pub struct VmsaTableRegister {
+    #[deko(skip)]
     pub _rsvd: [u16; 3],
+    #[deko(hex)]
     pub limit: u16,
+    #[deko(hex)]
     pub base: u64,
 }
 
@@ -105,19 +113,26 @@ pub struct VMSA {
     pub pl2_ssp: u64,
     pub pl3_ssp: u64,
     pub u_cet: u64,
+    #[deko(skip)]
     pub reserved_0c8: u16,
     pub vmpl: u8,
     pub cpl: u8,
+    #[deko(skip)]
     pub reserved_0cc: u32,
+    #[deko(hex)]
     pub efer: u64,
+    #[deko(skip)]
     pub reserved_0d8: Array<u8, 104>,
     pub xss: u64,
+    #[deko(hex)]
     pub cr4: u64,
+    #[deko(hex)]
     pub cr3: u64,
     pub cr0: u64,
     pub dr7: u64,
     pub dr6: u64,
     pub rflags: u64,
+    #[deko(hex)]
     pub rip: u64,
     pub dr0: u64,
     pub dr1: u64,
@@ -127,7 +142,9 @@ pub struct VMSA {
     pub dr1_mask: u64,
     pub dr2_mask: u64,
     pub dr3_mask: u64,
+    #[deko(skip)]
     pub reserved_1c0: Array<u8, 24>,
+    #[deko(hex)]
     pub rsp: u64,
     pub s_cet: u64,
     pub ssp: u64,
@@ -142,6 +159,7 @@ pub struct VMSA {
     pub sysenter_esp: u64,
     pub sysenter_eip: u64,
     pub cr2: u64,
+    #[deko(skip)]
     pub reserved_248: Array<u8, 32>,
     pub g_pat: u64,
     pub dbgctl: u64,
@@ -149,9 +167,12 @@ pub struct VMSA {
     pub br_to: u64,
     pub last_excp_from: u64,
     pub last_excp_to: u64,
+    #[deko(skip)]
     pub reserved_298: Array<u8, 72>,
+    #[deko(skip)]
     pub reserved_2e0: u64,
     pub pkru: u32,
+    #[deko(skip)]
     pub reserved_2ec: u32,
     pub guest_tsc_scale: u64,
     pub guest_tsc_offset: u64,
@@ -159,6 +180,7 @@ pub struct VMSA {
     pub rcx: u64,
     pub rdx: u64,
     pub rbx: u64,
+    #[deko(skip)]
     pub reserved_320: u64,
     pub rbp: u64,
     pub rsi: u64,
@@ -171,6 +193,7 @@ pub struct VMSA {
     pub r13: u64,
     pub r14: u64,
     pub r15: u64,
+    #[deko(skip)]
     pub reserved_380: Array<u8, 16>,
     pub guest_exitinfo1: u64,
     pub guest_exitinfo2: u64,
@@ -184,6 +207,7 @@ pub struct VMSA {
     pub pcpu_id: u64,
     pub event_inj: VmsaEventInject,
     pub xcr0: u64,
+    #[deko(skip)]
     pub reserved_3f0: Array<u8, 16>,
     pub x87_dp: u64,
     pub mxcsr: u32,
@@ -209,6 +233,7 @@ pub struct VMSA {
     pub ibs_dc_linaddr: u64,
     pub bp_ibstgt_rip: u64,
     pub ic_ibs_extd_ctl: u64,
+    #[deko(skip)]
     pub reserved_7c8: Array<u8, 2104>,
 }
 
@@ -252,13 +277,13 @@ impl VmsaInitialContext {
     pub fn new_with(rip: u64, css_top: u64, cr3: u64, tss: &X86Tss) -> Self {
         let ds = VMSASegment {
             selector: DEKO_DS,
-            flags: DEKO_DS_ATTRIBUTES,
+            flags: (DEKO_DS_ATTRIBUTES & 0xff) | ((DEKO_DS_ATTRIBUTES & 0xf000) >> 4),
             limit: 0xffff_ffff,
             base: 0,
         };
         let cs = VMSASegment {
-            selector: DEKO_DS,
-            flags: DEKO_DS_ATTRIBUTES,
+            selector: DEKO_CS,
+            flags: (DEKO_CS_ATTRIBUTES & 0xff) | ((DEKO_CS_ATTRIBUTES & 0xf000) >> 4),
             limit: 0xffff_ffff,
             base: 0,
         };
@@ -302,11 +327,7 @@ impl VmsaInitialContext {
             efer: read_efer().bits(),
             ldtr: VMSASegment { selector: 0, flags: 0, limit: 0, base: 0 },
             gdtr: VmsaTableRegister { _rsvd: [0;3], limit: gdt_limit, base: gdt_base },
-            idtr: VmsaTableRegister {
-                _rsvd: [0;3],
-                limit: 0,  // fix this.
-                base: 0,
-            },
+            idtr: VmsaTableRegister { _rsvd: [0;3], limit: idt_limit, base: idt_base },
             pat: 0x0007040600070406u64,
         }
     }
@@ -354,7 +375,7 @@ impl VmsaPage {
             die("aa");
         }
         let vaddr = VirtAddr(page.addr() as u64 + (idx as u64) * PAGE_SIZE);
-        let flags = RmpFlags::from_bits_truncate(rmp.bits() | BIT_VMSA);
+        let flags = RmpFlags::from_bits_truncate(rmp.bits() | RmpFlags::vmsa().bits());
 
         proof {
             assert(flags.bits() & Rmp_ALL_BITS == flags.bits()) by {
@@ -448,11 +469,13 @@ impl VmsaPage {
         this.dr7 = 0x400;
         this.xcr0 = 0x1;
         this.mxcsr = 0x1f80;
-        this.x87_fcw = 0x404;
-        this.x87_fsw = 0x5555;
+        this.x87_fcw = 0x40;
+        this.x87_ftw = 0x5555;
         this.vmpl = 0;
         this.vtom = 0;  // unsupported.
         this.sev_features = SnpStatusFlags::get_status().bits() >> 2;  // make this sev.
+
+        kinfo!("VMSA", this => hex);
 
         // Being lazy
         this.sev_features

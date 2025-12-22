@@ -118,7 +118,16 @@ pub fn init_global_idt() {
 
     kinfo!("Global IDT loaded");
 
+    // test_pf_handler(); // you can enable this to see this page fault handler has been called.
+
     GLOBAL_IDT.init(DekoAtomicData::new_with(idt_ptr, Tracked(idt_perm)));
+}
+
+#[verifier::external_body]
+fn test_pf_handler() {
+    let r = unsafe {
+        core::ptr::read(0xdeadbeef as *const u8)
+    };
 }
 
 pub const DE_VECTOR: usize = 0;

@@ -679,6 +679,9 @@ impl GuestHostCommucationBlock {
     /// It is expected that the SEV_FEATURES associated with the VMSA for
     /// the AP use the same interrupt injection mechanism as the BSP. The
     /// hypervisor can fail the SNP AP Creation request if they do not match.
+    ///
+    /// Preconditions: We should ensure that the RIP and RSP must be mapped
+    /// in the new page table.
     pub fn ap_create(
         ptr: DekoPPtr<Self>,
         Tracked(perm): Tracked<DekoPointsTo<Self>>,

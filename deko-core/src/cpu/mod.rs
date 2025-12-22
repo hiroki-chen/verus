@@ -100,7 +100,7 @@ impl WellFormed for PerCpuShared {
         &&& self.apic_id == self.cpu_index
         &&& self.cpu_index < CPUID_MAX_COUNT
         &&& self.guest_vmsa.wf()
-        &&& self.online.1@.id() == self.online.0.id()
+        &&& self.online.1@.is_for(self.online.0)
         &&& self.ipi_pending.1@.id() == self.ipi_pending.0.id()
         &&& self.nmi_pending.1@.id() == self.nmi_pending.0.id()
         &&& self.ipi_irr.wf()
@@ -894,12 +894,15 @@ impl DekoCpuCtx {
         };
 
         // This is problematic; we cannot have a fallback here.
-        let cr3 = virt_to_phys_checked(
+        let Some(cr3) = virt_to_phys_checked(
             private_bit,
             shared_bit,
             cpu_borrow.pgtable.into_vaddr(),
             Tracked(&perm.pgtable_perm),
-        ).unwrap_or(PhysAddr(read_cr3()));
+        ) else {
+            kerror!("Failed to get CR3 for VMSA initialization");
+            die("CR3 physical address translation failed");
+        };
 
         // Now we need to initialize the VMSA.
         let init_ctx = VmsaInitialContext::new_with(
@@ -908,6 +911,7 @@ impl DekoCpuCtx {
             cr3.0,
             &cpu_borrow.tss,
         );
+
         #[verus_spec(with Tracked(&mut vmsa_perm))]
         let sev_features = vmsa.init_from(&init_ctx);
         cpu_borrow.deko_vmsa.init(DekoAtomicData::new_with(vmsa, Tracked(vmsa_perm)));
@@ -1028,6 +1032,7 @@ impl DekoCpuCtx {
         private_bit: u64,
         shared_bit: u64,
         kernel_mapping: MappingSpace,
+        id: u64,
     ) -> DekoPPtr<DekoCpuCtx> {
         broadcast use PteFlags::lemma_each_bit_is_valid;
         broadcast use PteFlags::lemma_from_bits_single;
@@ -1248,7 +1253,7 @@ impl DekoCpuCtx {
         let mut cpu_ctx = DekoCpuCtx::new(
             init_pgtable,
             ghcb,
-            0,
+            id,
             shared_bit,
             private_bit,
             kernel_mapping,
@@ -1399,6 +1404,7 @@ pub fn start_application_processor(which: &PerCpuShared) {
         bsp.private_bit,
         bsp.shared_bit,
         bsp.kernel_mapping.clone(),
+        which.apic_id as u64,
     );
 
     // Move below code into `crate::imp``.
@@ -1430,16 +1436,20 @@ pub fn start_application_processor(which: &PerCpuShared) {
 /// Other APs will start execution from here.
 #[allow(improper_ctypes_definitions)]
 #[no_mangle]
-#[verus_spec(
-    with
-        Tracked(ap_perm): Tracked<DekoCpuCtxPermission>,
-)]
+#[unsafe(naked)]
+#[verifier::external_body]
+// #[verus_spec(
+//     with
+//         Tracked(ap_perm): Tracked<DekoCpuCtxPermission>,
+// )]
 #[verifier::exec_allows_no_decreases_clause]
-extern "C" fn ap_start() -> ! {
-    kinfo!("hello");
+unsafe extern "C" fn ap_start() {
+    core::arch::naked_asm!(
+        "hlt"
+    );
 
-    loop {
-    }
+    // loop {
+    // }
 }
 
 func_ptr!(ap_start);

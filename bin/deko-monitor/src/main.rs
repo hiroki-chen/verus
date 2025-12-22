@@ -156,6 +156,7 @@ fn start_application_processors(igvm_params: &IgvmParams<'_>) {
 /// Seems we do not have a good way to control the proper usage of stack
 /// sizes so the best practice is to restrict large stack usage functions to
 /// be separate functions.
+#[verifier::exec_allows_no_decreases_clause]
 fn do_make_ap_online(cpus: &[ACPICPUInfo]) {
     let mut write_handle = PERCPU_AREAS.acquire_write();
     let mut percpu_area = write_handle.get();
@@ -179,6 +180,17 @@ fn do_make_ap_online(cpus: &[ACPICPUInfo]) {
         let cpu_area = percpu_area.data.0.index(cpu_info.apic_id as usize);
 
         start_application_processor(cpu_area);
+
+        // Wait for the CPU to be online.
+        loop
+            invariant
+                cpu_area.wf(),
+        {
+            if cpu_area.online.0.load(Tracked(cpu_area.online.1.borrow())) {
+                break ;
+            }
+            core::hint::spin_loop();
+        }
 
         i += 1;
     }
@@ -314,7 +326,7 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
 
     // Prepare the BSP CPU context.
     proof_with!(Tracked(pgtable_perm) => Tracked(cpu_ctx_perm));
-    let bst_cpu_ptr = DekoCpuCtx::setup_cpu(new_page_table, private_bit, shared_bit, ms);
+    let bst_cpu_ptr = DekoCpuCtx::setup_cpu(new_page_table, private_bit, shared_bit, ms, 0);
 
     proof {
         // do it later.

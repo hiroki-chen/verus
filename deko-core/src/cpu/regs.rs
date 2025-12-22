@@ -90,6 +90,22 @@ pub fn read_cr0() -> Cr0Flags {
 
 #[inline]
 #[verifier::external_body]
+pub fn read_cr2() -> u64 {
+    let mut cr2: u64;
+
+    unsafe {
+        core::arch::asm!(
+            "movq %cr2, {}",
+            out(reg) cr2,
+            options(att_syntax)
+        );
+    }
+
+    cr2
+}
+
+#[inline]
+#[verifier::external_body]
 pub fn read_cr3() -> u64 {
     let mut cr3: u64;
 

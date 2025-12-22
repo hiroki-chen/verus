@@ -67,6 +67,9 @@ impl CpuID {
     }
 }
 
+/// General purpose registers saved during an interrupt or exception.
+///
+/// The order is reveresed because they are pushed onto the stack in this order.
 #[repr(C, packed)]
 #[derive(Clone, Copy, DekoDebug)]
 pub struct X86GeneralRegs {
