@@ -4,6 +4,7 @@
 //! permission tracking, including splitting and merging permissions for sub-regions.
 use core::marker::PhantomData;
 
+use deko_macros::with_atomic_pred;
 use vstd::prelude::*;
 use vstd::raw_ptr::{
     self, ptr_mut_from_data, Dealloc, IsExposed, MemContents, PointsToRaw, Provenance, PtrData,
@@ -52,10 +53,20 @@ pub type DekoPointsToRaw = PointsToRaw;
 /// DekoPPtr (which stands for “permissioned pointer”) is a wrapper around a `PPtr` pointer to a heap-allocated V.
 ///
 /// In order to access (read or write) the value behind the pointer, the user needs a special ghost permission token
-/// `DekoPointsTo<V>`.
+/// [`DekoPointsTo<V>`].
 #[repr(C, align(8))]
 #[allow(improper_ctypes_definitions)]
 pub struct DekoPPtr<V: WellFormed>(pub PPtr<V>);
+
+pub struct DekoPPtrPred;
+
+impl<V: WellFormed> Predicate<DekoAtomicData<DekoPPtr<V>, DekoPointsTo<V>>> for DekoPPtrPred {
+    open spec fn inv(self, data: DekoAtomicData<DekoPPtr<V>, DekoPointsTo<V>>) -> bool {
+        &&& data.perm@.wf()
+        &&& data.perm@.is_init()
+        &&& data.perm@.pptr() == data.data@
+    }
+}
 
 pub struct DekoPointsTo<V: WellFormed> {
     /// The underlying raw pointer permission.

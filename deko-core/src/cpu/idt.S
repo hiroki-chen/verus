@@ -1,3 +1,10 @@
+
+.code64
+.section .data
+.globl HV_DOORBELL_ADDR
+HV_DOORBELL_ADDR:
+	.quad 0
+
 .text
 
 idt_handler_ret:
@@ -23,6 +30,10 @@ idt_handler_ret:
   iretq
 
 .pushsection .entry.text, "ax"
+
+.globl default_return
+default_return:
+    ud2 // placeholder.
 
 push_regs_no_ghcb:
   pushq   %rbx

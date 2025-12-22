@@ -6,11 +6,13 @@ use deko_std::bits::bit_u32_and_auto;
 use deko_std::mem::{PAGE_SIZE, PAGE_SIZE_2M};
 use deko_std::prelude::VirtAddr;
 use deko_std::ptr::{addr_of_ref, DekoPPtr, DekoPointsTo};
+use deko_std::sync::DekoAtomicData;
 use deko_std::wf::WellFormed;
 use deko_std::{boxed_ptr, with_permission};
 use vstd::prelude::*;
 
 use crate::cpu::gdt::GLOBAL_GDT;
+use crate::cpu::idt::GLOBAL_IDT;
 use crate::cpu::regs::{
     read_cr0, read_cr4, read_efer, DEKO_DS, DEKO_DS_ATTRIBUTES, DEKO_TR_ATTRIBUTES, DEKO_TSS,
 };
@@ -20,7 +22,7 @@ use crate::snp::{
     rmpadjust, DekoCpuCtxPermission, PageTablePermission, RmpFlags, Rmp_ALL_BITS, SnpStatusFlags,
     BIT_VMSA,
 };
-use crate::{die, kerror, kunimplemented};
+use crate::{die, kerror, kinfo, kunimplemented};
 
 verus! {
 
@@ -267,6 +269,22 @@ impl VmsaInitialContext {
             base: addr_of_ref(tss) as u64,
         };
 
+        let (gdt_base, gdt_limit) = GLOBAL_GDT.get_base_and_limit();
+
+        let (idt_base, idt_limit) = match GLOBAL_IDT.get() {
+            Some(DekoAtomicData { data: idt, perm: idt_perm }) => {
+                let idt = idt.borrow(Tracked(idt_perm.borrow()));
+
+                idt.get_base_and_limit()
+            },
+            None => {
+                kerror!("Global IDT is not initialized");
+                die("");
+            },
+        };
+
+        kinfo!("the idt base is", idt_base => hex, idt_limit => hex);
+
         Self {
             rip,
             rsp: css_top,
@@ -283,11 +301,7 @@ impl VmsaInitialContext {
             tr,
             efer: read_efer().bits(),
             ldtr: VMSASegment { selector: 0, flags: 0, limit: 0, base: 0 },
-            gdtr: VmsaTableRegister {
-                _rsvd: [0;3],
-                limit: 0,  // fix this.
-                base: 0,
-            },
+            gdtr: VmsaTableRegister { _rsvd: [0;3], limit: gdt_limit, base: gdt_base },
             idtr: VmsaTableRegister {
                 _rsvd: [0;3],
                 limit: 0,  // fix this.
@@ -387,10 +401,16 @@ impl VmsaPage {
             perm.ptr_perm.is_init(),
     )]
     pub fn init_from(&self, ctx: &VmsaInitialContext) -> u64 {
+        // SAFETY: We have the permission to the VMSA page, and we ensure that
+        // the pointer is valid and properly aligned because we deref it
+        // from a valid DekoPPtr.
         let this = unsafe {
-            &mut *(self.page.borrow(Tracked(&perm.ptr_perm)).as_ptr().wrapping_add(
+            let ptr = self.page.borrow(Tracked(&perm.ptr_perm)).as_ptr().wrapping_add(
                 self.idx * PAGE_SIZE as usize,
-            ) as *mut VMSA)
+            ) as *mut VMSA;
+            core::ptr::write_bytes(ptr as *mut u8, 0, core::mem::size_of::<VMSA>());
+
+            &mut *ptr
         };
 
         this.es = ctx.es;
@@ -421,7 +441,7 @@ impl VmsaPage {
         this.cr0 = ctx.cr0;
         this.cr3 = ctx.cr3;
         this.cr4 = ctx.cr4;
-        this.efer = ctx.efer;
+        this.efer = ctx.efer | (1 << 12);
 
         this.g_pat = ctx.pat;
         this.dr6 = 0xffff_0ff0;
@@ -432,7 +452,7 @@ impl VmsaPage {
         this.x87_fsw = 0x5555;
         this.vmpl = 0;
         this.vtom = 0;  // unsupported.
-        this.sev_features = SnpStatusFlags::get_status().bits() as _;
+        this.sev_features = SnpStatusFlags::get_status().bits() >> 2;  // make this sev.
 
         // Being lazy
         this.sev_features

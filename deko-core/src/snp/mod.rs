@@ -748,7 +748,7 @@ pub fn setup_apic(ctx: DekoPPtr<DekoCpuCtx>, Tracked(ctx_perm): Tracked<&mut Dek
 
 // verus!
 deko_bitflags! {
-    pub struct SnpStatus: u32 {
+    pub struct SnpStatus: u64 {
         const SEV = 0;
         const SEV_ES = 1;
         const SEV_SNP = 2;
@@ -761,8 +761,8 @@ deko_bitflags! {
         const BTB_ISOLATION = 9;
         const VMPL_SSS = 10;
         const SECURE_TSC = 11;
-        const VMSA_REG_PROT = 12;
-        const SMT_PROT = 13;
+        const VMSA_REG_PROT = 16;
+        const SMT_PROT = 17;
     }
 }
 
@@ -776,10 +776,11 @@ impl SnpStatusFlags {
     pub fn get_status() -> (r: Self)
         ensures
             r.wf(),
+            r.bits() & SnpStatus_ALL_BITS == r.bits(),
     {
-        let bits = read_msr(MSR_SEV_STATUS) as u32;
+        let bits = read_msr(MSR_SEV_STATUS);
 
-        SnpStatusFlags { bits, flags: Ghost(Self::from_bits(bits)) }
+        Self::from_bits_truncate(bits)
     }
 }
 

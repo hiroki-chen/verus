@@ -700,7 +700,7 @@ impl GuestHostCommucationBlock {
         let Tracked(perm) = Self::clear(ptr, Tracked(perm));
 
         let info_1 = ((apic_id as u64) << 32) | (vmpl & 0xf) << 16 | (how & 0b11) /* (VMRUN) */;
-        let info_2 = vmsa.0 ;
+        let info_2 = vmsa.0;
         let Tracked(perm) = Self::set_rax(ptr, Tracked(perm), sev_features);
 
         Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::AP_CREATE, info_1, info_2)

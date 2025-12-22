@@ -59,6 +59,15 @@ impl WellFormed for GlobalDescriptorTable {
 }
 
 impl GlobalDescriptorTable {
+    pub fn get_base_and_limit(&self) -> (u64, u16)
+        requires
+            self.wf(),
+    {
+        let base = addr_of_ref(self);
+
+        (base as u64, (core::mem::size_of::<GDTEntry>() * 8 - 1) as u16)
+    }
+
     #[verifier::external_body]
     pub const fn new() -> (r: Self)
         ensures

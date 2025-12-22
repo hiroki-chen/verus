@@ -8,7 +8,7 @@
 use core::ptr::eq;
 
 use deko_core::cpu::gdt::GLOBAL_GDT;
-use deko_core::cpu::idt::{create_early_idt, init_early_idt, Idt};
+use deko_core::cpu::idt::{create_early_idt, init_early_idt, init_global_idt, Idt};
 use deko_core::cpu::regs::{cr0_init, cr4_init, load_cr3, sse_init};
 use deko_core::cpu::task::{cpu_idle, schedule_init, DekoRunQueue, DekoRunQueuePred};
 use deko_core::cpu::{
@@ -328,6 +328,8 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
     print_banner();
 
     setup_apic(bst_cpu_ptr, Tracked(&mut cpu_ctx_perm));
+
+    init_global_idt();
 
     sse_init();
     proof {

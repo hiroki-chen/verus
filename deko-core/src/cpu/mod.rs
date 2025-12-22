@@ -2,6 +2,7 @@ pub mod apic;
 pub mod ctx;
 pub mod gdt;
 pub mod idt;
+pub mod idt_handlers;
 pub mod irq;
 pub mod msr;
 pub mod regs;
@@ -23,6 +24,7 @@ use crate::cpu::task::{
     DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred, DekoRunnable, DekoRunnablePred,
     DekoTaskArgs,
 };
+use crate::imp::ghcb::current_ghcb;
 use crate::imp::RmpFlags;
 use crate::mm::paging::{
     bit_not_in_addr_region, bit_not_overlapping, index_at_level_spec, Mapping, Page, PageTable,
@@ -1359,6 +1361,8 @@ pub unsafe fn register_cpuid_table(addr: u32) -> (r: &'static CpuidTable)
 }
 
 /// Start an application processor given its per-cpu shared area.
+///
+/// This should be guarded behind `imp`
 #[verus_spec()]
 pub fn start_application_processor(which: &PerCpuShared) {
     kinfo!("Starting application processor: ", which.apic_id);
@@ -1404,6 +1408,23 @@ pub fn start_application_processor(which: &PerCpuShared) {
         cpu_entry,
     );
 
+    // Now invoke the ap creation routine.
+    let (ghcb, Tracked(ghcb_perm)) = current_ghcb();
+    kinfo!("ap_create arguments:");
+    kinfo!("  ghcb: ", ghcb);
+    kinfo!("  apic_id: ", which.apic_id);
+    kinfo!("  vmsa: ", vmsa);
+    kinfo!("  sev_features: ", sev_features);
+
+    GuestHostCommucationBlock::ap_create(
+        ghcb,
+        Tracked(ghcb_perm),
+        which.apic_id,
+        sev_features,
+        0,
+        vmsa,
+        1,
+    );
 }
 
 /// Other APs will start execution from here.
