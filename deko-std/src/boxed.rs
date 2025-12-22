@@ -221,6 +221,8 @@ impl<V: WellFormed, F: Predicate<V>> BoxInner<V, F> {
 }
 
 } // verus!
+  // Perhaps we can add an optional `Tracked<&mut PageTablePermission>` here so
+  // that we always ensure the pointer is valid in the page table.
 #[macro_export]
 macro_rules! boxed_ptr {
     ($name:ty, $alloc:expr) => {{

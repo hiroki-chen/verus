@@ -333,6 +333,8 @@ pub struct DekoCpuCtx {
     pub ctx_switch_stack: Option<VirtAddr>,
     /// The stack for handling interrupts.
     pub ist_stack: Option<DekoIstStack>,
+    // /// The current stack.
+    // pub current_stack: ...
     /// The private bit of the PTE of this core.
     #[deko(hex)]
     pub private_bit: u64,
@@ -912,6 +914,28 @@ impl DekoCpuCtx {
             &cpu_borrow.tss,
         );
 
+        // Check if stack is mapped?
+        {
+            let rsp = init_ctx.rsp;
+            assume(perm.pgtable_perm.walk_requires(
+                cpu_borrow.pgtable,
+                VirtAddr(rsp),
+                &cpu_borrow.kernel_mapping,
+                private_bit,
+                shared_bit,
+            ));
+            let mapping = PageTable::walk(
+                cpu_borrow.pgtable,
+                Tracked(&perm.pgtable_perm),
+                VirtAddr(rsp),
+                &cpu_borrow.kernel_mapping,
+                private_bit,
+                shared_bit,
+            );
+
+            kinfo!("VMSA stack mapping check: RSP", rsp => hex, "used for VMSA at CPU {}", cpu_borrow.cpu_id, "mapping:", mapping);
+        }
+
         #[verus_spec(with Tracked(&mut vmsa_perm))]
         let sev_features = vmsa.init_from(&init_ctx);
         cpu_borrow.deko_vmsa.init(DekoAtomicData::new_with(vmsa, Tracked(vmsa_perm)));
@@ -1142,8 +1166,10 @@ impl DekoCpuCtx {
         proof_with!(Tracked(&mut vm_perm), Tracked(vm_block_for_cpu_perm));
         vm_region.insert_at_vaddr(PERCPU_BASE, vm_block_for_self);
 
-        let (cpu_stack, top_of_the_stack) = {
-            let stack = DekoKernelStack::new_with_size(0x8000, false);
+        // This is for the current context switch stack.
+        let (cpu_css_stack, top_of_the_css_stack) = {
+            let mut stack = DekoKernelStack::new_with_size(0x8000, false);
+            stack.alloc_pages(private_bit, shared_bit, &DEKO_FRAME_ALLOCATOR);
             let top_of_the_stack = VirtAddr(stack.stack_top() + CONTEXT_SWITCH_STACK.0);
             let stack = VmMapping::Stack { stack };
 
@@ -1174,13 +1200,13 @@ impl DekoCpuCtx {
 
         // Create a new vm_block for the stack and then map it.
         proof {
-            use_type_invariant(&cpu_stack);
+            use_type_invariant(&cpu_css_stack);
         }
 
         proof_with!(Ghost(&vm_region) => Tracked(vm_block_for_stack_perm));
         let vm_block_for_stack = VirtualMemory::new(
-            VirtAddr(top_of_the_stack.0 - 0x8000)..top_of_the_stack,
-            cpu_stack,
+            VirtAddr(top_of_the_css_stack.0 - 0x8000)..top_of_the_css_stack,
+            cpu_css_stack,
             PteFlags::nx_kernel(),
         );
 
@@ -1192,7 +1218,7 @@ impl DekoCpuCtx {
         }
 
         proof_with!(Tracked(&mut vm_perm), Tracked(vm_block_for_stack_perm));
-        vm_region.insert_at_vaddr(VirtAddr(top_of_the_stack.0 - 0x8000), vm_block_for_stack);
+        vm_region.insert_at_vaddr(VirtAddr(top_of_the_css_stack.0 - 0x8000), vm_block_for_stack);
 
         // Allocate a stack for interrupt service routines.
         let (ist_df_stack, top_of_ist_stack) = {
@@ -1258,7 +1284,7 @@ impl DekoCpuCtx {
             private_bit,
             kernel_mapping,
             Some(vm_region),
-            Some(top_of_the_stack),
+            Some(top_of_the_css_stack),
             // Some(cpu_ist_stack),
             None,
             // None,
@@ -1436,20 +1462,15 @@ pub fn start_application_processor(which: &PerCpuShared) {
 /// Other APs will start execution from here.
 #[allow(improper_ctypes_definitions)]
 #[no_mangle]
-#[unsafe(naked)]
-#[verifier::external_body]
-// #[verus_spec(
-//     with
-//         Tracked(ap_perm): Tracked<DekoCpuCtxPermission>,
-// )]
+#[verus_spec(
+    with
+        Tracked(ap_perm): Tracked<DekoCpuCtxPermission>,
+)]
 #[verifier::exec_allows_no_decreases_clause]
-unsafe extern "C" fn ap_start() {
-    core::arch::naked_asm!(
-        "hlt"
-    );
-
-    // loop {
-    // }
+unsafe extern "C" fn ap_start() -> ! {
+    // kinfo!("Application processor started."); // do not do this as ghcb is not shared yet.
+    loop {
+    }
 }
 
 func_ptr!(ap_start);

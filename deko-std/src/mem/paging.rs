@@ -96,8 +96,8 @@ deko_const_decl!(
     /// Region for PerCPU Stacks
     PERCPU_STACKS_BASE,
     VirtAddr,
-    VirtAddr((PERCPU_BASE.0 + (6 * SIZE_LEVEL0)) as u64),
-    VirtAddr(PERCPU_BASE.0 + (6 * SIZE_LEVEL0)),
+    VirtAddr((PERCPU_BASE.0 + SIZE_LEVEL1) as u64),
+    VirtAddr(PERCPU_BASE.0 + SIZE_LEVEL1),
 );
 
 deko_const_decl!(

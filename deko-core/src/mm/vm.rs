@@ -444,6 +444,8 @@ impl VmMapping {
                 let pfn = offset >> 12;
                 let guard_offset = stack.guard_pages << 12;
 
+                kinfo!("VmMapping::phys_at: stack mapping at offset", offset, "with guard offset", guard_offset, "and pfn", pfn);
+
                 if pfn >= stack.guard_pages {
                     proof {
                         let gp = stack.guard_pages;
@@ -457,6 +459,8 @@ impl VmMapping {
                     }
 
                     let pfn = (offset - guard_offset) >> 12;
+
+                    kinfo!("VmMapping::phys_at: adjusted pfn is", pfn);
 
                     match stack.alloc.get(pfn as usize) {
                         Some(Some((_, paddr))) => { Some(*paddr) },
@@ -1700,7 +1704,7 @@ impl VirtualMemory {
         let mapping_size = mapping_data.mapping_size();
         let flags = PteFlags::from_bits_truncate(self.flags.bits() | PRESENT);
 
-        kinfo!("the mapping range is ", self.range);
+        kinfo!("VirtualMemory::map: mapping for", self.range);
 
         let mut offset = 0;
         #[verus_spec(
@@ -1732,7 +1736,7 @@ impl VirtualMemory {
                 self.range.end@ - self.range.start@ - offset,
         )]
         while offset < self.range.end.0 - self.range.start.0 {
-            kdebug!("Requesting mapping at offset ", offset);
+            kinfo!("Requesting mapping at offset ", offset);
 
             // Request if there is a physical address at this offset.
             if let Some(paddr) = mapping_data.phys_at(offset) {
