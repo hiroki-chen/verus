@@ -1008,8 +1008,6 @@ impl VirtualMemoryRegion {
             align.next_power_of_two()
         };
 
-        kinfo!("Inserting VM block with alignment:", align);
-
         // Safe to proceed
         proof_with!(Tracked(perm));
         self.insert_aligned(mapping, None, align, flags)
@@ -1704,7 +1702,7 @@ impl VirtualMemory {
         let mapping_size = mapping_data.mapping_size();
         let flags = PteFlags::from_bits_truncate(self.flags.bits() | PRESENT);
 
-        kinfo!("VirtualMemory::map: mapping for", self.range);
+        kdebug!("VirtualMemory::map: mapping for", self.range);
 
         let mut offset = 0;
         #[verus_spec(

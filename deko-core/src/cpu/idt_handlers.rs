@@ -14,7 +14,8 @@ verus! {
 unsafe extern "C" fn ex_handler_panic(ctx: &mut X86ExceptionContext) {
     let rip = ctx.frame.rip;
     let rsp = ctx.frame.rsp;
-    kerror!("Panic Exception occurred: rip =", rip => hex, rsp => hex);
+    let errno = ctx.error_code;
+    kerror!("Panic Exception occurred: rip =", rip => hex, "rsp:", rsp => hex, "error code:", errno => hex);
     die("Panic Exception");
 }
 
@@ -36,6 +37,7 @@ unsafe extern "C" fn ex_handler_page_fault_early() {
 }
 
 #[no_mangle]
+#[verifier::exec_allows_no_decreases_clause]
 #[verus_spec(
 
 )]
@@ -44,6 +46,11 @@ unsafe extern "C" fn ex_handler_page_fault(ctx: &mut X86ExceptionContext) {
     let cr2 = crate::cpu::regs::read_cr2();
     kinfo!("page fault error code:", errno => hex);
     kinfo!("faulting address (CR2):", cr2 => hex);
+
+    kinfo!("context:", ctx);
+
+    loop {
+    }
 
     // stub. to be implemented.
 

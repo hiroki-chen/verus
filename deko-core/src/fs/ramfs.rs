@@ -33,6 +33,8 @@ pub fn init_ramfs(addr_range: PaddrRange) {
     let temp_mapping = this_cpu_taken.temp_mapping.allocate(nr_pages as usize, 0);
 
     this_cpu.write(Tracked(&mut cpu_perm.ptr_perm), this_cpu_taken);  // put back
+
+    // Incomplete now but fine.
 }
 
 /// This is a very simpel RAM FS implementation that uses no backing

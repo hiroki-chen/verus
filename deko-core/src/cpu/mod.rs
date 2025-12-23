@@ -13,7 +13,7 @@ pub mod types;
 use core::borrow::BorrowMut;
 use core::panic;
 
-use deko_macros::DekoDebug;
+use deko_macros::{with_atomic_pred, DekoDebug};
 use deko_std::prelude::*;
 use task::DekoRunnablePtr;
 use vstd::atomic::{PAtomicBool, PAtomicU32, PermissionBool, PermissionU32};
@@ -43,7 +43,7 @@ use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR};
 use crate::snp::ghcb::{validate_ghcb, GuestHostCommucationBlock};
 use crate::snp::vmsa::{VmsaInitialContext, VmsaPage, VmsaPagePermission, VmsaPagePred};
 use crate::snp::Rmp_ALL_BITS;
-use crate::{die, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
+use crate::{die, kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
 
 verus! {
 
@@ -52,6 +52,47 @@ pub const IST_DF: usize = 0;
 pub const CPUID_MAX_COUNT: usize = 32;
 
 pub const CPU_AREA_MAGIC: u64 = 0x114514;
+
+pub exec static CPU_NUM: DekoOnceCell<DekoCpuNum, (), DekoCpuNumPred>
+    ensures
+        CPU_NUM.wf(),
+{
+    DekoOnceCell::new(Ghost(DekoCpuNumPred {  }))
+}
+
+impl WellFormed for DekoCpuNum {
+    #[verifier::inline]
+    open spec fn wf(&self) -> bool {
+        &&& 1 <= self.num <= CPUID_MAX_COUNT as u64
+    }
+}
+
+#[repr(transparent)]
+#[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
+pub struct DekoCpuNum {
+    pub num: u64,
+}
+
+#[inline]
+#[verus_spec(
+    requires
+        1 <= num <= CPUID_MAX_COUNT as u64,
+)]
+pub fn set_availabe_cpu_nums(num: u64) {
+    if CPU_NUM.get().is_some() {
+        kwarn!("CPU_NUM is already set!");
+        return ;
+    }
+    CPU_NUM.init(DekoAtomicData::new(DekoCpuNum { num }));
+}
+
+with_atomic_pred!(
+    DekoCpuNum,
+    (),
+    fields: { },
+    perm_fields: { },
+    data.wf()
+);
 
 pub struct GuestVmsaRef {
     pub vmsa: Option<PhysAddr>,
@@ -450,7 +491,8 @@ impl WellFormed for DekoCpuCtxPermission {
         &&& self.ptr_perm.is_init()
         &&& self.ptr_perm.wf()
         &&& self.ptr_perm.value().kernel_mapping().wf()
-        // &&& self.ptr_perm.value().ctx_switch_stack().wf()
+        &&& self.ptr_perm.value().vm_region_spec() matches Some(vm) ==> vm.wf()
+        &&& self.ptr_perm.value().run_queue_spec() matches Some(rq) ==> rq.wf()
         &&& self.pgtable_perm.wf()
         &&& self.pgtable_perm.pgtable_perm.pptr() == self.ptr_perm.value().pgtable_spec()@
         &&& self.pgtable_perm.mapping_space === self.ptr_perm.value().kernel_mapping_spec()
@@ -1356,6 +1398,63 @@ impl DekoCpuCtx {
         cpu_ctx_ptr
     }
 
+    /// Start the kernel task on this CPU.
+    ///
+    /// This function takes an option "schedule_now" which indicates whether
+    /// the task should be scheduled immediately or not. If true, the task
+    /// will be added to the runqueue and scheduled right away. If false,
+    /// the task will be added to the runqueue but up to the caller to determine
+    /// if the task should be scheduled.
+    ///
+    /// If "schedule_now", then we will call [`task::schedule`] to switch
+    /// the current context to the new task.
+    #[verus_spec(r =>
+        with
+            Tracked(perm): Tracked<&mut DekoCpuCtxPermission>,
+        requires
+            old(perm).wf_with(ptr),
+            old(perm).ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
+            old(perm).ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
+            task.wf(),
+        ensures
+            perm.wf_with(ptr),
+            perm.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
+            perm.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
+    )]
+    pub fn start_kernel_task(ptr: DekoPPtr<Self>, task: DekoRunnablePtr, schedule_now: bool) {
+        // Now insert into the runqueue.
+        let cpu_ctx = ptr.borrow(Tracked(&perm.ptr_perm));
+
+        kpanic_if!(core::hint::unlikely(
+            cpu_ctx.run_queue.is_none()),
+            "Runqueue is not initialized for CPU",
+            cpu_ctx.cpu_id,
+        );
+
+        let lock = cpu_ctx.run_queue.as_ref().unwrap();
+        proof {
+            use_type_invariant(&lock);
+        }
+        let mut write_handle = lock.acquire_write();
+        let DekoAtomicData { data: mut runqueue, mut perm } = write_handle.get();
+
+        kpanic_if!(core::hint::unlikely(runqueue.run_list.len() >= usize::MAX - 1),
+            "Runqueue is full for CPU",
+            cpu_ctx.cpu_id,
+        );
+
+        proof_with!(Tracked(perm.borrow_mut()));
+        runqueue.set_idle_task(task);
+
+        write_handle.release_write(DekoAtomicData::new_with(runqueue, perm));
+
+        if schedule_now {
+            unsafe {
+                task::schedule_init();
+            }
+        }
+    }
+
     /// Setup the idle task for this CPU.
     #[verus_spec(r =>
         with
@@ -1374,7 +1473,7 @@ impl DekoCpuCtx {
         let cpu_id = ptr.borrow(Tracked(&perm.ptr_perm)).cpu_id;
 
         // Create a new idle task.
-        proof_with!(Tracked(perm) => Tracked(new_perm));
+        proof_with!(Tracked(perm) => Tracked(mut new_perm));
         let task = DekoRunnable::new(
             ptr,
             DekoTaskArgs {
@@ -1391,32 +1490,8 @@ impl DekoCpuCtx {
 
         kinfo!("Created idle task for CPU ", cpu_id);
 
-        // Now insert into the runqueue.
-        let cpu_ctx = ptr.borrow(Tracked(&new_perm.ptr_perm));
-
-        kpanic_if!(core::hint::unlikely(
-            cpu_ctx.run_queue.is_none()),
-            "Runqueue is not initialized for CPU",
-            cpu_ctx.cpu_id,
-        );
-
-        let lock = cpu_ctx.run_queue.as_ref().unwrap();
-        let mut write_handle = lock.acquire_write();
-        let DekoAtomicData { data: mut runqueue, mut perm } = write_handle.get();
-
-        kpanic_if!(core::hint::unlikely(runqueue.run_list.len() >= usize::MAX - 1),
-            "Runqueue is full for CPU",
-            cpu_ctx.cpu_id,
-        );
-
-        proof_with!(Tracked(perm.borrow_mut()));
-        runqueue.set_idle_task(task);
-
-        write_handle.release_write(DekoAtomicData::new_with(runqueue, perm));
-
-        proof {
-            use_type_invariant(&lock);
-        }
+        proof_with!(Tracked(&mut new_perm));
+        DekoCpuCtx::start_kernel_task(ptr, task, false);  // idle task should not be scheduled immediately.
 
         proof_with!(|= Tracked(new_perm));
         ()
@@ -1489,11 +1564,11 @@ pub fn start_application_processor(which: &PerCpuShared) {
 
     // Now invoke the ap creation routine.
     let (ghcb, Tracked(ghcb_perm)) = current_ghcb();
-    kinfo!("ap_create arguments:");
-    kinfo!("  ghcb: ", ghcb);
-    kinfo!("  apic_id: ", which.apic_id);
-    kinfo!("  vmsa: ", vmsa);
-    kinfo!("  sev_features: ", sev_features);
+    kdebug!("ap_create arguments:");
+    kdebug!("  ghcb: ", ghcb);
+    kdebug!("  apic_id: ", which.apic_id);
+    kdebug!("  vmsa: ", vmsa);
+    kdebug!("  sev_features: ", sev_features);
 
     GuestHostCommucationBlock::ap_create(
         ghcb,

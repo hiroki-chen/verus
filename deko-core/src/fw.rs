@@ -98,7 +98,6 @@ impl FwCfg {
     pub fn select_file(&self, target: &str) -> Option<FwCfgFile> {
         self.select(FW_CFG_FILE_DIR);
         let n = self.read_dword_be();
-        kinfo!("FW_CFG has", n, "files");
 
         if n >= 0x1000 {
             kerror!("Too many FW_CFG files:", n);
@@ -132,8 +131,6 @@ impl FwCfg {
                     name.update(j, c);
                 }
             }
-
-            kinfo!("\tFW_CFG file:", i, "name:", name.as_str());
 
             // Need to more be specific about what `eq` we want here.
             if <str as PartialEq>::eq(name.as_str().trim_end_matches('\0'), target) {

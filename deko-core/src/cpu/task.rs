@@ -24,7 +24,7 @@ use vstd::std_specs::cmp::{PartialEqSpec, PartialEqSpecImpl, PartialOrdSpecImpl}
 use crate::collections::Vec;
 use crate::cpu::irq::irq_enable;
 use crate::cpu::regs::sse_restore_context;
-use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission, CPUID_MAX_COUNT};
+use crate::cpu::{self, DekoCpuCtx, DekoCpuCtxPermission, CPUID_MAX_COUNT, CPU_NUM};
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
 use crate::mm::paging::{
     bit_not_in_addr_region, bit_not_overlapping, PageTable, PageTablePermission, PteFlags,
@@ -100,21 +100,21 @@ pub fn request_vm_region() -> Option<(usize, VaddrRange)> {
 }
 
 /// The interrupt frame saved during an x86 interrupt.
-#[repr(C, packed)]
+#[repr(C)]
 #[derive(DekoDebug, Clone, Copy)]
 pub struct X86InterruptFrame {
-    pub rip: usize,
-    pub cs: usize,
-    pub flags: usize,
-    pub rsp: usize,
-    pub ss: usize,
+    pub rip: u64,
+    pub cs: u64,
+    pub flags: u64,
+    pub rsp: u64,
+    pub ss: u64,
 }
 
 /// The context saved during an x86 exception.
-#[repr(C, packed)]
+#[repr(C)]
 #[derive(DekoDebug, Clone, Copy)]
 pub struct X86ExceptionContext {
-    pub ssp: usize,
+    // pub ssp: usize,
     pub regs: X86GeneralRegs,
     pub error_code: usize,
     pub frame: X86InterruptFrame,
@@ -222,6 +222,41 @@ pub exec static DEKO_TASK_LIST: DekoRwLock<DekoRunQueue, DekoRunQueuePermission,
         Ghost(DekoRunQueuePred {  }),
     )
 };
+
+#[repr(u64)]
+#[derive(DekoDebug, Clone, Copy)]
+pub enum DekoRunnableState {
+    RUNNING = 0,
+    BLOCKED = 1,
+    TERMINATED = 2,
+}
+
+#[repr(C)]
+#[derive(DekoDebug, Clone, Copy)]
+pub struct DekoRunnableSchedState {
+    /// Whether this is an idle task
+    pub idle_task: bool,
+    /// Current state of the task
+    pub state: DekoRunnableState,
+    /// CPU this task is currently assigned to
+    pub cpu_index: usize,
+}
+
+impl WellFormed for DekoRunnableSchedState {
+    open spec fn wf(&self) -> bool {
+        &&& self.cpu_index < CPUID_MAX_COUNT as usize
+        &&& self.idle_task ==> !(self.state matches DekoRunnableState::RUNNING)
+        &&& (self.state matches DekoRunnableState::RUNNING) ==> !self.idle_task
+    }
+}
+
+with_atomic_pred!(
+    DekoRunnableSchedState,
+    (),
+    fields: {  },
+    perm_fields: {  },
+    data.wf()
+);
 
 // impl RwLockPredicate<DekoAtomicData<DekoRunQueue, DekoRunQueuePermission>> for DekoRunqueuePred {
 //     #[verifier::inline]
@@ -543,6 +578,8 @@ pub struct DekoRunnable {
     pub xsave_size: usize,
     /// The memory management.
     pub mm: DekoArc<VirtualMemoryRegion, VirtualMemoryRegionPermission, VirtualMemoryRegionPred>,
+    /// The state of this task.
+    pub state: DekoRwLock<DekoRunnableSchedState, (), DekoRunnableSchedStatePred>,
 }
 
 #[verus_verify]
@@ -749,7 +786,7 @@ impl DekoRunnable {
         let stack_offset = 8;  // == core::mem::size_of::<u64>();
         let stack_ptr = (stack_tos - stack_offset);
 
-        kinfo!("Allocated kernel stack at virtual address: ", vaddr => hex);
+        kdebug!("Allocated kernel stack at virtual address: ", vaddr => hex);
         // 'Push' the task frame onto the stack
         //
         // SAFETY: we ensure that both `TaskContext` and the function pointer
@@ -772,11 +809,13 @@ impl DekoRunnable {
         requires
             ctx_perm.wf_with(cpu),
             ctx_perm.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
+            ctx_perm.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
             args.wf(),
         ensures
             r.wf(),
             ctx_perm_updated@.wf_with(cpu),
             ctx_perm_updated@.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
+            ctx_perm_updated@.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
             // r@.???
     )]
     pub fn new(cpu: DekoPPtr<DekoCpuCtx>, args: DekoTaskArgs) -> DekoRunnablePtr {
@@ -907,6 +946,19 @@ impl DekoRunnable {
             ssp: VirtAddr(0),
             stack: stack_bounds,
             xsave_size: PAGE_SIZE as _,
+            state: {
+                let sched_state = DekoRunnableSchedState {
+                    idle_task: true,
+                    state: DekoRunnableState::TERMINATED,
+                    cpu_index: cpu_id as usize,
+                };
+
+                DekoRwLock::new(
+                    DekoAtomicData::new(sched_state),
+                    (),
+                    Ghost(DekoRunnableSchedStatePred {  }),
+                )
+            },
         };
 
         proof {
@@ -1135,11 +1187,11 @@ fn switch(pre: Option<DekoRunnablePtr>, next: DekoRunnablePtr) {
 /// that de-reference the [`DekoArc<T>`] to get the raw pointer.
 #[verifier::external_body]
 fn do_context_switch(pre: u64, next: u64, rsp_offset: u64, cr3_next: u64, stack_next: u64) {
-    kinfo!("Switching context: pre=", pre => hex);
-    kinfo!("Switching context: next=", next => hex);
-    kinfo!("Switching context: cr3_next=", cr3_next => hex);
-    kinfo!("Switching context: stack_next=", stack_next => hex);
-    kinfo!("Switching context: rsp_offset=", rsp_offset => hex);
+    kdebug!("Switching context: pre=", pre => hex);
+    kdebug!("Switching context: next=", next => hex);
+    kdebug!("Switching context: cr3_next=", cr3_next => hex);
+    kdebug!("Switching context: stack_next=", stack_next => hex);
+    kdebug!("Switching context: rsp_offset=", rsp_offset => hex);
 
     // Debug what's stored at rsp of the next task.
     let rsp_arr: &[u64; 18] = unsafe {
@@ -1212,10 +1264,10 @@ pub extern "C" fn run_kernel_tasks(
     xsave_addr: DekoPPtr<Array<u8, 4096>>,
     start_params: u64,
 ) {
-    kinfo!("Trampoline: entered `run_kernel_tasks:`");
-    kinfo!("\tentry = ", entry => hex);
-    kinfo!("\txsave_addr = ", xsave_addr.addr() as u64 => hex);
-    kinfo!("\tstart_params = ", start_params => hex);
+    kdebug!("Trampoline: entered `run_kernel_tasks:`");
+    kdebug!("\tentry = ", entry => hex);
+    kdebug!("\txsave_addr = ", xsave_addr.addr() as u64 => hex);
+    kdebug!("\tstart_params = ", start_params => hex);
 
     // Now we need to re-enable the interrupts.
     // Then we enter the entry.
@@ -1267,5 +1319,119 @@ pub fn cpu_idle(which: usize) -> DekoRunnablePtr {
 }
 
 func_ptr!(cpu_idle);
+
+/// Sets the CPU affinity for the current task.
+///
+/// Note this function will block the current task and try to "steal" it
+/// from the current CPU to the target CPU to complet the task migration.
+pub fn set_cpu_affinity(which: usize) {
+    kdebug!("Setting CPU affinity to core ", which);
+
+    let (cpu, Tracked(perm)) = DekoCpuCtx::this_cpu();
+    let cpu = cpu.borrow(Tracked(&perm.ptr_perm));
+
+    // Check the runqueue.
+    kpanic_if!(
+        core::hint::unlikely(cpu.run_queue.is_none()),
+        "No run queue is assigned to the CPU.",
+    );
+
+    let run_queue = cpu.run_queue.as_ref().unwrap();
+    let mut rq_handle = run_queue.acquire_write();
+    let DekoAtomicData { data: mut rq_data, perm: Tracked(mut rq_perm) } = rq_handle.get();
+
+    // Check if we have a current task.
+    kpanic_if!(
+        core::hint::unlikely(rq_data.current.is_none()),
+        "No current task is running on the CPU.",
+    );
+
+    // Block the task now.
+    let current_task: DekoRunnablePtr = rq_data.current.as_ref().unwrap().clone();
+    let mut handle = current_task.as_ref().data.state.acquire_write();
+    let DekoAtomicData { data: mut task_state, perm: Tracked(mut task_perm) } = handle.get();
+    task_state.state = DekoRunnableState::BLOCKED;
+    handle.release_write(DekoAtomicData::new_with(task_state, Tracked(task_perm)));
+
+}
+
+#[verus_spec()]
+#[verifier::exec_allows_no_decreases_clause]
+pub fn serv_main(cpu_index: usize) {
+    kinfo!("Service core", cpu_index, "entering main service loop.");
+
+    if cpu_index == 0 {
+        let cpu_nums: u64 = match CPU_NUM.get() {
+            Some(DekoAtomicData { data, .. }) => data.num,
+            None => 1,
+        };
+
+        let (this_cpu, Tracked(mut perm)) = DekoCpuCtx::this_cpu();
+        let rq = this_cpu.borrow(Tracked(&perm.ptr_perm)).run_queue.as_ref();
+        let vm = this_cpu.borrow(Tracked(&perm.ptr_perm)).vm_region.as_ref();
+        kpanic_if!(
+            core::hint::unlikely(rq.is_none() || vm.is_none()),
+            "Current CPU has no run queue or VM region assigned.",
+        );
+
+        let mut i = 1;
+        while i < cpu_nums
+            invariant
+                1 <= i <= cpu_nums,
+                cpu_nums <= CPUID_MAX_COUNT as u64,
+                perm.wf_with(this_cpu),
+                perm.ptr_perm.value().run_queue_spec() matches Some(rq_val) && rq_val.wf(),
+                perm.ptr_perm.value().vm_region_spec() matches Some(vm_val) && vm_val.wf(),
+            decreases cpu_nums - i,
+        {
+            proof_with!(Tracked(perm) => Tracked(new_perm));
+            let serv_task = DekoRunnable::new(
+                this_cpu,
+                DekoTaskArgs {
+                    entry: serv_main_func_ptr(),
+                    name: "serv_main_ap",
+                    mode: DekoTaskMode::Kernel {
+                        entry: serv_main_func_ptr(),
+                        param: i,
+                        ret: run_kernel_tasks_func_ptr(),
+                    },
+                    parent: None,
+                },
+            );
+
+            // Set service main for other APs.
+            proof_with!(Tracked(&mut new_perm));
+            DekoCpuCtx::start_kernel_task(this_cpu, serv_task, true);
+
+            // The control flow should be returned.. check how.
+
+            proof {
+                perm = new_perm;
+            }
+
+            i += 1;
+        }
+
+    } else {
+        // Migrate the task to self.
+        set_cpu_affinity(cpu_index);
+    }
+
+    loop {
+        // Try to enter the guest again.
+        try_enter_guest();
+    }
+}
+
+func_ptr!(serv_main);
+
+/// Try to enter the guest OS if possible.
+#[verifier::exec_allows_no_decreases_clause]
+pub fn try_enter_guest() {
+    kdebug!("Trying to enter guest...");
+
+    loop {
+    }
+}
 
 } // verus!

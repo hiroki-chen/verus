@@ -125,6 +125,40 @@ pub fn print_str(s: &str)
     CONSOLE.write_bytes(s.as_bytes());
 }
 
+/// Get the current CPU ID for logging purposes
+#[verifier::external_body]
+pub fn get_current_cpu_id() -> u64
+    opens_invariants none
+    no_unwind
+{
+    // Try to get the current CPU context, fall back to 0 if unavailable
+    // Use unsafe access to directly read from the per-CPU area
+    unsafe {
+        // THIS MIGHT FAIL... let us think about a better way later.
+        // let cpu_ptr = PERCPU_BASE.0 as *const crate::cpu::DekoCpuCtx;
+        // if !cpu_ptr.is_null() {
+        //     // Verify magic number to ensure validity
+        //     let magic = (*cpu_ptr).magic;
+        //     if magic == crate::cpu::CPU_AREA_MAGIC {
+        //         return (*cpu_ptr).cpu_id;
+        //     }
+        // }
+        0  // Fallback to CPU 0 if we can't get the current CPU
+
+    }
+}
+
+#[verifier::external_body]
+pub fn print_cpu_id()
+    opens_invariants none
+    no_unwind
+{
+    let cpu_id = get_current_cpu_id();
+    print_str("[CPU:");
+    cpu_id.deko_debug(&CONSOLE);
+    print_str("] ");
+}
+
 impl deko_std::fmt::DekoWriter for Console {
     #[verifier::external_body]
     fn write_str(&self, s: &str) {
@@ -316,6 +350,7 @@ macro_rules! kinfo {
             $crate::logging::print_str($crate::logging::INFO_COLOR);
             $crate::logging::print_str("[INFO] ");
             $crate::logging::print_str($crate::logging::RESET_COLOR);
+            $crate::logging::print_cpu_id();
             $crate::print_args_internal!($($args)*);
             $crate::logging::print_str("\n");
 
@@ -334,6 +369,7 @@ macro_rules! kwarn {
             $crate::logging::print_str($crate::logging::WARN_COLOR);
             $crate::logging::print_str("[WARN] ");
             $crate::logging::print_str($crate::logging::RESET_COLOR);
+            $crate::logging::print_cpu_id();
             $crate::print_args_internal!($($args)*);
             $crate::logging::print_str("\n");
 
@@ -352,6 +388,7 @@ macro_rules! kerror {
             $crate::logging::print_str($crate::logging::ERROR_COLOR);
             $crate::logging::print_str("[ERROR] ");
             $crate::logging::print_str($crate::logging::RESET_COLOR);
+            $crate::logging::print_cpu_id();
             $crate::print_args_internal!($($args)*);
             $crate::logging::print_str("\n");
 
@@ -370,6 +407,7 @@ macro_rules! kdebug {
             $crate::logging::print_str($crate::logging::DEBUG_COLOR);
             $crate::logging::print_str("[DEBUG] ");
             $crate::logging::print_str($crate::logging::RESET_COLOR);
+            $crate::logging::print_cpu_id();
             $crate::print_args_internal!($($args)*);
             $crate::logging::print_str("\n");
 
@@ -388,6 +426,7 @@ macro_rules! ktrace {
             $crate::logging::print_str($crate::logging::TRACE_COLOR);
             $crate::logging::print_str("[TRACE] ");
             $crate::logging::print_str($crate::logging::RESET_COLOR);
+            $crate::logging::print_cpu_id();
             $crate::print_args_internal!($($args)*);
             $crate::logging::print_str("\n");
 

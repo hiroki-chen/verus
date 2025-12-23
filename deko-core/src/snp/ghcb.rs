@@ -908,7 +908,7 @@ impl GuestHostCommucationBlock {
 
         // Note that we need to fix the offset within the page.
         let paddr_with_offset = paddr.0 + (vaddr.0 & 0xfff);
-        kinfo!("Preparing shared buffer at vaddr ", vaddr, " paddr ", PhysAddr(paddr_with_offset));
+        kdebug!("Preparing shared buffer at vaddr ", vaddr, " paddr ", PhysAddr(paddr_with_offset));
         // The GHCB SW_SCRATCH area must point to a Page State Change structure
         // that resides in the GHCB Shared Buffer area.
         Self::set_exit_scratch(ptr, Tracked(perm), paddr_with_offset)

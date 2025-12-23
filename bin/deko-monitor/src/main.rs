@@ -10,10 +10,12 @@ use core::ptr::eq;
 use deko_core::cpu::gdt::GLOBAL_GDT;
 use deko_core::cpu::idt::{create_early_idt, init_early_idt, init_global_idt, Idt};
 use deko_core::cpu::regs::{cr0_init, cr4_init, load_cr3, sse_init};
-use deko_core::cpu::task::{cpu_idle, schedule_init, DekoRunQueue, DekoRunQueuePred};
+use deko_core::cpu::task::{
+    self, cpu_idle, run_kernel_tasks, schedule_init, DekoRunQueue, DekoRunQueuePred, DekoRunnable,
+};
 use deko_core::cpu::{
-    start_application_processor, CpuidTable, DekoCpuCtx, DekoCpuCtxPermission, PerCpuShared,
-    CPUID_MAX_COUNT, IST_DF, PERCPU_AREAS,
+    set_availabe_cpu_nums, start_application_processor, CpuidTable, DekoCpuCtx,
+    DekoCpuCtxPermission, PerCpuShared, CPUID_MAX_COUNT, IST_DF, PERCPU_AREAS,
 };
 use deko_core::elf::ElfFile;
 use deko_core::fs::ramfs::init_ramfs;
@@ -145,7 +147,12 @@ fn start_application_processors(igvm_params: &IgvmParams<'_>) {
             return ;
         };
 
-        kinfo!("Detected", cpus.len(), "live CPUs");
+        kpanic_if!(
+            core::hint::unlikely(cpus.len() == 0 || cpus.len() > CPUID_MAX_COUNT as usize),
+            "Invalid CPU count from ACPI APIC table:", cpus.len()
+        );
+
+        set_availabe_cpu_nums(cpus.len() as u64);
 
         do_make_ap_online(&cpus);
     }
@@ -384,15 +391,19 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
         cpu_ctx_perm.wf(),
         cpu_ctx_perm.ptr_perm.value().cpu_id() == 0,
         cpu_index == cpu_ctx_perm.ptr_perm.value().cpu_id(),
+        cpu_ctx_perm.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
+        cpu_ctx_perm.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
 )]
 fn deko_main(cpu_index: usize) {
     kinfo!("deko_main: entered");
 
     if let Some(DekoAtomicData { data: launch_info, .. }) = LAUNCH_INFO.get() {
+        let (this_cpu, _) = DekoCpuCtx::this_cpu();
         let tracked mut cpu_ctx_perm = cpu_ctx_perm;
         let igvm_addr = VirtAddr::new(launch_info.igvm_params_virt_addr as u64);
 
         assume(cpu_ctx_perm.pgtable_perm.mapped(igvm_addr));
+        assume(cpu_ctx_perm.wf_with(this_cpu));
 
         proof_with!(Tracked(&cpu_ctx_perm));
         let igvm_params = deko_core::get_igvm_params(igvm_addr);
@@ -422,9 +433,25 @@ fn deko_main(cpu_index: usize) {
         // Initialize the guest driver.
         init_snp_guest_driver();
 
-        // TODO: Launch guest by launching the init process.
+        proof_with!(Tracked(cpu_ctx_perm) => Tracked(mut new_perm));
+        let serv_task = DekoRunnable::new(
+            this_cpu,
+            task::DekoTaskArgs {
+                parent: None,
+                entry: task::serv_main_func_ptr(),
+                name: "serv_loop",
+                mode: task::DekoTaskMode::Kernel {
+                    entry: task::serv_main_func_ptr(),
+                    param: 0,
+                    ret: task::run_kernel_tasks_func_ptr(),
+                },
+            },
+        );
 
-        cpu_idle(cpu_index);
+        proof_with!(Tracked(&mut new_perm));
+        DekoCpuCtx::start_kernel_task(this_cpu, serv_task, true);  // schedule now
+
+        // cpu_idle(cpu_index);  // guard in case schedule fails
     } else {
         kerror!("deko_main: launch info not initialized");
         early_die();

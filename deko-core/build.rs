@@ -144,7 +144,7 @@ fn generate_entry(stub: &EntryStub) -> String {
         vector = stub.vec,
         push_error = if !stub.errno { "\tpushq\t$0" } else { "" },
         if_flag = "0x200", // Example
-        excep_flags_off = "0x80",
+        excep_flags_off = "0x98",
     )
 }
 

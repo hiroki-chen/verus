@@ -27,7 +27,7 @@
 
     	pushq	$0
         push_regs
-        testl	$0x200, 0x80(%rsp)
+        testl	$0x200, 0x98(%rsp)
         jz	.Lskip_de
         sti
     .Lskip_de:
@@ -43,7 +43,7 @@
 
     	pushq	$0
         push_regs
-        testl	$0x200, 0x80(%rsp)
+        testl	$0x200, 0x98(%rsp)
         jz	.Lskip_db
         sti
     .Lskip_db:
@@ -59,7 +59,7 @@
 
     	pushq	$0
         push_regs
-        testl	$0x200, 0x80(%rsp)
+        testl	$0x200, 0x98(%rsp)
         jz	.Lskip_nmi
         sti
     .Lskip_nmi:
@@ -75,7 +75,7 @@
 
     	pushq	$0
         push_regs
-        testl	$0x200, 0x80(%rsp)
+        testl	$0x200, 0x98(%rsp)
         jz	.Lskip_bp
         sti
     .Lskip_bp:
@@ -91,7 +91,7 @@
 
     	pushq	$0
         push_regs
-        testl	$0x200, 0x80(%rsp)
+        testl	$0x200, 0x98(%rsp)
         jz	.Lskip_of
         sti
     .Lskip_of:
@@ -107,7 +107,7 @@
 
     	pushq	$0
         push_regs
-        testl	$0x200, 0x80(%rsp)
+        testl	$0x200, 0x98(%rsp)
         jz	.Lskip_br
         sti
     .Lskip_br:
@@ -123,7 +123,7 @@
 
     	pushq	$0
         push_regs
-        testl	$0x200, 0x80(%rsp)
+        testl	$0x200, 0x98(%rsp)
         jz	.Lskip_ud
         sti
     .Lskip_ud:
@@ -139,7 +139,7 @@
 
     	pushq	$0
         push_regs
-        testl	$0x200, 0x80(%rsp)
+        testl	$0x200, 0x98(%rsp)
         jz	.Lskip_nm
         sti
     .Lskip_nm:
@@ -155,7 +155,7 @@
 
     
         push_regs
-        testl	$0x200, 0x80(%rsp)
+        testl	$0x200, 0x98(%rsp)
         jz	.Lskip_df
         sti
     .Lskip_df:
@@ -171,7 +171,7 @@
 
     
         push_regs
-        testl	$0x200, 0x80(%rsp)
+        testl	$0x200, 0x98(%rsp)
         jz	.Lskip_ts
         sti
     .Lskip_ts:
@@ -187,7 +187,7 @@
 
     
         push_regs
-        testl	$0x200, 0x80(%rsp)
+        testl	$0x200, 0x98(%rsp)
         jz	.Lskip_np
         sti
     .Lskip_np:
@@ -203,7 +203,7 @@
 
     
         push_regs
-        testl	$0x200, 0x80(%rsp)
+        testl	$0x200, 0x98(%rsp)
         jz	.Lskip_ss
         sti
     .Lskip_ss:
@@ -219,7 +219,7 @@
 
     
         push_regs
-        testl	$0x200, 0x80(%rsp)
+        testl	$0x200, 0x98(%rsp)
         jz	.Lskip_gp
         sti
     .Lskip_gp:
@@ -235,7 +235,7 @@
 
     
         push_regs
-        testl	$0x200, 0x80(%rsp)
+        testl	$0x200, 0x98(%rsp)
         jz	.Lskip_pf_early
         sti
     .Lskip_pf_early:
@@ -251,7 +251,7 @@
 
     
         push_regs
-        testl	$0x200, 0x80(%rsp)
+        testl	$0x200, 0x98(%rsp)
         jz	.Lskip_pf
         sti
     .Lskip_pf:
@@ -267,7 +267,7 @@
 
     	pushq	$0
         push_regs
-        testl	$0x200, 0x80(%rsp)
+        testl	$0x200, 0x98(%rsp)
         jz	.Lskip_mf
         sti
     .Lskip_mf:
@@ -283,7 +283,7 @@
 
     
         push_regs
-        testl	$0x200, 0x80(%rsp)
+        testl	$0x200, 0x98(%rsp)
         jz	.Lskip_ac
         sti
     .Lskip_ac:
@@ -299,7 +299,7 @@
 
     	pushq	$0
         push_regs
-        testl	$0x200, 0x80(%rsp)
+        testl	$0x200, 0x98(%rsp)
         jz	.Lskip_mce
         sti
     .Lskip_mce:
@@ -315,7 +315,7 @@
 
     	pushq	$0
         push_regs
-        testl	$0x200, 0x80(%rsp)
+        testl	$0x200, 0x98(%rsp)
         jz	.Lskip_xm
         sti
     .Lskip_xm:
@@ -331,7 +331,7 @@
 
     	pushq	$0
         push_regs
-        testl	$0x200, 0x80(%rsp)
+        testl	$0x200, 0x98(%rsp)
         jz	.Lskip_ve
         sti
     .Lskip_ve:
@@ -347,7 +347,7 @@
 
     
         push_regs
-        testl	$0x200, 0x80(%rsp)
+        testl	$0x200, 0x98(%rsp)
         jz	.Lskip_cp
         sti
     .Lskip_cp:
@@ -363,7 +363,7 @@
 
     
         push_regs
-        testl	$0x200, 0x80(%rsp)
+        testl	$0x200, 0x98(%rsp)
         jz	.Lskip_vc
         sti
     .Lskip_vc:
@@ -379,7 +379,7 @@
 
     
         push_regs
-        testl	$0x200, 0x80(%rsp)
+        testl	$0x200, 0x98(%rsp)
         jz	.Lskip_sx
         sti
     .Lskip_sx:
@@ -395,7 +395,7 @@
 
     	pushq	$0
         push_regs
-        testl	$0x200, 0x80(%rsp)
+        testl	$0x200, 0x98(%rsp)
         jz	.Lskip_int80
         sti
     .Lskip_int80:

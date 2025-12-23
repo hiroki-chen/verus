@@ -954,6 +954,12 @@ pub fn get_sev_fw_metadata(igvm_params: &IgvmParamBlock) -> Option<SevFWMetaData
         header.wf(),
         igvm_params.wf(),
         kernel_prange.wf(),
+    ensures
+        pgtable_perm.wf(),
+        pgtable_perm.mapping_space == old(pgtable_perm).mapping_space,
+        pgtable_perm.private_bit == old(pgtable_perm).private_bit,
+        pgtable_perm.shared_bit == old(pgtable_perm).shared_bit,
+        pgtable_perm.pgtable_perm == old(pgtable_perm).pgtable_perm,
 )]
 pub fn prepare_guest_fw(
     header: &DekoKernelLaunchInfo,
@@ -963,8 +969,6 @@ pub fn prepare_guest_fw(
 ) {
     // Many things to be done inside the function.
     if let Some(fw_meta) = get_sev_fw_metadata(igvm_params.igvm_param_block) {
-        kinfo!("SEV FW Metadata: \n\t", fw_meta);
-
         // Now we need to make these pages accessible and mark them as valid in RMP.
         let mut memories = fw_meta.valid_mem.clone();
         if let Some(cpuid_page) = fw_meta.cpuid_page {
@@ -1162,6 +1166,10 @@ unsafe fn do_modify_fw_secrets_page(
             },
     ensures
         pgtable_perm.wf(),
+        pgtable_perm.mapping_space == old(pgtable_perm).mapping_space,
+        pgtable_perm.private_bit == old(pgtable_perm).private_bit,
+        pgtable_perm.shared_bit == old(pgtable_perm).shared_bit,
+        pgtable_perm.pgtable_perm == old(pgtable_perm).pgtable_perm,
 )]
 fn validate_fw_memories(
     header: &DekoKernelLaunchInfo,
@@ -1171,8 +1179,7 @@ fn validate_fw_memories(
     // The lowest bit indicates if we are in shared or private mode.
     let need_page_change = igvm_params.igvm_param_page.environment_info & 0x1 != 0;
 
-    kinfo!("Preparing to validate ", memories.len(), " firmware memory regions");
-    kinfo!("\tNeed page state change? ", need_page_change);
+    kinfo!("Validating", memories.len(), "firmware memory regions");
 
     if !memories.is_empty() {
         for i in 0..memories.len()
@@ -1188,6 +1195,10 @@ fn validate_fw_memories(
                         &&& memories@[j].end@ % PAGE_SIZE == 0
                     },
                 pgtable_perm.wf(),
+                pgtable_perm.mapping_space == old(pgtable_perm).mapping_space,
+                pgtable_perm.private_bit == old(pgtable_perm).private_bit,
+                pgtable_perm.shared_bit == old(pgtable_perm).shared_bit,
+                pgtable_perm.pgtable_perm == old(pgtable_perm).pgtable_perm,
         {
             let this = &memories[i];
 
@@ -1218,6 +1229,10 @@ fn validate_fw_memories(
         prange.end@ % PAGE_SIZE == 0,
     ensures
         pgtable_perm.wf(),
+        pgtable_perm.mapping_space == old(pgtable_perm).mapping_space,
+        pgtable_perm.private_bit == old(pgtable_perm).private_bit,
+        pgtable_perm.shared_bit == old(pgtable_perm).shared_bit,
+        pgtable_perm.pgtable_perm == old(pgtable_perm).pgtable_perm,
 )]
 fn validate_fw_memory_region(prange: PaddrRange) {
     broadcast use RmpFlags::lemma_each_bit_is_valid;
@@ -1235,6 +1250,10 @@ fn validate_fw_memory_region(prange: PaddrRange) {
             cur % PAGE_SIZE == 0,
             PAGE_SIZE == 0x1000,
             pgtable_perm.wf(),
+            pgtable_perm.mapping_space == old(pgtable_perm).mapping_space,
+            pgtable_perm.private_bit == old(pgtable_perm).private_bit,
+            pgtable_perm.shared_bit == old(pgtable_perm).shared_bit,
+            pgtable_perm.pgtable_perm == old(pgtable_perm).pgtable_perm,
         decreases end - cur,
     {
         // Create a temporary mapping for the physical address.
@@ -1274,6 +1293,12 @@ fn validate_fw_memory_region(prange: PaddrRange) {
         old(pgtable_perm).wf(),
         igvm_params.wf(),
         kernel_region.wf(),
+    ensures
+        pgtable_perm.wf(),
+        pgtable_perm.mapping_space == old(pgtable_perm).mapping_space,
+        pgtable_perm.private_bit == old(pgtable_perm).private_bit,
+        pgtable_perm.shared_bit == old(pgtable_perm).shared_bit,
+        pgtable_perm.pgtable_perm == old(pgtable_perm).pgtable_perm,
 )]
 fn validate_fw(igvm_params: &IgvmParams<'_>, kernel_region: PaddrRange) {
     broadcast use RmpFlags::lemma_each_bit_is_valid;
@@ -1296,6 +1321,10 @@ fn validate_fw(igvm_params: &IgvmParams<'_>, kernel_region: PaddrRange) {
                     &&& fw_flash@[j].end@ < 0x000f_ffff_ffff_f000u64
                 },
             pgtable_perm.wf(),
+            pgtable_perm.mapping_space == old(pgtable_perm).mapping_space,
+            pgtable_perm.private_bit == old(pgtable_perm).private_bit,
+            pgtable_perm.shared_bit == old(pgtable_perm).shared_bit,
+            pgtable_perm.pgtable_perm == old(pgtable_perm).pgtable_perm,
     {
         let this = &fw_flash[i];
         let nr_pages = (this.end.0 - this.start.0) / PAGE_SIZE as u64;
@@ -1314,6 +1343,10 @@ fn validate_fw(igvm_params: &IgvmParams<'_>, kernel_region: PaddrRange) {
                 kernel_region.wf(),
                 PAGE_SIZE == 0x1000,
                 pgtable_perm.wf(),
+                pgtable_perm.mapping_space == old(pgtable_perm).mapping_space,
+                pgtable_perm.private_bit == old(pgtable_perm).private_bit,
+                pgtable_perm.shared_bit == old(pgtable_perm).shared_bit,
+                pgtable_perm.pgtable_perm == old(pgtable_perm).pgtable_perm,
         {
             let cur = i as u64 * PAGE_SIZE + this.start.0;
             proof {
