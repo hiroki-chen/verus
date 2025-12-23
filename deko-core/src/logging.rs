@@ -291,6 +291,21 @@ macro_rules! print_args_internal {
 
 // Should be defined outside verus! block to allow macro export
 // otherwise the macro hygiene will complain about $crate usage.
+/// Be extra cautious when using these logging macros as they may
+/// introduce deadlocks if not used properly.
+///
+/// During the lifetime of this macro calling, a lock will be held
+/// to prevent concurrent access to the console. Thus, avoid calling
+/// any function that may also attempt to acquire the same lock
+/// within the logging macros to prevent deadlocks.
+///
+/// For example, do not do:
+///
+/// ```rs,norun
+/// kinfo!("Current stack range: ", some_func() => hex);
+/// ```
+///
+/// where `some_func` internally calls another logging macro.
 #[macro_export]
 macro_rules! kinfo {
     ($($args:tt)*) => {

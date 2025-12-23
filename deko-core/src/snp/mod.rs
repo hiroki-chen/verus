@@ -739,6 +739,7 @@ pub fn setup_apic(ctx: DekoPPtr<DekoCpuCtx>, Tracked(ctx_perm): Tracked<&mut Dek
         old(ctx_perm).wf_with(ctx),
     ensures
         ctx_perm.wf_with(ctx),
+        ctx_perm.ptr_perm == old(ctx_perm).ptr_perm,
 {
     let apic = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).apic();
 

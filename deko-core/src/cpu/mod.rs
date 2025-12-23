@@ -25,8 +25,8 @@ use crate::cpu::apic::X86Apic;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
 use crate::cpu::regs::{read_cr3, sse_init};
 use crate::cpu::task::{
-    DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred, DekoRunnable, DekoRunnablePred,
-    DekoTaskArgs,
+    cpu_idle_func_ptr, DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred, DekoRunnable,
+    DekoRunnablePred, DekoTaskArgs,
 };
 use crate::imp::ghcb::current_ghcb;
 use crate::imp::RmpFlags;
@@ -1371,6 +1371,8 @@ impl DekoCpuCtx {
             new_perm@.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
     )]
     pub fn setup_idle_task(ptr: DekoPPtr<Self>, entry: u64) {
+        let cpu_id = ptr.borrow(Tracked(&perm.ptr_perm)).cpu_id;
+
         // Create a new idle task.
         proof_with!(Tracked(perm) => Tracked(new_perm));
         let task = DekoRunnable::new(
@@ -1386,6 +1388,8 @@ impl DekoCpuCtx {
                 },
             },
         );
+
+        kinfo!("Created idle task for CPU ", cpu_id);
 
         // Now insert into the runqueue.
         let cpu_ctx = ptr.borrow(Tracked(&new_perm.ptr_perm));
@@ -1520,8 +1524,21 @@ unsafe extern "C" fn ap_start() -> ! {
 
     kinfo!("AP CPU", cpuid => hex, "is starting.");
 
+    let is_vm_region_none = cpu_ctx_ptr.borrow(Tracked(&ap_perm.ptr_perm)).vm_region.is_none();
+    if core::hint::unlikely(is_vm_region_none) {
+        die("AP CPU VM region is not initialized");
+    }
+    let is_run_queue_none = cpu_ctx_ptr.borrow(Tracked(&ap_perm.ptr_perm)).run_queue.is_none();
+    if core::hint::unlikely(is_run_queue_none) {
+        die("AP CPU run queue is not initialized");
+    }
+    assume(ap_perm.ptr_perm.value().vm_region_spec().unwrap().wf());
+    assume(ap_perm.ptr_perm.value().run_queue_spec().unwrap().wf());
     // Also setup the APIC for this cpu.
     crate::imp::setup_apic(cpu_ctx_ptr, Tracked(&mut ap_perm));
+    // Also set the idle task.
+    proof_with!(Tracked(ap_perm));
+    DekoCpuCtx::setup_idle_task(cpu_ctx_ptr, cpu_idle_func_ptr());
 
     sse_init();
 
@@ -1561,14 +1578,11 @@ unsafe extern "C" fn ap_start() -> ! {
     }
     per_cpu_shared_lock.release_write(DekoAtomicData::new_with(per_cpu_areas, perm));
 
-    // now we make it online.
-
     kinfo!("Application processor started:", cpuid => hex);
 
     // wait for schedule.
     loop {
     }
-    // kinfo!("Application processor started."); // do not do this as ghcb is not shared yet.
 }
 
 func_ptr!(ap_start);

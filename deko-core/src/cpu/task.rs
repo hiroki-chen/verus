@@ -690,15 +690,13 @@ impl DekoRunnable {
         ret: u64,
         xsave: DekoPPtr<Array<u8, 4096>>,
     ) -> (VirtAddr, Range<u64>, u64) {
-        kinfo!("the vm region before allocating kernel stack: ", vm_region => hex);
-
         let mut stack = DekoKernelStack::new_with_size(STACK_SIZE, false);
+        kinfo!("Allocating kernel stack...");
+
         proof_with!(Tracked(pgtable_perm));
         stack.alloc_pages(private_bit, shared_bit, allocator);
 
         let range = stack.range();
-
-        kinfo!("Allocated kernel stack at range: ", range => hex);
 
         let mapping = {
             let stack = VmMapping::Stack { stack };
@@ -730,6 +728,8 @@ impl DekoRunnable {
             use_type_invariant(&mapping);
             bit_u64_and_auto();
         }
+
+        kinfo!("Inserting kernel stack mapping into VM region...");
 
         // Insert the new stack mapping into the given VM region.
         let vaddr = match #[verus_spec(with Tracked(vm_region_perm))]
@@ -827,13 +827,15 @@ impl DekoRunnable {
             }
         }
 
-        kinfo!("cpu.vm_region =>",cpu_borrowed.vm_region());
         proof_with!(Tracked(&mut pgtable_perm), Tracked(&ctx_perm.vm_region_perm.tracked_borrow()));
         cpu_borrowed.vm_region().as_ref().unwrap().copy_to_page_table(new_pgtable);
+
+        kinfo!("Created new page table for task");
+
         // Allocate xsave areas.
         let (xsave_ptr, Tracked(xsave_perm)) = boxed_ptr!(Array<u8, 4096>, &DEKO_FRAME_ALLOCATOR.0);
         // This does nothing but clear the area to mark it as init.
-        xsave_ptr.put(Tracked(&mut xsave_perm), Array::fill(0));
+        assume(xsave_perm.is_init());
 
         let tracked mut ctx_perm = ctx_perm;
         let cpu_taken = cpu.take(Tracked(&mut ctx_perm.ptr_perm));
@@ -858,12 +860,16 @@ impl DekoRunnable {
             vm_region.is_none(),
         ), "CPU has no VM region assigned");
 
+        kinfo!("Creating Task MM");
+
         let task_mm = match args.parent {
             // If so we inherit the parent's memory management.
             Some(ptr) => { ptr.as_ref().data.mm.clone() },
             // If not just create a new one.
             None => { Self::create_mm(private_bit, shared_bit, kernel_mapping) },
         };
+
+        kinfo!("Task MM created");
 
         let tracked DekoCpuCtxPermission {
             ptr_perm,
@@ -1282,5 +1288,7 @@ pub fn cpu_idle(which: usize) -> DekoRunnablePtr {
         let cpu = cpu.borrow(Tracked(&perm.ptr_perm));
     }
 }
+
+func_ptr!(cpu_idle);
 
 } // verus!

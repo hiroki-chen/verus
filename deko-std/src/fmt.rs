@@ -20,7 +20,7 @@ macro_rules! impl_deko_debug_integer {
 
                 #[verifier::external_body]
                 fn deko_debug_hex<W: DekoWriter>(&self, writer: &W) {
-                    print_integer_hex(*self, writer);
+                    print_integer_hex(*self as u64, writer);
                 }
 
                 #[verifier::external_body]
@@ -103,20 +103,37 @@ fn print_byte_hex_padded<W: DekoWriter>(byte: u8, writer: &W) {
 
 // Specific helpers for common cases with optimized buffer sizes
 #[verifier::external]
-pub(crate) fn print_integer_hex<T: lexical_core::ToLexicalWithOptions, W: DekoWriter>(num: T, writer: &W) {
+pub(crate) fn print_integer_hex<W: DekoWriter>(num: u64, writer: &W) {
     writer.write_str("0x");
 
-    const FORMAT: u128 = NumberFormatBuilder::hexadecimal();
-    let mut buffer = [0u8; 32]; // Enough for 128-bit hex
-    let digits = write_with_options::<_, { FORMAT }>(
-        num,
-        &mut buffer,
-        &T::Options::default(),
-    );
+    if num == 0 {
+        writer.write_char('0');
+        return;
+    }
 
-    writer.write_bytes(&digits);
+    let mut buf = [0u8; 16];
+    let mut n = num;
+    let mut i = 15;
+
+    while n > 0 {
+        let digit = (n & 0xF) as u8;
+        buf[i] = if digit < 10 {
+            b'0' + digit
+        } else {
+            b'A' + (digit - 10)
+        };
+        n >>= 4;
+        if i == 0 { break; }
+        i -= 1;
+    }
+
+    // Write non-zero part
+    writer.write_bytes(&buf[i+1..]);
 }
 
+/// TODO: DO not call this function in new page tables as this would
+/// use a static variable for the lookups which cause problem as we
+/// haven't mapped .rodata section.
 #[verifier::external]
 pub(crate) fn print_integer_oct<T: lexical_core::ToLexicalWithOptions, W: DekoWriter>(num: T, writer: &W) {
     writer.write_str("0o");

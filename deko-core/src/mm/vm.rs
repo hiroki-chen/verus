@@ -1008,7 +1008,7 @@ impl VirtualMemoryRegion {
             align.next_power_of_two()
         };
 
-        kinfo!("Inserting VM block with alignment:", align => hex);
+        kinfo!("Inserting VM block with alignment:", align);
 
         // Safe to proceed
         proof_with!(Tracked(perm));
