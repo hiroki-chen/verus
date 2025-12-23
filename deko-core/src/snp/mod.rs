@@ -483,7 +483,7 @@ pub fn init_platform_end(
     crate::snp::logging::init_ghcb_logging(debug_console_port);
 
     // Print IGVM parameter information for debugging
-    kinfo!("IGVM Parameters\n\t", igvm_params);
+    kdebug!("IGVM Parameters\n\t", igvm_params);
 }
 
 pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxPermission>) -> (r: (

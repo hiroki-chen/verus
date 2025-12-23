@@ -309,12 +309,8 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>) -> (__discard: !) {
 
     let igvm_params_block = get_igvm_params_block(&header);
     imp::init_platform_end(&igvm_params_block, Tracked(&mut ctx_perm));
-    {
-        let ctx = ctx.borrow(Tracked(&ctx_perm.ptr_perm));
-        kinfo!("DekoCtx content is:", ctx);
-    }
 
-    kinfo!("header: ", header);
+    kdebug!("header: ", header);
 
     // now we need to load the kernel into the memory.
     // first we need to find where it is.
@@ -724,10 +720,6 @@ fn into_deko_monitor(
     deko_entry: u64,
     header: &DekoKernelLaunchInfo,
 ) -> (__discard: !) {
-    let raw_bytes = unsafe { core::slice::from_raw_parts(deko_entry as *const u8, 64) };
-    kinfo!("entry point @ ", deko_entry => hex);
-    kinfo!("entry point raw bytes: ", raw_bytes);
-
     unsafe {
         // core::ptr::drop_in_place(PERCPU_BASE.0 as *mut DekoCpuCtx);
         // Page::unmap_page_4k(

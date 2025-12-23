@@ -11,7 +11,7 @@ use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::elf::ElfFile;
 use crate::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR};
-use crate::{kerror, kinfo, kunimplemented, kwarn, DekoKernelLaunchInfo, Stage2LaunchInfo};
+use crate::{kdebug, kerror, kinfo, kunimplemented, kwarn, DekoKernelLaunchInfo, Stage2LaunchInfo};
 
 extern "C" {
     #[link_name = "pgtable"]
@@ -1182,7 +1182,7 @@ impl Page {
     ) -> (r: Mapping) {
         let mapping = Page::walk(page, Tracked(perm), vaddr, ms, private_bit, shared_bit);
 
-        kinfo!("allocate_pte_2m: walked to mapping", mapping);
+        kdebug!("allocate_pte_2m: walked to mapping", mapping);
 
         match mapping {
             Mapping::Level0(_, _) | Mapping::Level1(_, _) => mapping,
@@ -2288,7 +2288,7 @@ impl Page {
             // Check if we can map 2M page.
             if cur_vaddr % PAGE_SIZE_2M == 0 && cur_paddr % PAGE_SIZE_2M == 0 && cur_vaddr
                 + PAGE_SIZE_2M <= end_vaddr {
-                kinfo!("[2MB] Mapping page at vaddr: ", VirtAddr(cur_vaddr), " to paddr: ", PhysAddr(cur_paddr));
+                kdebug!("[2MB] Mapping page at vaddr: ", VirtAddr(cur_vaddr), " to paddr: ", PhysAddr(cur_paddr));
 
                 if Page::map_page_2m(
                     page,

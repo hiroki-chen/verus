@@ -122,6 +122,7 @@ struct PartialQemuConfig {
 enum BuildTarget {
     Deko,
     Stage1,
+    Init,
     All,
 }
 
@@ -129,6 +130,7 @@ enum BuildTarget {
 enum TargetArch {
     Tdx,
     Snp,
+    Init,
 }
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -348,10 +350,12 @@ impl Builder {
             BuildTarget::All => {
                 self.build(BuildTarget::Stage1, release)?;
                 self.build(BuildTarget::Deko, release)?;
+                self.build(BuildTarget::Init, release)?;
                 Ok(())
             }
             BuildTarget::Deko => self.build_deko(release),
             BuildTarget::Stage1 => self.build_stage1(release),
+            BuildTarget::Init => self.build_init(release),
         }
     }
 
@@ -571,6 +575,32 @@ impl Builder {
         let log_file = format!("deko-stage1-build-{}-{}.log", self.config.target_arch, profile);
         self.execute_cargo_with_json(cmd, &log_file)?;
 
+        Ok(())
+    }
+
+    fn build_init(&self, release: bool) -> Result<()> {
+        println!("{}", "--- Building init binary ---".bright_cyan().bold());
+
+        // Change to the project root directory for cargo commands
+        std::env::set_current_dir(&self.config.root.join("bin").join("init"))
+            .context("Failed to change directory to bin/init")?;
+
+        let mut cmd = Command::new("cargo");
+        cmd.arg("build")
+            .arg("--package")
+            .arg("init")
+            .arg("--target")
+            .arg(self.config.custom_target_json());
+
+        if release {
+            cmd.arg("--release");
+        }
+
+        let profile = if release { "release" } else { "debug" };
+        let log_file = format!("init-build-{}.log", profile);
+        self.execute_cargo_with_json(cmd, &log_file)?;
+
+        println!("✓ Init binary built successfully");
         Ok(())
     }
 
@@ -794,9 +824,10 @@ fn qemu_tdx(config: &FinalQemuConfig, cmd: &mut std::process::Command) {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let target_arch = match cli.target_arch.unwrap_or(TargetArch::Tdx) {
+    let target_arch = match cli.target_arch.unwrap_or(TargetArch::Init) {
         TargetArch::Tdx => "tdx",
         TargetArch::Snp => "snp",
+        TargetArch::Init => "init",
     };
 
     let builder = Builder::new(target_arch.to_string());

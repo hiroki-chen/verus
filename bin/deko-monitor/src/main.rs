@@ -16,6 +16,7 @@ use deko_core::cpu::{
     CPUID_MAX_COUNT, IST_DF, PERCPU_AREAS,
 };
 use deko_core::elf::ElfFile;
+use deko_core::fs::ramfs::init_ramfs;
 use deko_core::fw::{load_acpi_tables, read_acpi_table};
 use deko_core::logging::print_banner;
 use deko_core::mm::frame_allocator::DekoAllocatorApi;
@@ -411,10 +412,17 @@ fn deko_main(cpu_index: usize) {
         proof_with!(Tracked(&mut cpu_ctx_perm.pgtable_perm));
         deko_core::imp::prepare_guest_fw(launch_info, &igvm_params, kernel_prange, cpuid_table);
 
+        // Populate the rootfs.
+        init_ramfs(PhysAddr(launch_info.kernel_fs_start)..PhysAddr(launch_info.kernel_fs_end));
+
+        // TODO: Reclaim boot memories for later usage.
+
         start_application_processors(&igvm_params);
 
         // Initialize the guest driver.
         init_snp_guest_driver();
+
+        // TODO: Launch guest by launching the init process.
 
         cpu_idle(cpu_index);
     } else {

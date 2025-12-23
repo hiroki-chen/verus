@@ -9,7 +9,7 @@ members = [
     "xtask",
     # bins
     "bin/deko-monitor",
-    "bin/deko-stage2",
+    "bin/deko-stage2", "bin/init",
 ]
 # Unfortunately due to `Cargo`'s default feature unification, we need to
 # exclude some crates that have conflicting default features like global

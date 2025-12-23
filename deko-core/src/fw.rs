@@ -230,6 +230,8 @@ pub fn loads_rsdp<'a>() -> Option<RSDPDesc> {
         r.wf(),
 )]
 pub fn load_acpi_tables() -> Option<ACPITableBuffer<DekoAllocatorApi>> {
+    use crate::kdebug;
+
     broadcast use deko_std::boot::axiom_meta_array_size_wf;
 
     let fw = FwCfg {  };
@@ -266,7 +268,7 @@ pub fn load_acpi_tables() -> Option<ACPITableBuffer<DekoAllocatorApi>> {
                 kerror!("Too many ACPI tables:", rsdp_offsets_arr_len);
                 return None;
             }
-            kinfo!("rsdp =>", rsdp);  // RSD PTR + BOCHS signature
+            kdebug!("rsdp =>", rsdp);  // RSD PTR + BOCHS signature
             assume(Array::<u8, 4>::size_wf());
             let mut i = 0;
             let mut tables = Array::<ACPITableMeta, 8>::fill(
@@ -294,7 +296,7 @@ pub fn load_acpi_tables() -> Option<ACPITableBuffer<DekoAllocatorApi>> {
                 let offset = (b1) | (b2 << 8) | (b3 << 16) | (b4 << 24);
                 let this_table_hdr = read_acpi_table(&buffer, offset as usize)?.header;
 
-                kinfo!("Read ACPI Table at offset", offset, "header:", this_table_hdr);
+                kdebug!("Read ACPI Table at offset", offset, "header:", this_table_hdr);
                 // Now we just read the meta.
                 tables.update(
                     i,

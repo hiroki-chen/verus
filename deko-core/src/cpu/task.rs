@@ -35,7 +35,7 @@ use crate::mm::vm::{
     VirtualMemoryRegionPermission, VirtualMemoryRegionPred, VmMapping, VmMappingPred, VMR_GRANULE,
 };
 use crate::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR};
-use crate::{die, kerror, kinfo, kpanic_if, kunimplemented};
+use crate::{die, kdebug, kerror, kinfo, kpanic_if, kunimplemented};
 
 core::arch::global_asm!(include_str!("switch.S"), options(att_syntax));
 
@@ -691,7 +691,6 @@ impl DekoRunnable {
         xsave: DekoPPtr<Array<u8, 4096>>,
     ) -> (VirtAddr, Range<u64>, u64) {
         let mut stack = DekoKernelStack::new_with_size(STACK_SIZE, false);
-        kinfo!("Allocating kernel stack...");
 
         proof_with!(Tracked(pgtable_perm));
         stack.alloc_pages(private_bit, shared_bit, allocator);
@@ -729,8 +728,6 @@ impl DekoRunnable {
             bit_u64_and_auto();
         }
 
-        kinfo!("Inserting kernel stack mapping into VM region...");
-
         // Insert the new stack mapping into the given VM region.
         let vaddr = match #[verus_spec(with Tracked(vm_region_perm))]
         vm_region.insert(mapping.clone(), PteFlags::nx_kernel()) {
@@ -753,10 +750,6 @@ impl DekoRunnable {
         let stack_ptr = (stack_tos - stack_offset);
 
         kinfo!("Allocated kernel stack at virtual address: ", vaddr => hex);
-        kinfo!("Kernel top of stack: ", stack_tos => hex);
-        kinfo!("Kernel stack rsp: ", stack_ptr => hex);
-        kinfo!("ret addr: ", ret => hex);
-
         // 'Push' the task frame onto the stack
         //
         // SAFETY: we ensure that both `TaskContext` and the function pointer
@@ -830,8 +823,6 @@ impl DekoRunnable {
         proof_with!(Tracked(&mut pgtable_perm), Tracked(&ctx_perm.vm_region_perm.tracked_borrow()));
         cpu_borrowed.vm_region().as_ref().unwrap().copy_to_page_table(new_pgtable);
 
-        kinfo!("Created new page table for task");
-
         // Allocate xsave areas.
         let (xsave_ptr, Tracked(xsave_perm)) = boxed_ptr!(Array<u8, 4096>, &DEKO_FRAME_ALLOCATOR.0);
         // This does nothing but clear the area to mark it as init.
@@ -860,16 +851,12 @@ impl DekoRunnable {
             vm_region.is_none(),
         ), "CPU has no VM region assigned");
 
-        kinfo!("Creating Task MM");
-
         let task_mm = match args.parent {
             // If so we inherit the parent's memory management.
             Some(ptr) => { ptr.as_ref().data.mm.clone() },
             // If not just create a new one.
             None => { Self::create_mm(private_bit, shared_bit, kernel_mapping) },
         };
-
-        kinfo!("Task MM created");
 
         let tracked DekoCpuCtxPermission {
             ptr_perm,
@@ -905,7 +892,6 @@ impl DekoRunnable {
         };
 
         let stack_bounds = VirtAddr(stack.0 + vrange.start)..VirtAddr(stack.0 + vrange.end);
-        kinfo!("rsp offset is : ", rsp_offset => hex);
 
         let task = DekoRunnable {
             id: generate_id(),
@@ -954,8 +940,6 @@ impl DekoRunnable {
             vm_region_perm: Some(vm_region_perm),
         };
         cpu.write(Tracked(&mut ctx_perm.ptr_perm), cpu_new);
-
-        kinfo!("Finished creating new task with ID: ", task.id => hex);
 
         proof_with!(|= Tracked(ctx_perm));
         DekoArc::new(
@@ -1075,7 +1059,7 @@ pub unsafe fn schedule_init() {
                         handle.release_write(DekoAtomicData::new_with(runqueue, Tracked(perm)));
 
                         // perform the actual context switch
-                        kinfo!("next task to schedule: ", task.as_ref().data);
+                        kdebug!("next task to schedule: ", task.as_ref().data);
 
                         switch(None, task);
                     },
@@ -1106,9 +1090,6 @@ fn switch(pre: Option<DekoRunnablePtr>, next: DekoRunnablePtr) {
                 };
                 let private_bit = cpu.private_bit;
                 let shared_bit = cpu.shared_bit;
-
-                kinfo!("the private_bit: ", private_bit => hex);
-                kinfo!("the shared_bit: ", shared_bit => hex);
 
                 let rsp_next = next.as_ref().data.rsp;
 
@@ -1167,10 +1148,6 @@ fn do_context_switch(pre: u64, next: u64, rsp_offset: u64, cr3_next: u64, stack_
             18,
         ).try_into().unwrap()
     };
-
-    for (i, val) in rsp_arr.iter().enumerate() {
-        kinfo!("rsp[", i, "] = ", *val => hex);
-    }
 
     // kinfo!("Next task rsp content:", rsp_arr => hex);
 

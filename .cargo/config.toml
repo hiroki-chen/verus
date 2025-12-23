@@ -19,6 +19,9 @@ build-deko-snp-release = "xtask --target-arch snp build --target deko --release"
 build-deko-tdx-debug = "xtask --target-arch tdx build --target deko"
 build-deko-snp-debug = "xtask --target-arch snp build --target deko"
 
+build-init = "xtask build --target init"
+build-init-release = "xtask build --target init --release"
+
 stats = "xtask line-count"
 
 pretty = "xtask pretty"

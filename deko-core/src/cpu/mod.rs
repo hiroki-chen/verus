@@ -25,8 +25,8 @@ use crate::cpu::apic::X86Apic;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
 use crate::cpu::regs::{read_cr3, sse_init};
 use crate::cpu::task::{
-    cpu_idle_func_ptr, DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred, DekoRunnable,
-    DekoRunnablePred, DekoTaskArgs,
+    cpu_idle_func_ptr, schedule_init, DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred,
+    DekoRunnable, DekoRunnablePred, DekoTaskArgs,
 };
 use crate::imp::ghcb::current_ghcb;
 use crate::imp::RmpFlags;
@@ -1579,6 +1579,8 @@ unsafe extern "C" fn ap_start() -> ! {
     per_cpu_shared_lock.release_write(DekoAtomicData::new_with(per_cpu_areas, perm));
 
     kinfo!("Application processor started:", cpuid => hex);
+
+    schedule_init();
 
     // wait for schedule.
     loop {
