@@ -23,7 +23,7 @@ use crate::snp::{
     rmpadjust, DekoCpuCtxPermission, PageTablePermission, RmpFlags, Rmp_ALL_BITS, SnpStatusFlags,
     BIT_VMSA,
 };
-use crate::{die, kerror, kinfo, kunimplemented};
+use crate::{die, kdebug, kerror, kinfo, kunimplemented};
 
 verus! {
 
@@ -308,8 +308,6 @@ impl VmsaInitialContext {
             },
         };
 
-        kinfo!("the idt base is", idt_base => hex, idt_limit => hex);
-
         Self {
             rip,
             rsp: css_top,
@@ -475,7 +473,7 @@ impl VmsaPage {
         this.vtom = 0;  // unsupported.
         this.sev_features = SnpStatusFlags::get_status().bits() >> 2;  // make this sev.
 
-        kinfo!("VMSA", this => hex);
+        kdebug!("VMSA", this => hex);
 
         // Being lazy
         this.sev_features

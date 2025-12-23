@@ -385,6 +385,7 @@ pub struct WriteHandle<'a, V, S: Spin, Pred: RwLockPredicate<V>> {
     handle: Tracked<RwLockToks::writer<(Pred, S, CellId), PointsTo<V>, InternalPred<V, Pred>>>,
     perm: Tracked<PointsTo<V>>,
     rwlock: &'a RwLock<V, S, Pred>,
+    flags: S::GuardData,
 }
 
 /// Handle obtained for a shared read-lock from an [`RwLock`].
@@ -395,6 +396,7 @@ pub struct WriteHandle<'a, V, S: Spin, Pred: RwLockPredicate<V>> {
 pub struct ReadHandle<'a, V, S: Spin, Pred: RwLockPredicate<V>> {
     handle: Tracked<RwLockToks::reader<(Pred, S, CellId), PointsTo<V>, InternalPred<V, Pred>>>,
     rwlock: &'a RwLock<V, S, Pred>,
+    flags: S::GuardData,
 }
 
 impl<'a, V, S: Spin, Pred: RwLockPredicate<V>> WriteHandle<'a, V, S, Pred> {
@@ -459,7 +461,7 @@ impl<'a, V, S: Spin, Pred: RwLockPredicate<V>> WriteHandle<'a, V, S, Pred> {
             use_type_invariant(&self);
         }
 
-        let WriteHandle { handle: Tracked(handle), perm: Tracked(mut perm), rwlock } = self;
+        let WriteHandle { handle: Tracked(handle), perm: Tracked(mut perm), rwlock, flags } = self;
 
         atomic_with_ghost!(
             &rwlock.exc => store(false);
@@ -467,6 +469,8 @@ impl<'a, V, S: Spin, Pred: RwLockPredicate<V>> WriteHandle<'a, V, S, Pred> {
         {
             self.rwlock.inst.borrow().release_exc(perm, &mut g, perm, handle);
         });
+
+        S::lock_epilogue(&flags);
     }
 
     /// Release the write-lock, returning ownership of the lock-protected object.
@@ -482,7 +486,7 @@ impl<'a, V, S: Spin, Pred: RwLockPredicate<V>> WriteHandle<'a, V, S, Pred> {
             use_type_invariant(&self);
         }
 
-        let WriteHandle { handle: Tracked(handle), perm: Tracked(mut perm), rwlock } = self;
+        let WriteHandle { handle: Tracked(handle), perm: Tracked(mut perm), rwlock, flags } = self;
         self.rwlock.cell.put(Tracked(&mut perm), new_val);
 
         atomic_with_ghost!(
@@ -491,6 +495,8 @@ impl<'a, V, S: Spin, Pred: RwLockPredicate<V>> WriteHandle<'a, V, S, Pred> {
         {
             self.rwlock.inst.borrow().release_exc(perm, &mut g, perm, handle);
         });
+
+        S::lock_epilogue(&flags);
     }
 }
 
@@ -550,7 +556,7 @@ impl<'a, V, S: Spin, Pred: RwLockPredicate<V>> ReadHandle<'a, V, S, Pred> {
         proof {
             use_type_invariant(&self);
         }
-        let ReadHandle { handle: Tracked(handle), rwlock } = self;
+        let ReadHandle { handle: Tracked(handle), rwlock, flags } = self;
 
         let _ =
             atomic_with_ghost!(
@@ -559,6 +565,8 @@ impl<'a, V, S: Spin, Pred: RwLockPredicate<V>> ReadHandle<'a, V, S, Pred> {
         {
             rwlock.inst.borrow().release_shared(handle.element(), &mut g, handle);
         });
+
+        S::lock_epilogue(&flags);
     }
 }
 
@@ -623,7 +631,6 @@ impl<V, S: Spin, Pred: RwLockPredicate<V>> RwLock<V, S, Pred> {
         proof {
             use_type_invariant(self);
         }
-        let flags = S::lock_prologue();
 
         let mut done = false;
         let tracked mut token: Option<
@@ -651,6 +658,8 @@ impl<V, S: Spin, Pred: RwLockPredicate<V>> RwLock<V, S, Pred> {
                 _ => false,
             };
         }
+
+        let flags = S::lock_prologue();
         loop
             invariant
                 token is Some && equal(token->0.instance_id(), self.inst@.id()),
@@ -693,9 +702,9 @@ impl<V, S: Spin, Pred: RwLockPredicate<V>> RwLock<V, S, Pred> {
                     perm: Tracked(perm),
                     handle: Tracked(handle),
                     rwlock: self,
+                    flags,
                 };
 
-                S::lock_epilogue(&flags);
                 return write_handle;
             }
         }
@@ -715,7 +724,6 @@ impl<V, S: Spin, Pred: RwLockPredicate<V>> RwLock<V, S, Pred> {
         proof {
             use_type_invariant(self);
         }
-
         let flags = S::lock_prologue();
 
         loop
@@ -771,9 +779,12 @@ impl<V, S: Spin, Pred: RwLockPredicate<V>> RwLock<V, S, Pred> {
                                 Option::Some(t) => t,
                                 Option::None => proof_from_false(),
                             };
-                            let read_handle = ReadHandle { handle: Tracked(handle), rwlock: self };
+                            let read_handle = ReadHandle {
+                                handle: Tracked(handle),
+                                rwlock: self,
+                                flags,
+                            };
 
-                            S::lock_epilogue(&flags);
                             return read_handle;
                         } else {
                             let _ =

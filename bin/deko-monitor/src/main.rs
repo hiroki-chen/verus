@@ -158,14 +158,10 @@ fn start_application_processors(igvm_params: &IgvmParams<'_>) {
 /// be separate functions.
 #[verifier::exec_allows_no_decreases_clause]
 fn do_make_ap_online(cpus: &[ACPICPUInfo]) {
-    let mut write_handle = PERCPU_AREAS.acquire_write();
-    let mut percpu_area = write_handle.get();
-
     let mut i = 1;  // BSP is already up.
     #[verus_spec(
             invariant
                 1 <= i <= cpus.len() + 1,
-                percpu_area.wf(),
             decreases cpus@.len() - i,
         )]
     while i < cpus.len() {
@@ -177,16 +173,30 @@ fn do_make_ap_online(cpus: &[ACPICPUInfo]) {
                 CPUID_MAX_COUNT
             );
 
-        let cpu_area = percpu_area.data.0.index(cpu_info.apic_id as usize);
+        let handle = PERCPU_AREAS.acquire_read();
+        let DekoAtomicData { data: percpu_area, .. } = handle.borrow();
 
+        let cpu_area = percpu_area.0.index(cpu_info.apic_id as usize);
         start_application_processor(cpu_area);
+        handle.release_read();
 
         // Wait for the CPU to be online.
         loop
             invariant
-                cpu_area.wf(),
+                cpu_info.apic_id < CPUID_MAX_COUNT as u32,
         {
-            if cpu_area.online.0.load(Tracked(cpu_area.online.1.borrow())) {
+            let handle = PERCPU_AREAS.acquire_read();
+            let DekoAtomicData { data: percpu_area, perm } = handle.borrow();
+
+            let cpu_area = percpu_area.0.index(cpu_info.apic_id as usize);
+            let tracked this_perm = perm.borrow().shared_perms.tracked_borrow(
+                cpu_info.apic_id as int,
+            );
+
+            let is_online = cpu_area.online.load(Tracked(&this_perm.online_perm));
+
+            handle.release_read();
+            if is_online {
                 break ;
             }
             core::hint::spin_loop();
@@ -194,8 +204,6 @@ fn do_make_ap_online(cpus: &[ACPICPUInfo]) {
 
         i += 1;
     }
-
-    write_handle.release_write(percpu_area);
 }
 
 #[inline]
@@ -375,7 +383,6 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
         cpu_ctx_perm.wf(),
         cpu_ctx_perm.ptr_perm.value().cpu_id() == 0,
         cpu_index == cpu_ctx_perm.ptr_perm.value().cpu_id(),
-
 )]
 fn deko_main(cpu_index: usize) {
     kinfo!("deko_main: entered");

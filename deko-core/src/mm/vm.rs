@@ -444,7 +444,7 @@ impl VmMapping {
                 let pfn = offset >> 12;
                 let guard_offset = stack.guard_pages << 12;
 
-                kinfo!("VmMapping::phys_at: stack mapping at offset", offset, "with guard offset", guard_offset, "and pfn", pfn);
+                kdebug!("VmMapping::phys_at: stack mapping at offset", offset, "with guard offset", guard_offset, "and pfn", pfn);
 
                 if pfn >= stack.guard_pages {
                     proof {
@@ -460,7 +460,7 @@ impl VmMapping {
 
                     let pfn = (offset - guard_offset) >> 12;
 
-                    kinfo!("VmMapping::phys_at: adjusted pfn is", pfn);
+                    kdebug!("VmMapping::phys_at: adjusted pfn is", pfn);
 
                     match stack.alloc.get(pfn as usize) {
                         Some(Some((_, paddr))) => { Some(*paddr) },
@@ -1736,7 +1736,7 @@ impl VirtualMemory {
                 self.range.end@ - self.range.start@ - offset,
         )]
         while offset < self.range.end.0 - self.range.start.0 {
-            kinfo!("Requesting mapping at offset ", offset);
+            kdebug!("Requesting mapping at offset ", offset);
 
             // Request if there is a physical address at this offset.
             if let Some(paddr) = mapping_data.phys_at(offset) {
@@ -1747,7 +1747,7 @@ impl VirtualMemory {
                     assume(parent_perm.pgtable_perm.mapping_space.kernel.in_range_spec(paddr));
                 }
 
-                kinfo!("Mapping", vaddr, "to", paddr, "with flags", flags.bits() => hex);
+                kdebug!("Mapping", vaddr, "to", paddr, "with flags", flags.bits() => hex);
 
                 // Now we can map the page.
                 PageTable::map_page_4k(

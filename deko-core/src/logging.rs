@@ -77,6 +77,20 @@ pub struct Console;
 
 pub const CONSOLE: Console = Console;
 
+// Now we need a lock to protect concurrent access to the console.
+pub exec static CONSOLE_LOCK: DekoSimpleRwLock<()>
+    ensures
+        CONSOLE_LOCK.wf(),
+{
+    let r = DekoSimpleRwLock::new(DekoAtomicData::new(()), (), Ghost(TrivialPredicate::new()));
+
+    proof {
+        use_type_invariant(&r);
+    }
+
+    r
+}
+
 impl WellFormed for Console {
     open spec fn wf(&self) -> bool {
         true
@@ -84,19 +98,21 @@ impl WellFormed for Console {
 }
 
 impl Console {
-    #[verifier::external_body]
     fn write_bytes(&self, buffer: &[u8]) {
         let ghcb_port = match GHCB_IO_PORT.get() {
             Some(p) => p,
             None => return ,
         };
 
-        for b in buffer.iter() {
+        for b in 0..buffer.len()
+            invariant
+                ghcb_port.wf(),
+        {
             // Better not to call `.get()` inside
             // the loop as this will create race
             // condition so that we cannot print
             // anything from the port.
-            ghcb_port.outb(*b);
+            ghcb_port.outb(buffer[b]);
         }
     }
 }
@@ -280,11 +296,15 @@ macro_rules! kinfo {
     ($($args:tt)*) => {
         #[cfg(all(feature = "logging", log_level_info))]
         {
+            let _guard = $crate::logging::CONSOLE_LOCK.acquire_write();
+
             $crate::logging::print_str($crate::logging::INFO_COLOR);
             $crate::logging::print_str("[INFO] ");
             $crate::logging::print_str($crate::logging::RESET_COLOR);
             $crate::print_args_internal!($($args)*);
             $crate::logging::print_str("\n");
+
+            _guard.release_write_no_val();
         }
     };
 }
@@ -294,11 +314,15 @@ macro_rules! kwarn {
     ($($args:tt)*) => {
         #[cfg(all(feature = "logging", log_level_warn))]
         {
+            let _guard = $crate::logging::CONSOLE_LOCK.acquire_write();
+
             $crate::logging::print_str($crate::logging::WARN_COLOR);
             $crate::logging::print_str("[WARN] ");
             $crate::logging::print_str($crate::logging::RESET_COLOR);
             $crate::print_args_internal!($($args)*);
             $crate::logging::print_str("\n");
+
+            _guard.release_write_no_val();
         }
     };
 }
@@ -308,11 +332,15 @@ macro_rules! kerror {
     ($($args:tt)*) => {
         #[cfg(all(feature = "logging", log_level_error))]
         {
+            let _guard = $crate::logging::CONSOLE_LOCK.acquire_write();
+
             $crate::logging::print_str($crate::logging::ERROR_COLOR);
             $crate::logging::print_str("[ERROR] ");
             $crate::logging::print_str($crate::logging::RESET_COLOR);
             $crate::print_args_internal!($($args)*);
             $crate::logging::print_str("\n");
+
+            _guard.release_write_no_val();
         }
     };
 }
@@ -322,11 +350,15 @@ macro_rules! kdebug {
     ($($args:tt)*) => {
         #[cfg(all(feature = "logging", log_level_debug))]
         {
+            let _guard = $crate::logging::CONSOLE_LOCK.acquire_write();
+
             $crate::logging::print_str($crate::logging::DEBUG_COLOR);
             $crate::logging::print_str("[DEBUG] ");
             $crate::logging::print_str($crate::logging::RESET_COLOR);
             $crate::print_args_internal!($($args)*);
             $crate::logging::print_str("\n");
+
+            _guard.release_write_no_val();
         }
     };
 }
@@ -336,11 +368,15 @@ macro_rules! ktrace {
     ($($args:tt)*) => {
         #[cfg(all(feature = "logging", log_level_trace))]
         {
+            let _guard = $crate::logging::CONSOLE_LOCK.acquire_write();
+
             $crate::logging::print_str($crate::logging::TRACE_COLOR);
             $crate::logging::print_str("[TRACE] ");
             $crate::logging::print_str($crate::logging::RESET_COLOR);
             $crate::print_args_internal!($($args)*);
             $crate::logging::print_str("\n");
+
+            _guard.release_write_no_val();
         }
     };
 }

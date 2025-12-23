@@ -10,16 +10,20 @@ pub mod smp;
 pub mod task;
 pub mod types;
 
+use core::borrow::BorrowMut;
+use core::panic;
+
 use deko_macros::DekoDebug;
 use deko_std::prelude::*;
 use task::DekoRunnablePtr;
 use vstd::atomic::{PAtomicBool, PAtomicU32, PermissionBool, PermissionU32};
 use vstd::cell::{PCell, PointsTo};
+use vstd::invariant;
 use vstd::prelude::*;
 
 use crate::cpu::apic::X86Apic;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
-use crate::cpu::regs::read_cr3;
+use crate::cpu::regs::{read_cr3, sse_init};
 use crate::cpu::task::{
     DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred, DekoRunnable, DekoRunnablePred,
     DekoTaskArgs,
@@ -36,7 +40,7 @@ use crate::mm::vm::{
     VmMapping, VmMappingPred, VMR_GRANULE,
 };
 use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR};
-use crate::snp::ghcb::GuestHostCommucationBlock;
+use crate::snp::ghcb::{validate_ghcb, GuestHostCommucationBlock};
 use crate::snp::vmsa::{VmsaInitialContext, VmsaPage, VmsaPagePermission, VmsaPagePred};
 use crate::snp::Rmp_ALL_BITS;
 use crate::{die, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
@@ -82,17 +86,22 @@ pub struct PerCpuShared {
     #[deko(skip)]
     pub guest_vmsa: DekoSimpleRwLock<GuestVmsaRef>,
     #[deko(skip)]
-    pub online: (PAtomicBool, Tracked<PermissionBool>),
+    pub online: PAtomicBool,
     #[deko(skip)]
-    pub ipi_irr: Array<(PAtomicU32, Tracked<PermissionU32>), 8>,
+    pub ipi_irr: Array<PAtomicU32, 8>,
     #[deko(skip)]
-    pub ipi_pending: (PAtomicBool, Tracked<PermissionBool>),
+    pub ipi_pending: PAtomicBool,
     #[deko(skip)]
-    pub nmi_pending: (
-        PAtomicBool,
-        Tracked<PermissionBool>,
-    ),
+    pub nmi_pending: PAtomicBool,
     // ipi_state: IpiState, todo
+}
+
+with_permission! {
+    PerCpuShared,
+    online_perm: PermissionBool,
+    ipi_irr_perm: Seq<PermissionU32>,
+    ipi_pending_perm: PermissionBool,
+    nmi_pending_perm: PermissionBool,
 }
 
 impl WellFormed for PerCpuShared {
@@ -100,42 +109,59 @@ impl WellFormed for PerCpuShared {
         &&& self.apic_id == self.cpu_index
         &&& self.cpu_index < CPUID_MAX_COUNT
         &&& self.guest_vmsa.wf()
-        &&& self.online.1@.is_for(self.online.0)
-        &&& self.ipi_pending.1@.id() == self.ipi_pending.0.id()
-        &&& self.nmi_pending.1@.id() == self.nmi_pending.0.id()
         &&& self.ipi_irr.wf()
-        &&& forall|i: int|
-            0 <= i && i < 8 ==> #[trigger] self.ipi_irr@[i as int].1@.id()
-                == self.ipi_irr@[i as int].0.id() && self.ipi_irr@[i as int].wf()
+        &&& forall|i: int| 0 <= i && i < 8 ==> #[trigger] self.ipi_irr@[i as int].wf()
     }
 }
 
 impl PerCpuShared {
     #[verifier::external_body]
     #[inline(always)]
-    const fn new_ipi_irr() -> (r: Array<(PAtomicU32, Tracked<PermissionU32>), 8>)
+    const fn new_ipi_irr() -> (r: (Array<PAtomicU32, 8>, Tracked<Seq<PermissionU32>>))
         ensures
-            r.wf(),
+            r.0.wf(),
             forall|i: int|
-                #![trigger r@[i as int]]
                 0 <= i && i < 8 ==> {
-                    &&& r@[i as int].wf()
-                    &&& r@[i as int].1@.id() == r@[i as int].0.id()
+                    &&& #[trigger] r.0@[i as int].wf()
+                    &&& r.1@[i as int].is_for(r.0@[i as int])
                 },
     {
-        Array::new([const { (PAtomicU32::new(0)) };8])
+        let (arr, perms) =
+            seq_macro::seq! {
+            N in 0..8 {{
+                #(
+                    let (atomic~N, perm~N) = PAtomicU32::new(0);
+                )*
+
+                // Collect atomics into array
+                let arr = Array::new([
+                    #(atomic~N,)*
+                ]);
+
+                // Collect permissions into sequence
+                let perms = Array::new([
+                    #(perm~N,)*
+                ]);
+
+                (arr, perms)
+            }}
+        };
+
+        let perms_transformed = Tracked(Seq::new(8, |i| perms@[i as int]@));
+
+        (arr, perms_transformed)
     }
 
-    pub const fn new(id: u32) -> (r: Self)
+    pub const fn new(id: u32) -> (r: (PerCpuShared, Tracked<PerCpuSharedPermission>))
         requires
             id < CPUID_MAX_COUNT,
         ensures
             r.wf(),
     {
-        let online = PAtomicBool::new(false);
-        let ipi_pending = PAtomicBool::new(false);
-        let nmi_pending = PAtomicBool::new(false);
-        let ipi_irr = Self::new_ipi_irr();
+        let (online, Tracked(online_perm)) = PAtomicBool::new(false);
+        let (ipi_pending, Tracked(ipi_pending_perm)) = PAtomicBool::new(false);
+        let (nmi_pending, Tracked(nmi_pending_perm)) = PAtomicBool::new(false);
+        let (ipi_irr, Tracked(ipi_irr_perm)) = Self::new_ipi_irr();
         let guest_vmsa = DekoSimpleRwLock::new_simple(
             GuestVmsaRef { vmsa: None, caa: None, generation: 0, gen_in_use: 0 },
         );
@@ -144,20 +170,44 @@ impl PerCpuShared {
             use_type_invariant(&guest_vmsa);
         }
 
-        PerCpuShared {
-            apic_id: id,
-            cpu_index: id as usize,
-            guest_vmsa,
-            online,
-            ipi_irr,
-            ipi_pending,
-            nmi_pending,
-        }
+        (
+            PerCpuShared {
+                apic_id: id,
+                cpu_index: id as usize,
+                guest_vmsa,
+                online,
+                ipi_irr,
+                ipi_pending,
+                nmi_pending,
+            },
+            Tracked(
+                PerCpuSharedPermission {
+                    online_perm,
+                    ipi_irr_perm,
+                    ipi_pending_perm,
+                    nmi_pending_perm,
+                },
+            ),
+        )
     }
 }
 
 #[derive(DekoDebug)]
 pub struct PerCpuAreas(pub Array<PerCpuShared, CPUID_MAX_COUNT>);
+
+with_permission! {
+    PerCpuAreas,
+    shared_perms: Seq<PerCpuSharedPermission>,
+}
+
+pub struct PerCpuAreasPred;
+
+impl RwLockPredicate<DekoAtomicData<PerCpuAreas, PerCpuAreasPermission>> for PerCpuAreasPred {
+    open spec fn inv(self, v: DekoAtomicData<PerCpuAreas, PerCpuAreasPermission>) -> bool {
+        &&& v.data.wf()
+        &&& v.data.wf_with(v.perm@)
+    }
+}
 
 impl WellFormed for PerCpuAreas {
     open spec fn wf(&self) -> bool {
@@ -167,43 +217,55 @@ impl WellFormed for PerCpuAreas {
     }
 }
 
-pub struct PerCpuAreasInv;
-
-impl RwLockPredicate<DekoAtomicDataNoPerm<PerCpuAreas>> for PerCpuAreasInv {
-    open spec fn inv(self, v: DekoAtomicDataNoPerm<PerCpuAreas>) -> bool {
-        &&& v.data.wf()
+impl PerCpuAreas {
+    pub open spec fn wf_with(&self, perm: PerCpuAreasPermission) -> bool {
+        &&& self.0@.len() == CPUID_MAX_COUNT
+        &&& self.0@.len() == perm.shared_perms.len()
+        &&& self.wf()
         &&& forall|i: int|
-            #![trigger v.data.0@[i]]
+            #![trigger perm.shared_perms[i as int]]
             0 <= i < CPUID_MAX_COUNT as int ==> {
-                &&& v.data.0@[i].wf()
-                &&& v.data.0@[i].apic_id as int == i
+                &&& self.wf()
+                &&& self@[i as int].wf()
+                &&& perm.shared_perms[i as int].online_perm.is_for(self@[i as int].online)
+                &&& perm.shared_perms[i as int].ipi_pending_perm.is_for(self@[i as int].ipi_pending)
+                &&& perm.shared_perms[i as int].nmi_pending_perm.is_for(self@[i as int].nmi_pending)
+                &&& perm.shared_perms[i as int].ipi_irr_perm.len() == 8
+                &&& forall|j: int|
+                    0 <= j && j < 8 ==> {
+                        #[trigger] perm.shared_perms[i as int].ipi_irr_perm[j as int].is_for(
+                            self@[i as int].ipi_irr@[j as int],
+                        )
+                    }
             }
     }
-}
 
-impl PerCpuAreas {
     #[verifier::external_body]
-    pub const fn new() -> (r: Self)
+    pub const fn new() -> (r: (PerCpuAreas, Tracked<PerCpuAreasPermission>))
         ensures
-            r.wf(),
-            forall|i: int|
-                #![trigger r.0@[i]]
-                0 <= i < r.0@.len() ==> {
-                    &&& r.0@[i].wf()
-                    &&& r.0@[i].apic_id as int == i
-                },
+            r.0.wf_with(r.1@),
     {
-        seq_macro::seq!(
-            N in 0..32 {
-                PerCpuAreas(Array::new(
-                    [
-                        #(
-                            const { PerCpuShared::new(N) },
-                        )*
-                    ]
-                ))
-            }
-        )
+        let (arr, perms) =
+            seq_macro::seq!(
+            N in 0..32 {{
+                #(
+                    let (per_cpu~N, perm~N) = PerCpuShared::new(N as u32);
+                )*
+
+                let arr = Array::new([
+                    #(per_cpu~N,)*
+                ]);
+                let perms = Array::new([
+                    #(perm~N,)*
+                ]);
+
+                (arr, perms)
+            }}
+        );
+
+        let tracked perms_transformed = Seq::new(CPUID_MAX_COUNT as nat, |i| perms@[i as int]@);
+
+        (PerCpuAreas(arr), Tracked(PerCpuAreasPermission { shared_perms: perms_transformed }))
     }
 }
 
@@ -220,15 +282,12 @@ impl View for PerCpuAreas {
 ///
 /// For verification and the ease of implementation, we just use a simple
 /// read-write lock to protect the access to this structure.
-pub exec static PERCPU_AREAS: DekoRwLock<PerCpuAreas, (), PerCpuAreasInv>
+pub exec static PERCPU_AREAS: DekoRwLock<PerCpuAreas, PerCpuAreasPermission, PerCpuAreasPred>
     ensures
         PERCPU_AREAS.wf(),
 {
-    let lock = DekoRwLock::new(
-        DekoAtomicDataNoPerm::new(PerCpuAreas::new()),
-        (),
-        Ghost(PerCpuAreasInv {  }),
-    );
+    let (v, p) = PerCpuAreas::new();
+    let lock = DekoRwLock::new(DekoAtomicData::new_with(v, p), (), Ghost(PerCpuAreasPred {  }));
     proof {
         use_type_invariant(&lock);
     }
@@ -914,28 +973,6 @@ impl DekoCpuCtx {
             &cpu_borrow.tss,
         );
 
-        // Check if stack is mapped?
-        {
-            let rsp = init_ctx.rsp;
-            assume(perm.pgtable_perm.walk_requires(
-                cpu_borrow.pgtable,
-                VirtAddr(rsp),
-                &cpu_borrow.kernel_mapping,
-                private_bit,
-                shared_bit,
-            ));
-            let mapping = PageTable::walk(
-                cpu_borrow.pgtable,
-                Tracked(&perm.pgtable_perm),
-                VirtAddr(rsp),
-                &cpu_borrow.kernel_mapping,
-                private_bit,
-                shared_bit,
-            );
-
-            kinfo!("VMSA stack mapping check: RSP", rsp => hex, "used for VMSA at CPU {}", cpu_borrow.cpu_id, "mapping:", mapping);
-        }
-
         #[verus_spec(with Tracked(&mut vmsa_perm))]
         let sev_features = vmsa.init_from(&init_ctx);
         cpu_borrow.deko_vmsa.init(DekoAtomicData::new_with(vmsa, Tracked(vmsa_perm)));
@@ -1168,7 +1205,7 @@ impl DekoCpuCtx {
 
         // This is for the current context switch stack.
         let (cpu_css_stack, top_of_the_css_stack) = {
-            let mut stack = DekoKernelStack::new_with_size(0x8000, false);
+            let mut stack = DekoKernelStack::new_with_size(STACK_SIZE, false);
             stack.alloc_pages(private_bit, shared_bit, &DEKO_FRAME_ALLOCATOR);
             let top_of_the_stack = VirtAddr(stack.stack_top() + CONTEXT_SWITCH_STACK.0);
             let stack = VmMapping::Stack { stack };
@@ -1205,7 +1242,7 @@ impl DekoCpuCtx {
 
         proof_with!(Ghost(&vm_region) => Tracked(vm_block_for_stack_perm));
         let vm_block_for_stack = VirtualMemory::new(
-            VirtAddr(top_of_the_css_stack.0 - 0x8000)..top_of_the_css_stack,
+            VirtAddr(top_of_the_css_stack.0 - STACK_SIZE)..top_of_the_css_stack,
             cpu_css_stack,
             PteFlags::nx_kernel(),
         );
@@ -1218,11 +1255,14 @@ impl DekoCpuCtx {
         }
 
         proof_with!(Tracked(&mut vm_perm), Tracked(vm_block_for_stack_perm));
-        vm_region.insert_at_vaddr(VirtAddr(top_of_the_css_stack.0 - 0x8000), vm_block_for_stack);
+        vm_region.insert_at_vaddr(
+            VirtAddr(top_of_the_css_stack.0 - STACK_SIZE),
+            vm_block_for_stack,
+        );
 
         // Allocate a stack for interrupt service routines.
         let (ist_df_stack, top_of_ist_stack) = {
-            let stack = DekoKernelStack::new_with_size(0x8000, false);
+            let stack = DekoKernelStack::new_with_size(STACK_SIZE, false);
             let top_of_the_stack = VirtAddr(stack.stack_top() + STACK_IST_DF_BASE.0);
             let stack = VmMapping::Stack { stack };
 
@@ -1254,7 +1294,7 @@ impl DekoCpuCtx {
 
         proof_with!(Ghost(&vm_region) => Tracked(vm_block_for_ist_stack_perm));
         let vm_block_for_ist_stack = VirtualMemory::new(
-            VirtAddr(top_of_ist_stack.0 - 0x8000)..top_of_ist_stack,
+            VirtAddr(top_of_ist_stack.0 - STACK_SIZE)..top_of_ist_stack,
             ist_df_stack,
             PteFlags::nx_kernel(),
         );
@@ -1266,7 +1306,10 @@ impl DekoCpuCtx {
         }
 
         proof_with!(Tracked(&mut vm_perm), Tracked(vm_block_for_ist_stack_perm));
-        vm_region.insert_at_vaddr(VirtAddr(top_of_ist_stack.0 - 0x8000), vm_block_for_ist_stack);
+        vm_region.insert_at_vaddr(
+            VirtAddr(top_of_ist_stack.0 - STACK_SIZE),
+            vm_block_for_ist_stack,
+        );
 
         // let cpu_ist_stack = DekoIstStack { df_stack: Some(cpu_ist_stack), df_ss: None };
         let (run_queue, Tracked(run_queue_perm)) = DekoRunQueue::new();
@@ -1462,15 +1505,70 @@ pub fn start_application_processor(which: &PerCpuShared) {
 /// Other APs will start execution from here.
 #[allow(improper_ctypes_definitions)]
 #[no_mangle]
-#[verus_spec(
-    with
-        Tracked(ap_perm): Tracked<DekoCpuCtxPermission>,
-)]
+#[verus_spec()]
 #[verifier::exec_allows_no_decreases_clause]
 unsafe extern "C" fn ap_start() -> ! {
-    // kinfo!("Application processor started."); // do not do this as ghcb is not shared yet.
+    // BSP must have initialized DekoCpuCtx and map the per-cpu area onto the AP's
+    // own page table.
+    let (cpu_ctx_ptr, Tracked(ap_perm)) = DekoCpuCtx::this_cpu();
+    let cpuid = cpu_ctx_ptr.borrow(Tracked(&ap_perm.ptr_perm)).cpu_id;
+
+    // Now we must initialize the GHCB on this cpu.
+    kpanic_if!(cpuid == 0, "AP started with CPU ID 0, which is reserved for BSP");
+
+    validate_ghcb(cpu_ctx_ptr, Tracked(&mut ap_perm));
+
+    kinfo!("AP CPU", cpuid => hex, "is starting.");
+
+    // Also setup the APIC for this cpu.
+    crate::imp::setup_apic(cpu_ctx_ptr, Tracked(&mut ap_perm));
+
+    sse_init();
+
+    let mut per_cpu_shared_lock = PERCPU_AREAS.acquire_write();
+    let DekoAtomicData { data: mut per_cpu_areas, mut perm } = per_cpu_shared_lock.get();
+
+    let this = per_cpu_areas.0.index(cpuid as usize);
+
+    kpanic_if!(
+        core::hint::unlikely(this.cpu_index != cpuid as usize),
+        "Per-CPU shared area CPU index mismatch: expected",
+        cpuid, "got", this.cpu_index
+    );
+
+    let tracked mut this_perm = perm.borrow_mut().shared_perms.tracked_remove(cpuid as int);
+    let ghost old = this_perm;
+    loop
+        invariant
+            this_perm.online_perm.is_for(this.online),
+            this_perm.ipi_irr_perm == old.ipi_irr_perm,
+            this_perm.ipi_pending_perm == old.ipi_pending_perm,
+            this_perm.nmi_pending_perm == old.nmi_pending_perm,
+    {
+        core::hint::spin_loop();
+
+        match this.online.compare_exchange_weak(Tracked(&mut this_perm.online_perm), false, true) {
+            Ok(old) if old => {
+                die("AP CPU is already marked online in per-CPU shared area");
+            },
+            Ok(_) => break ,
+            Err(_) => continue ,
+        }
+    }
+
+    proof {
+        perm.borrow_mut().shared_perms.tracked_insert(cpuid as int, this_perm);
+    }
+    per_cpu_shared_lock.release_write(DekoAtomicData::new_with(per_cpu_areas, perm));
+
+    // now we make it online.
+
+    kinfo!("Application processor started:", cpuid => hex);
+
+    // wait for schedule.
     loop {
     }
+    // kinfo!("Application processor started."); // do not do this as ghcb is not shared yet.
 }
 
 func_ptr!(ap_start);

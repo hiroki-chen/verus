@@ -33,6 +33,7 @@ pub trait Spin {
 pub type SpinNoIrq = ();
 
 impl Spin for SpinNoIrq {
+    /// FLAGS saved/restored to disable/enable interrupts.
     type GuardData = u64;
 
     #[inline]

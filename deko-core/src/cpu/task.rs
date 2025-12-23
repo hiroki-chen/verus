@@ -9,7 +9,7 @@ use deko_std::bits::bit_u64_and_auto;
 use deko_std::cpu::{no_irq_zone, CpuID, X86GeneralRegs};
 use deko_std::list::{LinkedList, Node};
 use deko_std::mem::bitalloc::{DekoBitAlloc, DekoBitmapAllocator1024};
-use deko_std::mem::{PAGE_SIZE, PERTASK_BASE, PGTABLE_LVL3_IDX_SHARED};
+use deko_std::mem::{PAGE_SIZE, PERTASK_BASE, PGTABLE_LVL3_IDX_SHARED, STACK_SIZE};
 use deko_std::misc::early_dbg;
 use deko_std::prelude::{func_ptr, VADDR_UPPER_MASK};
 use deko_std::ptr::{DekoPPtr, DekoPointsTo};
@@ -40,6 +40,8 @@ use crate::{die, kerror, kinfo, kpanic_if, kunimplemented};
 core::arch::global_asm!(include_str!("switch.S"), options(att_syntax));
 
 verus! {
+
+pub const DEKO_DEFAULT_STACK_SIZE: u64 = 0x10000;
 
 pub exec static DEKO_KTASK_BIT_ALLOC: DekoSimpleRwLock<DekoBitmapAllocator1024>
     ensures
@@ -690,7 +692,7 @@ impl DekoRunnable {
     ) -> (VirtAddr, Range<u64>, u64) {
         kinfo!("the vm region before allocating kernel stack: ", vm_region => hex);
 
-        let mut stack = DekoKernelStack::new_with_size(0x8000, false);
+        let mut stack = DekoKernelStack::new_with_size(STACK_SIZE, false);
         proof_with!(Tracked(pgtable_perm));
         stack.alloc_pages(private_bit, shared_bit, allocator);
 
@@ -703,7 +705,7 @@ impl DekoRunnable {
 
             proof {
                 assert(stack.mapping_size_spec() >= PAGE_SIZE) by {
-                    assert(0x8000u64 >> 12 == 8) by (bit_vector);
+                    assert(0xa000 >> 12 == 10) by (bit_vector);
                 }
             }
 
