@@ -145,7 +145,7 @@ impl GHCBIoPort {
     {
         let (current_ghcb, Tracked(current_ghcb_perm)) = current_ghcb();
 
-        GuestHostCommucationBlock::ioout(
+        GuestHostCommunicationBlock::ioout(
             current_ghcb,
             Tracked(current_ghcb_perm),
             self.0 + port,
@@ -161,7 +161,7 @@ impl GHCBIoPort {
     {
         let (current_ghcb, Tracked(current_ghcb_perm)) = current_ghcb();
 
-        GuestHostCommucationBlock::ioin(
+        GuestHostCommunicationBlock::ioin(
             current_ghcb,
             Tracked(current_ghcb_perm),
             self.0 + port,

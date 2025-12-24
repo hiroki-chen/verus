@@ -68,6 +68,14 @@ impl<V: WellFormed> Predicate<DekoAtomicData<DekoPPtr<V>, DekoPointsTo<V>>> for 
     }
 }
 
+impl<V: WellFormed> RwLockPredicate<DekoAtomicData<DekoPPtr<V>, DekoPointsTo<V>>> for DekoPPtrPred {
+    open spec fn inv(self, data: DekoAtomicData<DekoPPtr<V>, DekoPointsTo<V>>) -> bool {
+        &&& data.perm@.wf()
+        &&& data.perm@.is_init()
+        &&& data.perm@.pptr() == data.data@
+    }
+}
+
 pub struct DekoPointsTo<V: WellFormed> {
     /// The underlying raw pointer permission.
     points_to: raw_ptr::PointsTo<V>,

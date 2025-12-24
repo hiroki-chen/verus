@@ -188,13 +188,13 @@ fn gen_idt_handler() {
         name: "irq_ipi",
         handler: "irq_ipi",
         errno: false,
-        vec: 0x50,
+        vec: 0xe0,
     }));
     assembly_code.push_str(&generate_irq(&EntryStub {
         name: "irq_int_inj",
         handler: "irq_int_inj",
         errno: false,
-        vec: 0xe0,
+        vec: 0x50,
     }));
 
     let final_code = format!(

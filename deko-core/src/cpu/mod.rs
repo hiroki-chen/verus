@@ -3,6 +3,7 @@ pub mod ctx;
 pub mod gdt;
 pub mod idt;
 pub mod idt_handlers;
+pub mod ipi;
 pub mod irq;
 pub mod msr;
 pub mod regs;
@@ -40,7 +41,8 @@ use crate::mm::vm::{
     VmMapping, VmMappingPred, VMR_GRANULE,
 };
 use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR};
-use crate::snp::ghcb::{validate_ghcb, GuestHostCommucationBlock};
+use crate::snp::doorbell::HVDoorbell;
+use crate::snp::ghcb::{validate_ghcb, GuestHostCommunicationBlock};
 use crate::snp::vmsa::{VmsaInitialContext, VmsaPage, VmsaPagePermission, VmsaPagePred};
 use crate::snp::Rmp_ALL_BITS;
 use crate::{die, kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
@@ -425,7 +427,7 @@ pub struct DekoCpuCtx {
     #[deko(hex)]
     pub cpu_id: u64,
     /// The GHCB block for this CPU.
-    pub ghcb: DekoPPtr<GuestHostCommucationBlock>,
+    pub ghcb: DekoPPtr<GuestHostCommunicationBlock>,
     pub tss: X86Tss,
     /// The page table of this CPU.
     pub pgtable: DekoPPtr<PageTable>,
@@ -454,13 +456,15 @@ pub struct DekoCpuCtx {
     pub temp_mapping: VirtualMemoryTemporary,
     /// The VMSA.
     pub deko_vmsa: DekoOnceCell<VmsaPage, VmsaPagePermission, VmsaPagePred>,
+    /// The doorbell for SEV-SNP restricted interrupt mode.
+    pub doorbell: Option<DekoRwLock<DekoPPtr<HVDoorbell>, DekoPointsTo<HVDoorbell>, DekoPPtrPred>>,
 }
 
 with_permission! {
     DekoCpuCtx,
     ptr_perm: DekoPointsTo<DekoCpuCtx>,
     pgtable_perm: PageTablePermission,
-    ghcb_perm: DekoPointsTo<GuestHostCommucationBlock>,
+    ghcb_perm: DekoPointsTo<GuestHostCommunicationBlock>,
     vm_region_perm: Option<VirtualMemoryRegionPermission>,
 }
 
@@ -491,8 +495,9 @@ impl WellFormed for DekoCpuCtxPermission {
         &&& self.ptr_perm.is_init()
         &&& self.ptr_perm.wf()
         &&& self.ptr_perm.value().kernel_mapping().wf()
-        &&& self.ptr_perm.value().vm_region_spec() matches Some(vm) ==> vm.wf()
-        &&& self.ptr_perm.value().run_queue_spec() matches Some(rq) ==> rq.wf()
+        &&& self.ptr_perm.value().vm_region matches Some(vm) ==> vm.wf()
+        &&& self.ptr_perm.value().run_queue matches Some(rq) ==> rq.wf()
+        &&& self.ptr_perm.value().doorbell matches Some(db) ==> db.wf()
         &&& self.pgtable_perm.wf()
         &&& self.pgtable_perm.pgtable_perm.pptr() == self.ptr_perm.value().pgtable_spec()@
         &&& self.pgtable_perm.mapping_space === self.ptr_perm.value().kernel_mapping_spec()
@@ -821,24 +826,9 @@ impl DekoCpuCtx {
         (ptr, Tracked::assume_new())
     }
 
-    // #[inline]
-    // #[verifier::when_used_as_spec(run_queue_spec)]
-    // pub fn run_queue(&self) -> (r: Option<&DekoRunQueue>)
-    //     requires
-    //         self.wf(),
-    //     ensures
-    //         r == self.run_queue_spec(),
-    // {
-    //     match &self.run_queue {
-    //         Some(rq) => {
-    //         }
-    //         None => None,
-    //     }
-    // }
-    /// Creates a new CPU data structure.
     pub fn new(
         pgtable: DekoPPtr<PageTable>,
-        ghcb: DekoPPtr<GuestHostCommucationBlock>,
+        ghcb: DekoPPtr<GuestHostCommunicationBlock>,
         cpu_id: u64,
         shared_bit: u64,
         private_bit: u64,
@@ -879,6 +869,7 @@ impl DekoCpuCtx {
             run_queue,
             temp_mapping: VirtualMemoryTemporary::new_zeroed(),
             deko_vmsa: DekoOnceCell::new(Ghost(VmsaPagePred {  })),
+            doorbell: None,
         }
     }
 
@@ -1067,14 +1058,14 @@ impl DekoCpuCtx {
         self.cpu_id
     }
 
-    pub open spec fn ghcb_spec(&self) -> DekoPPtr<GuestHostCommucationBlock> {
+    pub open spec fn ghcb_spec(&self) -> DekoPPtr<GuestHostCommunicationBlock> {
         self.ghcb
     }
 
     // When possible, define all these getter and setter by macros.
     #[verifier::when_used_as_spec(ghcb_spec)]
     #[inline]
-    pub fn ghcb(&self) -> (r: DekoPPtr<GuestHostCommucationBlock>)
+    pub fn ghcb(&self) -> (r: DekoPPtr<GuestHostCommunicationBlock>)
         ensures
             r == self.ghcb_spec(),
     {
@@ -1146,7 +1137,7 @@ impl DekoCpuCtx {
 
         let (cpu_ctx_ptr, Tracked(ctx_perm)) = boxed_ptr!(DekoCpuCtx, &DEKO_FRAME_ALLOCATOR.0);
         let (ghcb, Tracked(ghch_perm)) =
-            boxed_ptr!(GuestHostCommucationBlock, &DEKO_FRAME_ALLOCATOR.0);
+            boxed_ptr!(GuestHostCommunicationBlock, &DEKO_FRAME_ALLOCATOR.0);
 
         // First step is to map itself.
         let vaddr = cpu_ctx_ptr.into_vaddr();
@@ -1455,6 +1446,51 @@ impl DekoCpuCtx {
         }
     }
 
+    pub fn cleanup_terminated_task(
+        ptr: DekoPPtr<Self>,
+        Tracked(perm): Tracked<&DekoCpuCtxPermission>,
+    )
+        requires
+            perm.wf_with(ptr),
+            perm.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
+    {
+        let cpu = ptr.borrow(Tracked(&perm.ptr_perm));
+        let mut rq = cpu.run_queue.as_ref().unwrap().acquire_write();
+        let DekoAtomicData { data: mut runqueue, perm: Tracked(mut rq_perm) } = rq.get();
+
+        #[verus_spec(with Tracked(&mut rq_perm))]
+        runqueue.cleanup_terminated_task();
+
+        rq.release_write(DekoAtomicData::new_with(runqueue, Tracked(rq_perm)));
+    }
+
+    pub fn schedule_prep(ptr: DekoPPtr<Self>, Tracked(perm): Tracked<&DekoCpuCtxPermission>) -> (r:
+        Option<(DekoRunnablePtr, DekoRunnablePtr)>)
+        requires
+            perm.wf_with(ptr),
+            perm.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
+        ensures
+            r matches Some((cur, next)) ==> {
+                &&& cur.wf()
+                &&& next.wf()
+            },
+    {
+        let cpu = ptr.borrow(Tracked(&perm.ptr_perm));
+        let mut rq = cpu.run_queue.as_ref().unwrap().acquire_write();
+        let DekoAtomicData { data: mut runqueue, perm: Tracked(mut rq_perm) } = rq.get();
+
+        if runqueue.current.is_none() {
+            // No task to schedule.
+            rq.release_write(DekoAtomicData::new_with(runqueue, Tracked(rq_perm)));
+            return None;
+        }
+        #[verus_spec(with Tracked(&mut rq_perm))]
+        let result = runqueue.schedule_prep();
+        rq.release_write(DekoAtomicData::new_with(runqueue, Tracked(rq_perm)));
+
+        result
+    }
+
     /// Setup the idle task for this CPU.
     #[verus_spec(r =>
         with
@@ -1570,7 +1606,7 @@ pub fn start_application_processor(which: &PerCpuShared) {
     kdebug!("  vmsa: ", vmsa);
     kdebug!("  sev_features: ", sev_features);
 
-    GuestHostCommucationBlock::ap_create(
+    GuestHostCommunicationBlock::ap_create(
         ghcb,
         Tracked(ghcb_perm),
         which.apic_id,

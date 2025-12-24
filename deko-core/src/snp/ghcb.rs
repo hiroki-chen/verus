@@ -159,8 +159,8 @@ pub fn msr_set_page_valid(paddr: PhysAddr, valid: bool)
 
 /// Fetch the current GHCB structure for this specific CPU core.
 pub fn current_ghcb() -> (r: (
-    DekoPPtr<GuestHostCommucationBlock>,
-    Tracked<DekoPointsTo<GuestHostCommucationBlock>>,
+    DekoPPtr<GuestHostCommunicationBlock>,
+    Tracked<DekoPointsTo<GuestHostCommunicationBlock>>,
 ))
     ensures
         r.1@.wf(),
@@ -192,7 +192,7 @@ verus! {
 macro_rules! ghcb_getter {
     ($name:ident, $field:ident, $t:ty, $permname:ident) => {
         verus! {
-            impl GuestHostCommucationBlock {
+            impl GuestHostCommunicationBlock {
                 #[verifier::external_body]
                 fn $name(
                     ptr: DekoPPtr<Self>,
@@ -216,7 +216,7 @@ macro_rules! ghcb_getter {
 macro_rules! ghcb_setter {
     ($name:ident, $field:ident, $t:ty, $permname:ident) => {
         verus! {
-            impl GuestHostCommucationBlock {
+            impl GuestHostCommunicationBlock {
                 #[verifier::external_body]
                 fn $name(
                     ptr: DekoPPtr<Self>,
@@ -292,7 +292,7 @@ pub const TERM_REQ: u64 = 0x100;
 ///
 /// https://www.amd.com/content/dam/amd/en/documents/epyc-technical-docs/specifications/56421.pdf
 #[repr(C)]
-pub struct GuestHostCommucationBlock {
+pub struct GuestHostCommunicationBlock {
     _reserved: Array<PAtomicU8, 0xcb>,
     pub cpl: PAtomicU8,
     _reserved2: Array<PAtomicU8, 0x74>,
@@ -336,8 +336,8 @@ pub struct GuestHostCommucationBlock {
 
 // TODO: This should be integrated into GHCB related APIs; no rush now.
 with_permission! {
-    GuestHostCommucationBlock,
-    self_perm: DekoPointsTo<GuestHostCommucationBlock>,
+    GuestHostCommunicationBlock,
+    self_perm: DekoPointsTo<GuestHostCommunicationBlock>,
     cpl_perm: PermissionU8,
     xss_perm: PermissionU64,
     dr7_perm: PermissionU64,
@@ -357,7 +357,7 @@ with_permission! {
     shared_buffer_perm: Ghost<Seq<PermissionU8>>,
 }
 
-impl WellFormed for GuestHostCommucationBlock {
+impl WellFormed for GuestHostCommunicationBlock {
     closed spec fn wf(&self) -> bool {
         &&& self.shared_buffer.wf()
     }
@@ -393,7 +393,7 @@ ghcb_setter!(set_ghcb_usage, ghcb_usage, u32, PermissionU32);
 
 ghcb_setter!(set_ghcb_protocol_version, ghcb_protocol_version, u16, PermissionU16);
 
-impl GuestHostCommucationBlock {
+impl GuestHostCommunicationBlock {
     pub closed spec fn valid_bitmap(&self) -> Array<PAtomicU64, 0x2> {
         self.valid_bitmap
     }
@@ -562,6 +562,25 @@ impl GuestHostCommucationBlock {
         Tracked(perm)
     }
 
+    pub fn hv_ipi(
+        ptr: DekoPPtr<Self>,
+        Tracked(perm): Tracked<DekoPointsTo<Self>>,
+        icr: u64,
+    ) -> (r: Tracked<DekoPointsTo<Self>>)
+        requires
+            perm.wf(),
+            perm.is_init(),
+            perm.pptr() == ptr@,
+        ensures
+            r@.wf(),
+            r@.is_init(),
+            r@.pptr() == ptr@,
+    {
+        let Tracked(perm) = Self::clear(ptr, Tracked(perm));
+
+        Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::HV_IPI, icr, 0)
+    }
+
     pub fn rdmsr(
         ptr: DekoPPtr<Self>,
         Tracked(perm): Tracked<DekoPointsTo<Self>>,
@@ -603,8 +622,8 @@ impl GuestHostCommucationBlock {
 
         let Tracked(perm) = Self::clear(ptr, Tracked(perm));
         let Tracked(perm) = Self::set_rcx(ptr, Tracked(perm), msr_index as _);
-        let Tracked(perm) = Self::set_rax(ptr, Tracked(perm), val_high);
-        let Tracked(perm) = Self::set_rdx(ptr, Tracked(perm), val_low);
+        let Tracked(perm) = Self::set_rax(ptr, Tracked(perm), val_low);
+        let Tracked(perm) = Self::set_rdx(ptr, Tracked(perm), val_high);
         let Tracked(perm) = Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::MSR, 1, 0);
 
         Tracked(perm)

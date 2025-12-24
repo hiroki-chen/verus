@@ -299,7 +299,6 @@ with_atomic_pred! {
     perm_fields: { },
     data.wf()
 }
-
 impl WellFormed for Idt {
     open spec fn wf(&self) -> bool {
         &&& self.entries.wf()

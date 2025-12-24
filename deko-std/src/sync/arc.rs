@@ -564,6 +564,26 @@ impl<V: WellFormed, F: Predicate<V>> Arc<V, F> {
             ),
         )
     }
+
+    /// Decreases the strong reference count. If the strong reference count
+    /// reaches zero, the inner value is dropped and the allocation is freed.
+    /// This function consumes the [`Arc`].
+    ///
+    /// Unfotunately [`Drop`] is not yet fully supported in Verus since we
+    /// cannot open any invariant inside the `drop` function. Therefore,
+    /// we provide this `free` function that should be called explicitly
+    /// to free the resources held by the [`Arc`].
+    #[verifier::exec_allows_no_decreases_clause]
+    pub fn free(self)
+        requires
+            self.wf(),
+    {
+        proof {
+            use_type_invariant(&self);
+        }
+
+        // TODO:
+    }
 }
 
 impl<V: WellFormed, F: Predicate<V>> AsRefSpecImpl<V> for Arc<V, F> {

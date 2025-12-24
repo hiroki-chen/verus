@@ -135,14 +135,14 @@ pub fn get_current_cpu_id() -> u64
     // Use unsafe access to directly read from the per-CPU area
     unsafe {
         // THIS MIGHT FAIL... let us think about a better way later.
-        // let cpu_ptr = PERCPU_BASE.0 as *const crate::cpu::DekoCpuCtx;
-        // if !cpu_ptr.is_null() {
-        //     // Verify magic number to ensure validity
-        //     let magic = (*cpu_ptr).magic;
-        //     if magic == crate::cpu::CPU_AREA_MAGIC {
-        //         return (*cpu_ptr).cpu_id;
-        //     }
-        // }
+        let cpu_ptr = PERCPU_BASE.0 as *const crate::cpu::DekoCpuCtx;
+        if !cpu_ptr.is_null() {
+            // Verify magic number to ensure validity
+            let magic = (*cpu_ptr).magic;
+            if magic == crate::cpu::CPU_AREA_MAGIC {
+                return (*cpu_ptr).cpu_id;
+            }
+        }
         0  // Fallback to CPU 0 if we can't get the current CPU
 
     }

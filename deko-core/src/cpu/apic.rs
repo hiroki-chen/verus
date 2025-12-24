@@ -1,10 +1,12 @@
 use deko_macros::DekoDebug;
+use deko_std::bits::bit_u64_and_auto;
 use deko_std::boxed::Box;
 use deko_std::ptr::DekoPPtr;
 use deko_std::wf::WellFormed;
 use vstd::prelude::*;
 
-use crate::imp::wrmsr;
+use crate::imp::ghcb::GuestHostCommunicationBlock;
+use crate::imp::{wrmsr, SnpStatusFlags, REST_INJ};
 use crate::snp::rdmsr;
 use crate::{kdebug, kwarn};
 
@@ -36,6 +38,9 @@ pub const APIC_OFFSET_ICR: usize = 0x30;
 /// SELF-IPI register MSR offset (x2APIC only)
 pub const APIC_OFFSET_SELF_IPI: usize = 0x3F;
 
+/// Software Enable bit mask for Spurious Interrupt Vector Register
+pub const APIC_SPIV_SW_ENABLE_MASK: u64 = 1 << 8;
+
 /// Represents the Local APIC of a CPU.
 pub trait Apic: deko_std::fmt::DekoDebug + WellFormed {
     /// Reads the APIC ID.
@@ -56,10 +61,15 @@ pub trait Apic: deko_std::fmt::DekoDebug + WellFormed {
     ;
 
     /// Writes `value` to the APIC register at `reg`.
-    fn apic_write(&self, reg: u32, value: u32)
+    fn apic_write(&self, reg: u32, value: u64)
         requires
             self.wf(),
             reg <= 0xFF,
+    ;
+
+    fn spiv_write(&self, vector: u8, enable: bool)
+        requires
+            self.wf(),
     ;
 
     /// Reads the APIC register at `reg`.
@@ -73,8 +83,20 @@ pub trait Apic: deko_std::fmt::DekoDebug + WellFormed {
         requires
             self.wf(),
     {
-        self.apic_write(APIC_OFFSET_ICR as u32, low);
-        self.apic_write((APIC_OFFSET_ICR + 1) as u32, high);
+        broadcast use SnpStatusFlags::lemma_each_bit_is_valid;
+
+        if SnpStatusFlags::get_status().contains(REST_INJ) {
+            kdebug!("RESTRICTED INJ");
+            // Forward this to HV doorbell.
+            let (ghcb, Tracked(perm)) = crate::snp::ghcb::current_ghcb();
+            GuestHostCommunicationBlock::hv_ipi(
+                ghcb,
+                Tracked(perm),
+                (low as u64 | ((high as u64) << 32)),
+            );
+        } else {
+            self.apic_write(APIC_OFFSET_ICR as u32, (low as u64 | ((high as u64) << 32)));
+        }
     }
 
     /// End of Interrupt signal to the APIC.
@@ -98,22 +120,32 @@ impl Apic for X86Apic {
         kdebug!("Updating APIC base MSR to:", new_value => hex);
 
         if current_value != new_value {
-            wrmsr(MSR_APIC_BASE, current_value);
+            wrmsr(MSR_APIC_BASE, new_value);
         } else {
             kwarn!("APIC base MSR already has the desired value: {:#x}", new_value);
         }
     }
 
-    fn apic_write(&self, reg: u32, value: u32) {
+    fn apic_write(&self, reg: u32, value: u64) {
         let msr = MSR_X2APIC_BASE + reg;
 
-        wrmsr(msr, value as u64);
+        wrmsr(msr, value);
     }
 
     fn apic_read(&self, reg: u32) -> u32 {
         let msr = MSR_X2APIC_BASE + reg;
 
         rdmsr(msr) as u32
+    }
+
+    fn spiv_write(&self, vector: u8, enable: bool) {
+        let apic_spiv = if enable {
+            APIC_SPIV_SW_ENABLE_MASK
+        } else {
+            0
+        } | ((vector as u64) & 0xFF);
+
+        self.apic_write(APIC_OFFSET_SPIV as u32, apic_spiv);
     }
 }
 
@@ -125,9 +157,15 @@ impl WellFormed for X86Apic {
 
 impl X86Apic {
     /// Enables the x2APIC mode in the APIC.
+    #[inline]
     pub fn enable(&self) {
         let enable = 0x800 | 0x400;
         self.apic_base(!enable, enable);
+    }
+
+    #[inline]
+    pub fn sw_enable(&self) {
+        self.spiv_write(0xFF, true);
     }
 }
 

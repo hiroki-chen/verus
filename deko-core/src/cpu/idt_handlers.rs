@@ -7,6 +7,45 @@ use crate::{die, kdebug, kerror, kinfo};
 
 verus! {
 
+const PF_ERRNO_PRESENT: u64 = 1 << 0;
+
+const PF_ERRNO_WRITE: u64 = 1 << 1;
+
+const PF_ERRNO_USER: u64 = 1 << 2;
+
+const PF_ERRNO_RSVD: u64 = 1 << 3;
+
+const PF_ERRNO_INSTR: u64 = 1 << 4;
+
+pub fn pretty_pf_errno(errno: u64) {
+    crate::kinfo!("Page Fault Error Code: ", errno => hex);
+
+    if errno & PF_ERRNO_PRESENT != 0 {
+        crate::kinfo!("  - caused by a page-protection violation");
+    } else {
+        crate::kinfo!("  - caused by a non-present page");
+    }
+
+    if errno & PF_ERRNO_WRITE != 0 {
+        crate::kinfo!("  - caused by a write access");
+    } else {
+        crate::kinfo!("  - caused by a read access");
+    }
+
+    if errno & PF_ERRNO_USER != 0 {
+        crate::kinfo!("  - occurred in user mode");
+    } else {
+        crate::kinfo!("  - occurred in supervisor mode");
+    }
+
+    if errno & PF_ERRNO_RSVD != 0 {
+        crate::kinfo!("  - caused by reserved bits being set to 1");
+    }
+    if errno & PF_ERRNO_INSTR != 0 {
+        crate::kinfo!("  - caused by an instruction fetch");
+    }
+}
+
 #[no_mangle]
 #[verus_spec(
 
@@ -44,7 +83,7 @@ unsafe extern "C" fn ex_handler_page_fault_early() {
 unsafe extern "C" fn ex_handler_page_fault(ctx: &mut X86ExceptionContext) {
     let errno = ctx.error_code;
     let cr2 = crate::cpu::regs::read_cr2();
-    kinfo!("page fault error code:", errno => hex);
+    pretty_pf_errno(errno as _);
     kinfo!("faulting address (CR2):", cr2 => hex);
 
     kinfo!("context:", ctx);

@@ -1,15 +1,16 @@
 use deko_macros::{with_atomic_pred, DekoDebug};
 use deko_std::address::VirtAddr;
 use deko_std::mem::PAGE_SIZE;
-use deko_std::ptr::{DekoPPtr, DekoPointsTo};
+use deko_std::ptr::{DekoPPtr, DekoPPtrPred, DekoPointsTo};
+use deko_std::sync::{DekoAtomicData, DekoRwLock};
 use deko_std::wf::WellFormed;
 use deko_std::{boxed_ptr, with_permission};
 use vstd::prelude::*;
 
-use crate::cpu::DekoCpuCtx;
-use crate::kpanic_if;
-use crate::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR};
-use crate::snp::ghcb::{current_ghcb, GuestHostCommucationBlock};
+use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
+use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR};
+use crate::snp::ghcb::{current_ghcb, GuestHostCommunicationBlock};
+use crate::{die, kerror, kpanic_if};
 
 verus! {
 
@@ -34,7 +35,7 @@ impl WellFormed for HVExtIntInfo {
 ///
 /// # Note
 ///
-/// This struct needs to be protected via a lock.
+/// This struct needs to be protected via a _lock_.
 #[repr(C)]
 #[derive(DekoDebug)]
 pub struct HVDoorbell {
@@ -71,15 +72,9 @@ impl HVDoorbell {
     /// Consults the frame allocator and gets a new allocated [`HVDoorbell`] structure.
     ///
     /// The returned pointer is aligned to page size.
-    #[verus_spec(r =>
-        with
-            -> perm: Tracked<DekoPointsTo<Self>>,
-        ensures
-            perm@.wf(),
-            perm@.pptr() == r@,
-    )]
-    pub fn allocate() -> DekoPPtr<Self> {
-        let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    #[verus_spec()]
+    pub fn allocate() {
+        let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
 
         let cpu_borrowed = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
         let private_bit = cpu_borrowed.private_bit();
@@ -99,15 +94,21 @@ impl HVDoorbell {
             "HVDoorbell physical address is not page-aligned!"
         );
 
+        let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
+        cpu_taken.doorbell = Some(
+            DekoRwLock::new(
+                DekoAtomicData::new_with(doorbell_ptr, Tracked(perm)),
+                (),
+                Ghost(DekoPPtrPred {  }),
+            ),
+        );
+
         // Then we register the doorbell with the GHCB.
-        GuestHostCommucationBlock::register_hv_doorbell(
+        GuestHostCommunicationBlock::register_hv_doorbell(
             ghcb,
             Tracked(cpu_perm.ghcb_perm),
             doorbell_paddr,
         );
-
-        proof_with!(|= Tracked(perm));
-        doorbell_ptr
     }
 }
 

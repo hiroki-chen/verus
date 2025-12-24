@@ -556,6 +556,80 @@ impl<V: WellFormed> LinkedList<V> {
             },
         }
     }
+
+    pub fn push_back_no_alloc(&mut self, v: DekoPPtr<Node<V>>, perm: Tracked<DekoPointsTo<Node<V>>>)
+        requires
+            old(self).wf(),
+            old(self)@.len() < usize::MAX,
+            perm@.wf(),
+            perm@.value().wf(),
+            perm@.is_init(),
+            v@ == perm@.pptr(),
+        ensures
+            self.wf(),
+            self@ =~= old(self)@.insert(old(self)@.len() as int, perm@.value().value),
+            self.inner@.ptrs == (old(self).inner@.ptrs).add(seq![v]),
+    {
+        let Tracked(mut points_to) = perm;
+        let val = v.take(Tracked(&mut points_to));
+
+        match self.tail {
+            None => {
+                v.write(Tracked(&mut points_to), Node { prev: None, next: None, value: val.value });
+
+                self.push_empty(v, Tracked(points_to));
+            },
+            Some(old_tail_ptr) => {
+                proof {
+                    assert(self.inner@.ptrs.len() > 0);
+                    assert(self.node_wf_at((self.inner@.ptrs.len() - 1) as nat));
+                }
+                self.len = self.len + 1;
+
+                // Now we update the node pointers.
+                v.write(
+                    Tracked(&mut points_to),
+                    Node { prev: Some(old_tail_ptr), next: None, value: val.value },
+                );
+
+                assert(self.inner@.perms.dom().contains((self.inner@.ptrs.len() - 1) as nat));
+                let tracked mut old_tail_points_to = self.inner.borrow_mut().perms.tracked_remove(
+                    (self.inner@.ptrs.len() - 1) as nat,
+                );
+                assert(!self.inner@.perms.dom().contains((self.inner@.ptrs.len() - 1) as nat));
+                let mut old_tail_node = old_tail_ptr.take(Tracked(&mut old_tail_points_to));
+                old_tail_node.next = Some(v);
+                old_tail_ptr.write(Tracked(&mut old_tail_points_to), old_tail_node);
+                proof {
+                    // Update the ghost states.
+                    self.inner.borrow_mut().perms.tracked_insert(
+                        (self.inner@.ptrs.len() - 1) as nat,
+                        old_tail_points_to,
+                    );
+                }
+                self.tail = Some(v);
+
+                // Simultaneously, we update the ghost states.
+                // This is simpler than push_front because we do not need to shift any keys.
+                proof {
+                    self.inner.borrow_mut().ptrs.tracked_push(v);
+                    self.inner.borrow_mut().perms.tracked_insert(
+                        (self.inner@.ptrs.len() - 1) as nat,
+                        points_to,
+                    );
+
+                    assert(self@ =~= old(self)@.insert(
+                        old(self)@.len() as int,
+                        perm@.value().value,
+                    ));
+                    assert(self.node_wf_at((self.inner@.ptrs.len() - 1) as nat));
+                    assert(forall|i: nat|
+                        0 <= i <= old(self).inner@.ptrs.len() && old(self).node_wf_at(i)
+                            ==> #[trigger] self.node_wf_at(i));
+                }
+            },
+        }
+    }
 }
 
 impl<V: WellFormed> WellFormed for LinkedList<V> {

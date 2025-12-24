@@ -409,7 +409,7 @@
     irq_ipi_handler:
         pushq	$0
         push_regs
-        movl	$80, %esi
+        movl	$224, %esi
         movq	%rsp, %rdi
         xorl	%edx, %edx
         call	ex_handler_irq_ipi
@@ -419,7 +419,7 @@
     irq_int_inj_handler:
         pushq	$0
         push_regs
-        movl	$224, %esi
+        movl	$80, %esi
         movq	%rsp, %rdi
         xorl	%edx, %edx
         call	ex_handler_irq_int_inj

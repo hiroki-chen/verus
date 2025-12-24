@@ -28,8 +28,10 @@ context_switch:
   jz      1f
 
   movq    %r12, %rax
-  addq    %r11, %rax   // pre + offset_of(rsp)
-  movq    %rsp, (%rax)  # save current rsp into pre->rsp
+  addq    %r11, %rax    // pre + offset_of(rsp)
+  movq    %rsp, (%rax)  // save current rsp into pre->rsp
+  // Switch to a stack pointer that should be mapped on
+  // both tasks' page tables.
   mov     %r14, %rsp
 
 1:

@@ -32,7 +32,7 @@ use deko_core::mm::vm::{
     VMR_GRANULE,
 };
 use deko_core::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR};
-use deko_core::snp::ghcb::GuestHostCommucationBlock;
+use deko_core::snp::ghcb::GuestHostCommunicationBlock;
 use deko_core::snp::logging::init_ghcb_logging;
 use deko_core::snp::req::init_snp_guest_driver;
 use deko_core::snp::{init_guest_host, init_secrets_page, prepare_guest_fw, setup_apic};

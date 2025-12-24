@@ -23,7 +23,7 @@ use crate::mm::{
     init_guest_mmap, phys_to_virt, virt_to_phys, PageEncryptionMasks, DEKO_FRAME_ALLOCATOR,
     FEATURE_MASK, MAX_PHYS_ADDR, PHYS_ADDR_SIZE, PTE_MASK_PRIVATE, PTE_MASK_SHARED,
 };
-use crate::snp::ghcb::{current_ghcb, msr_register_ghcb_gpa, GuestHostCommucationBlock};
+use crate::snp::ghcb::{current_ghcb, msr_register_ghcb_gpa, GuestHostCommunicationBlock};
 use crate::{
     die, kdebug, kerror, kinfo, kpanic_if, kwarn, vec, DekoKernelLaunchInfo, Stage2LaunchInfo,
 };
@@ -502,7 +502,7 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
     // Get the page table from the context that was passed in
     let bsp_pgtable = ctx.borrow(Tracked(&ctx_perm.deko_ctx_ptr_perm)).pgtable;
     let tracked bsp_pgtable_perm = &ctx_perm.pgtable_perm;
-    let (ghcb, Tracked(ghcb_perm)) = Box::<GuestHostCommucationBlock>::new_zeroed(
+    let (ghcb, Tracked(ghcb_perm)) = Box::<GuestHostCommunicationBlock>::new_zeroed(
         &DEKO_FRAME_ALLOCATOR.0,
     );
     let (ghcb, Tracked(ghcb_perm)) = ghcb.into_ptr(Tracked(ghcb_perm));
@@ -719,7 +719,7 @@ pub fn rmpadjust(
 pub fn rdmsr(msr: u32) -> u64 {
     let (ghcb, Tracked(perm)) = current_ghcb();
 
-    let (high, low, _) = GuestHostCommucationBlock::rdmsr(ghcb, Tracked(perm), msr);
+    let (low, high, _) = GuestHostCommunicationBlock::rdmsr(ghcb, Tracked(perm), msr);
 
     ((high as u64) << 32) | (low as u64)
 }
@@ -727,10 +727,12 @@ pub fn rdmsr(msr: u32) -> u64 {
 pub fn wrmsr(msr: u32, value: u64) {
     let (ghcb, Tracked(perm)) = current_ghcb();
 
-    let low = (value & 0xffff_ffff) as u32;
+    let low = value as u32;
     let high = (value >> 32) as u32;
 
-    GuestHostCommucationBlock::wrmsr(ghcb, Tracked(perm), msr, high, low);
+    kinfo!("WRMSR: msr=", msr, ", value=", value=>hex, " (high=", high=>hex, ", low=", low=>hex, ")");
+
+    GuestHostCommunicationBlock::wrmsr(ghcb, Tracked(perm), msr, high, low);
 }
 
 /// Sets up the local APIC for the current CPU.
@@ -741,10 +743,20 @@ pub fn setup_apic(ctx: DekoPPtr<DekoCpuCtx>, Tracked(ctx_perm): Tracked<&mut Dek
         ctx_perm.wf_with(ctx),
         ctx_perm.ptr_perm == old(ctx_perm).ptr_perm,
 {
+    broadcast use SnpStatusFlags::lemma_each_bit_is_valid;
+    // Use the restricted interrupt mode.
+
+    if SnpStatusFlags::get_status().contains(REST_INJ) {
+        kinfo!("SNP: Using restricted interrupt mode");
+
+        doorbell::HVDoorbell::allocate();
+    }
     let apic = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).apic();
 
     // Enable x2APIC mode
     apic.enable();
+    // Enable the Spurious Interrupt Vector
+    apic.sw_enable();
 }
 
 // verus!
@@ -788,25 +800,25 @@ impl SnpStatusFlags {
 #[inline]
 pub fn outw(port: u16, val: u16) {
     let (ghcb, Tracked(perm)) = current_ghcb();
-    GuestHostCommucationBlock::ioout(ghcb, Tracked(perm), port, val as _, 2);
+    GuestHostCommunicationBlock::ioout(ghcb, Tracked(perm), port, val as _, 2);
 }
 
 #[inline]
 pub fn inb(port: u16) -> u8 {
     let (ghcb, Tracked(perm)) = current_ghcb();
-    GuestHostCommucationBlock::ioin(ghcb, Tracked(perm), port, 1) as u8
+    GuestHostCommunicationBlock::ioin(ghcb, Tracked(perm), port, 1) as u8
 }
 
 #[inline]
 pub fn inw(port: u16) -> u16 {
     let (ghcb, Tracked(perm)) = current_ghcb();
-    GuestHostCommucationBlock::ioin(ghcb, Tracked(perm), port, 2) as u16
+    GuestHostCommunicationBlock::ioin(ghcb, Tracked(perm), port, 2) as u16
 }
 
 #[inline]
 pub fn inl(port: u16) -> u32 {
     let (ghcb, Tracked(perm)) = current_ghcb();
-    GuestHostCommucationBlock::ioin(ghcb, Tracked(perm), port, 3) as u32
+    GuestHostCommunicationBlock::ioin(ghcb, Tracked(perm), port, 3) as u32
 }
 
 #[derive(DekoDebug)]
@@ -1205,7 +1217,7 @@ fn validate_fw_memories(
             // Consultb the GHCB for page state change.
             if need_page_change {
                 let (ghcb, Tracked(perm)) = current_ghcb();
-                GuestHostCommucationBlock::pstate_change(
+                GuestHostCommunicationBlock::pstate_change(
                     ghcb,
                     Tracked(perm),
                     this.clone(),
@@ -1408,7 +1420,7 @@ pub fn launch_guest_fw(header: &DekoKernelLaunchInfo) {
 )]
 pub fn page_state_change(mm: PaddrRange, op: PageStateChangeOp) {
     let (ghcb, Tracked(perm)) = current_ghcb();
-    GuestHostCommucationBlock::pstate_change(ghcb, Tracked(perm), mm, op);
+    GuestHostCommunicationBlock::pstate_change(ghcb, Tracked(perm), mm, op);
 }
 
 #[inline]
