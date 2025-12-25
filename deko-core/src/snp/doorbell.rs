@@ -7,6 +7,7 @@ use deko_std::ptr::{DekoPPtr, DekoPPtrPred, DekoPointsTo};
 use deko_std::sync::{DekoAtomicData, DekoRwLock};
 use deko_std::wf::WellFormed;
 use deko_std::{boxed_ptr, with_permission};
+use vstd::atomic::{PAtomicU8, PermissionU8};
 use vstd::prelude::*;
 
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
@@ -23,17 +24,30 @@ extern "C" {
 
 verus! {
 
-/// This is a trick to obtain the different HV doorbell pages from the same virtual address.
-/// This is because CPU will always map itself to the fixed address and the address of the
-/// doorbell's pointer remains the same across different CPUs.
+/// Initializes the global address of the per-CPU `HVDoorbell` pointer slot.
+///
+/// Each vCPU maps its own SNP doorbell page at the same *virtual* address.
+/// To access the current CPU's doorbell without carrying a per-CPU pointer
+/// everywhere, we cache the address of the per-CPU storage slot
+/// (`DekoAtomicData<...>::data`) in `HV_DOORBELL_ADDR`.
+///
+/// The *address of the slot* is invariant across CPUs (same kernel image / same
+/// virtual layout), while the slot's *contents* resolve to the current CPU’s
+/// doorbell page via per-CPU mapping.
+///
+/// # Safety
+/// - `ptr` must be valid, properly aligned, and point to a long-lived (static)
+///   `DekoAtomicData` that remains mapped for the lifetime of the kernel.
+/// - Must be called during early boot before any code reads `HV_DOORBELL_ADDR`,
+///   or must be otherwise synchronized to avoid concurrent initialization.
 #[verifier::external_body]
 #[inline]
 pub fn init_hv_doorbell(
-    ptr: vstd::simple_pptr::PPtr<DekoAtomicData<DekoPPtr<HVDoorbell>, DekoPointsTo<HVDoorbell>>>,
+    ptr: vstd::simple_pptr::PPtr<DekoAtomicData<DekoPPtr<HVDoorbell>, HvDoorbellPtrPermission>>,
 ) {
     unsafe {
         HV_DOORBELL_ADDR =
-        addr_of!((*(ptr.addr() as *const DekoAtomicData<DekoPPtr<HVDoorbell>, DekoPointsTo<HVDoorbell>>)).data) as usize;
+        addr_of!((*(ptr.addr() as *const DekoAtomicData<DekoPPtr<HVDoorbell>, HvDoorbellPtrPermission>)).data) as usize;
     }
 }
 
@@ -60,13 +74,12 @@ impl WellFormed for HVExtIntInfo {
 ///
 /// This struct needs to be protected via a _lock_.
 #[repr(C)]
-#[derive(DekoDebug)]
 pub struct HVDoorbell {
-    pub vector: u8,
-    pub flags: u8,
-    pub no_eoi_required: u8,
-    pub per_vmpl_events: u8,
-    pub reserved_: [u8; 60],
+    pub vector: PAtomicU8,
+    pub flags: PAtomicU8,
+    pub no_eoi_required: PAtomicU8,
+    pub per_vmpl_events: PAtomicU8,
+    pub reserved_: [u8; 60],  // not used.
     pub per_vmpl: [HVExtIntInfo; 3],
 }
 
@@ -76,18 +89,76 @@ impl WellFormed for HVDoorbell {
     }
 }
 
+#[verus_verify]
+impl HVDoorbell {
+    #[verus_spec(r =>
+        with
+            -> perm: Tracked<HVDoorbellPermission>,
+        ensures
+            r.wf(),
+            perm@.vector_perm.is_for(r.vector),
+            perm@.flags_perm.is_for(r.flags),
+            perm@.no_eoi_required_perm.is_for(r.no_eoi_required),
+            perm@.per_vmpl_events_perm.is_for(r.per_vmpl_events),
+    )]
+    pub fn new() -> Self {
+        let (vector, Tracked(vector_perm)) = PAtomicU8::new(0);
+        let (flags, Tracked(flags_perm)) = PAtomicU8::new(0);
+        let (no_eoi_required, Tracked(no_eoi_required_perm)) = PAtomicU8::new(0);
+        let (per_vmpl_events, Tracked(per_vmpl_events_perm)) = PAtomicU8::new(0);
+
+        proof_with!(|= Tracked(
+            HVDoorbellPermission {
+                vector_perm,
+                flags_perm,
+                no_eoi_required_perm,
+                per_vmpl_events_perm,
+            }
+        ));
+        Self {
+            vector,
+            flags,
+            no_eoi_required,
+            per_vmpl_events,
+            reserved_: [0;60],
+            // DO this later.
+            per_vmpl: [
+                HVExtIntInfo { status: 0, irr: [0;7], isr: [0;8] },
+                HVExtIntInfo { status: 0, irr: [0;7], isr: [0;8] },
+                HVExtIntInfo { status: 0, irr: [0;7], isr: [0;8] },
+            ],
+        }
+    }
+}
+
 with_permission! {
     HVDoorbell,
+    vector_perm: PermissionU8,
+    flags_perm: PermissionU8,
+    no_eoi_required_perm: PermissionU8,
+    per_vmpl_events_perm: PermissionU8,
 }
-// FIXME: This is probably not sufficient for now.
 
+pub tracked struct HvDoorbellPtrPermission {
+    pub hv_perm: HVDoorbellPermission,
+    pub ptr_perm: DekoPointsTo<HVDoorbell>,
+}
+
+type HvDoorbellPtr = DekoPPtr<HVDoorbell>;
 
 with_atomic_pred! {
-    HVDoorbell,
-    HVDoorbellPermission,
+    HvDoorbellPtr,
+    HvDoorbellPtrPermission,
     fields: { },
-    perm_fields: { },
-    true
+    perm_fields: { hv_perm, ptr_perm },
+
+    ptr_perm.pptr() == data.view() &&
+    ptr_perm.is_init() &&
+    ptr_perm.wf() &&
+    hv_perm.vector_perm.is_for(ptr_perm.value().vector) &&
+    hv_perm.flags_perm.is_for(ptr_perm.value().flags) &&
+    hv_perm.no_eoi_required_perm.is_for(ptr_perm.value().no_eoi_required) &&
+    hv_perm.per_vmpl_events_perm.is_for(ptr_perm.value().per_vmpl_events)
 }
 
 #[verus_verify]
@@ -107,6 +178,9 @@ impl HVDoorbell {
         // Note that HVDoorBell needs to be shared.
         let (doorbell_ptr, Tracked(perm)) = boxed_ptr!(HVDoorbell, &DEKO_FRAME_ALLOCATOR.0);
         let vaddr = VirtAddr::new(doorbell_ptr.addr() as u64);
+
+        proof_with!(=> Tracked(doorbell_perm));
+        let doorbell = HVDoorbell::new();
 
         PageTable::make_page_shared_4k(
             cpu_borrowed.pgtable,
@@ -140,12 +214,13 @@ impl HVDoorbell {
             doorbell_paddr,
         );
 
+        let tracked db_perm = HvDoorbellPtrPermission { hv_perm: doorbell_perm, ptr_perm: perm };
         let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
         cpu_taken.doorbell = Some(
             DekoRwLock::new(
-                DekoAtomicData::new_with(doorbell_ptr, Tracked(perm)),
+                DekoAtomicData::new_with(doorbell_ptr, Tracked(db_perm)),
                 (),
-                Ghost(DekoPPtrPred {  }),
+                Ghost(HvDoorbellPtrPred {  }),
             ),
         );
 
@@ -162,19 +237,73 @@ impl HVDoorbell {
     }
 }
 
+/// Handle a Restricted-Injection `#HV` doorbell notification.
+///
+/// In SEV-SNP Restricted Injection mode, the hypervisor cannot inject arbitrary
+/// interrupt vectors directly. Instead, it signals pending events by injecting
+/// `#HV` (vector 28) and writing the actual pending event (e.g., an IPI vector)
+/// into the per-vCPU doorbell page (`hvdb`).
+///
+/// This handler is entered from the `#HV` IDT gate and is responsible for:
+/// - Acknowledging the doorbell by atomically reading/clearing the pending
+///   state in the doorbell page (to allow future notifications).
+/// - Decoding the pending event and dispatching it to the appropriate internal
+///   interrupt/event handler (e.g., IPI, kick, timer, etc.).
+/// - Performing any required end-of-interrupt bookkeeping (if the doorbell
+///   indicates EOI assist / no-EOI-required semantics).
+///
+/// # Safety
+/// - Must be callable from interrupt context.
+/// - `hvdb` must point to the per-vCPU doorbell page and remain valid for the
+///   duration of the call.
+/// - The doorbell page must be mapped as shared/unencrypted (C=0) as required
+///   by the SNP GHCB doorbell mechanism.
+/// - Implementations must not block, allocate, or take locks that can deadlock
+///   in interrupt context.
 #[doc(hidden)]
 #[no_mangle]
 #[allow(improper_ctypes_definitions)]
+#[verifier::exec_allows_no_decreases_clause]
 #[verus_spec(r =>
     with
-        Tracked(hvdb_perm): Tracked<HVDoorbellPermission>,
+        Tracked(hvdb_perm): Tracked<HvDoorbellPtrPermission>,
     requires
-        // hvdb_perm.wf(),
-        // hvdb_perm.is_init(),
-        // hvdb.pptr() == hvdb@,
+        hvdb_perm.ptr_perm.pptr() == hvdb@,
+        hvdb_perm.ptr_perm.is_init(),
+        hvdb_perm.ptr_perm.wf(),
+
+        hvdb_perm.hv_perm.vector_perm.is_for(hvdb_perm.ptr_perm.value().vector),
+        hvdb_perm.hv_perm.flags_perm.is_for(hvdb_perm.ptr_perm.value().flags),
+        hvdb_perm.hv_perm.no_eoi_required_perm.is_for(hvdb_perm.ptr_perm.value().no_eoi_required),
+        hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb_perm.ptr_perm.value().per_vmpl_events),
 )]
 pub unsafe extern "C" fn handle_hv_doorbell(hvdb: DekoPPtr<HVDoorbell>) {
-    crate::kinfo!("test");
+    let tracked mut hvdb_perm = hvdb_perm;
+
+    let hvdb = hvdb.borrow(Tracked(&hvdb_perm.ptr_perm));
+
+    let vector = hvdb.vector.load(Tracked(&mut hvdb_perm.hv_perm.vector_perm));
+    let flags = hvdb.flags.load(Tracked(&mut hvdb_perm.hv_perm.flags_perm));
+
+    loop
+        invariant
+            hvdb_perm.hv_perm.vector_perm.is_for(hvdb.vector),
+    {
+        match hvdb.vector.compare_exchange_weak(
+            Tracked(&mut hvdb_perm.hv_perm.vector_perm),
+            vector,
+            0,
+        ) {
+            Ok(_) => {
+                // Successfully cleared the doorbell.
+                break ;
+            },
+            _ => {},
+        }
+    }
+
+    // crate::kinfo!("HV Doorbell interrupt received! vector: ", vector,);
+    // crate ::kinfo!("flags: ", flags,);
 
     // For now, we just panic.
     kpanic_if!(true, "Received HV Doorbell interrupt! Bye");

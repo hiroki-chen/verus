@@ -42,7 +42,7 @@ use crate::mm::vm::{
     VmMapping, VmMappingPred, VMR_GRANULE,
 };
 use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR};
-use crate::snp::doorbell::HVDoorbell;
+use crate::snp::doorbell::{HVDoorbell, HvDoorbellPtrPermission, HvDoorbellPtrPred};
 use crate::snp::ghcb::{validate_ghcb, GuestHostCommunicationBlock};
 use crate::snp::vmsa::{VmsaInitialContext, VmsaPage, VmsaPagePermission, VmsaPagePred};
 use crate::snp::Rmp_ALL_BITS;
@@ -458,7 +458,11 @@ pub struct DekoCpuCtx {
     /// The VMSA.
     pub deko_vmsa: DekoOnceCell<VmsaPage, VmsaPagePermission, VmsaPagePred>,
     /// The doorbell for SEV-SNP restricted interrupt mode.
-    pub doorbell: Option<DekoRwLock<DekoPPtr<HVDoorbell>, DekoPointsTo<HVDoorbell>, DekoPPtrPred>>,
+    ///
+    /// The lock only protects the pointer itself from other vCPUs.
+    pub doorbell: Option<
+        DekoRwLock<DekoPPtr<HVDoorbell>, HvDoorbellPtrPermission, HvDoorbellPtrPred>,
+    >,
 }
 
 with_permission! {

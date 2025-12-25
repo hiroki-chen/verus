@@ -34,41 +34,39 @@ idt_handler_ret:
 .globl hv_handler
 hv_handler:
   clac
-  call handle_hv_doorbell
 
-//     pushq 	$0
-//     pushq	  %rax
-//     pushq	  %rbx
-//     pushq	  %rcx
-//     // todo: check if any pending interrupts need to be handled.
+  pushq 	$0
+  pushq	  %rax
+  pushq	  %rbx
+  pushq	  %rcx
+    // todo: check if any pending interrupts need to be handled.
+.Lhv_handler_process_hv:
+  pushq	  %rdx
+	pushq	  %rsi
+	pushq	  %rdi
+	pushq 	%rbp
+	pushq	  %r8
+	pushq	  %r9
+	pushq	  %r10
+	pushq	  %r11
+	pushq	  %r12
+	pushq	  %r13
+	pushq	  %r14
+	pushq 	%r15
 
-// .Lhv_handler_process_hv:
-//   pushq	  %rdx
-// 	pushq	  %rsi
-// 	pushq	  %rdi
-// 	pushq 	%rbp
-// 	pushq	  %r8
-// 	pushq	  %r9
-// 	pushq	  %r10
-// 	pushq	  %r11
-// 	pushq	  %r12
-// 	pushq	  %r13
-// 	pushq	  %r14
-// 	pushq 	%r15
+  xorl	  %edx, %edx
+	// rdsspq	%rdx
+	pushq	  %rdx
 
-//   xorl	  %edx, %edx
-// 	// rdsspq	%rdx
-// 	pushq	  %rdx
+  // LOAD HV_DOORBELL_ADDR
+  movq    HV_DOORBELL_ADDR(%rip), %rsi
+  testq 	%rsi, %rsi
+  jz      default_return
+  movq    (%rsi), %rdi
+  testq 	%rdi, %rdi
+  jz      default_return
 
-//   // LOAD HV_DOORBELL_ADDR
-//   movq    HV_DOORBELL_ADDR(%rip), %rsi
-//   testq 	%rsi, %rsi
-//   jz      default_return
-//   movq    (%rsi), %rdi
-//   testq 	%rdi, %rdi
-//   jz      default_return
-
-//   call    handle_hv_doorbell
+  call    handle_hv_doorbell
 
 .globl default_return
 default_return:
