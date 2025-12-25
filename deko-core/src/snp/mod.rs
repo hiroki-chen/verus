@@ -23,6 +23,7 @@ use crate::mm::{
     init_guest_mmap, phys_to_virt, virt_to_phys, PageEncryptionMasks, DEKO_FRAME_ALLOCATOR,
     FEATURE_MASK, MAX_PHYS_ADDR, PHYS_ADDR_SIZE, PTE_MASK_PRIVATE, PTE_MASK_SHARED,
 };
+use crate::snp::doorbell::init_hv_doorbell;
 use crate::snp::ghcb::{current_ghcb, msr_register_ghcb_gpa, GuestHostCommunicationBlock};
 use crate::{
     die, kdebug, kerror, kinfo, kpanic_if, kwarn, vec, DekoKernelLaunchInfo, Stage2LaunchInfo,
@@ -431,6 +432,10 @@ pub fn validate_memory(
         }
 
         let (ret, cf) = pvalidate(addr.0, PAGE_SIZE, true, Tracked(&mut ctx_perm.pgtable_perm));
+
+        if ret != 0 || !cf {
+            return false;
+        }
         cur += PAGE_SIZE;
     }
 
@@ -581,7 +586,7 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
         ctx_perm.pgtable_perm.mapped_region(vrange),
         ctx_perm.pgtable_perm.mapping_space == old(ctx_perm).pgtable_perm.mapping_space,
 )]
-pub fn validate_vaddr_region(vrange: Range<VirtAddr>, validate: bool) {
+pub fn validate_vaddr_region(vrange: VaddrRange, validate: bool) {
     broadcast use vstd::arithmetic::div_mod::lemma_mod_equivalence;
 
     let mut cur = vrange.start.0;
@@ -613,7 +618,16 @@ pub fn validate_vaddr_region(vrange: Range<VirtAddr>, validate: bool) {
         proof {
             ctx_perm.pgtable_perm.lemma_mapped_region_implies_mapped(vrange, VirtAddr(cur));
         }
-        pvalidate(cur, PAGE_SIZE, validate, Tracked(&mut ctx_perm.pgtable_perm));
+        let (ret, changed) = pvalidate(
+            cur,
+            PAGE_SIZE,
+            validate,
+            Tracked(&mut ctx_perm.pgtable_perm),
+        );
+        if ret != 0 || !changed {
+            kerror!("RMPVALIDATE failed for vaddr regions");
+            die("RMPVALIDATE failed");
+        }
         proof {
             assert(forall|v: VirtAddr|
                 vrange.start@ <= v@ < vrange.end@ && v@ % PAGE_SIZE == 0
@@ -651,14 +665,13 @@ pub fn pvalidate(
         // old(pgtable_perm).shared_bit() == pgtable_perm.shared_bit(),
         old(pgtable_perm) == pgtable_perm,
 {
-    let rax = vaddr;
     let ret: u64;
     let rcx = if psize == PAGE_SIZE {
         RMP_4K
     } else {
         RMP_2M
     };
-    let cf: u64;
+    let changed: u8;
     let rdx = if validate {
         1
     } else {
@@ -667,18 +680,17 @@ pub fn pvalidate(
 
     unsafe {
         core::arch::asm!(
-            "xorq %r8, %r8",
             "pvalidate",
-            "adcq %r8, %r8",
-            in("rax")  rax,
+            "setc {cf}",
+            inlateout("rax") vaddr => ret,
             in("rcx")  rcx,
             in("rdx")  rdx,
-            lateout("rax") ret,
-            lateout("r8") cf,
-            options(att_syntax));
+            cf = out(reg_byte) changed,
+            options(att_syntax, nostack));
     }
 
-    (ret, cf != 0)
+    (ret, changed == 0)  // if cf == 0 then we are ok.
+
 }
 
 /// Adjusts the RMP entry for the given virtual address range => RMP can be used to
@@ -954,6 +966,20 @@ pub fn get_sev_fw_metadata(igvm_params: &IgvmParamBlock) -> Option<SevFWMetaData
     }
 }
 
+#[verifier::external_body]
+#[inline]
+pub fn flush_tlb() {
+    unsafe {
+        core::arch::asm!(
+            "invlpgb",
+            in("rax") 4u64,
+            in("rcx") 0u64,
+            in("rdx") 0u64,
+            options(att_syntax)
+        );
+    }
+}
+
 /// Performs the necessary preparations for launching guest boot firmware.
 ///
 /// This probes the IGVM parameters to locate the SEV firmware metadata
@@ -981,6 +1007,8 @@ pub fn prepare_guest_fw(
 ) {
     // Many things to be done inside the function.
     if let Some(fw_meta) = get_sev_fw_metadata(igvm_params.igvm_param_block) {
+        kdebug!("SEV FW Metadata found: ", fw_meta);
+
         // Now we need to make these pages accessible and mark them as valid in RMP.
         let mut memories = fw_meta.valid_mem.clone();
         if let Some(cpuid_page) = fw_meta.cpuid_page {
@@ -1183,7 +1211,7 @@ unsafe fn do_modify_fw_secrets_page(
         pgtable_perm.shared_bit == old(pgtable_perm).shared_bit,
         pgtable_perm.pgtable_perm == old(pgtable_perm).pgtable_perm,
 )]
-fn validate_fw_memories(
+pub(crate) fn validate_fw_memories(
     header: &DekoKernelLaunchInfo,
     igvm_params: &IgvmParams<'_>,
     memories: &[PaddrRange],
@@ -1223,6 +1251,8 @@ fn validate_fw_memories(
                     this.clone(),
                     PageStateChangeOp::Private,
                 );
+
+                kdebug!("Performed page state change to Private for firmware memory region:", this);
             }
             proof_with!(Tracked(pgtable_perm));
             validate_fw_memory_region(this.clone());
@@ -1286,10 +1316,9 @@ fn validate_fw_memory_region(prange: PaddrRange) {
         }
 
         // Then map these vaddrs into these paddrs.
-        // TODO: This seems inconsistent.
         let (r, changed) = pvalidate(temp_mapping.inner.start.0, PAGE_SIZE, true, Tracked(pgtable_perm));
         kpanic_if!(r != 0, "PVALIDATE failed for firmware memory validation at", PhysAddr(cur), "with return code", r);
-        kpanic_if!(!changed, "PVALIDATE CF indicates failure for firmware memory validation at", PhysAddr(cur));
+        kpanic_if!(!changed, "PVALIDATE CF indicates failure for firmware memory validation at", PhysAddr(cur), temp_mapping.inner,);
 
         let r = rmpadjust(temp_mapping.inner.start, PAGE_SIZE, flags, Tracked(pgtable_perm));
         kpanic_if!(r != 0, "RMPADJUST failed for firmware memory validation at", PhysAddr(cur), "with return code", r);

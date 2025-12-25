@@ -510,6 +510,12 @@ impl<'a, V, S: Spin, Pred: RwLockPredicate<V>> ReadHandle<'a, V, S, Pred> {
         ) && self.rwlock.wf()
     }
 
+    /// Borrows a pointer to the lock-protected object.
+    #[inline]
+    pub fn as_ptr(&self) -> (p: PPtr<V>) {
+        self.rwlock.cell.as_ptr()
+    }
+
     pub closed spec fn view(self) -> V {
         self.handle@.element().value()
     }

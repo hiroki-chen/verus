@@ -8,10 +8,12 @@ use vstd::{assert_by_contradiction, prelude::*};
 
 use super::DEKO_MAPPING_SPACE;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
-use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
+use crate::cpu::{flush_tlb_global, DekoCpuCtx, DekoCpuCtxPermission};
 use crate::elf::ElfFile;
-use crate::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR};
-use crate::{kdebug, kerror, kinfo, kunimplemented, kwarn, DekoKernelLaunchInfo, Stage2LaunchInfo};
+use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR};
+use crate::{
+    kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn, DekoKernelLaunchInfo, Stage2LaunchInfo,
+};
 
 extern "C" {
     #[link_name = "pgtable"]
@@ -1132,6 +1134,72 @@ impl Page {
         )
     }
 
+    /// Makes a virtual page shared by revoking its validation, updating the page state,
+    /// and modifying the page tables accordingly.
+    pub fn make_page_shared_4k(
+        ptr: DekoPPtr<Self>,
+        Tracked(perm): Tracked<&mut PageTablePermission>,
+        vaddr: VirtAddr,
+        ms: &MappingSpace,
+        private_bit: u64,
+        shared_bit: u64,
+    )
+        requires
+            old(perm).wf(),
+            old(perm).pgtable_perm.pptr() == ptr@,
+            old(perm).pgtable_perm.is_init(),
+            old(perm).mapped(vaddr),
+            vaddr.wf(),
+            vaddr@ % PAGE_SIZE == 0,
+            ms.wf(),
+            ms == old(perm).mapping_space,
+            private_bit == old(perm).private_bit,
+            shared_bit == old(perm).shared_bit,
+        ensures
+            perm.wf(),
+            perm.pgtable_perm.pptr() == old(perm).pgtable_perm.pptr(),
+            perm.mapping_space == old(perm).mapping_space,
+            perm.private_bit == old(perm).private_bit,
+            perm.shared_bit == old(
+                perm,
+            ).shared_bit,
+    // vaddr noe becomes shared
+
+    {
+        // Page validation must be revoked before changing it to shared.
+        let (ret, changed) = crate::imp::pvalidate(vaddr.0, PAGE_SIZE, false, Tracked(perm));
+
+        if ret != 0 {
+            kerror!("make_page_shared: pvalidate failed for vaddr", vaddr, "with error", ret,);
+            crate::die("");
+        }
+        if !changed {
+            kerror!("make_page_shared: pvalidate did not change anything for vaddr", vaddr,);
+            crate::die("");
+        }
+        let Some(paddr) = virt_to_phys_checked(private_bit, shared_bit, vaddr, Tracked(perm)) else {
+            kerror!("make_page_shared: cannot convert vaddr", vaddr, "to paddr",);
+            crate::die("");
+        };
+
+        kdebug!("make_page_shared: converting vaddr", vaddr, "to paddr", paddr,);
+
+        kpanic_if!(
+            core::hint::unlikely(paddr.0 >= 0x000f_ffff_ffff_f000u64 - PAGE_SIZE),
+            "make_page_shared: physical address overflow", paddr,
+        );
+
+        // Perform a state change.
+        crate::imp::page_state_change(
+            create_paddr_range(paddr, 1),
+            crate::imp::PageStateChangeOp::Shared,
+        );
+
+        PageTable::set_shared_4k(ptr, Tracked(perm), vaddr, ms, private_bit, shared_bit);
+
+        flush_tlb_global();
+    }
+
     /// This function lifts a pointer to a page table entry into a page.
     #[inline]
     pub fn from_entry(
@@ -2119,7 +2187,7 @@ impl Page {
             }
         }
 
-        flush_tlb();
+        crate::imp::flush_tlb();
     }
 
     // should we add vaddr as ghost param?
@@ -2197,6 +2265,8 @@ impl Page {
         let new_pte_value = PageTableEntry(
             PhysAddr(make_shared_address(pte, private_bit, shared_bit)),
         );
+
+        // kdebug!("Setting shared PTE at vaddr: ", vaddr, " from pte: ", entry, " to pte: ", new_pte_value);
         Page::update_entry_by_ptr(page, Tracked::assume_new(), idx, new_pte_value);
     }
 
@@ -2976,6 +3046,8 @@ impl PageTablePermission {
         &&& new_perm.mapping_space == self.mapping_space
         &&& new_perm.private_bit == self.private_bit
         &&& new_perm.shared_bit == self.shared_bit
+        &&& new_perm.pgtable_perm.pptr()
+            == self.pgtable_perm.pptr()
         // todo.
 
     }
@@ -4758,7 +4830,7 @@ pub(crate) fn map_and_validate(
         Tracked(&mut ctx_perm.pgtable_perm),
     );
 
-    kinfo!("Mapping done. Now validating...");
+    kinfo!("Mapping done. Now validating paddr", paddr);
 
     // Then validate these pages.
     #[verus_spec(with Tracked(ctx_perm))]

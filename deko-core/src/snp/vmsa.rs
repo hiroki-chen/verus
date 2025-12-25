@@ -296,6 +296,7 @@ impl VmsaInitialContext {
 
         let (gdt_base, gdt_limit) = GLOBAL_GDT.get_base_and_limit();
 
+        // Other APs will share the same IDT and GDT.
         let (idt_base, idt_limit) = match GLOBAL_IDT.get() {
             Some(DekoAtomicData { data: idt, perm: idt_perm }) => {
                 let idt = idt.borrow(Tracked(idt_perm.borrow()));

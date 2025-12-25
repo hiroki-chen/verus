@@ -7,13 +7,16 @@ use deko_std::boot::{
     ACPICPUInfo, ACPITable, ACPITableBuffer, ACPITableHeader, ACPITableMeta, IgvmParams, RSDPDesc,
     LOWMEM_END,
 };
-use deko_std::prelude::{PhysAddr, PAGE_SIZE};
+use deko_std::prelude::{create_paddr_range, PhysAddr, PAGE_SIZE};
 use deko_std::wf::WellFormed;
 use vstd::prelude::*;
 
 use crate::collections::{update_vec, Vec};
+use crate::cpu::DekoCpuCtx;
 use crate::mm::frame_allocator::DekoAllocatorApi;
-use crate::{die, kerror, kinfo, kpanic_if, kunimplemented, vec};
+use crate::mm::paging::PageTablePermission;
+use crate::mm::vm::TempMapping;
+use crate::{die, kerror, kinfo, kpanic_if, kunimplemented, vec, DekoKernelLaunchInfo};
 
 verus! {
 
@@ -385,6 +388,157 @@ pub fn get_fw_regions_from_igvm(igvm_params: &IgvmParams<'_>) -> Vec<PaddrRange>
         }
     }
     v
+}
+
+/// Invalidates the early-boot memory ranges that were used by the firmware.
+/// This keeps the system’s RMP state consistent while allowing those pages to be
+/// reclaimed later by the frame allocator.
+///
+/// # Notes
+/// - This function intentionally does **not** track or restore pages that may
+///   need to be re-validated at later boot stages. Any pages invalidated here
+///   are expected to be re-validated on demand when they are actually reused.
+/// - “Old memory” and “firmware memory” ranges may overlap (e.g., when the IGVM
+///   loader places firmware into low memory). To avoid duplicating overlap checks,
+///   we allow overlap here and handle correctness in later validation.
+///
+/// # Interaction with later validation
+/// In a later stage, [`crate::imp::validate_fw_memories`] performs the
+/// authoritative validation of firmware-occupied regions. If a page invalidated
+/// here is later (re-)validated (e.g., by a frame allocation path), then
+/// [`crate::imp::validate_fw_memories`] will detect the mismatch and panic.
+/// In that case, no page state change should occur.
+#[verus_spec(
+    with
+        Tracked(pgtable_perm): Tracked<&mut PageTablePermission>,
+    requires
+        header.wf(),
+        igvm_params.wf(),
+        old(pgtable_perm).wf(),
+    ensures
+        pgtable_perm.wf(),
+        pgtable_perm.pgtable_perm == old(pgtable_perm).pgtable_perm,
+        pgtable_perm.private_bit == old(pgtable_perm).private_bit,
+        pgtable_perm.shared_bit == old(pgtable_perm).shared_bit,
+        pgtable_perm.mapping_space == old(pgtable_perm).mapping_space,
+)]
+pub fn invalidate_early_boot_mem(header: &DekoKernelLaunchInfo, igvm_params: &IgvmParams<'_>) {
+    let need_psc = igvm_params.igvm_param_page.environment_info & 0x1 != 0;
+
+    // Read some old memories from the configuration.
+    if igvm_params.igvm_param_block.firmware.in_low_memory != 0 {
+        kinfo!("Invalidating low memory used by firmware [0x0 - 0x", LOWMEM_END => hex , ")");
+
+        proof_with!(Tracked(pgtable_perm));
+        invalidate_boot_memory(
+            header,
+            PaddrRange { start: PhysAddr(0), end: PhysAddr(LOWMEM_END as u64) },
+            need_psc,
+        );
+    }
+    proof_with!(Tracked(pgtable_perm));
+    invalidate_boot_memory(
+        header,
+        PaddrRange {
+            start: PhysAddr(header.stage2_start as u64),
+            end: PhysAddr(header.stage2_end as u64),
+        },
+        need_psc,
+    );
+
+    kpanic_if!(header.kernel_elf_stage2_virt_end >= 0x000f_ffff_ffff_f000u64,
+        "Invalid kernel ELF stage2 end address:", header.kernel_elf_stage2_virt_end);
+
+    proof_with!(Tracked(pgtable_perm));
+    invalidate_boot_memory(
+        header,
+        PaddrRange {
+            start: PhysAddr(header.kernel_elf_stage2_virt_start as u64),  // 1 - 1 mapping.
+            end: PhysAddr(header.kernel_elf_stage2_virt_end as u64),
+        },
+        need_psc,
+    );
+
+    if header.stage2_igvm_params_size != 0 {
+        proof_with!(Tracked(pgtable_perm));
+        invalidate_boot_memory(
+            header,
+            PaddrRange {
+                start: PhysAddr(header.stage2_igvm_params_phys_addr as u64),
+                end: PhysAddr(
+                    header.stage2_igvm_params_phys_addr as u64
+                        + header.stage2_igvm_params_size as u64,
+                ),
+            },
+            need_psc,
+        );
+    }
+}
+
+/// Invalidates a specific boot memory range used by the firmware.
+#[verus_spec(
+    with
+        Tracked(pgtable_perm): Tracked<&mut PageTablePermission>,
+    requires
+        header.wf(),
+        prange.wf(),
+        old(pgtable_perm).wf(),
+        prange.start@ % PAGE_SIZE == 0,
+        prange.end@ % PAGE_SIZE == 0,
+    ensures
+        pgtable_perm.wf(),
+        pgtable_perm.pgtable_perm == old(pgtable_perm).pgtable_perm,
+        pgtable_perm.private_bit == old(pgtable_perm).private_bit,
+        pgtable_perm.shared_bit == old(pgtable_perm).shared_bit,
+        pgtable_perm.mapping_space == old(pgtable_perm).mapping_space,
+)]
+fn invalidate_boot_memory(header: &DekoKernelLaunchInfo, prange: PaddrRange, need_psc: bool) {
+    kinfo!("Invalidating early memory region:", prange);
+
+    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
+
+    let mut cur = prange.start.0;
+    #[verus_spec(
+        invariant
+            prange.start@ <= cur <= prange.end@ < 0x000f_ffff_ffff_f000,
+            prange.end@ % PAGE_SIZE == 0,
+            prange.start@ % PAGE_SIZE == 0,
+            cur@ % PAGE_SIZE == 0,
+            prange.wf(),
+            header.wf(),
+            pgtable_perm.wf(),
+            PAGE_SIZE == 0x1000,
+        decreases
+            prange.end@ - cur,
+    )]
+    while cur < prange.end.0 {
+        let Some(mapping) = TempMapping::new(create_paddr_range(PhysAddr(cur), 1)) else {
+            kerror!("Failed to create temporary mapping for paddr:", PhysAddr(cur),);
+            die("");
+        };
+
+        assume(pgtable_perm.mapped(mapping.inner.start));
+
+        let (r, changed) = crate::imp::pvalidate(
+            mapping.inner.start.0,
+            PAGE_SIZE,
+            false,  // invalidate
+            Tracked(pgtable_perm),
+        );
+
+        kpanic_if!(r != 0, "PVALIDATE failed to invalidate early boot memory at", PhysAddr(cur), "with return code", r);
+        kpanic_if!(!changed, "PVALIDATE CF indicates failure to invalidate early boot memory at", PhysAddr(cur), mapping.inner,);
+
+        cur += PAGE_SIZE;
+    }
+
+    cpu.put(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
+
+    if need_psc {
+        // Perform a PSC.
+        crate::imp::page_state_change(prange, crate::imp::PageStateChangeOp::Shared);
+    }
 }
 
 } // verus!

@@ -18,6 +18,7 @@ use vstd::atomic::{
 };
 use vstd::prelude::*;
 
+use super::flush_tlb;
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::paging::{PageTable, PteFlags};
 use crate::mm::{virt_to_phys, virt_to_phys_checked};
@@ -82,8 +83,18 @@ pub fn validate_ghcb(
     ).unwrap_or(PhysAddr(ghcb.addr() as u64));
 
     // Invalidate this page from the CVM.
-    crate::imp::pvalidate(ghcb_vaddr.0, 0x1000, false, Tracked(&mut ctx_perm.pgtable_perm));
+    let (ret, changed) = crate::imp::pvalidate(
+        ghcb_vaddr.0,
+        0x1000,
+        false,
+        Tracked(&mut ctx_perm.pgtable_perm),
+    );
+
+    if ret != 0 || !changed {
+        crate::die("Failed to pvalidate GHCB page");
+    }
     // Notify the hypervisor that this page is now invalid.
+
     msr_set_page_valid(ghcb_paddr, false);
 
     // Then set the GHCB page as shared in the page table.
@@ -97,6 +108,8 @@ pub fn validate_ghcb(
         // shared_bit,
         1 << 0,
     );
+
+    flush_tlb();
 
     // Register the GHCB GPA with the hypervisor.
     msr_register_ghcb_gpa(ghcb_paddr);
@@ -562,6 +575,11 @@ impl GuestHostCommunicationBlock {
         Tracked(perm)
     }
 
+    /// The #HV Send IPI NAE event allows for an SEV-SNP guest to send an IPI to other
+    /// vCPUs in the guest when the Restricted Injection feature is enabled. The SW_EXITINFO1
+    /// field contains the information necessary to perform the IPI. The format of the
+    /// SW_EXITINFO1 field is the same as the x2APIC Interrupt Command Register, allowing
+    /// hypervisors to possibly reuse existing x2APIC IPI emulation support.
     pub fn hv_ipi(
         ptr: DekoPPtr<Self>,
         Tracked(perm): Tracked<DekoPointsTo<Self>>,
@@ -846,6 +864,8 @@ impl GuestHostCommunicationBlock {
             r@.is_init(),
             r@.pptr() == ptr@,
     {
+        kdebug!("Registering HV doorbell at paddr ", doorbell_paddr);
+
         let doorbell_gpa_val = doorbell_paddr.0;
 
         let Tracked(perm) = Self::clear(ptr, Tracked(perm));

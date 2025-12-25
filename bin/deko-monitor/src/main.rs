@@ -342,27 +342,27 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
 
     // Prepare the BSP CPU context.
     proof_with!(Tracked(pgtable_perm) => Tracked(cpu_ctx_perm));
-    let bst_cpu_ptr = DekoCpuCtx::setup_cpu(new_page_table, private_bit, shared_bit, ms, 0);
+    let bsp_cpu_ptr = DekoCpuCtx::setup_cpu(new_page_table, private_bit, shared_bit, ms, 0);
 
     proof {
         // do it later.
-        assume(cpu_ctx_perm.wf_with(bst_cpu_ptr));
+        assume(cpu_ctx_perm.wf_with(bsp_cpu_ptr));
         assume(cpu_ctx_perm.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf());
     }
 
-    init_guest_host(bst_cpu_ptr, Tracked(&mut cpu_ctx_perm));
+    init_guest_host(bsp_cpu_ptr, Tracked(&mut cpu_ctx_perm));
 
     init_ghcb_logging(debug_serial_port);
     print_banner();
 
-    setup_apic(bst_cpu_ptr, Tracked(&mut cpu_ctx_perm));
+    setup_apic(bsp_cpu_ptr, Tracked(&mut cpu_ctx_perm));
 
     init_global_idt();
 
     sse_init();
     proof {
         // do it later.
-        assume(cpu_ctx_perm.wf_with(bst_cpu_ptr));
+        assume(cpu_ctx_perm.wf_with(bsp_cpu_ptr));
         assume(cpu_ctx_perm.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf());
         assume(cpu_ctx_perm.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf());
     }
@@ -370,7 +370,7 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
     // Assign "deko_main" to the BSP CPU context so that it will
     // start executing from there.
     proof_with!(Tracked(cpu_ctx_perm) => Tracked(cpu_ctx_perm));
-    DekoCpuCtx::setup_idle_task(bst_cpu_ptr, deko_main_func_ptr());
+    DekoCpuCtx::setup_idle_task(bsp_cpu_ptr, deko_main_func_ptr());
 
     unsafe {
         schedule_init();
@@ -419,6 +419,9 @@ fn deko_main(cpu_index: usize) {
             kerror!("deko_main: CPUID page not initialized; this is a fatal error");
             early_die();
         };
+
+        proof_with!(Tracked(&mut cpu_ctx_perm.pgtable_perm));
+        deko_core::fw::invalidate_early_boot_mem(launch_info, &igvm_params);
 
         proof_with!(Tracked(&mut cpu_ctx_perm.pgtable_perm));
         deko_core::imp::prepare_guest_fw(launch_info, &igvm_params, kernel_prange, cpuid_table);

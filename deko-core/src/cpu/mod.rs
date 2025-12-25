@@ -16,6 +16,7 @@ use core::panic;
 
 use deko_macros::{with_atomic_pred, DekoDebug};
 use deko_std::prelude::*;
+use regs::{read_cr4, write_cr4};
 use task::DekoRunnablePtr;
 use vstd::atomic::{PAtomicBool, PAtomicU32, PermissionBool, PermissionU32};
 use vstd::cell::{PCell, PointsTo};
@@ -24,7 +25,7 @@ use vstd::prelude::*;
 
 use crate::cpu::apic::X86Apic;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
-use crate::cpu::regs::{read_cr3, sse_init};
+use crate::cpu::regs::{read_cr3, sse_init, Cr4Flags};
 use crate::cpu::task::{
     cpu_idle_func_ptr, schedule_init, DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred,
     DekoRunnable, DekoRunnablePred, DekoTaskArgs,
@@ -1699,5 +1700,23 @@ unsafe extern "C" fn ap_start() -> ! {
 }
 
 func_ptr!(ap_start);
+
+/// Flush the TLB entries globally by toggling the PGE bit in CR4.
+pub fn flush_tlb_global() {
+    broadcast use Cr4Flags::lemma_each_bit_is_valid;
+
+    let old_cr4 = read_cr4();
+
+    let cr4 = Cr4Flags::from_bits_truncate(old_cr4.bits() ^ regs::PGE);
+
+    proof {
+        assert(cr4.bits() & regs::Cr4_ALL_BITS == cr4.bits()) by {
+            bit_u64_and_auto();
+        }
+    }
+
+    write_cr4(cr4);
+    write_cr4(old_cr4);
+}
 
 } // verus!

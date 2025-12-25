@@ -132,14 +132,6 @@ pub fn no_irq_zone<T>(f: impl FnOnce() -> T) -> T {
     v
 }
 
-#[verifier::external_body]
-pub fn flush_tlb() {
-    // Flush TLB for the new mapping
-    unsafe {
-        core::arch::asm!("movq %cr3, %rax", "movq %rax, %cr3", out("rax") _, options(nostack, att_syntax));
-    }
-}
-
 } // verus!
 verus! {
 

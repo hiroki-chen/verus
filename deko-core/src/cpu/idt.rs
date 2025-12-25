@@ -363,6 +363,7 @@ impl Idt {
         this.entries.update(SS_VECTOR, IdtEntry::raw_entry(VirtAddr::new(ss_handler_func_ptr())));
         this.entries.update(GP_VECTOR, IdtEntry::raw_entry(VirtAddr::new(gp_handler_func_ptr())));
         this.entries.update(PF_VECTOR, IdtEntry::raw_entry(VirtAddr::new(pf_handler_func_ptr())));
+        this.entries.update(HV_VECTOR, IdtEntry::raw_entry(VirtAddr::new(hv_handler_func_ptr())));
         this.entries.update(SYSCALL, IdtEntry::raw_entry(VirtAddr::new(int80_handler_func_ptr())));
         this.entries.update(IPI_VECTOR, IdtEntry::raw_entry(VirtAddr::new(irq_ipi_handler_func_ptr())));
         this.entries.update(INT_INJ_VECTOR, IdtEntry::raw_entry(VirtAddr::new(irq_int_inj_handler_func_ptr())));

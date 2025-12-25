@@ -1,7 +1,7 @@
 
 .code64
 .section .data
-.globl HV_DOORBELL_ADDR
+.globl HV_DOORBELL_ADDR // *const *const HVDoorbell
 HV_DOORBELL_ADDR:
 	.quad 0
 
@@ -31,9 +31,48 @@ idt_handler_ret:
 
 .pushsection .entry.text, "ax"
 
+.globl hv_handler
+hv_handler:
+  clac
+  call handle_hv_doorbell
+
+//     pushq 	$0
+//     pushq	  %rax
+//     pushq	  %rbx
+//     pushq	  %rcx
+//     // todo: check if any pending interrupts need to be handled.
+
+// .Lhv_handler_process_hv:
+//   pushq	  %rdx
+// 	pushq	  %rsi
+// 	pushq	  %rdi
+// 	pushq 	%rbp
+// 	pushq	  %r8
+// 	pushq	  %r9
+// 	pushq	  %r10
+// 	pushq	  %r11
+// 	pushq	  %r12
+// 	pushq	  %r13
+// 	pushq	  %r14
+// 	pushq 	%r15
+
+//   xorl	  %edx, %edx
+// 	// rdsspq	%rdx
+// 	pushq	  %rdx
+
+//   // LOAD HV_DOORBELL_ADDR
+//   movq    HV_DOORBELL_ADDR(%rip), %rsi
+//   testq 	%rsi, %rsi
+//   jz      default_return
+//   movq    (%rsi), %rdi
+//   testq 	%rdi, %rdi
+//   jz      default_return
+
+//   call    handle_hv_doorbell
+
 .globl default_return
 default_return:
-    ud2 // placeholder.
+  ud2 // placeholder.
 
 push_regs_no_ghcb:
   pushq   %rbx

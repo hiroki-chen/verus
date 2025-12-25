@@ -203,8 +203,15 @@ impl WellFormed for DekoKernelLaunchInfo {
         &&& self.heap_area_phys_start@ % PAGE_SIZE == 0
         &&& self.heap_area_size@ % PAGE_SIZE == 0
         &&& self.heap_area_size@ > 0
+        &&& 0x000f_ffff_ffff_f000 > self.stage2_end > self.stage2_start
+        &&& self.stage2_end@ % PAGE_SIZE == 0
+        &&& self.stage2_start@ % PAGE_SIZE == 0
+        &&& self.stage2_igvm_params_phys_addr@ + self.stage2_igvm_params_size@
+            <= 0x000f_ffff_ffff_f000
+        &&& self.stage2_igvm_params_phys_addr@ % PAGE_SIZE == 0
+        &&& self.stage2_igvm_params_size@ % PAGE_SIZE == 0
         &&& self.heap_area_phys_start@ + self.heap_area_size@ <= self.kernel_region_phys_end@
-        &&& self.heap_area_virt_start@ + self.heap_area_size@ <= u64::MAX
+        &&& self.heap_area_virt_start@ + self.heap_area_size@ <= 0x000f_ffff_ffff_f000
         &&& self.heap_area_virt_start@ >= VADDR_UPPER_MASK
         &&& self.heap_area_virt_start@ % PAGE_SIZE == 0
         &&& self.kernel_region_virt_start@ % PAGE_SIZE == 0

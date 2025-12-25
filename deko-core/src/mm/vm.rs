@@ -275,9 +275,6 @@ impl VirtualMemoryTemporary {
             lemma_bit_map_allocator_1024_is_pow2();
         }
 
-        kdebug!("VirtualMemoryTemporary::allocate: requesting", nr_pages, "pages with alignment", align);
-        kdebug!("VirtualMemoryTemporary::allocate: current alloc state:", self.alloc);
-
         let r = self.alloc.alloc(nr_pages + 1, align)?;
 
         proof {

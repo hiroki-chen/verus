@@ -307,20 +307,4 @@ pub fn init_memory_map(header: &DekoKernelLaunchInfo) {
     // stub: placeholder.
 }
 
-/// Since we are now in a full-fledged system, bootstrapped memory regions
-/// used during early boot should be invalidated to prevent accidental usage
-/// and for more memory to be available for general allocation.
-#[verus_spec(
-    with
-        Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
-    requires
-        old(ctx_perm).wf_with(ctx),
-        header.wf(),
-)]
-pub fn invalidate_boot_mem(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) {
-    // stub: placeholder.
-    // Always invalidate stage 2 boot memory unless the firmware
-    // is loaded into the low memory.
-}
-
 } // verus!

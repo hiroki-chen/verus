@@ -277,8 +277,9 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>) -> (__discard: !) {
     let lowmem = VirtAddr::from(LOWMEM_END as u64);
     let heap_mapping = FixedAddressMappingRange::new(zero, lowmem, PhysAddr::from(0u64));
 
-    imp::validate_memory(Tracked(&mut ctx_perm), 0, LOWMEM_END as u64);
-
+    if !imp::validate_memory(Tracked(&mut ctx_perm), 0, LOWMEM_END as u64) {
+        die("Memory validation failed during stage2 setup!");
+    }
     assert(ctx_perm.wf());
 
     let mapping_space = MappingSpace { kernel: kernel_mapping, physmap: heap_mapping };

@@ -150,7 +150,7 @@ fn send_ipi_to(target: usize, from: &X86Apic) {
 
     let low = VECTOR_IPI | DELIVERY_MODE_FIXED | DEST_MODE_PHYSICAL | LEVEL_ASSERT | TRIGGER_EDGE
         | DEST_SHORTHAND_NONE;
-    let high = (target as u32) << 24;
+    let high = (target as u32);
 
     kdebug!("Sending IPI", ((high as u64) << 32 | low as u64) => hex, "to target CPU", target => hex);
 
