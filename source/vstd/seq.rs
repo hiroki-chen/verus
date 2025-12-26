@@ -174,7 +174,7 @@ impl<A> Seq<A> {
     }
 
     #[verifier(external_body)]
-    pub proof fn tracked_new(len: nat, tracked f: spec_fn(int) -> A) -> (tracked ret: Self)
+    pub proof fn tracked_new(len: nat, f: spec_fn(int) -> A) -> (tracked ret: Self)
         ensures
             ret === Seq::new(len, f),
     {
