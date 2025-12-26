@@ -39,7 +39,14 @@ hv_handler:
   pushq	  %rax
   pushq	  %rbx
   pushq	  %rcx
-    // todo: check if any pending interrupts need to be handled.
+
+  testl   $0x200, ({EXCEP_FLAGS_OFF} - {EXCEP_RCX_OFF})(%rsp)
+  jnz    .Lhv_handler_process_hv
+
+// Stub.
+.Lprocess_pending_hv:
+  ud2
+
 .Lhv_handler_process_hv:
   pushq	  %rdx
 	pushq	  %rsi
@@ -66,11 +73,56 @@ hv_handler:
   testq 	%rdi, %rdi
   jz      default_return
 
+.Lcall_hv_doorbell:
   call    handle_hv_doorbell
 
 .globl default_return
 default_return:
-  ud2 // placeholder.
+	cli
+  testb   $0x3, {EXCEP_CS_OFF}(%rsp) // check if interrupted in guest mode
+  jnz     .Lhv_handler_return_guest
+
+.Lreturn_to_all:
+  // Check EFLAGS.IF
+  testl   $0x200, {EXCEP_FLAGS_OFF}(%rsp)
+  jz	    .Lbegin_iret_return
+
+  movq    HV_DOORBELL_ADDR(%rip), %rdi
+  testq   %rdi, %rdi
+  jz     .Lbegin_iret_return
+  movq    (%rdi), %rdi
+  testq   %rdi, %rdi
+  jz      .Lbegin_iret_return
+  testw   $0x8000, (%rdi)
+  jnz     .Lcall_hv_doorbell
+
+.Lbegin_iret_return:
+  addq      $8, %rsp    // skip ssp; currently we don't use it
+  // begin iretq sequence
+  popq       %r15
+  popq       %r14
+  popq       %r13
+  popq       %r12
+  popq       %r11
+  popq       %r10
+  popq       %r9
+  popq       %r8
+  popq       %rbp
+  popq       %rdi
+  popq       %rsi
+  popq       %rdx
+  popq       %rcx
+  popq       %rbx
+  popq       %rax
+
+  // No error code is needed.
+  addq    $8, %rsp
+
+  iretq
+
+.Lhv_handler_return_guest:
+  // nothing to do
+  jmp .Lreturn_to_all
 
 push_regs_no_ghcb:
   pushq   %rbx
