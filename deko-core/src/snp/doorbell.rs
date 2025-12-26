@@ -16,7 +16,7 @@ use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::paging::PageTable;
 use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR};
 use crate::snp::ghcb::{current_ghcb, GuestHostCommunicationBlock};
-use crate::{die, kerror, kinfo, kpanic_if};
+use crate::{die, kerror, kinfo, kpanic_if, kwarn};
 
 extern "C" {
     // exclusive.
@@ -51,8 +51,6 @@ pub fn init_hv_doorbell(
         HV_DOORBELL_ADDR =
         addr_of!((*(ptr.addr() as *const DekoAtomicData<DekoPPtr<HVDoorbell>, HvDoorbellPtrPermission>)).data) as usize;
     }
-
-    // kinfo!("Initialized HV_DOORBELL_ADDR to ", unsafe { HV_DOORBELL_ADDR } => hex,);
 }
 
 #[repr(C)]
@@ -167,6 +165,12 @@ with_atomic_pred! {
 
 #[verus_verify]
 impl HVDoorbell {
+    /// Initializes the global HV doorbell address for the current CPU.
+    ///
+    /// Note that the way the [`HV_DOORBELL_ADDR`] is initialized must
+    /// use the fixed mapping address so that we always access the same
+    /// virtual address across all CPUs to obtain the pointer to the
+    /// inner [`HVDoorbell`].
     #[verus_spec()]
     fn init_hv_doorbell_addr() {
         let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
@@ -292,15 +296,17 @@ impl HVDoorbell {
         hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb_perm.ptr_perm.value().per_vmpl_events),
 )]
 pub unsafe extern "C" fn handle_hv_doorbell(hvdb: DekoPPtr<HVDoorbell>) {
-    crate::kinfo!("Pointer to HV Doorbell: ", hvdb,);
-
     let tracked mut hvdb_perm = hvdb_perm;
-
     let hvdb = hvdb.borrow(Tracked(&hvdb_perm.ptr_perm));
-
     let vector = hvdb.vector.load(Tracked(&mut hvdb_perm.hv_perm.vector_perm));
-    let flags = hvdb.flags.load(Tracked(&mut hvdb_perm.hv_perm.flags_perm));
+    // Clear the flag.
+    let flags = hvdb.flags.fetch_and(
+        Tracked(&mut hvdb_perm.hv_perm.flags_perm),
+        !(0x80)  /* NoFurtherSignal */
+        ,
+    );
 
+    // Some sanity check for flags...
     loop
         invariant
             hvdb_perm.hv_perm.vector_perm.is_for(hvdb.vector),
@@ -318,22 +324,20 @@ pub unsafe extern "C" fn handle_hv_doorbell(hvdb: DekoPPtr<HVDoorbell>) {
         }
     }
 
-    crate::kinfo!("HV Doorbell interrupt received! vector: ", vector,);
-    crate::kinfo!("flags: ", flags,);
-
     match vector as usize {
         IPI_VECTOR => {
             kinfo!("Handling HV Doorbell IPI interrupt!",);
             // Dummy implementation for now.
+            let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+
+            proof_with!(Tracked(&cpu_perm));
+            DekoCpuCtx::handle_ipi_req(cpu);
         },
         _ => {
             // Unknown vector.
+            kwarn!("Unknown HV Doorbell vector received: ", vector, "as we only handle IPI");
         },
     }
-
-    // let (this_cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
-    // Optional.
-    // this_cpu.borrow(Tracked(&cpu_perm.ptr_perm)).apic.eoi();
 }
 
 } // verus!

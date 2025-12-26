@@ -41,7 +41,7 @@ pub const SIZE_LEVEL1: u64 = 0x200000;
 pub const SIZE_LEVEL0: u64 = 0x1000;
 
 // Stack definitions
-pub const STACK_PAGES: u64 = 10;
+pub const STACK_PAGES: u64 = 13;
 
 pub const STACK_SIZE: u64 = PAGE_SIZE * STACK_PAGES;
 

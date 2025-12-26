@@ -5,10 +5,11 @@ use deko_std::ptr::DekoPPtr;
 use deko_std::wf::WellFormed;
 use vstd::prelude::*;
 
+use crate::cpu::CPUID_MAX_COUNT;
 use crate::imp::ghcb::GuestHostCommunicationBlock;
 use crate::imp::{wrmsr, SnpStatusFlags, REST_INJ};
 use crate::snp::rdmsr;
-use crate::{kdebug, kwarn};
+use crate::{kdebug, kpanic_if, kwarn};
 
 verus! {
 
@@ -50,8 +51,11 @@ pub trait Apic: deko_std::fmt::DekoDebug + WellFormed {
             self.wf(),
         ensures
             self.wf(),
+            r < CPUID_MAX_COUNT,
     {
-        self.apic_read(APIC_OFFSET_ID as u32)
+        let r = self.apic_read(APIC_OFFSET_ID as u32);
+        kpanic_if!(r >= CPUID_MAX_COUNT as u32, "APIC ID {} exceeds maximum CPU count {}", r, CPUID_MAX_COUNT);
+        r
     }
 
     /// Updates the APIC_BASE MSR with the given masks.

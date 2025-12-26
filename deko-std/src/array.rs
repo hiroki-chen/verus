@@ -69,6 +69,7 @@ impl<T: WellFormed, const N: usize> Array<T, N> {
             Self::size_wf(),
         ensures
             s.wf(),
+            forall|i: int| 0 <= i < N as int ==> s@.index(i) == #[trigger] value@[i as int],
     {
         Self(value)
     }

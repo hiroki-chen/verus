@@ -861,3 +861,55 @@ impl<V: WellFormed, P, Pred: RwLockPredicate<DekoAtomicData<V, P>>> Predicate<
 }
 
 } // verus!
+/// A macro to acquire a read lock, execute a block, and release the lock.
+///
+/// If you explicitly need to get the handle instead of the value, do not
+/// use this macro and instead call `acquire_read` and `release_read`
+/// manually to do so.
+#[macro_export]
+macro_rules! deko_rwlock_read_atomic_data {
+    ($lock:expr, $data_binding:ident, $perm_binding:ident, $body:tt) => {
+        let read_handle = $lock.acquire_read();
+        let $crate::sync::DekoAtomicData { data: $data_binding, perm: $perm_binding } = read_handle.view();
+
+        let result = vstd::prelude::verus_exec_expr! { //<- this trick allows us to use verus syntax partially.
+            $body
+        };
+
+        read_handle.release_read();
+    }
+}
+
+/// A macro to acquire a write lock, execute a block, and release the lock.
+///
+/// If you explicitly need to get the handle instead of the value, do not
+/// use this macro and instead call `acquire_write` and `release_write`
+/// manually to do so.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// deko_rwlock_write_atomic_data!(my_lock, data, perm, {
+///     // modify data and perm as needed
+///     data.field += 1;
+///
+///     proof {
+///         perm.some_spec_holds(&data);
+///     }
+/// });
+/// ```
+///
+/// The lock will be automatically dropped at the end of the block.
+#[macro_export]
+macro_rules! deko_rwlock_write_atomic_data {
+    ($lock:expr, $data_binding:ident, $perm_binding:ident, $body:tt) => {
+        let mut write_handle = $lock.acquire_write();
+        let $crate::sync::DekoAtomicData { data: mut $data_binding, perm: mut $perm_binding } = write_handle.get();
+
+        let result = vstd::prelude::verus_exec_expr! { //<- this trick allows us to use verus syntax partially.
+            $body
+        };
+
+        write_handle.release_write($crate::sync::DekoAtomicData { data: $data_binding, perm: $perm_binding });
+    }
+}

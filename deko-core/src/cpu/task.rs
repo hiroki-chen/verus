@@ -901,7 +901,7 @@ impl DekoRunnable {
 
             proof {
                 assert(stack.mapping_size_spec() >= PAGE_SIZE) by {
-                    assert(0xa000 >> 12 == 10) by (bit_vector);
+                    assert(STACK_SIZE >> 12 == 13) by (bit_vector);
                 }
             }
 

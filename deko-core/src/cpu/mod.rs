@@ -25,6 +25,7 @@ use vstd::prelude::*;
 
 use crate::cpu::apic::X86Apic;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
+use crate::cpu::ipi::{CpuIpiArea, CpuIpiAreaPermission};
 use crate::cpu::regs::{read_cr3, sse_init, Cr4Flags};
 use crate::cpu::task::{
     cpu_idle_func_ptr, schedule_init, DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred,
@@ -137,7 +138,10 @@ pub struct PerCpuShared {
     pub ipi_pending: PAtomicBool,
     #[deko(skip)]
     pub nmi_pending: PAtomicBool,
-    // ipi_state: IpiState, todo
+    /// A shared area for IPI handling; other CPUs
+    /// can write to this area when sending IPIs.
+    #[deko(skip)]
+    pub ipi_shared: CpuIpiArea,
 }
 
 with_permission! {
@@ -146,6 +150,7 @@ with_permission! {
     ipi_irr_perm: Seq<PermissionU32>,
     ipi_pending_perm: PermissionBool,
     nmi_pending_perm: PermissionBool,
+    ipi_shared_perm: CpuIpiAreaPermission,
 }
 
 impl WellFormed for PerCpuShared {
@@ -159,17 +164,21 @@ impl WellFormed for PerCpuShared {
 }
 
 impl PerCpuShared {
-    #[verifier::external_body]
     #[inline(always)]
     const fn new_ipi_irr() -> (r: (Array<PAtomicU32, 8>, Tracked<Seq<PermissionU32>>))
         ensures
             r.0.wf(),
+            r.0@.len() == r.1@.len(),
             forall|i: int|
+                #![trigger r.1@[i as int]]
+                #![trigger r.0@[i as int]]
                 0 <= i && i < 8 ==> {
-                    &&& #[trigger] r.0@[i as int].wf()
+                    &&& r.0@[i as int].wf()
                     &&& r.1@[i as int].is_for(r.0@[i as int])
                 },
     {
+        broadcast use deko_std::array::lemma_sized_t_makes_sized_array;
+
         let (arr, perms) =
             seq_macro::seq! {
             N in 0..8 {{
@@ -191,9 +200,9 @@ impl PerCpuShared {
             }}
         };
 
-        let perms_transformed = Tracked(Seq::new(8, |i| perms@[i as int]@));
+        let tracked perms_transformed = Seq::tracked_new(8, |i| perms@[i as int]@);
 
-        (arr, perms_transformed)
+        (arr, Tracked(perms_transformed))
     }
 
     pub const fn new(id: u32) -> (r: (PerCpuShared, Tracked<PerCpuSharedPermission>))
@@ -209,6 +218,7 @@ impl PerCpuShared {
         let guest_vmsa = DekoSimpleRwLock::new_simple(
             GuestVmsaRef { vmsa: None, caa: None, generation: 0, gen_in_use: 0 },
         );
+        let (ipi_shared, Tracked(ipi_shared_perm)) = CpuIpiArea::new();
 
         proof {
             use_type_invariant(&guest_vmsa);
@@ -223,6 +233,7 @@ impl PerCpuShared {
                 ipi_irr,
                 ipi_pending,
                 nmi_pending,
+                ipi_shared,
             },
             Tracked(
                 PerCpuSharedPermission {
@@ -230,6 +241,7 @@ impl PerCpuShared {
                     ipi_irr_perm,
                     ipi_pending_perm,
                     nmi_pending_perm,
+                    ipi_shared_perm,
                 },
             ),
         )
@@ -281,6 +293,12 @@ impl PerCpuAreas {
                             self@[i as int].ipi_irr@[j as int],
                         )
                     }
+                &&& perm.shared_perms[i as int].ipi_shared_perm.pending_perm.is_for(
+                    self@[i as int].ipi_shared.pending,
+                )
+                &&& perm.shared_perms[i as int].ipi_shared_perm.request_set_perm.is_for(
+                    self@[i as int].ipi_shared.request_set,
+                )
             }
     }
 
@@ -1677,6 +1695,7 @@ unsafe extern "C" fn ap_start() -> ! {
             this_perm.ipi_irr_perm == old.ipi_irr_perm,
             this_perm.ipi_pending_perm == old.ipi_pending_perm,
             this_perm.nmi_pending_perm == old.nmi_pending_perm,
+            this_perm.ipi_shared_perm == old.ipi_shared_perm,
     {
         core::hint::spin_loop();
 
@@ -1706,6 +1725,9 @@ unsafe extern "C" fn ap_start() -> ! {
 func_ptr!(ap_start);
 
 /// Flush the TLB entries globally by toggling the PGE bit in CR4.
+///
+/// This should be called once a page table entry has been updated
+/// and we need to ensure that all CPUs see the updated mapping.
 pub fn flush_tlb_global() {
     broadcast use Cr4Flags::lemma_each_bit_is_valid;
 
