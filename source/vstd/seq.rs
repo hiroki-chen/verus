@@ -174,13 +174,21 @@ impl<A> Seq<A> {
     }
 
     #[verifier(external_body)]
+    pub proof fn tracked_new(len: nat, tracked f: spec_fn(int) -> A) -> (tracked ret: Self)
+        ensures
+            ret === Seq::new(len, f),
+    {
+        unimplemented!()
+    }
+
+    #[verifier(external_body)]
     pub proof fn tracked_remove(tracked &mut self, i: int) -> (tracked ret: A)
         requires
             0 <= i < old(self).len(),
         ensures
             ret === old(self)[i],
             self.len() == old(self).len() - 1,
-            *self == old(self).remove(i),
+            self == old(self).remove(i),
     {
         unimplemented!()
     }
@@ -191,7 +199,7 @@ impl<A> Seq<A> {
             0 <= i <= old(self).len(),
         ensures
             self.len() == old(self).len() + 1,
-            *self == old(self).insert(i, v),
+            self == old(self).insert(i, v),
     {
         unimplemented!()
     }
