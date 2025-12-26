@@ -198,52 +198,74 @@ impl DekoIpIRequest {
             i += 1;
         }
 
-        // deko_rwlock_write_atomic_data!(
-        //     PERCPU_AREAS,
-        //     cpu_areas,
-        //     cpu_areas_perm,
-        //     {
-        //         let tracked mut   ipi_area_perm = cpu_areas_perm.borrow_mut().shared_perms.tracked_remove(id as int);
-        //         // Obtain a reference to this CPU's IPI area.
-        //         let ipi_area = &cpu_areas.0.index(id).ipi_shared;
+        deko_rwlock_write_atomic_data!(
+            PERCPU_AREAS,
+            cpu_areas,
+            cpu_areas_perm,
+            {
+                // Obtain a reference to this CPU's IPI area.
+                let Some(ref cpu_areas) = cpu_areas else {
+                    die("PERCPU_AREAS is not initialized");
+                };
 
-        //         // Increment the count of pending requests.
-        //         ipi_area.pending.store(Tracked(&mut ipi_area_perm.ipi_shared_perm.pending_perm), cpu_nums as _);
-        //         proof {
-        //             cpu_areas_perm.borrow_mut().shared_perms.tracked_insert(id as int, ipi_area_perm);
-        //         }
-        //     }
-        // );
+                kpanic_if!(
+                    core::hint::unlikely(id >= cpu_areas.0.len()),
+                    "Target CPU ID",
+                    id,
+                    "exceeds current CPU count",
+                    cpu_areas.0.len(),
+                );
+                let ipi_area = &cpu_areas.0[id].ipi_shared;
+                let tracked mut ipi_area_perm = cpu_areas_perm.borrow_mut().shared_perms.tracked_remove(id as int);
 
-        // // Now let's wait for others to complete their handling.
-        // #[verus_spec(
-        //     invariant
-        //         self.wf(),
-        //         0 <= id < CPUID_MAX_COUNT,
-        // )]
-        // loop {
-        //     core::hint::spin_loop();
+                // Increment the count of pending requests.
+                ipi_area.pending.store(Tracked(&mut ipi_area_perm.ipi_shared_perm.pending_perm), cpu_nums as _);
+                proof {
+                    cpu_areas_perm.borrow_mut().shared_perms.tracked_insert(id as int, ipi_area_perm);
+                }
+            }
+        );
 
-        //     deko_rwlock_write_atomic_data!(
-        //         PERCPU_AREAS,
-        //         cpu_areas,
-        //         cpu_areas_perm,
-        //         {
-        //             let tracked mut ipi_area_perm;
-        //             // Obtain a reference to this CPU's IPI area.
-        //             let ipi_area = &cpu_areas.0.index(id).ipi_shared;
-        //             proof {
-        //                 ipi_area_perm = cpu_areas_perm.borrow_mut().shared_perms.tracked_borrow(id as int);
-        //             }
+        // Now let's wait for others to complete their handling.
+        #[verus_spec(
+            invariant
+                self.wf(),
+                0 <= id < CPUID_MAX_COUNT,
+        )]
+        loop {
+            core::hint::spin_loop();
 
-        //             let pending = ipi_area.pending.load(Tracked(&ipi_area_perm.ipi_shared_perm.pending_perm));
+            deko_rwlock_write_atomic_data!(
+                PERCPU_AREAS,
+                cpu_areas,
+                cpu_areas_perm,
+                {
+                    let tracked mut ipi_area_perm;
+                    let Some(ref cpu_areas) = cpu_areas else {
+                        die("PERCPU_AREAS is not initialized");
+                    };
+                    kpanic_if!(
+                        core::hint::unlikely(id >= cpu_areas.0.len()),
+                        "Target CPU ID",
+                        id,
+                        "exceeds current CPU count",
+                        cpu_areas.0.len(),
+                    );
 
-        //             if pending == 0 {
-        //                 break;
-        //             }
-        //         }
-        //     );
-        // }
+                    // Obtain a reference to this CPU's IPI area.
+                    let ipi_area = &cpu_areas.0[id].ipi_shared;
+                    proof {
+                        ipi_area_perm = cpu_areas_perm.borrow_mut().shared_perms.tracked_borrow(id as int);
+                    }
+
+                    let pending = ipi_area.pending.load(Tracked(&ipi_area_perm.ipi_shared_perm.pending_perm));
+
+                    if pending == 0 {
+                        break;
+                    }
+                }
+            );
+        }
     }
 }
 
