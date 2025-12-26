@@ -36,7 +36,9 @@ use deko_core::snp::ghcb::GuestHostCommunicationBlock;
 use deko_core::snp::logging::init_ghcb_logging;
 use deko_core::snp::req::init_snp_guest_driver;
 use deko_core::snp::{init_guest_host, init_secrets_page, prepare_guest_fw, setup_apic};
-use deko_core::{get_igvm_params, kdebug, kerror, kinfo, kpanic_if, kwarn, DekoKernelLaunchInfo};
+use deko_core::{
+    die, get_igvm_params, kdebug, kerror, kinfo, kpanic_if, kwarn, DekoKernelLaunchInfo,
+};
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
@@ -183,8 +185,16 @@ fn do_make_ap_online(cpus: &[ACPICPUInfo]) {
 
         let handle = PERCPU_AREAS.acquire_read();
         let DekoAtomicData { data: percpu_area, .. } = handle.borrow();
+        let Some(ref percpu_area) = percpu_area else {
+            die("PERCPU_AREAS is not initialized");
+        };
 
-        let cpu_area = percpu_area.0.index(cpu_info.apic_id as usize);
+        kpanic_if!(
+            core::hint::unlikely(cpu_info.apic_id as usize >= percpu_area.0.len()),
+            "AP CPU ID out of bounds in per-CPU shared area: got;", cpu_info.apic_id
+        );
+
+        let cpu_area = &percpu_area.0[cpu_info.apic_id as usize];
         start_application_processor(cpu_area);
         handle.release_read();
 
@@ -195,8 +205,16 @@ fn do_make_ap_online(cpus: &[ACPICPUInfo]) {
         {
             let handle = PERCPU_AREAS.acquire_read();
             let DekoAtomicData { data: percpu_area, perm } = handle.borrow();
+            let Some(ref percpu_area) = percpu_area else {
+                die("PERCPU_AREAS is not initialized");
+            };
 
-            let cpu_area = percpu_area.0.index(cpu_info.apic_id as usize);
+            kpanic_if!(
+                core::hint::unlikely(cpu_info.apic_id as usize >= percpu_area.0.len()),
+                "AP CPU ID out of bounds in per-CPU shared area: got;", cpu_info.apic_id
+            );
+
+            let cpu_area = &percpu_area.0[cpu_info.apic_id as usize];
             let tracked this_perm = perm.borrow().shared_perms.tracked_borrow(
                 cpu_info.apic_id as int,
             );
@@ -423,15 +441,13 @@ fn deko_main(cpu_index: usize) {
         proof_with!(Tracked(&mut cpu_ctx_perm.pgtable_perm));
         deko_core::fw::invalidate_early_boot_mem(launch_info, &igvm_params);
 
+        start_application_processors(&igvm_params);
+
         proof_with!(Tracked(&mut cpu_ctx_perm.pgtable_perm));
         deko_core::imp::prepare_guest_fw(launch_info, &igvm_params, kernel_prange, cpuid_table);
 
         // Populate the rootfs.
         init_ramfs(PhysAddr(launch_info.kernel_fs_start)..PhysAddr(launch_info.kernel_fs_end));
-
-        // TODO: Reclaim boot memories for later usage.
-
-        start_application_processors(&igvm_params);
 
         // Initialize the guest driver.
         init_snp_guest_driver();

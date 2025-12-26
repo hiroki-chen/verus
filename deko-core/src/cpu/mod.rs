@@ -88,6 +88,29 @@ pub fn set_availabe_cpu_nums(num: u64) {
         return ;
     }
     CPU_NUM.init(DekoAtomicData::new(DekoCpuNum { num }));
+
+    proof_with!(=> Tracked(mut percpu_areas_perm));
+    let mut percpu_areas = PerCpuAreas::new();
+
+    for i in 0..num as u32
+        invariant
+            num <= CPUID_MAX_COUNT as u64,
+            percpu_areas.wf_with(percpu_areas_perm),
+            percpu_areas@.len() == i as int,
+    {
+        proof_with!(Tracked(&mut percpu_areas_perm));
+        percpu_areas.push_new_cpu(i);
+    }
+
+    deko_rwlock_write_atomic_data!(
+        PERCPU_AREAS,
+        data,
+        data_perm,
+        {
+            data = Some(percpu_areas);
+            data_perm = Tracked(percpu_areas_perm);
+        }
+    );
 }
 
 with_atomic_pred!(
@@ -209,7 +232,21 @@ impl PerCpuShared {
         requires
             id < CPUID_MAX_COUNT,
         ensures
-            r.wf(),
+            r.0.apic_id == id,
+            r.0.cpu_index == id as usize,
+            r.0.wf(),
+            r.1@.online_perm.is_for(r.0.online),
+            r.1@.ipi_pending_perm.is_for(r.0.ipi_pending),
+            r.1@.nmi_pending_perm.is_for(r.0.nmi_pending),
+            r.1@.ipi_irr_perm.len() == 8,
+            forall|i: int|
+                #![trigger r.1@.ipi_irr_perm[i as int]]
+                0 <= i < 8 ==> {
+                    &&& r.0.ipi_irr@[i as int].wf()
+                    &&& r.1@.ipi_irr_perm[i as int].is_for(r.0.ipi_irr@[i as int])
+                },
+            r.1@.ipi_shared_perm.pending_perm.is_for(r.0.ipi_shared.pending),
+            r.1@.ipi_shared_perm.request_set_perm.is_for(r.0.ipi_shared.request_set),
     {
         let (online, Tracked(online_perm)) = PAtomicBool::new(false);
         let (ipi_pending, Tracked(ipi_pending_perm)) = PAtomicBool::new(false);
@@ -248,39 +285,56 @@ impl PerCpuShared {
     }
 }
 
+/// TODO: A collection of per-cpu shared areas. Refactor under the way.
+///
+/// A collection of globally shared area for CPUs to access each other's state.
+///
+/// This is implemented as a vector which requires dynamic allocator but this
+/// is fine as this is only used after the kernel is fully booted (AP CPUs are
+/// online) so we can use the normal kernel allocator.
 #[derive(DekoDebug)]
-pub struct PerCpuAreas(pub Array<PerCpuShared, CPUID_MAX_COUNT>);
+pub struct PerCpuAreas(pub crate::collections::Vec<PerCpuShared>);
 
 with_permission! {
     PerCpuAreas,
     shared_perms: Seq<PerCpuSharedPermission>,
 }
 
-pub struct PerCpuAreasPred;
+type PerCpuAreasOpt = Option<PerCpuAreas>;
 
-impl RwLockPredicate<DekoAtomicData<PerCpuAreas, PerCpuAreasPermission>> for PerCpuAreasPred {
-    open spec fn inv(self, v: DekoAtomicData<PerCpuAreas, PerCpuAreasPermission>) -> bool {
-        &&& v.data.wf()
-        &&& v.data.wf_with(v.perm@)
+with_atomic_pred!(
+    PerCpuAreasOpt,
+    PerCpuAreasPermission,
+    fields: { },
+    perm_fields: { },
+    if data.is_some() {
+        data.unwrap().wf_with(perm) && data.wf()
+    } else {
+        true
     }
-}
+);
 
 impl WellFormed for PerCpuAreas {
     open spec fn wf(&self) -> bool {
         &&& self.0.wf()
         &&& forall|i: int|
-            0 <= i && i < CPUID_MAX_COUNT as int ==> #[trigger] self.0@[i as int].wf()
+            #![trigger self@[i as int]]
+            0 <= i < self@.len() as int ==> {
+                &&& self@[i as int].wf()
+                &&& self@[i as int].cpu_index == i as usize
+            }
     }
 }
 
+#[verus_verify]
 impl PerCpuAreas {
     pub open spec fn wf_with(&self, perm: PerCpuAreasPermission) -> bool {
-        &&& self.0@.len() == CPUID_MAX_COUNT
+        &&& self.0@.len() <= CPUID_MAX_COUNT
         &&& self.0@.len() == perm.shared_perms.len()
         &&& self.wf()
         &&& forall|i: int|
             #![trigger perm.shared_perms[i as int]]
-            0 <= i < CPUID_MAX_COUNT as int ==> {
+            0 <= i < self@.len() as int ==> {
                 &&& self.wf()
                 &&& self@[i as int].wf()
                 &&& perm.shared_perms[i as int].online_perm.is_for(self@[i as int].online)
@@ -288,7 +342,7 @@ impl PerCpuAreas {
                 &&& perm.shared_perms[i as int].nmi_pending_perm.is_for(self@[i as int].nmi_pending)
                 &&& perm.shared_perms[i as int].ipi_irr_perm.len() == 8
                 &&& forall|j: int|
-                    0 <= j && j < 8 ==> {
+                    0 <= j < 8 ==> {
                         #[trigger] perm.shared_perms[i as int].ipi_irr_perm[j as int].is_for(
                             self@[i as int].ipi_irr@[j as int],
                         )
@@ -302,38 +356,49 @@ impl PerCpuAreas {
             }
     }
 
-    #[verifier::external_body]
-    pub const fn new() -> (r: (PerCpuAreas, Tracked<PerCpuAreasPermission>))
+    /// Push a new CPU shared area into the collection.
+    #[verus_spec(
+        with
+            Tracked(perm): Tracked<&mut PerCpuAreasPermission>,
+        requires
+            old(self).wf_with(*old(perm)),
+            old(self)@.len() < CPUID_MAX_COUNT,
+            id == old(self)@.len() as u32,
         ensures
-            r.0.wf_with(r.1@),
-    {
-        let (arr, perms) =
-            seq_macro::seq!(
-            N in 0..32 {{
-                #(
-                    let (per_cpu~N, perm~N) = PerCpuShared::new(N as u32);
-                )*
+            self.wf_with(*perm),
+            self@.len() == old(self)@.len() + 1,
+            self@.len() <= CPUID_MAX_COUNT,
+    )]
+    pub fn push_new_cpu(&mut self, id: u32) {
+        let (cpu_shared, Tracked(cpu_shared_perm)) = PerCpuShared::new(id);
 
-                let arr = Array::new([
-                    #(per_cpu~N,)*
-                ]);
-                let perms = Array::new([
-                    #(perm~N,)*
-                ]);
+        self.0.push(cpu_shared);
 
-                (arr, perms)
-            }}
-        );
+        proof {
+            perm.shared_perms.tracked_push(cpu_shared_perm);
+        }
+    }
 
-        let tracked perms_transformed = Seq::new(CPUID_MAX_COUNT as nat, |i| perms@[i as int]@);
-
-        (PerCpuAreas(arr), Tracked(PerCpuAreasPermission { shared_perms: perms_transformed }))
+    /// Create a new, empty [`PerCpuAreas`] structure.
+    #[verus_spec(r =>
+        with
+            -> perm: Tracked<PerCpuAreasPermission>,
+        ensures
+            r.wf(),
+            r@.len() == 0,
+            r.wf_with(perm@),
+    )]
+    #[inline]
+    pub fn new() -> PerCpuAreas {
+        proof_with!(|= Tracked(PerCpuAreasPermission { shared_perms: Seq::tracked_empty() }));
+        Self(crate::vec![])
     }
 }
 
 impl View for PerCpuAreas {
     type V = Seq<PerCpuShared>;
 
+    #[verifier::inline]
     open spec fn view(&self) -> Self::V {
         self.0@
     }
@@ -344,12 +409,25 @@ impl View for PerCpuAreas {
 ///
 /// For verification and the ease of implementation, we just use a simple
 /// read-write lock to protect the access to this structure.
-pub exec static PERCPU_AREAS: DekoRwLock<PerCpuAreas, PerCpuAreasPermission, PerCpuAreasPred>
+///
+/// Because this struct is frequently accessed, it is unwise for use to allocate everything
+/// just on the stack as this would cause a lot of stack overflows and bad for performance.
+pub exec static PERCPU_AREAS: DekoRwLock<
+    Option<PerCpuAreas>,
+    PerCpuAreasPermission,
+    PerCpuAreasOptPred,
+>
     ensures
         PERCPU_AREAS.wf(),
 {
-    let (v, p) = PerCpuAreas::new();
-    let lock = DekoRwLock::new(DekoAtomicData::new_with(v, p), (), Ghost(PerCpuAreasPred {  }));
+    let lock = DekoRwLock::new(
+        DekoAtomicData::new_with(
+            None,
+            Tracked(PerCpuAreasPermission { shared_perms: Seq::tracked_empty() }),
+        ),
+        (),
+        Ghost(PerCpuAreasOptPred {  }),
+    );
     proof {
         use_type_invariant(&lock);
     }
@@ -1679,7 +1757,18 @@ unsafe extern "C" fn ap_start() -> ! {
     let mut per_cpu_shared_lock = PERCPU_AREAS.acquire_write();
     let DekoAtomicData { data: mut per_cpu_areas, mut perm } = per_cpu_shared_lock.get();
 
-    let this = per_cpu_areas.0.index(cpuid as usize);
+    let Some(mut per_cpu_areas) = per_cpu_areas else {
+        die("Per-CPU shared areas not initialized");
+    };
+
+    kpanic_if!(
+        core::hint::unlikely(cpuid as usize >= per_cpu_areas.0.len()),
+        "AP CPU ID out of bounds in per-CPU shared area: got;",
+        cpuid, "max", per_cpu_areas.0.len(),
+        "check if BSP initialized the CPU count correctly"
+    );
+
+    let this = &per_cpu_areas.0[cpuid as usize];
 
     kpanic_if!(
         core::hint::unlikely(this.cpu_index != cpuid as usize),
@@ -1711,7 +1800,7 @@ unsafe extern "C" fn ap_start() -> ! {
     proof {
         perm.borrow_mut().shared_perms.tracked_insert(cpuid as int, this_perm);
     }
-    per_cpu_shared_lock.release_write(DekoAtomicData::new_with(per_cpu_areas, perm));
+    per_cpu_shared_lock.release_write(DekoAtomicData::new_with(Some(per_cpu_areas), perm));
 
     kinfo!("Application processor started:", cpuid => hex);
 

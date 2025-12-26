@@ -1056,9 +1056,19 @@ fn prepare_fw_launch(
 
     if let Some(caa) = fw_meta.caa_page {
         let shared_handle = PERCPU_AREAS.acquire_read();
-        let shared = shared_handle.borrow();
+        let DekoAtomicData { data, perm, } = shared_handle.borrow();
 
-        let cpu_shared = shared.data.0.index(cpuid as usize);
+        let Some(ref shared) = data else {
+            die("PERCPU_AREAS is not initialized");
+        };
+
+        kpanic_if!(
+            cpuid as usize >= shared.0.len(),
+            "CPU ID out of bounds for PERCPU_AREAS",
+            cpuid,
+        );
+
+        let cpu_shared = &shared.0[cpuid as usize];
         let mut guest_vmsa = cpu_shared.guest_vmsa.acquire_write();
         let DekoAtomicData { data: mut v, .. } = guest_vmsa.get();
         v.generation = v.generation.saturating_add(1);

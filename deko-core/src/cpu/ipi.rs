@@ -13,7 +13,7 @@ use vstd::prelude::*;
 use crate::cpu::apic::{Apic, X86Apic};
 use crate::cpu::task::DekoRunnablePtr;
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission, PerCpuAreas, CPUID_MAX_COUNT, PERCPU_AREAS};
-use crate::{kdebug, kpanic_if};
+use crate::{die, kdebug, kpanic_if};
 
 verus! {
 
@@ -198,52 +198,52 @@ impl DekoIpIRequest {
             i += 1;
         }
 
-        deko_rwlock_write_atomic_data!(
-            PERCPU_AREAS,
-            cpu_areas,
-            cpu_areas_perm,
-            {
-                let tracked mut   ipi_area_perm = cpu_areas_perm.borrow_mut().shared_perms.tracked_remove(id as int);
-                // Obtain a reference to this CPU's IPI area.
-                let ipi_area = &cpu_areas.0.index(id).ipi_shared;
+        // deko_rwlock_write_atomic_data!(
+        //     PERCPU_AREAS,
+        //     cpu_areas,
+        //     cpu_areas_perm,
+        //     {
+        //         let tracked mut   ipi_area_perm = cpu_areas_perm.borrow_mut().shared_perms.tracked_remove(id as int);
+        //         // Obtain a reference to this CPU's IPI area.
+        //         let ipi_area = &cpu_areas.0.index(id).ipi_shared;
 
-                // Increment the count of pending requests.
-                ipi_area.pending.store(Tracked(&mut ipi_area_perm.ipi_shared_perm.pending_perm), cpu_nums as _);
-                proof {
-                    cpu_areas_perm.borrow_mut().shared_perms.tracked_insert(id as int, ipi_area_perm);
-                }
-            }
-        );
+        //         // Increment the count of pending requests.
+        //         ipi_area.pending.store(Tracked(&mut ipi_area_perm.ipi_shared_perm.pending_perm), cpu_nums as _);
+        //         proof {
+        //             cpu_areas_perm.borrow_mut().shared_perms.tracked_insert(id as int, ipi_area_perm);
+        //         }
+        //     }
+        // );
 
-        // Now let's wait for others to complete their handling.
-        #[verus_spec(
-            invariant
-                self.wf(),
-                0 <= id < CPUID_MAX_COUNT,
-        )]
-        loop {
-            core::hint::spin_loop();
+        // // Now let's wait for others to complete their handling.
+        // #[verus_spec(
+        //     invariant
+        //         self.wf(),
+        //         0 <= id < CPUID_MAX_COUNT,
+        // )]
+        // loop {
+        //     core::hint::spin_loop();
 
-            deko_rwlock_write_atomic_data!(
-                PERCPU_AREAS,
-                cpu_areas,
-                cpu_areas_perm,
-                {
-                    let tracked mut ipi_area_perm;
-                    // Obtain a reference to this CPU's IPI area.
-                    let ipi_area = &cpu_areas.0.index(id).ipi_shared;
-                    proof {
-                        ipi_area_perm = cpu_areas_perm.borrow_mut().shared_perms.tracked_borrow(id as int);
-                    }
+        //     deko_rwlock_write_atomic_data!(
+        //         PERCPU_AREAS,
+        //         cpu_areas,
+        //         cpu_areas_perm,
+        //         {
+        //             let tracked mut ipi_area_perm;
+        //             // Obtain a reference to this CPU's IPI area.
+        //             let ipi_area = &cpu_areas.0.index(id).ipi_shared;
+        //             proof {
+        //                 ipi_area_perm = cpu_areas_perm.borrow_mut().shared_perms.tracked_borrow(id as int);
+        //             }
 
-                    let pending = ipi_area.pending.load(Tracked(&ipi_area_perm.ipi_shared_perm.pending_perm));
+        //             let pending = ipi_area.pending.load(Tracked(&ipi_area_perm.ipi_shared_perm.pending_perm));
 
-                    if pending == 0 {
-                        break;
-                    }
-                }
-            );
-        }
+        //             if pending == 0 {
+        //                 break;
+        //             }
+        //         }
+        //     );
+        // }
     }
 }
 
@@ -274,8 +274,20 @@ fn send_ipi_to(target: usize, from: &X86Apic) {
         cpu_areas,
         cpu_areas_perm,
         {
+            let Some(ref cpu_areas) = cpu_areas else {
+                die("PERCPU_AREAS is not initialized");
+            };
+
+            kpanic_if!(
+                core::hint::unlikely(target >= cpu_areas.0.len()),
+                "Target CPU ID",
+                target,
+                "exceeds current CPU count",
+                cpu_areas.0.len(),
+            );
+
             // Obtain a reference to the target CPU's IPI area.
-            let ipi_area = &cpu_areas.0.index(target).ipi_shared;
+            let ipi_area = &cpu_areas.0[target].ipi_shared;
             let tracked mut ipi_area_perm = cpu_areas_perm.borrow_mut().shared_perms.tracked_remove(target as int);
 
             // Mark that an IPI request has been made to the target CPU.
@@ -311,9 +323,22 @@ impl DekoCpuCtx {
             cpu_areas,
             cpu_areas_perm,
             {
+                let Some(ref cpu_areas) = cpu_areas else {
+                    die("PERCPU_AREAS is not initialized");
+                };
+
+                kpanic_if!(
+                    core::hint::unlikely(cpu_id >= cpu_areas.0.len()),
+                    "Target CPU ID",
+                    cpu_id,
+                    "exceeds current CPU count",
+                    cpu_areas.0.len(),
+                );
+
+
                 let tracked mut ipi_area_perm;
                 // Obtain a reference to this CPU's IPI area.
-                let ipi_area = &cpu_areas.0.index(cpu_id).ipi_shared;
+                let ipi_area = &cpu_areas.0[cpu_id].ipi_shared;
                 proof {
                     ipi_area_perm = cpu_areas_perm.borrow_mut().shared_perms.tracked_borrow(cpu_id as int);
                 }
@@ -321,15 +346,14 @@ impl DekoCpuCtx {
                 let cpu_set = ipi_area.request_set.load(Tracked(&ipi_area_perm.ipi_shared_perm.request_set_perm));
 
                 // Enumerate over all CPUs
-                for i in 0..CPUID_MAX_COUNT
+                for i in 0..cpu_areas.0.len()
                     invariant
-                        0 <= i <= CPUID_MAX_COUNT,
+                        0 <= i <= cpu_areas@.len() <= CPUID_MAX_COUNT,
                         cpu_areas.wf(),
-                        cpu_areas@.len() == CPUID_MAX_COUNT as int,
                         cpu_areas@.len() == cpu_areas_perm@.shared_perms.len(),
                         forall|j: int|
                         #![trigger cpu_areas_perm@.shared_perms[j as int]]
-                        0 <= j < CPUID_MAX_COUNT as int ==> {
+                        0 <= j < cpu_areas@.len() as int ==> {
                             &&& cpu_areas@[j as int].wf()
                             &&& cpu_areas_perm@.shared_perms[j as int].online_perm.is_for(cpu_areas@[j as int].online)
                             &&& cpu_areas_perm@.shared_perms[j as int].ipi_pending_perm.is_for(cpu_areas@[j as int].ipi_pending)
@@ -352,7 +376,7 @@ impl DekoCpuCtx {
                     if (cpu_set & (1 << i)) != 0 {
                         kdebug!("CPU", cpu_id => hex, "handling IPI from CPU", i => hex);
                         // Handle the IPI from CPU i.
-                        let cpu_shared_this = &cpu_areas.0.index(i).ipi_shared;
+                        let cpu_shared_this = &cpu_areas.0[i].ipi_shared;
                         let tracked mut shared_perm_this = cpu_areas_perm.borrow_mut().shared_perms.tracked_remove(i as int);
 
                         unsafe {

@@ -1454,9 +1454,8 @@ fn switch(pre: Option<DekoRunnablePtr>, next: DekoRunnablePtr) {
     let next = DekoArc::as_ptr(&next).addr() as u64;
 
     // perform the actual context switch
-    unsafe {
-        do_context_switch(pre, next, deko_rsp_offset(), cr3_next, stack.0);
-    }
+    do_context_switch(pre, next, deko_rsp_offset(), cr3_next, stack.0);
+
 }
 
 fn after_switch() {
@@ -1675,9 +1674,8 @@ pub fn set_cpu_affinity(which: usize) {
 
     // The CPU should schdule and should not return.
     // Schedule.
-    unsafe {
-        schedule();
-    }
+
+    schedule();
 }
 
 // BUG: Newly created task will trigger a page fault somewhere.
