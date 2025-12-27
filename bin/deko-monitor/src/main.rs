@@ -20,6 +20,7 @@ use deko_core::cpu::{
 use deko_core::elf::ElfFile;
 use deko_core::fs::ramfs::init_ramfs;
 use deko_core::fw::{load_acpi_tables, read_acpi_table};
+use deko_core::hal::set_is_stage2;
 use deko_core::logging::print_banner;
 use deko_core::mm::frame_allocator::DekoAllocatorApi;
 use deko_core::mm::paging::{
@@ -31,7 +32,7 @@ use deko_core::mm::vm::{
     VirtualMemory, VirtualMemoryPermission, VirtualMemoryRegion, VmMapping, VmMappingPred,
     VMR_GRANULE,
 };
-use deko_core::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR};
+use deko_core::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR_FULL};
 use deko_core::snp::ghcb::GuestHostCommunicationBlock;
 use deko_core::snp::logging::init_ghcb_logging;
 use deko_core::snp::req::init_snp_guest_driver;
@@ -241,7 +242,7 @@ fn init_mem(header: &DekoKernelLaunchInfo) {
     let heap_start = header.heap_area_virt_start;
     let heap_size = header.heap_area_size;
 
-    DEKO_FRAME_ALLOCATOR.0.init(heap_start, heap_size);
+    DEKO_FRAME_ALLOCATOR_FULL.init(heap_start, heap_size);
 }
 
 /// The "true" entry point of the monitor.
@@ -262,6 +263,8 @@ fn init_mem(header: &DekoKernelLaunchInfo) {
         header.wf(),
 )]
 extern "C" fn deko_entry(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
+    set_is_stage2(false);
+
     #[verus_spec(with Tracked(ctx_perm))]
     deko_setup(ctx, header);
 
@@ -360,7 +363,15 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
 
     // Prepare the BSP CPU context.
     proof_with!(Tracked(pgtable_perm) => Tracked(cpu_ctx_perm));
-    let bsp_cpu_ptr = DekoCpuCtx::setup_cpu(new_page_table, private_bit, shared_bit, ms, 0);
+    // buggy.
+    let bsp_cpu_ptr = DekoCpuCtx::setup_cpu(
+        new_page_table,
+        private_bit,
+        shared_bit,
+        ms,
+        0,
+        &DEKO_FRAME_ALLOCATOR_FULL,
+    );
 
     proof {
         // do it later.
@@ -372,6 +383,10 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
 
     init_ghcb_logging(debug_serial_port);
     print_banner();
+
+    kinfo!("The remaining memory in frame allocator:",
+        DEKO_FRAME_ALLOCATOR_FULL.0.remaining(),
+    );
 
     setup_apic(bsp_cpu_ptr, Tracked(&mut cpu_ctx_perm));
 
@@ -467,8 +482,7 @@ fn deko_main(cpu_index: usize) {
             },
         );
 
-        proof_with!(Tracked(&mut new_perm));
-        DekoCpuCtx::start_kernel_task(this_cpu, serv_task, true);  // schedule now
+        DekoCpuCtx::start_kernel_task(this_cpu, Tracked(&mut new_perm), serv_task);  // schedule now
 
         // cpu_idle(cpu_index);  // guard in case schedule fails
     } else {
@@ -485,6 +499,10 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     // Print detailed panic information using the logging system
     #[cfg(feature = "logging")]
     deko_core::logging::print_panic_info(info);
+
+    unsafe {
+        core::arch::asm!("ud2");
+    }
 
     loop {
     }

@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 deko-std = { path = "../../deko-std", features = ["alloc", "snp"] }
 vstd = { git = "https://github.com/hiroki-chen/verus.git", default-features = false, features = [
-  "alloc",
-] }
+  "alloc", "allow_panic"
+] , branch = "verus-spec-const-fix"}
 proptest = "1.9.0"
 indicatif = "0.17.8"

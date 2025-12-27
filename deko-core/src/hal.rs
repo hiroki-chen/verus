@@ -25,6 +25,20 @@ verus! {
 #[link_section = ".ap_section"]
 pub exec static AP_FLAG: AtomicBool = AtomicBool::new(false);
 
+pub exec static IS_STAGE2: AtomicBool = AtomicBool::new(false);
+
+#[verifier::external_body]
+#[inline(always)]
+pub fn set_is_stage2(v: bool) {
+    IS_STAGE2.store(v, Ordering::Release);
+}
+
+#[verifier::external_body]
+#[inline(always)]
+pub fn is_stage2() -> bool {
+    IS_STAGE2.load(Ordering::Acquire)
+}
+
 #[verifier::external_body]
 #[inline(always)]
 fn allow_ap_to_proceed() {

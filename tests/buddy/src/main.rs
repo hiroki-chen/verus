@@ -52,7 +52,7 @@ fn alloc_ops_strategy() -> impl Strategy<Value = Vec<AllocOp>> {
             3 => any::<u64>()
                 .prop_map(|index| AllocOp::Free { index }),
         ],
-        10..100, // Generate 10-100 operations
+        20..100, // Generate 20-100 operations
     )
 }
 
@@ -107,7 +107,7 @@ fn main() {
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 10000,  // More test cases
-        max_shrink_iters: 100000,
+        max_shrink_iters: 10000,
         .. ProptestConfig::default()
     })]
 
@@ -151,8 +151,8 @@ proptest! {
             heap_start
         );
 
-        let mut allocator = DekoHeap::<10>::new(Ghost::assume_new());
-        allocator.init(heap_start, heap_len, 10);
+        let mut allocator = DekoHeap::<20>::new(Ghost::assume_new());
+        allocator.init(heap_start, heap_len, 20);
         let mut allocations: Vec<(u64, u64, u64)> = Vec::new();
 
         for op in ops {
@@ -224,8 +224,8 @@ proptest! {
 
         let (_buffer, heap_start, heap_len) = create_aligned_heap(HEAP_SIZE, HEAP_ALIGN);
 
-        let mut allocator = DekoHeap::<10>::new(Ghost::assume_new());
-        allocator.init(heap_start, heap_len, 10);
+        let mut allocator = DekoHeap::<20>::new(Ghost::assume_new());
+        allocator.init(heap_start, heap_len, 20);
 
         let mut allocations: Vec<(u64, u64, u64)> = Vec::new();
 
@@ -275,7 +275,7 @@ proptest! {
 
         // Initialize progress bar once (smaller case count for parameterized tests)
         INIT.call_once(|| {
-            let pb = ProgressBar::new(360); // 6 sizes * 6 aligns * 10 iterations 
+            let pb = ProgressBar::new(10000); // 6 sizes * 6 aligns * 20 iterations 
             pb.set_style(ProgressStyle::with_template(
                 "[{bar:40.green/blue}] {pos:>7}/{len:7} Memory reuse patterns {msg}"
             ).unwrap().progress_chars("##-"));
@@ -288,7 +288,7 @@ proptest! {
         unsafe {
             if let Some(ref pb) = PROGRESS_BAR {
                 pb.set_position(current as u64);
-                if current >= 359 {
+                if current >= 9999 {
                     pb.finish_with_message("✓ Complete");
                 }
             }
@@ -299,9 +299,11 @@ proptest! {
 
         let (_buffer, heap_start, heap_len) = create_aligned_heap(HEAP_SIZE, HEAP_ALIGN);
 
-        let mut allocator = DekoHeap::<10>::new(Ghost::assume_new());
-        allocator.init(heap_start, heap_len, 10);
+        let mut allocator = DekoHeap::<18>::new(Ghost::assume_new());
 
+        allocator.init(heap_start, heap_len, 18);
+        
+        // panic!("allocator.min_block_size == {}", allocator.min_block_size);
         // First allocation
         let addr1 = allocator.allocate(size, align);
         prop_assert_ne!(addr1, 0, "Initial allocation failed");
@@ -349,18 +351,18 @@ proptest! {
             }
         }
 
-        const HEAP_SIZE: usize = 0x10000; // Small heap
+        const HEAP_SIZE: usize = 0x200000; // Small heap
         const HEAP_ALIGN: usize = 0x10000;
 
         let (_buffer, heap_start, heap_len) = create_aligned_heap(HEAP_SIZE, HEAP_ALIGN);
-        let mut allocator = DekoHeap::<10>::new(Ghost::assume_new());
-        allocator.init(heap_start, heap_len, 10);
+        let mut allocator = DekoHeap::<20>::new(Ghost::assume_new());
+        allocator.init(heap_start, heap_len, 20);
 
         // Fill the heap
-        let addr1 = allocator.allocate(0x8000, 0x1000);
+        let addr1 = allocator.allocate(0x100000, 0x1000);
         assert_ne!(addr1, 0);
 
-        let addr2 = allocator.allocate(0x8000, 0x1000);
+        let addr2 = allocator.allocate(0x100000, 0x1000);
         assert_ne!(addr2, 0);
 
         // This should fail
@@ -368,8 +370,8 @@ proptest! {
         assert_eq!(addr3, 0, "Expected allocation to fail when heap is full");
 
         // Cleanup
-        allocator.deallocate(addr1, 0x8000, 0x1000);
-        allocator.deallocate(addr2, 0x8000, 0x1000);
+        allocator.deallocate(addr1, 0x100000, 0x1000);
+        allocator.deallocate(addr2, 0x100000, 0x1000);
     }
 
     fn test_fragmentation(_ in alloc_ops_strategy()) {
@@ -403,12 +405,12 @@ proptest! {
         const HEAP_ALIGN: usize = 0x10000;
 
         let (_buffer, heap_start, heap_len) = create_aligned_heap(HEAP_SIZE, HEAP_ALIGN);
-        let mut allocator = DekoHeap::<10>::new(Ghost::assume_new());
-        allocator.init(heap_start, heap_len, 10);
+        let mut allocator = DekoHeap::<20>::new(Ghost::assume_new());
+        allocator.init(heap_start, heap_len, 20);
 
         // Allocate alternating sizes to fragment memory
         let mut allocs = Vec::new();
-        for i in 0..10 {
+        for i in 0..20 {
             let size = if i % 2 == 0 { 0x1000 } else { 0x2000 };
             let addr = allocator.allocate(size, 0x1000);
             if addr != 0 {

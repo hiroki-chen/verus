@@ -12,7 +12,7 @@ use crate::ptr::{DekoPPtr, DekoPointsTo};
 use crate::std_extra::convert::AsRefSpecImpl;
 use crate::sync::DekoAtomicData;
 use crate::wf::WellFormed;
-use crate::{addr_of_ref, boxed_ptr, DefaultDekoHeapAllocator, Predicate, VirtAddr, ARC_ID};
+use crate::{addr_of_ref, boxed_ptr, DekoFrameAllocator, Predicate, VirtAddr, ARC_ID};
 
 verus! {
 
@@ -361,7 +361,7 @@ impl<V: WellFormed, F: Predicate<V>> Arc<V, F> {
 
     /// Constructs a new [`Arc<T>`] instance with the given value `v`, using the provided allocator
     /// and with a predicate `f` that should hold for the inner value.
-    pub fn new(v: V, allocator: &DefaultDekoHeapAllocator, Ghost(f): Ghost<F>) -> (r: Self)
+    pub fn new<A: DekoFrameAllocator>(v: V, allocator: &A, Ghost(f): Ghost<F>) -> (r: Self)
         requires
             allocator.wf(),
             v.wf(),

@@ -18,7 +18,7 @@ use crate::cpu::regs::{
     DEKO_TR_ATTRIBUTES, DEKO_TSS,
 };
 use crate::cpu::X86Tss;
-use crate::mm::DEKO_FRAME_ALLOCATOR;
+use crate::mm::DEKO_FRAME_ALLOCATOR_FULL;
 use crate::snp::{
     rmpadjust, DekoCpuCtxPermission, PageTablePermission, RmpFlags, Rmp_ALL_BITS, SnpStatusFlags,
     BIT_VMSA,
@@ -359,7 +359,7 @@ impl VmsaPage {
     pub fn alloc(rmp: RmpFlags) -> Self {
         broadcast use RmpFlags::lemma_each_bit_is_valid;
 
-        let (page, Tracked(perm)) = boxed_ptr!([VMSA; 2], &DEKO_FRAME_ALLOCATOR.0);
+        let (page, Tracked(perm)) = boxed_ptr!([VMSA; 2], &DEKO_FRAME_ALLOCATOR_FULL);
 
         // Make sure the VMSA page is not 2M-aligned.
         // To ensure this property, we allocate 2 VMSAs.
@@ -428,6 +428,9 @@ impl VmsaPage {
             let ptr = self.page.borrow(Tracked(&perm.ptr_perm)).as_ptr().wrapping_add(
                 self.idx * PAGE_SIZE as usize,
             ) as *mut VMSA;
+
+            kdebug!("write bytes vmsa");
+
             core::ptr::write_bytes(ptr as *mut u8, 0, core::mem::size_of::<VMSA>());
 
             &mut *ptr

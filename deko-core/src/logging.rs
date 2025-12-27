@@ -346,7 +346,7 @@ macro_rules! kinfo {
         #[cfg(all(feature = "logging", log_level_info))]
         {
             let _guard = $crate::logging::CONSOLE_LOCK.acquire_write();
-
+            #[verifier::external]
             $crate::logging::print_str($crate::logging::INFO_COLOR);
             $crate::logging::print_str("[INFO] ");
             $crate::logging::print_str($crate::logging::RESET_COLOR);

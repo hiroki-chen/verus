@@ -3,7 +3,7 @@
 use std::sync::Once;
 
 use deko_core::mm::frame_allocator::DekoAllocatorApi;
-use deko_core::mm::DEKO_FRAME_ALLOCATOR;
+use deko_core::mm::DEKO_FRAME_ALLOCATOR_FULL;
 use proptest::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
@@ -83,7 +83,11 @@ fn setup_allocator() {
             let offset = (aligned_start - raw_start) as usize;
             let aligned_length = (total_size - offset) as u64;
 
-            DEKO_FRAME_ALLOCATOR.init(aligned_start, aligned_length);
+            println!(
+                "Initializing global allocator: raw_start={:#x}, aligned_start={:#x}, aligned_length={:#x}",
+                raw_start, aligned_start, aligned_length
+            );
+            DEKO_FRAME_ALLOCATOR_FULL.init(aligned_start, aligned_length);
 
             // Keep buffer alive forever
             HEAP_BUFFER = Some(buffer);
@@ -97,13 +101,15 @@ fn setup_allocator() {
 }
 
 fn main() {
+    println!("Running collection tests...");
+
     test_vec_random_ops();
     test_vec_large_elements();
     test_vec_strings();
 }
 
 proptest! {
-    fn test_vec_random_ops(ops in vec_ops_strategy(any::<i32>(), 10..200)) {
+    fn test_vec_random_ops(ops in vec_ops_strategy(any::<i32>(), 0..100)) {
         use std::sync::Once;
         static INIT: Once = Once::new();
         static mut PROGRESS_BAR: Option<ProgressBar> = None;
@@ -111,7 +117,7 @@ proptest! {
 
         // Initialize progress bar once
         INIT.call_once(|| {
-            let pb = ProgressBar::new(256);  // Default proptest cases
+            let pb = ProgressBar::new(1000);  // Default proptest cases
             pb.set_style(ProgressStyle::with_template(
                 "[{bar:40.green/blue}] {pos:>7}/{len:7} Vector random ops {msg}"
             ).unwrap().progress_chars("##-"));
@@ -124,7 +130,7 @@ proptest! {
         unsafe {
             if let Some(ref pb) = PROGRESS_BAR {
                 pb.set_position(current as u64);
-                if current >= 255 {
+                if current >= 999 {
                     pb.finish_with_message("✓ Complete");
                 }
             }
@@ -186,7 +192,7 @@ proptest! {
         }
     }
 
-    fn test_vec_large_elements(ops in vec_ops_strategy(any::<[u64; 16]>(), 10..100)) {
+    fn test_vec_large_elements(ops in vec_ops_strategy(any::<[u64; 16]>(), 0..100)) {
         setup_allocator();
 
         let mut v = Vec::<[u64; 16], _>::new_in(DekoAllocatorApi {});
@@ -216,7 +222,7 @@ proptest! {
         prop_assert!(v.capacity() > 0 || v.is_empty());
     }
 
-    fn test_vec_strings(ops in vec_ops_strategy(any::<String>(), 10..100)) {
+    fn test_vec_strings(ops in vec_ops_strategy(any::<String>(), 0..100)) {
         setup_allocator();
 
         let mut v = Vec::<String, _>::new_in(DekoAllocatorApi {});

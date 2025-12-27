@@ -6,7 +6,7 @@ use vstd::prelude::*;
 
 use crate::cpu::task::X86ExceptionContext;
 use crate::mm::paging::GLOBAL;
-use crate::mm::DEKO_FRAME_ALLOCATOR;
+use crate::mm::DEKO_FRAME_ALLOCATOR_FULL;
 use crate::{kinfo, kpanic_if, kwarn};
 
 core::arch::global_asm!(
@@ -14,6 +14,7 @@ core::arch::global_asm!(
     EXCEP_FLAGS_OFF = const offset_of!(X86ExceptionContext, frame.flags),
     EXCEP_CS_OFF = const offset_of!(X86ExceptionContext, frame.cs),
     EXCEP_RCX_OFF = const offset_of!(X86ExceptionContext, regs.rcx),
+    EXCEP_RIP_OFF = const offset_of!(X86ExceptionContext, frame.rip),
     options(att_syntax)
 );
 
@@ -114,7 +115,7 @@ pub fn init_global_idt() {
         "Global IDT is already initialized",
     );
 
-    let (idt_ptr, Tracked(mut idt_perm)) = boxed_ptr!(Idt, &DEKO_FRAME_ALLOCATOR.0);
+    let (idt_ptr, Tracked(mut idt_perm)) = boxed_ptr!(Idt, &DEKO_FRAME_ALLOCATOR_FULL);
 
     kinfo!("Populating exception handlers in global IDT");
 

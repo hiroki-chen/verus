@@ -133,7 +133,6 @@ impl TempMapping {
             kwarn!("TempMapping::new: invalid number of pages requested:", nr_pages);
             return None;
         }
-        kdebug!("TempMapping::new: requesting temporary mapping of", nr_pages, "pages for physical range", prange);
         let flags = PteFlags::data();
         let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
 
@@ -441,8 +440,6 @@ impl VmMapping {
                 let pfn = offset >> 12;
                 let guard_offset = stack.guard_pages << 12;
 
-                kdebug!("VmMapping::phys_at: stack mapping at offset", offset, "with guard offset", guard_offset, "and pfn", pfn);
-
                 if pfn >= stack.guard_pages {
                     proof {
                         let gp = stack.guard_pages;
@@ -456,8 +453,6 @@ impl VmMapping {
                     }
 
                     let pfn = (offset - guard_offset) >> 12;
-
-                    kdebug!("VmMapping::phys_at: adjusted pfn is", pfn);
 
                     match stack.alloc.get(pfn as usize) {
                         Some(Some((_, paddr))) => { Some(*paddr) },
@@ -1731,8 +1726,6 @@ impl VirtualMemory {
                 self.range.end@ - self.range.start@ - offset,
         )]
         while offset < self.range.end.0 - self.range.start.0 {
-            kdebug!("Requesting mapping at offset ", offset);
-
             // Request if there is a physical address at this offset.
             if let Some(paddr) = mapping_data.phys_at(offset) {
                 let vaddr = VirtAddr(self.range.start.0 + offset);
@@ -1741,8 +1734,6 @@ impl VirtualMemory {
                     // This proof will be delayed.
                     assume(parent_perm.pgtable_perm.mapping_space.kernel.in_range_spec(paddr));
                 }
-
-                kdebug!("Mapping", vaddr, "to", paddr, "with flags", flags.bits() => hex);
 
                 // Now we can map the page.
                 PageTable::map_page_4k(

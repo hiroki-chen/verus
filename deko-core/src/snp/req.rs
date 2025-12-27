@@ -8,7 +8,7 @@ use deko_std::{boxed_ptr, with_permission};
 use vstd::prelude::*;
 
 use crate::kinfo;
-use crate::mm::DEKO_FRAME_ALLOCATOR;
+use crate::mm::DEKO_FRAME_ALLOCATOR_FULL;
 
 verus! {
 
@@ -203,10 +203,11 @@ impl SnpGuestDriver {
             r.wf_with(request_perm@),
     )]
     pub fn new() -> Self {
-        let (request, Tracked(request_perm)) = boxed_ptr!(SnpGuestMsg, &DEKO_FRAME_ALLOCATOR.0);
-        let (response, Tracked(response_perm)) = boxed_ptr!(SnpGuestMsg, &DEKO_FRAME_ALLOCATOR.0);
+        let (request, Tracked(request_perm)) = boxed_ptr!(SnpGuestMsg, &DEKO_FRAME_ALLOCATOR_FULL);
+        let (response, Tracked(response_perm)) =
+            boxed_ptr!(SnpGuestMsg, &DEKO_FRAME_ALLOCATOR_FULL);
         let (ext_data, Tracked(extdata_perm)) =
-            boxed_ptr!(Array<u8, SNP_GUEST_REQ_MAX_DATA_SIZE>, &DEKO_FRAME_ALLOCATOR.0);
+            boxed_ptr!(Array<u8, SNP_GUEST_REQ_MAX_DATA_SIZE>, &DEKO_FRAME_ALLOCATOR_FULL);
 
         proof_with!(|= Tracked(
             SnpGuestDriverPermission {

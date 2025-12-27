@@ -65,7 +65,11 @@ unsafe impl<V: WellFormed + Heap> core::alloc::Allocator for DekoBuddyAllocator<
 /// - [`DekoBuddyAllocator`] - The main heap allocator that uses this constant
 /// - [`DekoHeap`] - The heap implementation parameterized by this size
 /// - [`valid_heap_param`] - Function that validates heap parameters including this size
-pub const HEAP_SIZE: usize = 10;
+///
+pub const HEAP_SIZE_STAGE2: usize = 10;
+
+/// Minblock = ?
+pub const HEAP_SIZE_FULL: usize = 13;
 
 /// The _true_ global allocator for Deko that manages the physical pages.
 ///
@@ -115,24 +119,29 @@ impl<V: WellFormed + Heap> DekoBuddyAllocator<V> {
         Self { allocator: DekoRwLock::new(DekoAtomicData::new(v), (), Ghost(pred)) }
     }
 
-    pub fn init(&self, heap_start: u64, heap_size: u64)
+    pub fn remaining(&self) -> (r: u64) {
+        let read_handle = self.allocator.acquire_read();
+        let allocator = read_handle.borrow();
+
+        let res = allocator.data.remaining();
+        read_handle.release_read();
+        res
+    }
+
+    pub fn init(&self, heap_start: u64, heap_size: u64, order: u64)
         requires
             self.wf(),
-            crate::heap::valid_heap_param(heap_start, heap_size, HEAP_SIZE as u64),
+            crate::heap::valid_heap_param(heap_start, heap_size, order),
     {
         let mut write_handle = self.allocator.acquire_write();
         let mut allocator = write_handle.get();
-
-        // proof {
-        //     use_type_invariant(&write_handle);
-        // }
 
         // If already initialized, we do nothing.
         if allocator.data.is_init_impl() {
             write_handle.release_write(allocator);
             return ;
         }
-        allocator.data.init(heap_start, heap_size, HEAP_SIZE as u64);
+        allocator.data.init(heap_start, heap_size, order);
 
         write_handle.release_write(allocator);
     }
@@ -164,6 +173,9 @@ impl<V: WellFormed + Heap> DekoBuddyAllocator<V> {
     {
         let p = self.alloc_impl(size, align) as *mut u8;
 
+        if p == core::ptr::null_mut() {
+            panic!("DekoBuddyAllocator::alloc: allocation failed; perhaps out of memory?");
+        }
         unsafe {
             core::ptr::write_bytes(p, 0, size);
         }
@@ -245,12 +257,48 @@ impl<V: WellFormed + Heap> WellFormed for DekoBuddyAllocator<V> {
     }
 }
 
-/// Please be aware that this is NOT:
-/// - the global allocator for Rust.
-/// - the virtual heap allocator, and
-///
-/// this IS
-/// - the physical memory allocator that allocates physical pages.
-pub type DefaultDekoHeapAllocator = DekoBuddyAllocator<DekoHeap<HEAP_SIZE>>;
+/// The frame allocator trait that defines the interface for physical page allocation.
+pub trait DekoFrameAllocator: WellFormed + Sized {
+    fn alloc_page(&self, size: usize, align: usize) -> (pt: (
+        *mut u8,
+        Tracked<PointsToRaw>,
+        Tracked<Dealloc>,
+    ))
+        requires
+            self.wf(),
+            valid_layout(size, align),
+            size != 0,
+        ensures
+            pt.1@.is_range(pt.0.addr() as int, size as int),
+            pt.2@@ == (DeallocData {
+                addr: pt.0.addr(),
+                size: size as nat,
+                align: align as nat,
+                provenance: pt.1@.provenance(),
+            }),
+            pt.0.addr() as int % align as int == 0,
+            pt.0@.provenance == pt.1@.provenance(),
+        opens_invariants none
+    ;
+
+    fn dealloc_page(
+        &self,
+        ptr: *mut u8,
+        size: usize,
+        align: usize,
+        Tracked(perm): Tracked<PointsToRaw>,
+        Tracked(dealloc): Tracked<Dealloc>,
+    )
+        requires
+            self.wf(),
+            size != 0,
+            dealloc.addr() == ptr.addr(),
+            dealloc.size() == size as nat,
+            dealloc.align() == align as nat,
+            ptr@.provenance == perm.provenance(),
+            perm.is_range(ptr.addr() as int, size as int),
+        opens_invariants none
+    ;
+}
 
 } // verus!

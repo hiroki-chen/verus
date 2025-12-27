@@ -939,6 +939,8 @@ fn test_runner(suite: Option<String>, release: bool) -> Result<()> {
             continue;
         }
         cmd.arg("verus").arg("build").arg("--manifest-path").arg(suite_path);
+        // .arg("--")
+        // .arg("--nocapture");
 
         if release {
             cmd.arg("--release");

@@ -43,6 +43,7 @@ hv_handler:
   testl   $0x200, ({EXCEP_FLAGS_OFF} - {EXCEP_RCX_OFF})(%rsp)
   jnz    .Lhv_handler_process_hv
 
+  // movq	({EXCEP_RIP_OFF} - {EXCEP_RCX_OFF})(%rsp), %rax
 // Stub.
 .Lprocess_pending_hv:
   ud2

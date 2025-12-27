@@ -891,8 +891,6 @@ impl GuestHostCommunicationBlock {
             perm.is_init(),
             perm.pptr() == ptr@,
     {
-        kdebug!("writing data", data => hex, " at offset ", offset);
-
         let ghcb = ptr.borrow(Tracked(perm));
         let shared_buffer = &ghcb.shared_buffer;
 

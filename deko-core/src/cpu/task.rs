@@ -9,7 +9,9 @@ use deko_std::bits::bit_u64_and_auto;
 use deko_std::cpu::{no_irq_zone, CpuID, X86GeneralRegs};
 use deko_std::list::{LinkedList, Node};
 use deko_std::mem::bitalloc::{DekoBitAlloc, DekoBitmapAllocator1024};
-use deko_std::mem::{PAGE_SIZE, PERTASK_BASE, PGTABLE_LVL3_IDX_SHARED, STACK_SIZE};
+use deko_std::mem::{
+    DekoFrameAllocator, PAGE_SIZE, PERTASK_BASE, PGTABLE_LVL3_IDX_SHARED, STACK_SIZE,
+};
 use deko_std::misc::early_dbg;
 use deko_std::prelude::{func_ptr, VADDR_UPPER_MASK};
 use deko_std::ptr::{DekoPPtr, DekoPointsTo};
@@ -17,7 +19,10 @@ use deko_std::sync::arc::DekoArc;
 use deko_std::sync::rwlock::{DekoRwLock, RwLockPredicate};
 use deko_std::sync::{DekoAtomicData, DekoSimpleRwLock, DekoSimpleRwLockPred, RwLock};
 use deko_std::wf::WellFormed;
-use deko_std::{boxed_ptr, with_permission, TrivialPredicate};
+use deko_std::{
+    boxed_ptr, deko_rwlock_read_atomic_data, deko_rwlock_write_atomic_data, with_permission,
+    TrivialPredicate,
+};
 use vstd::prelude::*;
 use vstd::std_specs::cmp::{PartialEqSpec, PartialEqSpecImpl, PartialOrdSpecImpl};
 
@@ -35,10 +40,14 @@ use crate::mm::vm::{
     self, VirtualMemory, VirtualMemoryPermission, VirtualMemoryRegion,
     VirtualMemoryRegionPermission, VirtualMemoryRegionPred, VmMapping, VmMappingPred, VMR_GRANULE,
 };
-use crate::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR};
+use crate::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR, DEKO_FRAME_ALLOCATOR_FULL};
 use crate::{die, kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
 
-core::arch::global_asm!(include_str!("switch.S"), options(att_syntax));
+core::arch::global_asm!(
+    include_str!("switch.S"),
+    TASK_RSP_OFFSET = const core::mem::offset_of!(DekoRunnable, rsp),
+    options(att_syntax)
+);
 
 verus! {
 
@@ -81,17 +90,19 @@ pub const fn deko_rsp_offset() -> u64 {
         }
 )]
 pub fn request_vm_region() -> Option<(usize, VaddrRange)> {
-    let mut write_handle = DEKO_KTASK_BIT_ALLOC.acquire_write();
-    let mut alloc = write_handle.get();
-
-    let r = alloc.data.alloc(1, 0);
-    write_handle.release_write(alloc);
+    let r =
+        deko_rwlock_write_atomic_data!(
+        DEKO_KTASK_BIT_ALLOC,
+        alloc,
+        __,
+        {
+            alloc.alloc(1, 0)
+        }
+    );
 
     match r {
         None => None,
         Some(idx) => {
-            // HACK: for testing purposes.
-            let idx = 1;
             let span = 0x8000000000u64 / DekoBitmapAllocator1024::cap() as u64;
             let base = PERTASK_BASE.0 + (idx * span as usize) as u64;
 
@@ -155,6 +166,8 @@ with_atomic_pred! {
 
 fn on_task_exit() {
     kinfo!("Task exited");
+
+    schedule();
 }
 
 #[verus_verify]
@@ -191,7 +204,7 @@ pub broadcast axiom fn xsave_area_size_wf()
         2 <= r <= u64::MAX,
 )]
 pub(crate) fn generate_id() -> u64 {
-    const ID_COUNTER: AtomicU64 = AtomicU64::new(2);
+    static ID_COUNTER: AtomicU64 = AtomicU64::new(2);
 
     let mut id = ID_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     while id < 2 {
@@ -445,8 +458,11 @@ impl DekoRunQueue {
             node_perm@.value()@ == task,
     )]
     fn make_node(task: DekoRunnablePtr) -> DekoPPtr<Node<DekoRunnablePtr>> {
+        kinfo!("rq: Making node for task.");
+        kinfo!("rq: mem:", crate::mm::dump_frame_allocator_usage());
         let (node_ptr, Tracked(mut node_perm)) =
-            boxed_ptr!(Node<DekoRunnablePtr>, &DEKO_FRAME_ALLOCATOR.0);
+            boxed_ptr!(Node<DekoRunnablePtr>, &DEKO_FRAME_ALLOCATOR_FULL);
+        kinfo!("rq: Making node for task done.");
 
         // write to the node.
         node_ptr.write(
@@ -524,16 +540,22 @@ impl DekoRunQueue {
             self.wf_with(*perm),
     )]
     pub fn handle_task(&mut self, task: DekoRunnablePtr) {
+        kinfo!("rq: Handling task before scheduling out. 1");
         let DekoAtomicData { data: task_ref, .. } = task.as_ref();
 
         if task_ref.is_running() && !task_ref.is_idle() {
+            kinfo!("rq: Handling task before scheduling out. 2");
+
             kpanic_if!(
                 core::hint::unlikely(self.run_list.len() >= usize::MAX),
                 "Run queue is full when scheduling out a running task"
             );  // make verus happy.
 
+            kinfo!("rq: Handling task before scheduling out. 3");
+
             proof_with!(Tracked(perm));
             self.push_back(task);
+            kinfo!("rq: Handling task before scheduling out. 4");
         } else if task_ref.is_terminated() {
             self.terminated.replace(task.clone());
             proof {
@@ -558,10 +580,16 @@ impl DekoRunQueue {
             }
     )]
     pub fn schedule_prep(&mut self) -> Option<(DekoRunnablePtr, DekoRunnablePtr)> {
+        kinfo!("rq: Preparing scheduling found current task. 1");
+
         let current = self.current.take().unwrap();
+
+        kinfo!("rq: Preparing scheduling found current task. 2");
 
         proof_with!(Tracked(perm));
         self.handle_task(current.clone());
+
+        kinfo!("rq: Preparing scheduling found current task. 3");
 
         proof_with!(Tracked(perm));
         let next = self.get_next_task();
@@ -570,6 +598,8 @@ impl DekoRunQueue {
         if DekoArc::ptr_eq(&current, &next) {
             None
         } else {
+            kinfo!("rq: Preparing scheduling found current task. 7");
+
             Some((current, next))
         }
     }
@@ -780,6 +810,8 @@ impl DekoRunnable {
             },
         };
 
+        kdebug!("Allocated VM region for new task: index", idx, "region", region);
+
         // TODO: Where should the virtual region come from?
         // Perhaps we'll need some allocator to do so.
         proof_with!(Tracked(pgtable_perm), => Tracked(vm_region_perm));
@@ -795,7 +827,7 @@ impl DekoRunnable {
 
         DekoArc::new(
             DekoAtomicData::new_with(vmr, Tracked(vm_region_perm)),
-            &DEKO_FRAME_ALLOCATOR.0,
+            &DEKO_FRAME_ALLOCATOR_FULL,
             Ghost(VirtualMemoryRegionPred {  }),
         )
     }
@@ -837,9 +869,9 @@ impl DekoRunnable {
             (*task_ctx_ptr).regs.rsi = xsave;
             (*task_ctx_ptr).regs.rdx = params;
             (*task_ctx_ptr).ret = ret;
-            (*task_ctx_ptr).flags = 0x2;  // Default flags with interrupts enabled.
+            (*task_ctx_ptr).flags = 0x2;
 
-            (task_ctx_ptr as *mut u64).write(on_task_exit as u64);
+            (stack_ptr as *mut u64).write(on_task_exit as u64);
         }
     }
 
@@ -879,11 +911,11 @@ impl DekoRunnable {
             r.1.end >= r.1.start,
             r.0@ + r.1.end < u64::MAX,
     )]
-    pub fn alloc_kernel_stack(
+    pub fn alloc_kernel_stack<A: DekoFrameAllocator>(
         vm_region: &mut VirtualMemoryRegion,
         private_bit: u64,
         shared_bit: u64,
-        allocator: &DekoPageFrameAllocator,
+        allocator: &A,
         entry: u64,
         param: u64,
         ret: u64,
@@ -917,7 +949,7 @@ impl DekoRunnable {
 
             DekoArc::new(
                 DekoAtomicData::new(mapping_lock),
-                &DEKO_FRAME_ALLOCATOR.0,
+                &DEKO_FRAME_ALLOCATOR_FULL,
                 Ghost(DekoSimpleRwLockPred {  }),
             )
         };
@@ -1022,7 +1054,8 @@ impl DekoRunnable {
         }
 
         // Allocate xsave areas.
-        let (xsave_ptr, Tracked(xsave_perm)) = boxed_ptr!(Array<u8, 4096>, &DEKO_FRAME_ALLOCATOR.0);
+        let (xsave_ptr, Tracked(xsave_perm)) =
+            boxed_ptr!(Array<u8, 4096>, &DEKO_FRAME_ALLOCATOR_FULL);
         // This does nothing but clear the area to mark it as init.
         assume(xsave_perm.is_init());
 
@@ -1050,6 +1083,7 @@ impl DekoRunnable {
             vm_region.is_none(),
         ), "CPU has no VM region assigned");
 
+        // Allocate a new virtual memory region for the new task.
         let task_mm = match args.parent {
             // If so we inherit the parent's memory management.
             Some(ptr) => { ptr.as_ref().data.mm.clone() },
@@ -1077,7 +1111,7 @@ impl DekoRunnable {
                     &mut vm_region,
                     private_bit,
                     shared_bit,
-                    &DEKO_FRAME_ALLOCATOR,
+                    &DEKO_FRAME_ALLOCATOR_FULL,
                     entry,
                     param,
                     ret,
@@ -1111,8 +1145,8 @@ impl DekoRunnable {
             xsave_size: PAGE_SIZE as _,
             state: {
                 let sched_state = DekoRunnableSchedState {
-                    idle_task: true,
-                    state: DekoRunnableState::TERMINATED,
+                    idle_task: false,
+                    state: DekoRunnableState::RUNNING,
                     cpu_index: cpu_id as usize,
                 };
 
@@ -1160,7 +1194,7 @@ impl DekoRunnable {
         proof_with!(|= Tracked(ctx_perm));
         DekoArc::new(
             DekoAtomicData::new_with(task, Tracked(DekoRunnablePermission { xsave_perm })),
-            &DEKO_FRAME_ALLOCATOR.0,
+            &DEKO_FRAME_ALLOCATOR_FULL,
             Ghost(DekoRunnablePred {  }),
         )
     }
@@ -1387,6 +1421,7 @@ pub unsafe fn schedule_init() {
 /// Schedules the next task to run on the current CPU.
 pub fn schedule() {
     let (cpu, Tracked(perm)) = DekoCpuCtx::this_cpu();
+    let cpu_id = cpu.borrow(Tracked(&perm.ptr_perm)).cpu_id;
     let rq = cpu.borrow(Tracked(&perm.ptr_perm)).run_queue.as_ref();
     // make verus happy.
     kpanic_if!(core::hint::unlikely(rq.is_none()), "No run queue found when scheduling task");
@@ -1395,21 +1430,49 @@ pub fn schedule() {
         ||
             {
                 let work = DekoCpuCtx::schedule_prep(cpu, Tracked(&perm));
-
                 if let Some((cur, next)) = work {
+                    // id generation is somehow incorrect.
                     kdebug!("Switching from task ", cur.as_ref().data.id => hex);
                     kdebug!("Switching to task ", next.as_ref().data.id => hex);
 
-                    // switch(Some(cur), next);
+                    let next_state = &next.as_ref().data.state;
+
+                    let old_cpu =
+                        deko_rwlock_write_atomic_data! {
+                        next_state,
+                        state,
+                        __,
+                        {
+                            let old = state.cpu_index;
+
+                            old
+                        }
+                    };
+
+                    kinfo!("Old CPU index for next task: ", old_cpu);
+                    kinfo!("New CPU index for next task: ", cpu_id);
+
+                    // SSE Save context.
+
+                    switch(Some(cur), next);
+
+                    // SSE restore context.
+                } else {
+                    kdebug!("No task switch needed.");
                 }
-                kdebug!("No task switch needed.");
             },
     );
 
+    kdebug!("Returned from task switch.");
+
     after_switch();
+
+    kdebug!("After switch handling done.");
 
     // Remove the terminated task from the task list, if any.
     DekoCpuCtx::cleanup_terminated_task(cpu, Tracked(&perm));
+
+    kinfo!("Task scheduling complete.");
 }
 
 /// Attempts to perform the task switch.
@@ -1454,8 +1517,7 @@ fn switch(pre: Option<DekoRunnablePtr>, next: DekoRunnablePtr) {
     let next = DekoArc::as_ptr(&next).addr() as u64;
 
     // perform the actual context switch
-    do_context_switch(pre, next, deko_rsp_offset(), cr3_next, stack.0);
-
+    do_context_switch(pre, next, cr3_next, stack.0);
 }
 
 fn after_switch() {
@@ -1494,29 +1556,26 @@ fn after_switch() {
 /// Typically this is just an unsafe wrapper for the [`switch`] function
 /// that de-reference the [`DekoArc<T>`] to get the raw pointer.
 #[verifier::external_body]
-fn do_context_switch(pre: u64, next: u64, rsp_offset: u64, cr3_next: u64, stack_next: u64) {
+fn do_context_switch(pre: u64, next: u64, cr3_next: u64, stack_next: u64) {
     kdebug!("Switching context: pre=", pre => hex);
     kdebug!("Switching context: next=", next => hex);
     kdebug!("Switching context: cr3_next=", cr3_next => hex);
     kdebug!("Switching context: stack_next=", stack_next => hex);
-    kdebug!("Switching context: rsp_offset=", rsp_offset => hex);
 
-    // test if rsp can be read.
-    let rsp = unsafe { (next as *const DekoRunnable).read().rsp };
+    // let rsp = unsafe { (next as *const DekoRunnable).read().rsp };
 
-    kdebug!("Next task rsp = ", rsp => hex);
+    // kdebug!("Next task rsp = ", rsp => hex);
 
-    let v = unsafe { core::slice::from_raw_parts(rsp as *const u64, 18) };
+    // let v = unsafe { core::slice::from_raw_parts(rsp as *const u64, 18) };
 
-    kdebug!("Next task rsp content: ");
-    for i in 0..v.len() {
-        kdebug!("\t[", i, "] = ", v[i] => hex);
-    }
+    // kdebug!("Next task rsp content: ");
+    // for i in 0..v.len() {
+    //     kdebug!("\t[", i, "] = ", v[i] => hex);
+    // }
 
     unsafe {
         core::arch::asm!(
             "call context_switch",
-            in("r11") rsp_offset,
             in("r12") pre,
             in("r13") next,
             in("r14") stack_next,
@@ -1580,6 +1639,8 @@ pub extern "C" fn run_kernel_tasks(
     // Now we need to re-enable the interrupts.
     // Then we enter the entry.
     irq_enable();
+
+    after_switch();
 
     sse_restore_context(xsave_addr.addr() as u64);
 
@@ -1709,15 +1770,21 @@ pub fn serv_main(cpu_index: usize) {
         );
 
         let rq = rq.as_ref().unwrap();
-        let rq_handle = rq.acquire_read();
-        let DekoAtomicData { data: rq, .. } = rq_handle.borrow();
-        kpanic_if!(
-            core::hint::unlikely(rq.current.is_none()),
-            "Run queue is not well-formed.",
-        );
 
-        let current = rq.current.as_ref().unwrap().clone();
-        rq_handle.release_read();
+        let current =
+            deko_rwlock_read_atomic_data! {
+            rq,
+            runqueue,
+            __,
+            {
+                kpanic_if!(
+                    core::hint::unlikely(runqueue.current.is_none()),
+                    "Run queue is not well-formed.",
+                );
+
+                runqueue.current.as_ref().unwrap().clone()
+            }
+        };
 
         let mut i = 1;
         while i < cpu_nums
@@ -1730,6 +1797,9 @@ pub fn serv_main(cpu_index: usize) {
                 current.wf(),
             decreases cpu_nums - i,
         {
+            // BUG: FIX ME. Something isn't right here.
+            // Perhaps due to pub fn request_vm_region() -> Option<(usize, VaddrRange)>.
+            // so that kernel mapping gets messed up.
             proof_with!(Tracked(perm) => Tracked(new_perm));
             let serv_task = DekoRunnable::new(
                 this_cpu,  /* BUG: This is a thread? */
@@ -1741,15 +1811,15 @@ pub fn serv_main(cpu_index: usize) {
                         param: i,
                         ret: run_kernel_tasks_func_ptr(),
                     },
-                    parent: Some(current.clone()),  // spawned by the current task.
+                    // parent: Some(current.clone()),  // spawned by the current task.
+                    parent: None,
                 },
             );
 
+            kinfo!("Spawning service main on AP core ", i);
             // Set service main for other APs.
-            proof_with!(Tracked(&mut new_perm));
-            DekoCpuCtx::start_kernel_task(this_cpu, serv_task, true);
-
-            // CPU 0 never continues here.
+            // But this task never gets run?????
+            DekoCpuCtx::start_kernel_task(this_cpu, Tracked(&mut new_perm), serv_task);
 
             proof {
                 perm = new_perm;
@@ -1758,6 +1828,7 @@ pub fn serv_main(cpu_index: usize) {
             i += 1;
         }
     } else {
+        kinfo!("AP core ", cpu_index, " entering idle state.");
         // Migrate the task to self.
         set_cpu_affinity(cpu_index);
     }

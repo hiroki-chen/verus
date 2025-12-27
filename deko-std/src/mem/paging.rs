@@ -203,7 +203,7 @@ pub const PGTABLE_LVL3_IDX_PERTASK: u64 = 508;
 /// Base address of task memory region
 // pub const PERTASK_BASE: VirtAddr = VirtAddr(PGTABLE_LVL3_IDX_PERTASK << ((3 * 9) + 12));
 // FIXME: Hardcoded due to verus verification issues
-pub const PERTASK_BASE: VirtAddr = VirtAddr(0xFE0000000000);
+pub const PERTASK_BASE: VirtAddr = VirtAddr(0xFFFFFE0000000000);
 
 deko_const_decl!(
     /// End address of task memory region

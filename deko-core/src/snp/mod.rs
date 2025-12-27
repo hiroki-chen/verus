@@ -508,7 +508,7 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
     let bsp_pgtable = ctx.borrow(Tracked(&ctx_perm.deko_ctx_ptr_perm)).pgtable;
     let tracked bsp_pgtable_perm = &ctx_perm.pgtable_perm;
     let (ghcb, Tracked(ghcb_perm)) = Box::<GuestHostCommunicationBlock>::new_zeroed(
-        &DEKO_FRAME_ALLOCATOR.0,
+        &DEKO_FRAME_ALLOCATOR,
     );
     let (ghcb, Tracked(ghcb_perm)) = ghcb.into_ptr(Tracked(ghcb_perm));
 
@@ -516,7 +516,7 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
     // Note that we do not need to initialize the percpu area since it is
     // zeroed out by Box::new_zeroed.
     // We just need to set up the page table entry and the CpuData struct.
-    let (bsp_percpu, Tracked(bsp_percpu_perm)) = Box::new_zeroed(&DEKO_FRAME_ALLOCATOR.0);
+    let (bsp_percpu, Tracked(bsp_percpu_perm)) = Box::new_zeroed(&DEKO_FRAME_ALLOCATOR);
     let bsp_percpu_paddr = PhysAddr(bsp_percpu.addr() as u64);
     let (bsp_percpu_ptr, Tracked(mut bsp_percpu_perm)) = bsp_percpu.into_ptr(
         Tracked(bsp_percpu_perm),

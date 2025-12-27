@@ -129,9 +129,16 @@ pub exec static DEKO_MAPPING_SPACE: OnceCell<MappingSpace, MappingSpacePred>
     OnceCell::new(Ghost(MappingSpacePred {  }))
 }
 
-pub exec static DEKO_FRAME_ALLOCATOR: DekoPageFrameAllocator
+pub exec static DEKO_FRAME_ALLOCATOR: DekoPageFrameAllocator<HEAP_SIZE_STAGE2>
     ensures
         DEKO_FRAME_ALLOCATOR.wf(),
+{
+    DekoPageFrameAllocator::new()
+}
+
+pub exec static DEKO_FRAME_ALLOCATOR_FULL: DekoPageFrameAllocator<HEAP_SIZE_FULL>
+    ensures
+        DEKO_FRAME_ALLOCATOR_FULL.wf(),
 {
     DekoPageFrameAllocator::new()
 }
@@ -187,7 +194,7 @@ pub struct PageEncryptionMasks {
         heap_start@ % 0x1000 == 0,
         heap_end@ % 0x1000 == 0,
         heap_end@ > heap_start@,
-        valid_heap_param(heap_start.0, (heap_end.0 - heap_start.0) as u64, HEAP_SIZE as u64),
+        valid_heap_param(heap_start.0, (heap_end.0 - heap_start.0) as u64, HEAP_SIZE_STAGE2 as u64),
         heap_start == VirtAddr::new_spec(STAGE2_HEAP_START as u64),
         heap_end == VirtAddr::new_spec(STAGE2_HEAP_END as u64),
 )]
@@ -305,6 +312,10 @@ pub fn phys_to_virt(
 )]
 pub fn init_memory_map(header: &DekoKernelLaunchInfo) {
     // stub: placeholder.
+}
+
+pub fn dump_frame_allocator_usage() -> u64 {
+    DEKO_FRAME_ALLOCATOR_FULL.0.remaining()
 }
 
 } // verus!

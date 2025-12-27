@@ -27,9 +27,7 @@ context_switch:
   testq   %r12, %r12   // pre == null
   jz      1f
 
-  movq    %r12, %rax
-  addq    %r11, %rax    // pre + offset_of(rsp)
-  movq    %rsp, (%rax)  // save current rsp into pre->rsp
+  movq    %rsp, {TASK_RSP_OFFSET}(%r12)  // save current rsp to pre->rsp
   // Switch to a stack pointer that should be mapped on
   // both tasks' page tables.
   mov     %r14, %rsp
@@ -45,9 +43,7 @@ context_switch:
   // Instead, we pass the next rsp in r11 register from Rust side so that we can
   // directly load it here and recover the context (which is repr(C)) directly.
 
-  movq    %r13, %rax
-  addq    %r11, %rax    // next + offset_of(rsp)
-  movq    (%rax), %rsp  // load next rsp from next->rsp
+  movq    {TASK_RSP_OFFSET}(%r13), %rsp  // load next rsp from next->rsp
   addq    $8, %rsp      // skip saved rsp
 
   popq    %r15
@@ -68,15 +64,3 @@ context_switch:
   popfq
 
   retq
-
-.globl trampoline
-
-trampoline:
-  // void_t trampoline(void_t (*func)(void_t*), void_t* arg)
-  // Call func(arg) and then halt.
-
-  // Restore the interrupts as they were disabled when we switched tasks in the
-  // no_irq_zone.
-  sti
-  xrstor (%rsi)
-  

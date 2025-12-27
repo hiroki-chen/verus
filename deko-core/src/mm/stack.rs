@@ -4,7 +4,7 @@ use deko_macros::DekoDebug;
 use deko_std::address::{PhysAddr, VaddrRange, VirtAddr};
 use deko_std::boxed_ptr;
 use deko_std::fmt::DekoDebug;
-use deko_std::mem::PAGE_SIZE;
+use deko_std::mem::{DekoFrameAllocator, HEAP_SIZE_FULL, PAGE_SIZE};
 use deko_std::ptr::DekoPPtr;
 use deko_std::wf::WellFormed;
 use vstd::prelude::*;
@@ -215,11 +215,11 @@ impl DekoKernelStack {
                             paddr.wf() && paddr@ % PAGE_SIZE == 0
                     }
         )]
-    pub fn alloc_pages(
+    pub fn alloc_pages<A: DekoFrameAllocator>(
         &mut self,
         private_bit: u64,
         shared_bit: u64,
-        allocator: &DekoPageFrameAllocator,
+        allocator: &A,
     ) {
         let mut i = 0;
 
@@ -244,7 +244,7 @@ impl DekoKernelStack {
                 self.alloc@.len() as u64 - i,
         )]
         while i < self.alloc.len() {
-            let (ptr, Tracked(ptr_perm)) = boxed_ptr!(Page, &allocator.0);
+            let (ptr, Tracked(ptr_perm)) = boxed_ptr!(Page, allocator);
             let vaddr = VirtAddr::new(ptr.addr() as u64);
             let paddr = match virt_to_phys_checked(
                 private_bit,

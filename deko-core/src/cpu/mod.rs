@@ -42,7 +42,7 @@ use crate::mm::vm::{
     VirtualMemory, VirtualMemoryRegion, VirtualMemoryRegionPermission, VirtualMemoryTemporary,
     VmMapping, VmMappingPred, VMR_GRANULE,
 };
-use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR};
+use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR_FULL};
 use crate::snp::doorbell::{HVDoorbell, HvDoorbellPtrPermission, HvDoorbellPtrPred};
 use crate::snp::ghcb::{validate_ghcb, GuestHostCommunicationBlock};
 use crate::snp::vmsa::{VmsaInitialContext, VmsaPage, VmsaPagePermission, VmsaPagePred};
@@ -1222,12 +1222,13 @@ impl DekoCpuCtx {
 
 )]
     #[verifier::external_body]  // this function times out.
-    pub fn setup_cpu(
+    pub fn setup_cpu<A: DekoFrameAllocator>(
         init_pgtable: DekoPPtr<PageTable>,
         private_bit: u64,
         shared_bit: u64,
         kernel_mapping: MappingSpace,
         id: u64,
+        allocator: &A,
     ) -> DekoPPtr<DekoCpuCtx> {
         broadcast use PteFlags::lemma_each_bit_is_valid;
         broadcast use PteFlags::lemma_from_bits_single;
@@ -1236,9 +1237,8 @@ impl DekoCpuCtx {
         broadcast use VirtAddr::lemma_pfn_roundtrip;
         // We first allocate a new CPU context for.
 
-        let (cpu_ctx_ptr, Tracked(ctx_perm)) = boxed_ptr!(DekoCpuCtx, &DEKO_FRAME_ALLOCATOR.0);
-        let (ghcb, Tracked(ghch_perm)) =
-            boxed_ptr!(GuestHostCommunicationBlock, &DEKO_FRAME_ALLOCATOR.0);
+        let (cpu_ctx_ptr, Tracked(ctx_perm)) = boxed_ptr!(DekoCpuCtx, allocator);
+        let (ghcb, Tracked(ghch_perm)) = boxed_ptr!(GuestHostCommunicationBlock, allocator);
 
         // First step is to map itself.
         let vaddr = cpu_ctx_ptr.into_vaddr();
@@ -1292,7 +1292,7 @@ impl DekoCpuCtx {
 
             DekoArc::new(
                 DekoAtomicData::new(arc),
-                &DEKO_FRAME_ALLOCATOR.0,
+                &DEKO_FRAME_ALLOCATOR_FULL,
                 Ghost(DekoSimpleRwLockPred {  }),
             )
         };
@@ -1340,7 +1340,7 @@ impl DekoCpuCtx {
         // This is for the current context switch stack.
         let (cpu_css_stack, top_of_the_css_stack) = {
             let mut stack = DekoKernelStack::new_with_size(STACK_SIZE, false);
-            stack.alloc_pages(private_bit, shared_bit, &DEKO_FRAME_ALLOCATOR);
+            stack.alloc_pages(private_bit, shared_bit, &DEKO_FRAME_ALLOCATOR_FULL);
             let top_of_the_stack = VirtAddr(stack.stack_top() + CONTEXT_SWITCH_STACK.0);
             let stack = VmMapping::Stack { stack };
 
@@ -1362,7 +1362,7 @@ impl DekoCpuCtx {
             (
                 DekoArc::new(
                     DekoAtomicData::new(arc),
-                    &DEKO_FRAME_ALLOCATOR.0,
+                    &DEKO_FRAME_ALLOCATOR_FULL,
                     Ghost(DekoSimpleRwLockPred {  }),
                 ),
                 top_of_the_stack,
@@ -1419,7 +1419,7 @@ impl DekoCpuCtx {
             (
                 DekoArc::new(
                     DekoAtomicData::new(arc),
-                    &DEKO_FRAME_ALLOCATOR.0,
+                    &DEKO_FRAME_ALLOCATOR_FULL,
                     Ghost(DekoSimpleRwLockPred {  }),
                 ),
                 top_of_the_stack,
@@ -1513,7 +1513,7 @@ impl DekoCpuCtx {
             perm.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
             perm.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
     )]
-    pub fn start_kernel_task(ptr: DekoPPtr<Self>, task: DekoRunnablePtr, schedule_now: bool) {
+    pub fn set_idle_task(ptr: DekoPPtr<Self>, task: DekoRunnablePtr) {
         // Now insert into the runqueue.
         let cpu_ctx = ptr.borrow(Tracked(&perm.ptr_perm));
 
@@ -1539,12 +1539,46 @@ impl DekoCpuCtx {
         runqueue.set_idle_task(task);
 
         write_handle.release_write(DekoAtomicData::new_with(runqueue, perm));
+    }
 
-        if schedule_now {
-            unsafe {
-                task::schedule_init();
+    pub fn start_kernel_task(
+        ptr: DekoPPtr<Self>,
+        Tracked(perm): Tracked<&mut DekoCpuCtxPermission>,
+        task: DekoRunnablePtr,
+    )
+        requires
+            old(perm).wf_with(ptr),
+            old(perm).ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
+            old(perm).ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
+            task.wf(),
+        ensures
+            perm.wf_with(ptr),
+            perm.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
+            perm.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
+    {
+        let cpu = ptr.borrow(Tracked(&perm.ptr_perm));
+
+        kpanic_if!(core::hint::unlikely(
+            cpu.run_queue.is_none()),
+            "Runqueue is not initialized for CPU",
+            cpu.cpu_id,
+        );
+
+        let lock = cpu.run_queue.as_ref().unwrap();
+        deko_rwlock_write_atomic_data! {
+            lock,
+            runqueue,
+            rq_perm,
+            {
+                #[verus_spec(with Tracked(rq_perm.borrow_mut()))]
+                runqueue.handle_task(task.clone());
             }
         }
+
+        kinfo!("Scheduling...");
+
+        // Now perform a scheduling.
+        task::schedule();
     }
 
     pub fn cleanup_terminated_task(
@@ -1556,13 +1590,17 @@ impl DekoCpuCtx {
             perm.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
     {
         let cpu = ptr.borrow(Tracked(&perm.ptr_perm));
-        let mut rq = cpu.run_queue.as_ref().unwrap().acquire_write();
-        let DekoAtomicData { data: mut runqueue, perm: Tracked(mut rq_perm) } = rq.get();
+        let rq = cpu.run_queue.as_ref().unwrap();
 
-        #[verus_spec(with Tracked(&mut rq_perm))]
-        runqueue.cleanup_terminated_task();
-
-        rq.release_write(DekoAtomicData::new_with(runqueue, Tracked(rq_perm)));
+        deko_rwlock_write_atomic_data! {
+            rq,
+            runqueue,
+            rq_perm,
+            {
+                #[verus_spec(with Tracked(rq_perm.borrow_mut()))]
+                runqueue.cleanup_terminated_task();
+            }
+        }
     }
 
     pub fn schedule_prep(ptr: DekoPPtr<Self>, Tracked(perm): Tracked<&DekoCpuCtxPermission>) -> (r:
@@ -1577,19 +1615,22 @@ impl DekoCpuCtx {
             },
     {
         let cpu = ptr.borrow(Tracked(&perm.ptr_perm));
-        let mut rq = cpu.run_queue.as_ref().unwrap().acquire_write();
-        let DekoAtomicData { data: mut runqueue, perm: Tracked(mut rq_perm) } = rq.get();
+        let rq = cpu.run_queue.as_ref().unwrap();
 
-        if runqueue.current.is_none() {
-            // No task to schedule.
-            rq.release_write(DekoAtomicData::new_with(runqueue, Tracked(rq_perm)));
-            return None;
+        deko_rwlock_write_atomic_data! {
+            rq,
+            runqueue,
+            rq_perm,
+            {
+                match runqueue.current {
+                    Some(_) => {
+                        #[verus_spec(with Tracked(rq_perm.borrow_mut()))]
+                        runqueue.schedule_prep();
+                    },
+                    None => None,
+                }
+            }
         }
-        #[verus_spec(with Tracked(&mut rq_perm))]
-        let result = runqueue.schedule_prep();
-        rq.release_write(DekoAtomicData::new_with(runqueue, Tracked(rq_perm)));
-
-        result
     }
 
     /// Setup the idle task for this CPU.
@@ -1628,7 +1669,7 @@ impl DekoCpuCtx {
         kinfo!("Created idle task for CPU ", cpu_id);
 
         proof_with!(Tracked(&mut new_perm));
-        DekoCpuCtx::start_kernel_task(ptr, task, false);  // idle task should not be scheduled immediately.
+        DekoCpuCtx::set_idle_task(ptr, task);  // idle task should not be scheduled immediately.
 
         proof_with!(|= Tracked(new_perm));
         ()
@@ -1690,6 +1731,7 @@ pub fn start_application_processor(which: &PerCpuShared) {
         bsp.shared_bit,
         bsp.kernel_mapping.clone(),
         which.apic_id as u64,
+        &DEKO_FRAME_ALLOCATOR_FULL,
     );
 
     // Move below code into `crate::imp``.

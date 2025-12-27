@@ -10,7 +10,10 @@ use super::DEKO_MAPPING_SPACE;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
 use crate::cpu::{flush_tlb_global, DekoCpuCtx, DekoCpuCtxPermission};
 use crate::elf::ElfFile;
-use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR};
+use crate::hal::is_stage2;
+use crate::mm::{
+    virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR, DEKO_FRAME_ALLOCATOR_FULL,
+};
 use crate::{
     kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn, DekoKernelLaunchInfo, Stage2LaunchInfo,
 };
@@ -965,9 +968,11 @@ impl PageTable {
             r.2@.private_bit == private_bit,
             r.2@.shared_bit == shared_bit,
     {
-        let (pgtable, Tracked(perm)) = Box::<PageTable>::new_zeroed(&DEKO_FRAME_ALLOCATOR.0);
-        // Downgrade and forget this box.
-        let (pgtable, Tracked(mut perm)) = pgtable.into_ptr(Tracked(perm));
+        let (pgtable, Tracked(perm)) = if is_stage2() {
+            boxed_ptr!(PageTable, &DEKO_FRAME_ALLOCATOR)
+        } else {
+            boxed_ptr!(PageTable, &DEKO_FRAME_ALLOCATOR_FULL)
+        };
 
         // Create the self-referential mapping entry.
         let paddr = virt_to_phys(
@@ -1065,13 +1070,15 @@ impl Page {
     ///
     /// FIXME: Possibly we need to revisit this.
     #[verifier::external_body]
-    pub fn alloc_new(ms: &MappingSpace, private_bit: u64, shared_bit: u64) -> (r: (
-        DekoPPtr<Self>,
-        Tracked<DekoPointsTo<Self>>,
-        PhysAddr,
-    ))
+    pub fn alloc_new<A: DekoFrameAllocator>(
+        ms: &MappingSpace,
+        private_bit: u64,
+        shared_bit: u64,
+        allocator: &A,
+    ) -> (r: (DekoPPtr<Self>, Tracked<DekoPointsTo<Self>>, PhysAddr))
         requires
             ms.wf(),
+            allocator.wf(),
         ensures
             r.0.addr() % PAGE_SIZE as usize == 0,
             r.2@ % PAGE_SIZE == 0,
@@ -1085,7 +1092,7 @@ impl Page {
                 0 <= i < PAGE_TABLE_ENTRY as int ==> #[trigger] r.1@.value().0@[i]@@ == 0,
     {
         // Ptr is already the virtual address.
-        let (ptr, Tracked(prov), Tracked(dealloc)) = DEKO_FRAME_ALLOCATOR.0.alloc(
+        let (ptr, Tracked(prov), Tracked(dealloc)) = allocator.alloc_page(
             PAGE_SIZE as usize,
             PAGE_SIZE as usize,
         );
@@ -1311,16 +1318,18 @@ impl Page {
     ///     _ => unreachable!(), // Never happens due to postcondition
     /// }
     #[verifier::spinoff_prover]
-    pub fn allocate_pte_4k(
+    pub fn allocate_pte_4k<A: DekoFrameAllocator>(
         page: DekoPPtr<Page>,
         Tracked(perm): Tracked<&mut PageTablePermission>,
         vaddr: VirtAddr,
         ms: &MappingSpace,
         private_bit: u64,
         shared_bit: u64,
+        allocator: &A,
     ) -> (r: Mapping)
         requires
             old(perm).allocate_pte_4k_requires(page, vaddr, ms, private_bit, shared_bit),
+            allocator.wf(),
         ensures
             old(perm).allocate_pte_4k_ensures(vaddr, private_bit, shared_bit, r, perm),
     {
@@ -1343,6 +1352,7 @@ impl Page {
                 private_bit,
                 shared_bit,
                 false,
+                allocator,
             ),
             2 => Self::allocate_pte_lvl2(
                 req_mapping,
@@ -1352,6 +1362,7 @@ impl Page {
                 private_bit,
                 shared_bit,
                 false,
+                allocator,
             ),
             1 => Self::allocate_pte_lvl1(
                 req_mapping,
@@ -1361,6 +1372,7 @@ impl Page {
                 private_bit,
                 shared_bit,
                 false,
+                allocator,
             ),
             0 => req_mapping,
             _ => {
@@ -1373,7 +1385,7 @@ impl Page {
     }
 
     #[verifier::spinoff_prover]
-    pub fn allocate_pte_lvl3(
+    pub fn allocate_pte_lvl3<A: DekoFrameAllocator>(
         mapping: Mapping,
         Tracked(perm): Tracked<&mut PageTablePermission>,
         vaddr: VirtAddr,
@@ -1381,9 +1393,11 @@ impl Page {
         private_bit: u64,
         shared_bit: u64,
         huge: bool,
+        allocator: &A,
     ) -> (r: Mapping)
         requires
             old(perm).allocate_pte_lvl3_requires(mapping, vaddr, ms, private_bit, shared_bit, huge),
+            allocator.wf(),
         ensures
             old(perm).allocate_pte_lvl3_ensures(vaddr, private_bit, shared_bit, huge, r, perm),
     {
@@ -1430,6 +1444,7 @@ impl Page {
             ms,
             private_bit,
             shared_bit,
+            allocator,
         );
         if core::intrinsics::unlikely(new_page.addr() == 0 || paddr.0 == 0) {
             // Heap does not start with 0 so use 0 to indicate OOM
@@ -1522,12 +1537,21 @@ impl Page {
             ));
         }
 
-        Page::allocate_pte_lvl2(mapping, Tracked(perm), vaddr, ms, private_bit, shared_bit, huge)
+        Page::allocate_pte_lvl2(
+            mapping,
+            Tracked(perm),
+            vaddr,
+            ms,
+            private_bit,
+            shared_bit,
+            huge,
+            allocator,
+        )
     }
 
     #[verifier::spinoff_prover]
     #[verifier::external_body]
-    pub fn allocate_pte_lvl2(
+    pub fn allocate_pte_lvl2<A: DekoFrameAllocator>(
         mapping: Mapping,
         Tracked(perm): Tracked<&mut PageTablePermission>,
         vaddr: VirtAddr,
@@ -1535,9 +1559,11 @@ impl Page {
         private_bit: u64,
         shared_bit: u64,
         huge: bool,
+        allocator: &A,
     ) -> (r: Mapping)
         requires
             old(perm).allocate_pte_lvl2_requires(mapping, vaddr, ms, private_bit, shared_bit, huge),
+            allocator.wf(),
         ensures
             old(perm).allocate_pte_lvl2_ensures(vaddr, private_bit, shared_bit, huge, r, perm),
     {
@@ -1571,6 +1597,7 @@ impl Page {
             ms,
             private_bit,
             shared_bit,
+            allocator,
         );
         if new_page.addr() == 0 || paddr.0 == 0 {
             // Heap does not start with 0 so use 0 to indicate OOM
@@ -1591,12 +1618,21 @@ impl Page {
             Tracked(&page_perm.this_page_perm),
         ).0.index_as_ptr(idx);
 
-        Page::allocate_pte_lvl1(mapping, Tracked(perm), vaddr, ms, private_bit, shared_bit, huge)
+        Page::allocate_pte_lvl1(
+            mapping,
+            Tracked(perm),
+            vaddr,
+            ms,
+            private_bit,
+            shared_bit,
+            huge,
+            allocator,
+        )
     }
 
     #[verifier::spinoff_prover]
     #[verifier::external_body]
-    pub fn allocate_pte_lvl1(
+    pub fn allocate_pte_lvl1<A: DekoFrameAllocator>(
         mapping: Mapping,
         Tracked(perm): Tracked<&mut PageTablePermission>,
         vaddr: VirtAddr,
@@ -1604,9 +1640,11 @@ impl Page {
         private_bit: u64,
         shared_bit: u64,
         huge: bool,
+        allocator: &A,
     ) -> (r: Mapping)
         requires
             old(perm).allocate_pte_lvl1_requires(mapping, vaddr, ms, private_bit, shared_bit, huge),
+            allocator.wf(),
         ensures
             old(perm).allocate_pte_lvl1_ensures(vaddr, private_bit, shared_bit, huge, r, perm),
     {
@@ -1640,6 +1678,7 @@ impl Page {
             ms,
             private_bit,
             shared_bit,
+            allocator,
         );
         if core::intrinsics::unlikely(new_page.addr() == 0 || paddr.0 == 0) {
             // Heap does not start with 0 so use 0 to indicate OOM
@@ -2070,11 +2109,11 @@ impl Page {
         }
         let addr_2m = entry.borrow(Tracked(entry_perm)).address(private_bit, shared_bit);
         let mut flags = PteFlags::from_bits_truncate(entry.borrow(Tracked(entry_perm)).0.0);
-        let (new_page, Tracked(new_page_perm), paddr) = Page::alloc_new(
-            ms,
-            private_bit,
-            shared_bit,
-        );
+        let (new_page, Tracked(new_page_perm), paddr) = if is_stage2() {
+            Page::alloc_new(ms, private_bit, shared_bit, &DEKO_FRAME_ALLOCATOR)
+        } else {
+            Page::alloc_new(ms, private_bit, shared_bit, &DEKO_FRAME_ALLOCATOR_FULL)
+        };
         flags.remove(HUGE);
 
         proof {
@@ -2520,14 +2559,27 @@ impl Page {
         broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
         // Allocate a page for us.
 
-        let mapping = Page::allocate_pte_4k(
-            page,
-            Tracked(perm),
-            vaddr,
-            ms,
-            private_bit,
-            shared_bit,
-        );
+        let mapping = if is_stage2() {
+            Page::allocate_pte_4k(
+                page,
+                Tracked(perm),
+                vaddr,
+                ms,
+                private_bit,
+                shared_bit,
+                &DEKO_FRAME_ALLOCATOR,
+            )
+        } else {
+            Page::allocate_pte_4k(
+                page,
+                Tracked(perm),
+                vaddr,
+                ms,
+                private_bit,
+                shared_bit,
+                &DEKO_FRAME_ALLOCATOR_FULL,
+            )
+        };
 
         let Mapping::Level0(page, idx) = mapping else {
             kerror!("Expected Level0 mapping but got different mapping ", mapping, " for vaddr: ", vaddr);
@@ -4869,6 +4921,7 @@ pub fn init_monitor_paging(
     let mut phys = header.kernel_region_phys_start;
     let seg_num = elf.load_segment_num(VirtAddr(header.kernel_region_virt_start));
     let mut i = 0;
+
     while i < seg_num
         invariant
             i <= seg_num,

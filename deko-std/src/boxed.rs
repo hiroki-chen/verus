@@ -13,7 +13,7 @@ pub type BoxWithPred<T, F> = BoxInner<T, F>;
 
 impl<T: WellFormed> Box<T> {
     #[inline]
-    pub fn new(x: T, allocator: &DefaultDekoHeapAllocator) -> (s: (Self, Tracked<BoxPointsTo<T>>))
+    pub fn new<A: DekoFrameAllocator>(x: T, allocator: &A) -> (s: (Self, Tracked<BoxPointsTo<T>>))
         requires
             allocator.wf(),
         ensures
@@ -29,7 +29,7 @@ impl<T: WellFormed> Box<T> {
     }
 
     #[inline]
-    pub fn new_zeroed(allocator: &DefaultDekoHeapAllocator) -> (s: (Self, Tracked<BoxPointsTo<T>>))
+    pub fn new_zeroed<A: DekoFrameAllocator>(allocator: &A) -> (s: (Self, Tracked<BoxPointsTo<T>>))
         requires
             allocator.wf(),
         ensures
@@ -128,7 +128,7 @@ impl<V: WellFormed, F: Predicate<V>> BoxInner<V, F> {
     /// where they are identity-mapped; i.e., the virtual address equals to their
     /// physical address.
     #[verifier::external_body]
-    pub fn new_zeroed_with_f(allocator: &DefaultDekoHeapAllocator, Ghost(f): Ghost<F>) -> (s: (
+    pub fn new_zeroed_with_f<A: DekoFrameAllocator>(allocator: &A, Ghost(f): Ghost<F>) -> (s: (
         Self,
         Tracked<BoxPointsTo<V>>,
     ))
@@ -142,6 +142,9 @@ impl<V: WellFormed, F: Predicate<V>> BoxInner<V, F> {
     {
         let (pptr, Tracked(mut pptr_perm)) = DekoPPtr::empty(allocator);
 
+        if pptr.addr() == 0 || pptr.addr() % core::mem::align_of::<V>() != 0 {
+            panic!("BoxInner::new_zeroed_with_f: allocation failed; perhaps out of memory?");
+        }
         unsafe {
             core::ptr::write_bytes(pptr.addr() as *mut u8, 0x00, core::mem::size_of::<V>());
         }
@@ -159,7 +162,7 @@ impl<V: WellFormed, F: Predicate<V>> BoxInner<V, F> {
     /// Similar to `new_zeroed_with_f`, the caller must ensure that the pointer
     /// is used correctly as virtual or physical address; or the write will fail.
     #[verifier::external_body]
-    pub fn new_with_f(x: V, allocator: &DefaultDekoHeapAllocator, Ghost(f): Ghost<F>) -> (s: (
+    pub fn new_with_f<A: DekoFrameAllocator>(x: V, allocator: &A, Ghost(f): Ghost<F>) -> (s: (
         Self,
         Tracked<BoxPointsTo<V>>,
     ))

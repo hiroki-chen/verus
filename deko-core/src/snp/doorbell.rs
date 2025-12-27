@@ -14,9 +14,9 @@ use crate::cpu::apic::Apic;
 use crate::cpu::idt::IPI_VECTOR;
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::paging::PageTable;
-use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR};
+use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR_FULL};
 use crate::snp::ghcb::{current_ghcb, GuestHostCommunicationBlock};
-use crate::{die, kerror, kinfo, kpanic_if, kwarn};
+use crate::{die, kdebug, kerror, kinfo, kpanic_if, kwarn};
 
 extern "C" {
     // exclusive.
@@ -201,7 +201,7 @@ impl HVDoorbell {
         let ghcb = cpu_borrowed.ghcb();
 
         // Note that HVDoorBell needs to be shared.
-        let (doorbell_ptr, Tracked(perm)) = boxed_ptr!(HVDoorbell, &DEKO_FRAME_ALLOCATOR.0);
+        let (doorbell_ptr, Tracked(perm)) = boxed_ptr!(HVDoorbell, &DEKO_FRAME_ALLOCATOR_FULL);
         let vaddr = VirtAddr::new(doorbell_ptr.addr() as u64);
 
         proof_with!(=> Tracked(doorbell_perm));
@@ -338,6 +338,8 @@ pub unsafe extern "C" fn handle_hv_doorbell(hvdb: DekoPPtr<HVDoorbell>) {
             kwarn!("Unknown HV Doorbell vector received: ", vector, "as we only handle IPI");
         },
     }
+
+    kdebug!("completed HV doorbell handling");
 }
 
 } // verus!

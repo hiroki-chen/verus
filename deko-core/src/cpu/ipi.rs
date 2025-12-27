@@ -421,6 +421,8 @@ impl DekoCpuCtx {
                 }
             }
         };
+
+        kdebug!("CPU", cpu_id => hex, "completed IPI handling");
     }
 }
 
@@ -445,7 +447,7 @@ unsafe fn receive_single_ipi(ipi_area: &CpuIpiArea) {
     let handler_ptr = ipi_area.handler.addr();
 
     // TODO: Need to check if the pointer is valid; but how??
-    // make_ipi_handle_call(handler_ptr, ipi_area.message);
+    make_ipi_handle_call(handler_ptr, ipi_area.message);
 }
 
 /// # Safety

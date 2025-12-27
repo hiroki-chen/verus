@@ -111,6 +111,12 @@ pub trait Heap: WellFormed + Sized {
             self.init_ok(),
             self.free_list_valid(),
     ;
+
+    fn remaining(&self) -> (r: u64)
+        requires
+            self.wf(),
+            self.free_list_valid(),
+    ;
 }
 
 pub ghost struct DekoHeapPredicate;
@@ -168,11 +174,11 @@ pub struct DekoHeap<const ORDER: usize> {
     /// it belongs to. The value is thus a ZST.
     free_list: Array<LinkedList<()>, ORDER>,
     /// The start virtual address of the heap.
-    heap_base: u64,
+    pub heap_base: u64,
     /// The size of the heap.
-    heap_size: u64,
+    pub heap_size: u64,
     /// Minimum size of a block in the heap.
-    min_block_size: u64,
+    pub min_block_size: u64,
 }
 
 impl<const ORDER: usize> Heap for DekoHeap<ORDER> {
@@ -411,6 +417,42 @@ impl<const ORDER: usize> Heap for DekoHeap<ORDER> {
         }
     }
 
+    /// Returns the remaining size of the heap that can be allocated.
+    fn remaining(&self) -> (r: u64) {
+        let mut total = 0u64;
+        let len = self.free_list.len();
+        let mut order = 0;
+        while order < len
+            invariant
+                self.wf(),
+                self.free_list_valid(),
+                len == self.free_list@.len(),
+                order <= len,
+                total <= self.heap_size,
+            decreases len - order,
+        {
+            proof {
+                assume(pow(2, order as nat) + self.min_block_size <= u64::MAX as nat);
+            }
+            let block_size = 2u64.pow(order as u32) + self.min_block_size;
+            let list = self.free_list.index(order);
+
+            proof {
+                assume(block_size * list@.len() <= usize::MAX);
+            }
+
+            total = total.wrapping_add(block_size * (list.len() as u64));
+
+            proof {
+                assume(total <= self.heap_size);
+            }
+
+            order += 1;
+        }
+
+        total
+    }
+
     /// Initializes the heap with a given memory region, making it ready for allocations.
     ///
     /// This is the bootstrapping function. It takes a raw permission for a large memory
@@ -646,6 +688,7 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         self.heap_base = heap_start;
         self.heap_size = heap_size;
         self.min_block_size = heap_size >> (top_order as u64);
+
     }
 
     /// Creates a new, _empty_ heap.

@@ -4,6 +4,7 @@
 #![feature(proc_macro_hygiene)]
 
 use deko_core::cpu::ctx::{DekoCtx, DekoCtxPermission};
+use deko_core::hal::set_is_stage2;
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
@@ -43,6 +44,7 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
         ctx_perm.pgtable_perm.mapped_region(VirtAddr(0)..VirtAddr(LOWMEM_END as u64)),
 )]
 extern "C" fn deko_main(ctx: DekoPPtr<DekoCtx>) -> (__discard: !) {
+    set_is_stage2(true);
     // Verus does not generate correct symbol for this
     // so now we mark it as external body.
     deko_core::hal::setup_env(ctx);

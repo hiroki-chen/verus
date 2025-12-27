@@ -12,7 +12,7 @@ use vstd::raw_ptr::{
 use vstd::simple_pptr::{PPtr, PointsTo};
 use vstd::view::View;
 
-use crate::mem::{DefaultDekoHeapAllocator, DekoBuddyAllocator, PermissionDekoMem};
+use crate::mem::{DekoBuddyAllocator, PermissionDekoMem};
 use crate::prelude::*;
 
 verus! {
@@ -714,7 +714,7 @@ impl<V: WellFormed> DekoPPtr<V> {
     ///
     /// Please be extra careful that this function returns a pointer
     /// (physical address).
-    pub fn empty(allocator: &DefaultDekoHeapAllocator) -> (pt: (Self, Tracked<DekoPointsTo<V>>))
+    pub fn empty<A: DekoFrameAllocator>(allocator: &A) -> (pt: (Self, Tracked<DekoPointsTo<V>>))
         requires
             allocator.wf(),
         ensures
@@ -726,7 +726,7 @@ impl<V: WellFormed> DekoPPtr<V> {
 
         match core::mem::size_of::<V>() {
             v if v != 0 => {
-                let (p, Tracked(points_to_raw), Tracked(dealloc)) = allocator.alloc(
+                let (p, Tracked(points_to_raw), Tracked(dealloc)) = allocator.alloc_page(
                     core::mem::size_of::<V>(),
                     core::mem::align_of::<V>(),
                 );
@@ -768,7 +768,7 @@ impl<V: WellFormed> DekoPPtr<V> {
     }
 
     /// Allocates heap memory for type `V`, leaving it initialized with the given value `v`.
-    pub fn new(v: V, allocator: &DefaultDekoHeapAllocator) -> (pt: (Self, Tracked<DekoPointsTo<V>>))
+    pub fn new<A: DekoFrameAllocator>(v: V, allocator: &A) -> (pt: (Self, Tracked<DekoPointsTo<V>>))
         requires
             allocator.wf(),
             v.wf(),
@@ -793,7 +793,7 @@ impl<V: WellFormed> DekoPPtr<V> {
     ///
     /// To properly take care of the memory, you should call move `V` out of the pointer and
     /// then discard `V` elsewhere.
-    pub fn drop(self, Tracked(perm): Tracked<DekoPointsTo<V>>, allocator: &DefaultDekoHeapAllocator)
+    pub fn drop<A: DekoFrameAllocator>(self, Tracked(perm): Tracked<DekoPointsTo<V>>, allocator: &A)
         requires
             (perm).pptr() == self@,
             (perm).is_uninit(),
@@ -815,7 +815,7 @@ impl<V: WellFormed> DekoPPtr<V> {
             let tracked raw = perm.points_to.into_raw();
             let tracked exposed = perm.exposed;
             let ptr = vstd::raw_ptr::with_exposed_provenance(self.0.0, Tracked(exposed));
-            allocator.dealloc(ptr, size, align, Tracked(raw), Tracked(dealloc));
+            allocator.dealloc_page(ptr, size, align, Tracked(raw), Tracked(dealloc));
         } else {
             // for ZST the memory is not allocated so it is safe to assume
             // that the memory is uninitialized.

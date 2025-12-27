@@ -529,4 +529,24 @@ impl<V: WellFormed, P: crate::Predicate<V>> DekoDebug for crate::sync::arc::Arc<
     }
 }
 
+#[verifier::external_body]
+pub fn get_func<A: core::any::Any>(what: &A) -> &str {
+    let full = core::any::type_name_of_val(&what);
+    full.rsplit("::").nth(1).unwrap_or(full)
+}
+
 } // verus!
+
+#[macro_export]
+macro_rules! func {
+    () => {
+        #[verifier::external]
+        const __SOMETHING: u64 = 0;
+        {
+            // An item declared here gets a fully-qualified path that includes the
+            // enclosing function.
+
+            $crate::fmt::get_func(&__SOMETHING)
+        }
+    };
+}
