@@ -405,9 +405,6 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
     proof_with!(Tracked(cpu_ctx_perm) => Tracked(cpu_ctx_perm));
     DekoCpuCtx::setup_idle_task(bsp_cpu_ptr, deko_main_func_ptr(), "deko_main");
 
-    proof_with!(Tracked(&cpu_ctx_perm));
-    DekoCpuCtx::runqueue_info(bsp_cpu_ptr);
-
     unsafe {
         schedule_init();
     }

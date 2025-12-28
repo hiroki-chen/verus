@@ -630,8 +630,6 @@ impl DekoRunQueue {
                 "Run queue is full when scheduling out a running task"
             );  // make verus happy.
 
-            kinfo!("pushing back running task ", task_ref);
-
             proof_with!(Tracked(perm));
             self.push_back(task);
         } else if task_ref.is_terminated() {
@@ -1787,6 +1785,25 @@ pub fn cpu_idle(which: usize) -> DekoRunnablePtr {
         let (cpu, Tracked(perm)) = DekoCpuCtx::this_cpu();
         let cpu = cpu.borrow(Tracked(&perm.ptr_perm));
 
+        kpanic_if!(
+            core::hint::unlikely(cpu.run_queue.is_none()),
+            "No run queue is assigned to the CPU.",
+        );
+
+        let task =
+            deko_rwlock_write_atomic_data! {
+            cpu.run_queue.as_ref().unwrap(),
+            rq,
+            __,
+            {
+                rq.wake.take()
+            }
+        };
+
+        if let Some(task) = task {
+            // schedule this task.
+            kinfo!("Waking up task ", task.as_ref().data.id => hex, " on CPU core ", which);
+        }
         schedule();
     }
 }
@@ -1875,9 +1892,6 @@ pub fn serv_main(cpu_index: usize) {
         kinfo!("Boot CPU: total CPU count = ", cpu_nums);
 
         let (this_cpu, Tracked(mut perm)) = DekoCpuCtx::this_cpu();
-
-        proof_with!(Tracked(&perm));
-        DekoCpuCtx::runqueue_info(this_cpu);
 
         let rq = this_cpu.borrow(Tracked(&perm.ptr_perm)).run_queue.as_ref();
         let vm = this_cpu.borrow(Tracked(&perm.ptr_perm)).vm_region.as_ref();

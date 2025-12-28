@@ -1650,9 +1650,6 @@ impl DekoCpuCtx {
             runqueue,
             rq_perm,
             {
-                #[verus_spec(with Tracked(rq_perm.borrow()))]
-                runqueue.info();
-
                 match runqueue.current {
                     Some(_) => {
                         #[verus_spec(with Tracked(rq_perm.borrow_mut()))]

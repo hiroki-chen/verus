@@ -866,6 +866,12 @@ impl<V: WellFormed, P, Pred: RwLockPredicate<DekoAtomicData<V, P>>> Predicate<
 /// If you explicitly need to get the handle instead of the value, do not
 /// use this macro and instead call `acquire_read` and `release_read`
 /// manually to do so.
+///
+/// # Warning
+///
+/// This body is a critical section protected by the read lock. Make sure
+/// that the body will unexpectedly alter the control flow so that the lock
+/// is left held. For example, do not use `return` or `break` inside the body.
 #[macro_export]
 macro_rules! deko_rwlock_read_atomic_data {
     ($lock:expr, $data_binding:ident, $perm_binding:ident, $body:tt) => {{
@@ -902,6 +908,11 @@ macro_rules! deko_rwlock_read_atomic_data {
 /// ```
 ///
 /// The lock will be automatically dropped at the end of the block.
+///
+/// # Warning
+/// This body is a critical section protected by the read lock. Make sure
+/// that the body will unexpectedly alter the control flow so that the lock
+/// is left held. For example, do not use `return` or `break` inside the body.
 #[macro_export]
 macro_rules! deko_rwlock_write_atomic_data {
     ($lock:expr, $data_binding:ident, $perm_binding:ident, $body:tt) => {{

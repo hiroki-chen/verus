@@ -7,7 +7,7 @@ use deko_std::prelude::{func_ptr, DekoPointsTo};
 use deko_std::ptr::DekoPPtr;
 use deko_std::sync::{DekoAtomicData, DekoSimpleRwLock};
 use deko_std::wf::WellFormed;
-use deko_std::{deko_rwlock_write_atomic_data, with_permission};
+use deko_std::{deko_rwlock_read_atomic_data, deko_rwlock_write_atomic_data, with_permission};
 use vstd::atomic::*;
 use vstd::cell::{PCell, PointsTo};
 use vstd::prelude::*;
@@ -18,7 +18,7 @@ use crate::cpu::{
     DekoCpuCtx, DekoCpuCtxPermission, PerCpuAreas, PerCpuAreasPermission, CPUID_MAX_COUNT,
     PERCPU_AREAS,
 };
-use crate::{die, kdebug, kinfo, kpanic_if};
+use crate::{die, kdebug, kinfo, kpanic_if, kwarn};
 
 verus! {
 
@@ -221,12 +221,6 @@ impl DekoIpiRequest {
         let id = cpu.borrow(Tracked(&cpu_perms.ptr_perm)).cpu_id as usize;
         let apic = &cpu.borrow(Tracked(&cpu_perms.ptr_perm)).apic;
 
-        // kpanic_if!(
-        //     (self.targets & (1 << id)) != 0,
-        //     "CPU attempted to send IPI to itself:",
-        //     id
-        // );
-
         kpanic_if!(
             core::hint::unlikely(self.sender != id),
             "Sender ID mismatch: sender",
@@ -249,8 +243,6 @@ impl DekoIpiRequest {
         )]
         while i < CPUID_MAX_COUNT {
             if (self.targets & (1 << i)) != 0 {
-                send_ipi_to(i, apic);
-
                 cpu_nums += 1;
             }
             i += 1;
@@ -286,6 +278,23 @@ impl DekoIpiRequest {
             }
         );
 
+        i = 0;
+        #[verus_spec(
+            invariant
+                0 <= i <= CPUID_MAX_COUNT,
+            decreases
+                CPUID_MAX_COUNT - i,
+        )]
+        while i < CPUID_MAX_COUNT {
+            if (self.targets & (1 << i)) != 0 {
+                // Now it is safe to send, because the receiver will
+                // see the correct 'pending' count and message.
+                send_ipi_to(i, apic);
+            }
+            i += 1;
+        }
+
+        kinfo!("Now waiting for other CPUs to handle the IPI...");
         // Now let's wait for others to complete their handling.
         #[verus_spec(
             invariant
@@ -295,12 +304,12 @@ impl DekoIpiRequest {
         loop {
             core::hint::spin_loop();
 
-            deko_rwlock_write_atomic_data!(
+            let pending =
+                deko_rwlock_read_atomic_data!(
                 PERCPU_AREAS,
                 cpu_areas,
                 cpu_areas_perm,
                 {
-                    let tracked mut ipi_area_perm;
                     let Some(ref cpu_areas) = cpu_areas else {
                         die("PERCPU_AREAS is not initialized");
                     };
@@ -314,17 +323,15 @@ impl DekoIpiRequest {
 
                     // Obtain a reference to this CPU's IPI area.
                     let ipi_area = &cpu_areas.0[id].ipi_shared;
-                    proof {
-                        ipi_area_perm = cpu_areas_perm.borrow_mut().shared_perms.tracked_borrow(id as int);
-                    }
+                    let tracked ipi_area_perm = cpu_areas_perm.borrow().shared_perms.tracked_borrow(id as int);
 
-                    let pending = ipi_area.pending.load(Tracked(&ipi_area_perm.ipi_shared_perm.pending_perm));
-
-                    if pending == 0 {
-                        break;
-                    }
+                    ipi_area.pending.load(Tracked(&ipi_area_perm.ipi_shared_perm.pending_perm))
                 }
             );
+
+            if pending == 0 {
+                break ;
+            }
         }
     }
 }
@@ -399,10 +406,9 @@ impl DekoCpuCtx {
 
         kdebug!("CPU", cpu_id => hex, "handling IPI request");
 
-        // Need to check the IPI message and handle accordingly.
-        // This write is just to obtain owned permissions to the IPI area.
-        // So that we can reason about it.
-        deko_rwlock_write_atomic_data! {
+        // First quickly grab the set of CPUs that have requested IPIs.
+        let cpu_set =
+            deko_rwlock_read_atomic_data! {
             PERCPU_AREAS,
             cpu_areas,
             cpu_areas_perm,
@@ -419,122 +425,75 @@ impl DekoCpuCtx {
                     cpu_areas.0.len(),
                 );
 
-                let tracked mut ipi_area_perm;
-                // Obtain a reference to this CPU's IPI area.
+                let tracked ipi_perm = cpu_areas_perm.borrow().shared_perms.tracked_borrow(cpu_id as int);
                 let ipi_area = &cpu_areas.0[cpu_id].ipi_shared;
-                proof {
-                    ipi_area_perm = cpu_areas_perm.borrow_mut().shared_perms.tracked_borrow(cpu_id as int);
-                }
+                ipi_area.request_set.load(Tracked(&ipi_perm.ipi_shared_perm.request_set_perm)).clone()
+            }
+        };
 
-                let cpu_set = ipi_area.request_set.load(Tracked(&ipi_area_perm.ipi_shared_perm.request_set_perm));
+        for i in 0..CPUID_MAX_COUNT {
+            if (cpu_set & (1 << i)) != 0 {
+                kdebug!("CPU", cpu_id => hex, "handling IPI from CPU", i => hex);
 
-                // Enumerate over all CPUs
-                for i in 0..cpu_areas.0.len()
-                    invariant
-                        0 <= i <= cpu_areas@.len() <= CPUID_MAX_COUNT,
-                        cpu_areas.wf(),
-                        cpu_areas@.len() == cpu_areas_perm@.shared_perms.len(),
-                        forall|j: int|
-                        #![trigger cpu_areas_perm@.shared_perms[j as int]]
-                        0 <= j < cpu_areas@.len() as int ==> {
-                            &&& cpu_areas@[j as int].wf()
-                            &&& cpu_areas_perm@.shared_perms[j as int].online_perm.is_for(cpu_areas@[j as int].online)
-                            &&& cpu_areas_perm@.shared_perms[j as int].ipi_pending_perm.is_for(cpu_areas@[j as int].ipi_pending)
-                            &&& cpu_areas_perm@.shared_perms[j as int].nmi_pending_perm.is_for(cpu_areas@[j as int].nmi_pending)
-                            &&& cpu_areas_perm@.shared_perms[j as int].ipi_irr_perm.len() == 8
-                            &&& forall|k: int|
-                                0 <= k < 8 ==> {
-                                    #[trigger] cpu_areas_perm@.shared_perms[j as int].ipi_irr_perm[k as int].is_for(
-                                        cpu_areas@[j as int].ipi_irr@[k as int],
-                                    )
-                                }
-                            &&& cpu_areas_perm@.shared_perms[j as int].ipi_shared_perm.pending_perm.is_for(
-                                cpu_areas@[j as int].ipi_shared.pending,
-                            )
-                            &&& cpu_areas_perm@.shared_perms[j as int].ipi_shared_perm.request_set_perm.is_for(
-                                cpu_areas@[j as int].ipi_shared.request_set,
-                            )
-                            &&& cpu_areas_perm@.shared_perms[j as int].ipi_shared_perm.handler_perm.id()
-                                == cpu_areas@[j as int].ipi_shared.handler.id()
-                            &&& cpu_areas_perm@.shared_perms[j as int].ipi_shared_perm.message_perm.id()
-                                == cpu_areas@[j as int].ipi_shared.message.id()
-                            &&& cpu_areas_perm@.shared_perms[j as int].ipi_shared_perm.handler_perm.is_init()
-                            &&& cpu_areas_perm@.shared_perms[j as int].ipi_shared_perm.message_perm.is_init()
-                        }
-                {
-                    if (cpu_set & (1 << i)) != 0 {
-                        kdebug!("CPU", cpu_id => hex, "handling IPI from CPU", i => hex);
-                        // Handle the IPI from CPU i.
-                        let cpu_shared_this = &cpu_areas.0[i].ipi_shared;
+                // Now we must handle the IPI from CPU i; this requires us to
+                // obtain mutable access to the IPI area.
+                let (handler, msg) =
+                    deko_rwlock_write_atomic_data! {
+                    PERCPU_AREAS,
+                    cpu_areas,
+                    cpu_areas_perm,
+                    {
+                        let Some(ref cpu_areas) = cpu_areas else {
+                            die("PERCPU_AREAS is not initialized");
+                        };
+
+                        kpanic_if!(
+                            core::hint::unlikely(i >= cpu_areas.0.len()),
+                            "Target CPU ID",
+                            i,
+                            "exceeds current CPU count",
+                            cpu_areas.0.len(),
+                        );
+
+                        let sender_cpu_shared = &cpu_areas.0[i].ipi_shared;
                         let tracked mut shared_perm_this = cpu_areas_perm.borrow_mut().shared_perms.tracked_remove(i as int);
-
-                        unsafe {
-                            #[verus_spec(with Tracked(&mut shared_perm_this.ipi_shared_perm))]
-                            receive_single_ipi(&cpu_shared_this);
-                        }
-
                         // Now that the request has been handled, decrement the count of
                         // pending requests on the sender's bulletin board.  The IPI
                         // board may cease to be valid as soon as this decrement
                         // completes.
-                        cpu_shared_this.pending.fetch_sub_wrapping(Tracked(
+                        sender_cpu_shared.pending.fetch_sub_wrapping(Tracked(
                             &mut shared_perm_this.ipi_shared_perm.pending_perm
                         ), 1);
+
+                        let msg = match sender_cpu_shared.message.borrow(Tracked(&shared_perm_this.ipi_shared_perm.message_perm)).as_ref() {
+                            Some(e) => {
+                                assume(e.wf());
+                                Some(e.clone())
+                            }
+                            None => None,
+                        };
+                        let handler = sender_cpu_shared.handler.borrow(Tracked(&shared_perm_this.ipi_shared_perm.handler_perm)).clone();
 
                         proof {
                             cpu_areas_perm.borrow_mut().shared_perms.tracked_insert(i as int, shared_perm_this);
                         }
+
+                        (handler, msg)
                     }
+                };
+
+                if let Some(msg) = msg {
+                    unsafe {
+                        make_ipi_handle_call(handler as usize, &msg);
+                    }
+                } else {
+                    kwarn!("IPI message from CPU", i => hex, "is None, skipping...");
                 }
             }
-        };
+        }
 
-        kdebug!("CPU", cpu_id => hex, "completed IPI handling");
+        kdebug!("CPU", cpu_id => hex, "finished handling IPI request");
     }
-}
-
-/// Receives a single IPI and invoke the handler to handle this IPI.
-///
-/// The caller must ensure that the message and the handler is valid
-/// and mapped in memory.
-#[inline]
-#[verus_spec(
-    with
-        Tracked(ipi_area_perm): Tracked<&mut CpuIpiAreaPermission>,
-    requires
-        old(ipi_area_perm).pending_perm.is_for(ipi_area.pending),
-        old(ipi_area_perm).request_set_perm.is_for(ipi_area.request_set),
-        old(ipi_area_perm).message_perm.id() == ipi_area.message.id(),
-        old(ipi_area_perm).handler_perm.id() == ipi_area.handler.id(),
-        old(ipi_area_perm).message_perm.is_init(),
-        old(ipi_area_perm).handler_perm.is_init(),
-    ensures
-        ipi_area_perm.pending_perm.is_for(ipi_area.pending),
-        ipi_area_perm.request_set_perm.is_for(ipi_area.request_set),
-        ipi_area_perm.message_perm.id() == ipi_area.message.id(),
-        ipi_area_perm.handler_perm.id() == ipi_area.handler.id(),
-        ipi_area_perm.message_perm.is_init(),
-        ipi_area_perm.handler_perm.is_init(),
-        old(ipi_area_perm).pending_perm.value() == ipi_area_perm.pending_perm.value(),
-)]
-unsafe fn receive_single_ipi(ipi_area: &CpuIpiArea) {
-    // stub for now.
-    let handler_ptr = *ipi_area.handler.borrow(Tracked(&ipi_area_perm.handler_perm));
-    let message = ipi_area.message.borrow(Tracked(&ipi_area_perm.message_perm));
-
-    kinfo!("Received IPI, invoking handler at", handler_ptr => hex);
-
-    kpanic_if!(
-        core::hint::unlikely(handler_ptr == 0),
-        "IPI handler pointer is null",
-    );
-
-    kpanic_if!(
-        core::hint::unlikely(message.is_none()),
-        "IPI message is None",
-    );
-
-    make_ipi_handle_call(handler_ptr as usize, message.as_ref().unwrap());
 }
 
 /// # Safety
@@ -597,7 +556,7 @@ pub fn handle_set_affinity(ptr: DekoPPtr<DekoIpIMessage>) {
                 }
             }
 
-            schedule();
+            // schedule();
         },
         _ => {
             kpanic_if!(
