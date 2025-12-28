@@ -630,6 +630,8 @@ impl DekoRunQueue {
                 "Run queue is full when scheduling out a running task"
             );  // make verus happy.
 
+            kinfo!("pushing back running task ", task_ref);
+
             proof_with!(Tracked(perm));
             self.push_back(task);
         } else if task_ref.is_terminated() {
@@ -748,6 +750,21 @@ impl DekoRunQueue {
             r =~= old(self).idle,
     )]
     pub fn set_idle_task(&mut self, idle: DekoRunnablePtr) -> Option<DekoRunnablePtr> {
+        let state_lock = &idle.as_ref().data.state;
+        deko_rwlock_write_atomic_data! {
+            state_lock,
+            state,
+            state_perm,
+            {
+                kpanic_if!(
+                    core::hint::unlikely(matches!(state.state, DekoRunnableState::TERMINATED)),
+                    "Trying to set an already terminated task as idle task"
+                );
+
+                state.idle_task = true;
+            }
+        }
+
         let old = self.idle.replace(idle.clone());
 
         deko_rwlock_write_atomic_data! {
@@ -1604,11 +1621,15 @@ fn after_switch() {
         die("No run queue found after context switch.");
     };
 
-    let mut rq_handle = rq.acquire_write();
-    let DekoAtomicData { data: mut runqueue, perm: Tracked(mut perm) } = rq_handle.get();
-    let affinity = runqueue.affinity.take();
-
-    rq_handle.release_write(DekoAtomicData::new_with(runqueue, Tracked(perm)));
+    let affinity =
+        deko_rwlock_write_atomic_data! {
+        rq,
+        runqueue,
+        __,
+        {
+            runqueue.affinity.take()
+        }
+    };
 
     if let Some((task, which)) = affinity {
         kdebug!("After switch: setting CPU affinity to core ", which);
@@ -1758,7 +1779,8 @@ pub fn cpu_idle(which: usize) -> DekoRunnablePtr {
             which < CPUID_MAX_COUNT,
     )]
     loop {
-        // early_dbg();  // <=> hlt, though bad naming
+        early_dbg();  // <=> hlt, though bad naming
+
         // Check if there is any IPI sent to this CPU.
         let (cpu, Tracked(perm)) = DekoCpuCtx::this_cpu();
         let cpu = cpu.borrow(Tracked(&perm.ptr_perm));
