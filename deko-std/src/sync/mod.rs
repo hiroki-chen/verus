@@ -38,6 +38,7 @@ pub use mutex::*;
 pub use once::*;
 pub use rwlock::*;
 use vstd::prelude::*;
+use vstd::std_specs::cmp::{PartialEqSpec, PartialEqSpecImpl};
 use vstd::std_specs::convert::FromSpecImpl;
 
 use crate::std_extra::convert::AsRefSpecImpl;
@@ -98,6 +99,24 @@ impl<V: crate::fmt::DekoDebug, P> crate::fmt::DekoDebug for DekoAtomicData<V, P>
         writer.write_str("DekoAtomicData{ data: ");
         self.data.deko_debug(writer);
         writer.write_str(" }");
+    }
+}
+
+impl<V: WellFormed + PartialEq + PartialEqSpec, P> PartialEqSpecImpl for DekoAtomicData<V, P> {
+    open spec fn obeys_eq_spec() -> bool {
+        true
+    }
+
+    open spec fn eq_spec(&self, other: &Self) -> bool {
+        <V as PartialEqSpec>::eq_spec(&self.data, &other.data)
+    }
+}
+
+impl<V: WellFormed + PartialEq, P> PartialEq for DekoAtomicData<V, P> {
+    #[inline]
+    #[verifier::external_body]
+    fn eq(&self, other: &Self) -> bool {
+        <V as PartialEq>::eq(&self.data, &other.data)
     }
 }
 

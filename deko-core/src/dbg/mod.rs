@@ -1,3 +1,6 @@
+use core::mem::offset_of;
+use core::ops::RangeBounds;
+
 // Below code is modified from SVSM.
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
@@ -7,9 +10,10 @@
 // Author: Nicolai Stange <nstange@suse.de>
 use deko_macros::DekoDebug;
 use deko_std::address::{VaddrRange, VirtAddr};
+use deko_std::cpu::X86GeneralRegs;
 use vstd::prelude::*;
 
-use crate::cpu::task::X86ExceptionContext;
+use crate::cpu::task::{DekoRunnableCtx, X86ExceptionContext};
 use crate::kinfo;
 
 verus! {
@@ -57,40 +61,39 @@ impl StackUnwinder {
         rip: VirtAddr,
         stacks: &StacksBounds,
     ) -> UnwoundStackFrame {
-        // // The next frame's rsp or rbp should live on some valid stack,
-        // // otherwise mark the unwound frame as invalid.
-        // let Some(stack) = stacks.iter().find(|stack| {
-        //     !stack.is_empty() && (stack.contains_inclusive(rsp) || stack.contains_inclusive(rbp))
-        // }) else {
-        //     log::info!("check_unwound_frame: rsp {rsp:#018x} and rbp {rbp:#018x} does not match any known stack");
-        //     return UnwoundStackFrame::Invalid;
-        // };
+        // The next frame's rsp or rbp should live on some valid stack,
+        // otherwise mark the unwound frame as invalid.
+        let Some(stack) = stacks.iter().find(|stack| {
+            !stack.is_empty() && (stack.contains(&rsp) || stack.contains(&rbp))
+        }) else {
+            kinfo!("check_unwound_frame: rsp", rsp, "rbp", rbp, "not in any stack");
+            return UnwoundStackFrame::Invalid;
+        };
 
-        // // The x86-64 ABI requires stack frames to be 16b-aligned
-        // let is_aligned = rbp.is_aligned(16);
-        // let is_last = Self::frame_is_last(rbp);
+        // The x86-64 ABI requires stack frames to be 16b-aligned
+        let is_aligned = rbp.0 % 16 == 0;
+        let is_last = Self::frame_is_last(rbp);
         // let is_exception_frame = is_exception_handler_return_site(rip);
 
-        // if !is_last && !is_exception_frame {
-        //     // Consistency check to ensure forward-progress: never unwind downwards.
-        //     if rbp < rsp {
-        //         return UnwoundStackFrame::Invalid;
-        //     }
-        // }
+        if !is_last /* && !is_exception_frame */ {
+            // Consistency check to ensure forward-progress: never unwind downwards.
+            if rbp.0 < rsp.0 {
+                return UnwoundStackFrame::Invalid;
+            }
+        }
 
-        // let _stack_depth = stack.end() - rsp;
+        let _stack_depth = (stack.end.0 - rsp.0) as usize;
 
-        // UnwoundStackFrame::Valid(StackFrame {
-        //     rbp,
-        //     rsp,
-        //     rip,
-        //     is_aligned,
-        //     is_last,
-        //     is_exception_frame,
-        //     _stack_depth,
-        // })
-
-        todo!()
+        UnwoundStackFrame::Valid(StackFrame {
+            rbp,
+            rsp,
+            rip,
+            is_aligned,
+            is_last,
+            // is_exception_frame,
+            is_exception_frame: false,
+            _stack_depth,
+        })
     }
 
     #[verifier::external_body]

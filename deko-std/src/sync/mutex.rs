@@ -38,8 +38,7 @@ impl Spin for SpinNoIrq {
 
     #[inline]
     fn lock_prologue() -> Self::GuardData {
-        // disable_interrupts()
-        0
+        disable_interrupts()
     }
 
     #[verifier::external_body]
@@ -50,7 +49,7 @@ impl Spin for SpinNoIrq {
 
     #[inline]
     fn lock_epilogue(data: &Self::GuardData) {
-        // restore_interrupts(*data);
+        restore_interrupts(*data);
     }
 }
 

@@ -31,6 +31,7 @@
 //! ```
 use deko_macros::DekoDebug;
 use vstd::prelude::*;
+use vstd::std_specs::cmp::{PartialEqSpecImpl, PartialOrdSpecImpl};
 
 use crate::prelude::*;
 
@@ -700,7 +701,7 @@ impl MappingSpace {
 /// let from_u32 = VirtAddr::from(0x12345678u32);
 /// let from_ptr = VirtAddr::from(ptr as *const u8);
 /// ```
-#[derive(PartialEq, Eq, Clone, Default, Copy, DekoDebug)]
+#[derive(Eq, Clone, Default, Copy, DekoDebug)]
 #[repr(transparent)]
 pub struct VirtAddr(
     #[deko(hex)]
@@ -974,7 +975,7 @@ impl WellFormed for VirtAddr {
 /// // Direct construction
 /// let paddr2 = PhysAddr(0x1234_5678_9ABC_DEF0);
 /// ```
-#[derive(PartialEq, Eq, Clone, Copy, Debug, Default, DekoDebug)]
+#[derive(Eq, Clone, Copy, Debug, Default, DekoDebug)]
 #[repr(transparent)]
 pub struct PhysAddr(
     #[deko(hex)]
@@ -1240,6 +1241,86 @@ pub fn create_paddr_range(start: PhysAddr, len: usize) -> (r: PaddrRange)
     }
 
     PaddrRange { start, end: PhysAddr(start.0 + (len as u64) * PAGE_SIZE) }
+}
+
+impl PartialOrd for VirtAddr {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.0.cmp(&other.0))
+    }
+}
+
+impl PartialEq for VirtAddr {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl PartialOrdSpecImpl for VirtAddr {
+    closed spec fn obeys_partial_cmp_spec() -> bool {
+        true
+    }
+
+    open spec fn partial_cmp_spec(&self, other: &Self) -> core::option::Option<
+        core::cmp::Ordering,
+    > {
+        if self@ < other@ {
+            core::option::Option::Some(core::cmp::Ordering::Less)
+        } else if self@ > other@ {
+            core::option::Option::Some(core::cmp::Ordering::Greater)
+        } else {
+            core::option::Option::Some(core::cmp::Ordering::Equal)
+        }
+    }
+}
+
+impl PartialEqSpecImpl for VirtAddr {
+    closed spec fn obeys_eq_spec() -> bool {
+        true
+    }
+
+    open spec fn eq_spec(&self, other: &Self) -> bool {
+        self@ == other@
+    }
+}
+
+impl PartialOrd for PhysAddr {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.0.cmp(&other.0))
+    }
+}
+
+impl PartialEq for PhysAddr {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl PartialOrdSpecImpl for PhysAddr {
+    closed spec fn obeys_partial_cmp_spec() -> bool {
+        true
+    }
+
+    open spec fn partial_cmp_spec(&self, other: &Self) -> core::option::Option<
+        core::cmp::Ordering,
+    > {
+        if self@ < other@ {
+            core::option::Option::Some(core::cmp::Ordering::Less)
+        } else if self@ > other@ {
+            core::option::Option::Some(core::cmp::Ordering::Greater)
+        } else {
+            core::option::Option::Some(core::cmp::Ordering::Equal)
+        }
+    }
+}
+
+impl PartialEqSpecImpl for PhysAddr {
+    closed spec fn obeys_eq_spec() -> bool {
+        true
+    }
+
+    open spec fn eq_spec(&self, other: &Self) -> bool {
+        self@ == other@
+    }
 }
 
 } // verus!

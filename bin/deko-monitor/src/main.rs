@@ -38,7 +38,7 @@ use deko_core::snp::logging::init_ghcb_logging;
 use deko_core::snp::req::init_snp_guest_driver;
 use deko_core::snp::{init_guest_host, init_secrets_page, prepare_guest_fw, setup_apic};
 use deko_core::{
-    die, get_igvm_params, kdebug, kerror, kinfo, kpanic_if, kwarn, DekoKernelLaunchInfo,
+    dbg, die, get_igvm_params, kdebug, kerror, kinfo, kpanic_if, kwarn, DekoKernelLaunchInfo,
 };
 use deko_std::prelude::*;
 use vstd::prelude::*;
@@ -403,7 +403,10 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
     // Assign "deko_main" to the BSP CPU context so that it will
     // start executing from there.
     proof_with!(Tracked(cpu_ctx_perm) => Tracked(cpu_ctx_perm));
-    DekoCpuCtx::setup_idle_task(bsp_cpu_ptr, deko_main_func_ptr());
+    DekoCpuCtx::setup_idle_task(bsp_cpu_ptr, deko_main_func_ptr(), "deko_main");
+
+    proof_with!(Tracked(&cpu_ctx_perm));
+    DekoCpuCtx::runqueue_info(bsp_cpu_ptr);
 
     unsafe {
         schedule_init();
@@ -473,7 +476,7 @@ fn deko_main(cpu_index: usize) {
             task::DekoTaskArgs {
                 parent: None,
                 entry: task::serv_main_func_ptr(),
-                name: "serv_loop",
+                name: "serv_main",
                 mode: task::DekoTaskMode::Kernel {
                     entry: task::serv_main_func_ptr(),
                     param: 0,
@@ -484,7 +487,7 @@ fn deko_main(cpu_index: usize) {
 
         DekoCpuCtx::start_kernel_task(this_cpu, Tracked(&mut new_perm), serv_task);  // schedule now
 
-        // cpu_idle(cpu_index);  // guard in case schedule fails
+        cpu_idle(cpu_index);  // guard in case schedule fails
     } else {
         kerror!("deko_main: launch info not initialized");
         early_die();
@@ -499,6 +502,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     // Print detailed panic information using the logging system
     #[cfg(feature = "logging")]
     deko_core::logging::print_panic_info(info);
+
+    dbg::print_stack(3);
 
     unsafe {
         core::arch::asm!("ud2");

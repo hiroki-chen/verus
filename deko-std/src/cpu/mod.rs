@@ -71,22 +71,37 @@ impl CpuID {
 ///
 /// The order is reveresed because they are pushed onto the stack in this order.
 #[repr(C)]
-#[derive(Clone, Copy, DekoDebug)]
+#[derive(Clone, Copy, Default, DekoDebug)]
 pub struct X86GeneralRegs {
+    #[deko(hex)]
     pub r15: u64,
+    #[deko(hex)]
     pub r14: u64,
+    #[deko(hex)]
     pub r13: u64,
+    #[deko(hex)]
     pub r12: u64,
+    #[deko(hex)]
     pub r11: u64,
+    #[deko(hex)]
     pub r10: u64,
+    #[deko(hex)]
     pub r9: u64,
+    #[deko(hex)]
     pub r8: u64,
+    #[deko(hex)]
     pub rbp: u64,
+    #[deko(hex)]
     pub rdi: u64,
+    #[deko(hex)]
     pub rsi: u64,
+    #[deko(hex)]
     pub rdx: u64,
+    #[deko(hex)]
     pub rcx: u64,
+    #[deko(hex)]
     pub rbx: u64,
+    #[deko(hex)]
     pub rax: u64,
 }
 

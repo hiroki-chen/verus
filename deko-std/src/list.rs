@@ -651,7 +651,7 @@ impl<V: WellFormed> WellFormed for LinkedList<V> {
 impl<T: WellFormed> View for LinkedList<T> {
     type V = Seq<T>;
 
-    closed spec fn view(&self) -> Self::V {
+    open spec fn view(&self) -> Self::V {
         Seq::new(self.inner@.ptrs.len(), |i: int| self.inner@.perms[i as nat].value().value)
     }
 }

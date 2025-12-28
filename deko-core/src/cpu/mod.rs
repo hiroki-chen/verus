@@ -29,7 +29,7 @@ use crate::cpu::ipi::{CpuIpiArea, CpuIpiAreaPermission};
 use crate::cpu::regs::{read_cr3, sse_init, Cr4Flags};
 use crate::cpu::task::{
     cpu_idle_func_ptr, schedule_init, DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred,
-    DekoRunnable, DekoRunnablePred, DekoTaskArgs,
+    DekoRunnable, DekoRunnablePred, DekoTaskArgs, DEKO_TASK_LIST,
 };
 use crate::imp::ghcb::current_ghcb;
 use crate::imp::RmpFlags;
@@ -1575,10 +1575,28 @@ impl DekoCpuCtx {
             }
         }
 
+        deko_rwlock_write_atomic_data! {
+            DEKO_TASK_LIST,
+            runqueue,
+            rq_perm,
+            {
+                kpanic_if!(
+                    core::hint::unlikely(runqueue.run_list.len() >= usize::MAX),
+                    "Runqueue is full for CPU",
+                    cpu.cpu_id,
+                );
+
+                #[verus_spec(with Tracked(rq_perm.borrow_mut()))]
+                runqueue.push_back(task);
+            }
+        }
+
         kinfo!("Scheduling...");
 
         // Now perform a scheduling.
         task::schedule();
+
+        kinfo!("Returned from scheduling.");
     }
 
     pub fn cleanup_terminated_task(
@@ -1622,6 +1640,9 @@ impl DekoCpuCtx {
             runqueue,
             rq_perm,
             {
+                #[verus_spec(with Tracked(rq_perm.borrow()))]
+                runqueue.info();
+
                 match runqueue.current {
                     Some(_) => {
                         #[verus_spec(with Tracked(rq_perm.borrow_mut()))]
@@ -1647,7 +1668,7 @@ impl DekoCpuCtx {
             new_perm@.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
             new_perm@.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
     )]
-    pub fn setup_idle_task(ptr: DekoPPtr<Self>, entry: u64) {
+    pub fn setup_idle_task(ptr: DekoPPtr<Self>, entry: u64, name: &'static str) {
         let cpu_id = ptr.borrow(Tracked(&perm.ptr_perm)).cpu_id;
 
         // Create a new idle task.
@@ -1657,10 +1678,10 @@ impl DekoCpuCtx {
             DekoTaskArgs {
                 parent: None,
                 entry,
-                name: "idle",
+                name,
                 mode: task::DekoTaskMode::Kernel {
                     entry,
-                    param: 0,  // cpu id... etc.
+                    param: cpu_id,
                     ret: crate::cpu::task::run_kernel_tasks_func_ptr(),
                 },
             },
@@ -1792,7 +1813,7 @@ unsafe extern "C" fn ap_start() -> ! {
     crate::imp::setup_apic(cpu_ctx_ptr, Tracked(&mut ap_perm));
     // Also set the idle task.
     proof_with!(Tracked(ap_perm));
-    DekoCpuCtx::setup_idle_task(cpu_ctx_ptr, cpu_idle_func_ptr());
+    DekoCpuCtx::setup_idle_task(cpu_ctx_ptr, cpu_idle_func_ptr(), "cpu_idle");
 
     sse_init();
 
@@ -1844,7 +1865,7 @@ unsafe extern "C" fn ap_start() -> ! {
     }
     per_cpu_shared_lock.release_write(DekoAtomicData::new_with(Some(per_cpu_areas), perm));
 
-    kinfo!("Application processor started:", cpuid => hex);
+    kinfo!("Application processor started;", cpuid => hex, "entering idle loop.");
 
     schedule_init();
 

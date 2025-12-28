@@ -41,7 +41,7 @@ use crate::mm::vm::{
     VirtualMemoryRegionPermission, VirtualMemoryRegionPred, VmMapping, VmMappingPred, VMR_GRANULE,
 };
 use crate::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR, DEKO_FRAME_ALLOCATOR_FULL};
-use crate::{die, kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
+use crate::{dbg, die, kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
 
 core::arch::global_asm!(
     include_str!("switch.S"),
@@ -393,6 +393,32 @@ impl WellFormed for DekoRunQueue {
 }
 
 #[verus_verify]
+impl DekoCpuCtx {
+    #[verus_spec(
+        with
+            Tracked(perm): Tracked<&DekoCpuCtxPermission>,
+        requires
+            perm.wf_with(ptr),
+    )]
+    pub fn runqueue_info(ptr: DekoPPtr<Self>) {
+        let rq = &ptr.borrow(Tracked(&perm.ptr_perm)).run_queue;
+        let id = ptr.borrow(Tracked(&perm.ptr_perm)).cpu_id;
+
+        if let Some(rq) = rq {
+            deko_rwlock_read_atomic_data! {
+                rq,
+                runqueue,
+                runqueue_perm,
+                {
+                    #[verus_spec(with Tracked(runqueue_perm.borrow()))]
+                    runqueue.info();
+                }
+            }
+        }
+    }
+}
+
+#[verus_verify]
 impl DekoRunQueue {
     pub open spec fn wf_with(&self, perm: DekoRunQueuePermission) -> bool {
         &&& self.wf()
@@ -446,6 +472,66 @@ impl DekoRunQueue {
         self.run_list.len() > 0 || self.idle.is_some()
     }
 
+    /// Prints debugging information about the run queue.
+    #[verus_spec(
+        with
+            Tracked(perm): Tracked<&DekoRunQueuePermission>,
+        requires
+            self.wf(),
+            self.wf_with(*perm),
+    )]
+    pub fn info(&self) {
+        kinfo!("Runqueue info:");
+        if let Some(current) = &self.current {
+            kinfo!("  Current task: ", current.as_ref().data);
+        } else {
+            kinfo!("  Current task: None");
+        }
+        if let Some(idle) = &self.idle {
+            kinfo!("  Idle task: ", idle.as_ref().data);
+        } else {
+            kinfo!("  Idle task: None");
+        }
+        if let Some(terminated) = &self.terminated {
+            kinfo!("  Terminated task: ", terminated.as_ref().data);
+        } else {
+            kinfo!("  Terminated task: None");
+        }
+        if let Some(wake) = &self.wake {
+            kinfo!("  Wake task: ", wake.as_ref().data);
+        } else {
+            kinfo!("  Wake task: None");
+        }
+
+        if let Some(head) = self.run_list.head.as_ref() {
+            let mut ptr = head;
+            let len = self.run_list.len();
+            kinfo!("  Runlist length: ", len);
+
+            for i in 0..len
+                invariant
+                    0 <= i <= self.run_list@.len(),
+                    self.run_list.wf(),
+                    len == self.run_list@.len() == self.run_list.inner@.ptrs.len(),
+                    i < self.run_list@.len() ==> {
+                        &&& ptr == self.run_list.inner@.ptrs[i as int]
+                        &&& self.run_list.node_wf_at(i as nat)
+                    },
+                    self.run_list.head.is_some(),
+            {
+                let v = ptr.borrow(
+                    Tracked(self.run_list.inner.borrow().perms.tracked_borrow(i as nat)),
+                );
+
+                kinfo!("  Runlist[", i, "]: ", v.value.as_ref().data);
+
+                if i + 1 < len {
+                    ptr = v.next.as_ref().unwrap();
+                }
+            }
+        }
+    }
+
     #[verus_spec(r =>
         with
             -> node_perm: Tracked<DekoPointsTo<Node<DekoRunnablePtr>>>,
@@ -458,12 +544,8 @@ impl DekoRunQueue {
             node_perm@.value()@ == task,
     )]
     fn make_node(task: DekoRunnablePtr) -> DekoPPtr<Node<DekoRunnablePtr>> {
-        kinfo!("rq: Making node for task.");
-        kinfo!("rq: mem:", crate::mm::dump_frame_allocator_usage());
         let (node_ptr, Tracked(mut node_perm)) =
             boxed_ptr!(Node<DekoRunnablePtr>, &DEKO_FRAME_ALLOCATOR_FULL);
-        kinfo!("rq: Making node for task done.");
-
         // write to the node.
         node_ptr.write(
             Tracked(&mut node_perm),
@@ -540,22 +622,16 @@ impl DekoRunQueue {
             self.wf_with(*perm),
     )]
     pub fn handle_task(&mut self, task: DekoRunnablePtr) {
-        kinfo!("rq: Handling task before scheduling out. 1");
         let DekoAtomicData { data: task_ref, .. } = task.as_ref();
 
         if task_ref.is_running() && !task_ref.is_idle() {
-            kinfo!("rq: Handling task before scheduling out. 2");
-
             kpanic_if!(
                 core::hint::unlikely(self.run_list.len() >= usize::MAX),
                 "Run queue is full when scheduling out a running task"
             );  // make verus happy.
 
-            kinfo!("rq: Handling task before scheduling out. 3");
-
             proof_with!(Tracked(perm));
             self.push_back(task);
-            kinfo!("rq: Handling task before scheduling out. 4");
         } else if task_ref.is_terminated() {
             self.terminated.replace(task.clone());
             proof {
@@ -580,26 +656,18 @@ impl DekoRunQueue {
             }
     )]
     pub fn schedule_prep(&mut self) -> Option<(DekoRunnablePtr, DekoRunnablePtr)> {
-        kinfo!("rq: Preparing scheduling found current task. 1");
-
         let current = self.current.take().unwrap();
-
-        kinfo!("rq: Preparing scheduling found current task. 2");
 
         proof_with!(Tracked(perm));
         self.handle_task(current.clone());
-
-        kinfo!("rq: Preparing scheduling found current task. 3");
 
         proof_with!(Tracked(perm));
         let next = self.get_next_task();
         self.current = Some(next.clone());
 
-        if DekoArc::ptr_eq(&current, &next) {
+        if current == next {
             None
         } else {
-            kinfo!("rq: Preparing scheduling found current task. 7");
-
             Some((current, next))
         }
     }
@@ -626,6 +694,8 @@ impl DekoRunQueue {
         }
     }
 
+    /// Try to get the next task to run. This function panics if there
+    /// both the run list is empty and there is no idle task.
     #[verus_spec(r =>
         with
             Tracked(perm): Tracked<&mut DekoRunQueuePermission>,
@@ -663,7 +733,8 @@ impl DekoRunQueue {
 
     /// Sets the idle task of the run queue; if there was a previous idle task,
     /// the task pointer is returned.
-    #[allow(non_shorthand_field_patterns)]
+    ///
+    /// This also pushes the new idle task to the front of the global run queue.
     #[verus_spec(r =>
         with
             Tracked(perm): Tracked<&mut DekoRunQueuePermission>,
@@ -672,28 +743,27 @@ impl DekoRunQueue {
             old(self).run_list@.len() < usize::MAX - 1,
             idle.wf(),
         ensures
-            self@ =~= old(self)@.insert(0, idle@),
+            self@ =~= old(self)@,
             self.wf_with(*perm),
             r =~= old(self).idle,
     )]
     pub fn set_idle_task(&mut self, idle: DekoRunnablePtr) -> Option<DekoRunnablePtr> {
         let old = self.idle.replace(idle.clone());
 
-        proof_with!(Tracked(perm));
-        self.push_front(idle.clone());
+        deko_rwlock_write_atomic_data! {
+            DEKO_TASK_LIST,
+            global_rq,
+            global_rq_perm,
+            {
+                kpanic_if!(
+                    core::hint::unlikely(global_rq.run_list.len() >= usize::MAX),
+                    "Global run queue is full when setting idle task"
+                );
 
-        // Update the global task list too.
-        let mut handle = DEKO_TASK_LIST.acquire_write();
-        let DekoAtomicData { mut data, perm: Tracked(mut perm) } = handle.get();
-
-        kpanic_if!(
-            core::hint::unlikely(data.run_list.len() >= usize::MAX),
-            "Global run queue is full when setting idle task"
-        );  // make verus happy.
-
-        proof_with!(Tracked(&mut perm));
-        data.push_front(idle.clone());
-        handle.release_write(DekoAtomicData { data, perm: Tracked(perm) });
+                #[verus_spec(with Tracked(global_rq_perm.borrow_mut()))]
+                global_rq.push_front(idle.clone());
+            }
+        }
 
         old
     }
@@ -738,9 +808,12 @@ impl RwLockPredicate<
 #[repr(C)]
 #[derive(Clone, DekoDebug)]
 pub struct DekoRunnableCtx {
+    #[deko(hex)]
     pub rsp: u64,
     pub regs: X86GeneralRegs,
+    #[deko(hex)]
     pub flags: u64,
+    #[deko(hex)]
     pub ret: u64,
 }
 
@@ -757,6 +830,8 @@ pub struct DekoRunnable {
     pub ssp: VirtAddr,
     /// The unique id of the task.
     pub id: u64,
+    /// The name of the task for debugging purposes.
+    pub name: &'static str,
     /// The priority of the task.
     pub priority: u8,
     /// The page table of the task.
@@ -1156,6 +1231,7 @@ impl DekoRunnable {
                     Ghost(DekoRunnableSchedStatePred {  }),
                 )
             },
+            name: args.name,
         };
 
         proof {
@@ -1419,6 +1495,7 @@ pub unsafe fn schedule_init() {
 }
 
 /// Schedules the next task to run on the current CPU.
+#[verifier::external_body]  // temporary until we debug what's wrong
 pub fn schedule() {
     let (cpu, Tracked(perm)) = DekoCpuCtx::this_cpu();
     let cpu_id = cpu.borrow(Tracked(&perm.ptr_perm)).cpu_id;
@@ -1674,16 +1751,19 @@ func_ptr!(run_kernel_tasks);
 )]
 #[verifier::exec_allows_no_decreases_clause]
 pub fn cpu_idle(which: usize) -> DekoRunnablePtr {
+    kinfo!("CPU core ", which, " entering idle state.");
+
     #[verus_spec(
         invariant
             which < CPUID_MAX_COUNT,
     )]
     loop {
-        early_dbg();  // <=> hlt, though bad naming
-
+        // early_dbg();  // <=> hlt, though bad naming
         // Check if there is any IPI sent to this CPU.
         let (cpu, Tracked(perm)) = DekoCpuCtx::this_cpu();
         let cpu = cpu.borrow(Tracked(&perm.ptr_perm));
+
+        schedule();
     }
 }
 
@@ -1762,6 +1842,10 @@ pub fn serv_main(cpu_index: usize) {
         kinfo!("Boot CPU: total CPU count = ", cpu_nums);
 
         let (this_cpu, Tracked(mut perm)) = DekoCpuCtx::this_cpu();
+
+        proof_with!(Tracked(&perm));
+        DekoCpuCtx::runqueue_info(this_cpu);
+
         let rq = this_cpu.borrow(Tracked(&perm.ptr_perm)).run_queue.as_ref();
         let vm = this_cpu.borrow(Tracked(&perm.ptr_perm)).vm_region.as_ref();
         kpanic_if!(
@@ -1786,8 +1870,7 @@ pub fn serv_main(cpu_index: usize) {
             }
         };
 
-        let mut i = 1;
-        while i < cpu_nums
+        for i in 1..cpu_nums
             invariant
                 1 <= i <= cpu_nums,
                 cpu_nums <= CPUID_MAX_COUNT as u64,
@@ -1798,11 +1881,9 @@ pub fn serv_main(cpu_index: usize) {
             decreases cpu_nums - i,
         {
             // BUG: FIX ME. Something isn't right here.
-            // Perhaps due to pub fn request_vm_region() -> Option<(usize, VaddrRange)>.
-            // so that kernel mapping gets messed up.
             proof_with!(Tracked(perm) => Tracked(new_perm));
             let serv_task = DekoRunnable::new(
-                this_cpu,  /* BUG: This is a thread? */
+                this_cpu,
                 DekoTaskArgs {
                     entry: serv_main_func_ptr(),
                     name: "serv_main_ap",
@@ -1811,8 +1892,7 @@ pub fn serv_main(cpu_index: usize) {
                         param: i,
                         ret: run_kernel_tasks_func_ptr(),
                     },
-                    // parent: Some(current.clone()),  // spawned by the current task.
-                    parent: None,
+                    parent: Some(current.clone()),  // spawned by the current task.
                 },
             );
 
@@ -1821,11 +1901,11 @@ pub fn serv_main(cpu_index: usize) {
             // But this task never gets run?????
             DekoCpuCtx::start_kernel_task(this_cpu, Tracked(&mut new_perm), serv_task);
 
+            kinfo!("Service main for AP core ", i, " started.");
+
             proof {
                 perm = new_perm;
             }
-
-            i += 1;
         }
     } else {
         kinfo!("AP core ", cpu_index, " entering idle state.");

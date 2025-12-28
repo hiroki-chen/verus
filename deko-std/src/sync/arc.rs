@@ -6,6 +6,7 @@ use vstd::multiset::Multiset;
 use vstd::pervasive::arbitrary;
 use vstd::prelude::*;
 use vstd::shared::Shared;
+use vstd::std_specs::cmp::PartialEqSpecImpl;
 use vstd::{atomic_with_ghost, open_atomic_invariant};
 
 use crate::ptr::{DekoPPtr, DekoPointsTo};
@@ -618,10 +619,44 @@ impl<V: WellFormed, F: Predicate<V>> AsRef<V> for Arc<V, F> {
     }
 }
 
-/// A type alias for a [`Arc`] that uses [`DekoAtomicData`] as its
+/// A type alias for a [`DekoArc`] that uses [`DekoAtomicData`] as its
 /// atomic storage type.
 pub type DekoArc<V, P, F> = Arc<DekoAtomicData<V, P>, F>;
 
 pub type DekoSimpleArc<V, F> = DekoArc<V, (), F>;
+
+impl<
+    T: WellFormed + vstd::std_specs::cmp::PartialEqSpec,
+    F: Predicate<T>,
+> PartialEqSpecImpl for Arc<T, F> {
+    open spec fn obeys_eq_spec() -> bool {
+        false
+    }
+
+    open spec fn eq_spec(&self, other: &Self) -> bool {
+        <T as vstd::std_specs::cmp::PartialEqSpec>::eq_spec(&self@, &other@)
+    }
+}
+
+impl<T: WellFormed + PartialEq, F: Predicate<T>> PartialEq for Arc<T, F> {
+    /// Equality for two [`DekoArc`]s
+    /// Two [`DekoArc`]s are equal if their inner values are equal, even if they are
+    /// stored in different allocation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use deko_std::sync::DekoArc;
+    ///
+    /// let five = DekoArc::new(5, &DekoFrameAllocator {}, Ghost(|v: i32| true));
+    /// let also_five = DekoArc::new(5, &DekoFrameAllocator {}, Ghost(|v: i32| true));
+    /// assert!(five == also_five);
+    /// ```
+    #[inline]
+    #[verifier::external_body]  // this is due to the missing support for preconditions; might need `vstd`'s help.
+    fn eq(&self, other: &Self) -> bool {
+        <T as PartialEq>::eq(self.as_ref(), other.as_ref())
+    }
+}
 
 } // verus!
