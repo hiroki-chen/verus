@@ -27,9 +27,9 @@ use vstd::prelude::*;
 use vstd::std_specs::cmp::{PartialEqSpec, PartialEqSpecImpl, PartialOrdSpecImpl};
 
 use crate::collections::Vec;
-use crate::cpu::ipi::{DekoIpIMessage, DekoIpIRequest};
+use crate::cpu::ipi::{DekoIpIMessage, DekoIpiRequest};
 use crate::cpu::irq::irq_enable;
-use crate::cpu::regs::sse_restore_context;
+use crate::cpu::regs::{sse_restore_context, sse_save_context};
 use crate::cpu::{self, DekoCpuCtx, DekoCpuCtxPermission, CPUID_MAX_COUNT, CPU_NUM};
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
 use crate::mm::paging::{
@@ -1547,10 +1547,12 @@ pub fn schedule() {
                     kinfo!("New CPU index for next task: ", cpu_id);
 
                     // SSE Save context.
+                    sse_save_context(cur.as_ref().data.xsave.addr() as u64);
 
-                    switch(Some(cur), next);
+                    switch(Some(cur.clone()), next);
 
                     // SSE restore context.
+                    sse_restore_context(cur.as_ref().data.xsave.addr() as u64);
                 } else {
                     kdebug!("No task switch needed.");
                 }
@@ -1634,7 +1636,7 @@ fn after_switch() {
     if let Some((task, which)) = affinity {
         kdebug!("After switch: setting CPU affinity to core ", which);
 
-        let req = DekoIpIRequest::new(
+        let req = DekoIpiRequest::new(
             &[which as usize],
             DekoIpIMessage::AffinityChange { task: task.clone() },
         );
@@ -1795,6 +1797,9 @@ func_ptr!(cpu_idle);
 ///
 /// Note this function will block the current task and try to "steal" it
 /// from the current CPU to the target CPU to complet the task migration.
+///
+/// This function is usually called on a service core to migrate the
+/// current task to the target core.
 #[verus_spec(
     requires
         which < CPUID_MAX_COUNT,
@@ -1811,34 +1816,40 @@ pub fn set_cpu_affinity(which: usize) {
         "No run queue is assigned to the CPU.",
     );
 
-    let run_queue = cpu.run_queue.as_ref().unwrap();
-    let mut rq_handle = run_queue.acquire_write();
-    let DekoAtomicData { data: mut rq_data, perm: Tracked(mut rq_perm) } = rq_handle.get();
+    deko_rwlock_write_atomic_data! {
+        cpu.run_queue.as_ref().unwrap(),
+        rq_data,
+        __,
+        {
+            // Check if we have a current task.
+            kpanic_if!(
+                core::hint::unlikely(rq_data.current.is_none()),
+                "No current task is running on the CPU.",
+            );
 
-    // Check if we have a current task.
-    kpanic_if!(
-        core::hint::unlikely(rq_data.current.is_none()),
-        "No current task is running on the CPU.",
-    );
+            // Block the task now.
+            let current_task: DekoRunnablePtr = rq_data.current.as_ref().unwrap().clone();
 
-    // Block the task now.
-    let current_task: DekoRunnablePtr = rq_data.current.as_ref().unwrap().clone();
+            kinfo!("current task before migration: ", current_task.as_ref().data);
 
-    kinfo!("current task before migration: ", current_task.as_ref().data);
+            deko_rwlock_write_atomic_data! {
+                current_task.as_ref().data.state,
+                state,
+                __,
+                {
+                    state.state = DekoRunnableState::BLOCKED;
+                }
+            }
 
-    let mut handle = current_task.as_ref().data.state.acquire_write();
-    let DekoAtomicData { data: mut task_state, perm: Tracked(mut task_perm) } = handle.get();
-    task_state.state = DekoRunnableState::BLOCKED;
-    handle.release_write(DekoAtomicData::new_with(task_state, Tracked(task_perm)));
-
-    // Then set the affinity of this runqueue.
-    rq_data.affinity = Some((current_task.clone(), which as u64));
-    rq_handle.release_write(DekoAtomicData::new_with(rq_data, Tracked(rq_perm)));
-
-    // The CPU should schdule and should not return.
-    // Schedule.
+            // Then set the affinity of this runqueue.
+            rq_data.affinity = Some((current_task.clone(), which as u64));
+        }
+    }
 
     schedule();
+
+    // After scheduling, the task should be migrated as we
+    // can match `Some` in `after_switch`.
 }
 
 // BUG: Newly created task will trigger a page fault somewhere.
@@ -1930,7 +1941,7 @@ pub fn serv_main(cpu_index: usize) {
             }
         }
     } else {
-        kinfo!("AP core ", cpu_index, " entering idle state.");
+        kinfo!("Making CPU core", cpu_index, "awake by IPI affinity message.");
         // Migrate the task to self.
         set_cpu_affinity(cpu_index);
     }

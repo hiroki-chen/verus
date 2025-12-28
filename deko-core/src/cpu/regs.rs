@@ -361,4 +361,17 @@ pub fn sse_restore_context(addr: u64) {
     }
 }
 
+#[verus_spec(r =>
+    // with Tracked(cpu_core): Tracked<&mut DekoCpuCore>,
+    // requires
+    // ensures
+)]
+#[verifier::external_body]
+#[inline]
+pub fn sse_save_context(addr: u64) {
+    unsafe {
+        core::arch::x86_64::_xsave(addr as *mut u8, 0b111);
+    }
+}
+
 } // verus!

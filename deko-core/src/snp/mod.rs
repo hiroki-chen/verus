@@ -1098,7 +1098,6 @@ fn copy_apci_tables_to_fw(
 ) {
     if let Some(cpuid) = fw_meta.cpuid_page {
         kinfo!("Copying CPUID page to firmware location at", cpuid);
-        kdebug!("\t cpuid_table:、t", cpuid_table);
 
         // Create a temporary mapping.
         let Some(cpuid_mapping) = TempMapping::new(cpuid..PhysAddr(cpuid.0 + PAGE_SIZE)) else {

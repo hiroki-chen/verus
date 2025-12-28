@@ -247,6 +247,10 @@ impl PerCpuShared {
                 },
             r.1@.ipi_shared_perm.pending_perm.is_for(r.0.ipi_shared.pending),
             r.1@.ipi_shared_perm.request_set_perm.is_for(r.0.ipi_shared.request_set),
+            r.1@.ipi_shared_perm.handler_perm.id() == r.0.ipi_shared.handler.id(),
+            r.1@.ipi_shared_perm.message_perm.id() == r.0.ipi_shared.message.id(),
+            r.1@.ipi_shared_perm.handler_perm.is_init(),
+            r.1@.ipi_shared_perm.message_perm.is_init(),
     {
         let (online, Tracked(online_perm)) = PAtomicBool::new(false);
         let (ipi_pending, Tracked(ipi_pending_perm)) = PAtomicBool::new(false);
@@ -353,6 +357,12 @@ impl PerCpuAreas {
                 &&& perm.shared_perms[i as int].ipi_shared_perm.request_set_perm.is_for(
                     self@[i as int].ipi_shared.request_set,
                 )
+                &&& perm.shared_perms[i as int].ipi_shared_perm.handler_perm.id()
+                    == self@[i as int].ipi_shared.handler.id()
+                &&& perm.shared_perms[i as int].ipi_shared_perm.message_perm.id()
+                    == self@[i as int].ipi_shared.message.id()
+                &&& perm.shared_perms[i as int].ipi_shared_perm.handler_perm.is_init()
+                &&& perm.shared_perms[i as int].ipi_shared_perm.message_perm.is_init()
             }
     }
 

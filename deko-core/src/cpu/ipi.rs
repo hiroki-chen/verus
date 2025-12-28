@@ -3,17 +3,22 @@ use core::marker::PhantomData;
 use core::sync::atomic::AtomicU64;
 
 use deko_macros::DekoDebug;
+use deko_std::prelude::{func_ptr, DekoPointsTo};
 use deko_std::ptr::DekoPPtr;
-use deko_std::sync::DekoAtomicData;
+use deko_std::sync::{DekoAtomicData, DekoSimpleRwLock};
 use deko_std::wf::WellFormed;
 use deko_std::{deko_rwlock_write_atomic_data, with_permission};
 use vstd::atomic::*;
+use vstd::cell::{PCell, PointsTo};
 use vstd::prelude::*;
 
 use crate::cpu::apic::{Apic, X86Apic};
-use crate::cpu::task::DekoRunnablePtr;
-use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission, PerCpuAreas, CPUID_MAX_COUNT, PERCPU_AREAS};
-use crate::{die, kdebug, kpanic_if};
+use crate::cpu::task::{schedule, DekoRunnablePtr, DekoRunnableState};
+use crate::cpu::{
+    DekoCpuCtx, DekoCpuCtxPermission, PerCpuAreas, PerCpuAreasPermission, CPUID_MAX_COUNT,
+    PERCPU_AREAS,
+};
+use crate::{die, kdebug, kinfo, kpanic_if};
 
 verus! {
 
@@ -40,9 +45,9 @@ pub struct CpuIpiArea {
     pub request_set: PAtomicU32,
     /// The numbers of remaining pending IPI requests.
     pub pending: PAtomicUsize,
-    // pub request: (),
-    pub message: DekoPPtr<DekoIpIMessage>,
-    pub handler: DekoPPtr<u64>,  // extern "C" fn(*const msg),
+    pub message: PCell<Option<DekoIpIMessage>>,
+    // pub message: DekoSimpleRwLock<DekoIpIMessage>,
+    pub handler: PCell<u64>,  // extern "C" fn(*const msg),
 }
 
 impl CpuIpiArea {
@@ -51,20 +56,24 @@ impl CpuIpiArea {
         ensures
             r.1@.pending_perm.is_for(r.0.pending),
             r.1@.request_set_perm.is_for(r.0.request_set),
-            r.0.message.addr() == 0,
-            r.0.handler.addr() == 0,
+            r.1@.pending_perm.value() == 0,
+            r.1@.handler_perm.id() == r.0.handler.id(),
+            r.1@.message_perm.id() == r.0.message.id(),
+            r.1@.message_perm.value() == None::<DekoIpIMessage>,
+            r.1@.handler_perm.value() == 0,
+            r.1@.message_perm.is_init(),
+            r.1@.handler_perm.is_init(),
     {
         let (request_set, Tracked(request_set_perm)) = PAtomicU32::new(0);
         let (pending, Tracked(pending_perm)) = PAtomicUsize::new(0);
+        let (message, Tracked(message_perm)) = PCell::new(None);
+        let (handler, Tracked(handler_perm)) = PCell::new(0u64);
 
         (
-            CpuIpiArea {
-                request_set,
-                pending,
-                message: DekoPPtr(vstd::simple_pptr::PPtr(0usize, PhantomData)),
-                handler: DekoPPtr(vstd::simple_pptr::PPtr(0usize, PhantomData)),
-            },
-            Tracked(CpuIpiAreaPermission { request_set_perm, pending_perm }),
+            CpuIpiArea { request_set, pending, message, handler },
+            Tracked(
+                CpuIpiAreaPermission { request_set_perm, pending_perm, message_perm, handler_perm },
+            ),
         )
     }
 }
@@ -78,6 +87,8 @@ with_permission!(
     CpuIpiArea,
     request_set_perm: PermissionU32,
     pending_perm: PermissionUsize,
+    message_perm: PointsTo<Option<DekoIpIMessage>>,
+    handler_perm: PointsTo<u64>,
 );
 
 // Bits 19:18 = 00
@@ -93,9 +104,27 @@ pub enum DekoIpIMessage {
     },
 }
 
+#[verus_verify]
+impl DekoIpIMessage {
+    #[verus_spec(r =>
+        requires
+            self.wf(),
+        ensures
+            r.wf(),
+    )]
+    pub fn clone(&self) -> Self {
+        match self {
+            DekoIpIMessage::TlbShootdown => DekoIpIMessage::TlbShootdown,
+            DekoIpIMessage::AffinityChange { task } => DekoIpIMessage::AffinityChange {
+                task: task.clone(),
+            },
+        }
+    }
+}
+
 /// Represents an Inter-Processor Interrupt (IPI) request.
 #[derive(DekoDebug)]
-pub struct DekoIpIRequest {
+pub struct DekoIpiRequest {
     /// Bitmap of target CPUs; each bit represents a CPU.
     /// Bit 0 represents CPU 0, bit 1 represents CPU 1, and so on.
     ///
@@ -107,7 +136,7 @@ pub struct DekoIpIRequest {
     pub sender: usize,
 }
 
-impl WellFormed for DekoIpIRequest {
+impl WellFormed for DekoIpiRequest {
     #[verifier::inline]
     open spec fn wf(&self) -> bool {
         &&& self.message.wf()
@@ -124,7 +153,7 @@ impl WellFormed for DekoIpIMessage {
 }
 
 #[verus_verify]
-impl DekoIpIRequest {
+impl DekoIpiRequest {
     #[verus_spec(r =>
         requires
             forall |i: int|
@@ -149,7 +178,34 @@ impl DekoIpIRequest {
         let (cpu, Tracked(cpu_perms)) = DekoCpuCtx::this_cpu();
         let sender = cpu.borrow(Tracked(&cpu_perms.ptr_perm)).cpu_id as usize;
 
-        DekoIpIRequest { targets: bitmap, message: msg, sender }
+        DekoIpiRequest { targets: bitmap, message: msg, sender }
+    }
+
+    /// &mut is not supported...
+    #[verifier::external_body]
+    #[verus_spec(
+        with
+            Tracked(cpu_areas_perm): Tracked<&mut PerCpuAreasPermission>,
+        requires
+            self.wf(),
+            old(cpu_areas).wf_with(*old(cpu_areas_perm)),
+            index < old(cpu_areas)@.len(),
+        ensures
+            cpu_areas.wf_with(*cpu_areas_perm),
+    )]
+    pub fn update_shared_area_ipi(
+        &self,
+        cpu_areas: &mut PerCpuAreas,
+        index: usize,
+        cpu_num: usize,
+        f: usize,
+    ) {
+        let ipi_area = &mut cpu_areas.0[index].ipi_shared;
+
+        // Increment the count of pending requests.
+        ipi_area.pending.store(Tracked::assume_new(), cpu_num as _);
+        ipi_area.message.put(Tracked::assume_new(), Some(self.message.clone()));
+        ipi_area.handler.put(Tracked::assume_new(), f as u64);
     }
 
     /// Sends the IPI to the target CPUs.
@@ -159,6 +215,8 @@ impl DekoIpIRequest {
             self.wf(),
     )]
     pub fn send_ipi(&self) {
+        kdebug!("Sending IPI from CPU", self.sender => hex, "to targets BITMAP", self.targets => hex);
+
         let (cpu, Tracked(cpu_perms)) = DekoCpuCtx::this_cpu();
         let id = cpu.borrow(Tracked(&cpu_perms.ptr_perm)).cpu_id as usize;
         let apic = &cpu.borrow(Tracked(&cpu_perms.ptr_perm)).apic;
@@ -204,25 +262,27 @@ impl DekoIpIRequest {
             cpu_areas_perm,
             {
                 // Obtain a reference to this CPU's IPI area.
-                let Some(ref cpu_areas) = cpu_areas else {
+                let Some(mut inner) = cpu_areas else {
                     die("PERCPU_AREAS is not initialized");
                 };
 
                 kpanic_if!(
-                    core::hint::unlikely(id >= cpu_areas.0.len()),
+                    core::hint::unlikely(id >= inner.0.len()),
                     "Target CPU ID",
                     id,
                     "exceeds current CPU count",
-                    cpu_areas.0.len(),
+                    inner.0.len(),
                 );
-                let ipi_area = &cpu_areas.0[id].ipi_shared;
-                let tracked mut ipi_area_perm = cpu_areas_perm.borrow_mut().shared_perms.tracked_remove(id as int);
 
-                // Increment the count of pending requests.
-                ipi_area.pending.store(Tracked(&mut ipi_area_perm.ipi_shared_perm.pending_perm), cpu_nums as _);
-                proof {
-                    cpu_areas_perm.borrow_mut().shared_perms.tracked_insert(id as int, ipi_area_perm);
-                }
+                #[verus_spec(with Tracked(cpu_areas_perm.borrow_mut()))]
+                self.update_shared_area_ipi(
+                    &mut inner,
+                    id,
+                    cpu_nums as usize,
+                    handle_set_affinity_func_ptr() as usize,
+                );
+
+                cpu_areas = Some(inner);
             }
         );
 
@@ -288,10 +348,7 @@ fn send_ipi_to(target: usize, from: &X86Apic) {
 
     kdebug!("Sending IPI", ((high as u64) << 32 | low as u64) => hex, "to target CPU", target => hex);
 
-    let from_id = from.id();
-    from.icr_write(low, high);
-
-    deko_rwlock_write_atomic_data!(
+    deko_rwlock_write_atomic_data! {
         PERCPU_AREAS,
         cpu_areas,
         cpu_areas_perm,
@@ -313,13 +370,18 @@ fn send_ipi_to(target: usize, from: &X86Apic) {
             let tracked mut ipi_area_perm = cpu_areas_perm.borrow_mut().shared_perms.tracked_remove(target as int);
 
             // Mark that an IPI request has been made to the target CPU.
-            ipi_area.request_set.fetch_and(Tracked(&mut ipi_area_perm.ipi_shared_perm.request_set_perm), (1 << from.id()));
+            ipi_area.request_set.fetch_or(Tracked(&mut ipi_area_perm.ipi_shared_perm.request_set_perm), (1 << from.id()));
 
             proof {
                 cpu_areas_perm.borrow_mut().shared_perms.tracked_insert(target as int, ipi_area_perm);
             }
         }
-    );
+    };
+
+    kinfo!("icr write...");
+
+    let from_id = from.id();
+    from.icr_write(low, high);
 }
 
 #[verus_verify]
@@ -357,7 +419,6 @@ impl DekoCpuCtx {
                     cpu_areas.0.len(),
                 );
 
-
                 let tracked mut ipi_area_perm;
                 // Obtain a reference to this CPU's IPI area.
                 let ipi_area = &cpu_areas.0[cpu_id].ipi_shared;
@@ -393,6 +454,12 @@ impl DekoCpuCtx {
                             &&& cpu_areas_perm@.shared_perms[j as int].ipi_shared_perm.request_set_perm.is_for(
                                 cpu_areas@[j as int].ipi_shared.request_set,
                             )
+                            &&& cpu_areas_perm@.shared_perms[j as int].ipi_shared_perm.handler_perm.id()
+                                == cpu_areas@[j as int].ipi_shared.handler.id()
+                            &&& cpu_areas_perm@.shared_perms[j as int].ipi_shared_perm.message_perm.id()
+                                == cpu_areas@[j as int].ipi_shared.message.id()
+                            &&& cpu_areas_perm@.shared_perms[j as int].ipi_shared_perm.handler_perm.is_init()
+                            &&& cpu_areas_perm@.shared_perms[j as int].ipi_shared_perm.message_perm.is_init()
                         }
                 {
                     if (cpu_set & (1 << i)) != 0 {
@@ -437,17 +504,37 @@ impl DekoCpuCtx {
     requires
         old(ipi_area_perm).pending_perm.is_for(ipi_area.pending),
         old(ipi_area_perm).request_set_perm.is_for(ipi_area.request_set),
+        old(ipi_area_perm).message_perm.id() == ipi_area.message.id(),
+        old(ipi_area_perm).handler_perm.id() == ipi_area.handler.id(),
+        old(ipi_area_perm).message_perm.is_init(),
+        old(ipi_area_perm).handler_perm.is_init(),
     ensures
         ipi_area_perm.pending_perm.is_for(ipi_area.pending),
         ipi_area_perm.request_set_perm.is_for(ipi_area.request_set),
+        ipi_area_perm.message_perm.id() == ipi_area.message.id(),
+        ipi_area_perm.handler_perm.id() == ipi_area.handler.id(),
+        ipi_area_perm.message_perm.is_init(),
+        ipi_area_perm.handler_perm.is_init(),
         old(ipi_area_perm).pending_perm.value() == ipi_area_perm.pending_perm.value(),
 )]
 unsafe fn receive_single_ipi(ipi_area: &CpuIpiArea) {
     // stub for now.
-    let handler_ptr = ipi_area.handler.addr();
+    let handler_ptr = *ipi_area.handler.borrow(Tracked(&ipi_area_perm.handler_perm));
+    let message = ipi_area.message.borrow(Tracked(&ipi_area_perm.message_perm));
 
-    // TODO: Need to check if the pointer is valid; but how??
-    make_ipi_handle_call(handler_ptr, ipi_area.message);
+    kinfo!("Received IPI, invoking handler at", handler_ptr => hex);
+
+    kpanic_if!(
+        core::hint::unlikely(handler_ptr == 0),
+        "IPI handler pointer is null",
+    );
+
+    kpanic_if!(
+        core::hint::unlikely(message.is_none()),
+        "IPI message is None",
+    );
+
+    make_ipi_handle_call(handler_ptr as usize, message.as_ref().unwrap());
 }
 
 /// # Safety
@@ -459,10 +546,68 @@ unsafe fn receive_single_ipi(ipi_area: &CpuIpiArea) {
     // with ???
     // requires???
 )]
-unsafe fn make_ipi_handle_call(addr: usize, arg: DekoPPtr<DekoIpIMessage>) {
-    let f = core::mem::transmute::<usize, extern "C" fn (DekoPPtr<DekoIpIMessage>)>(addr);
+unsafe fn make_ipi_handle_call(addr: usize, arg: &DekoIpIMessage) {
+    let f = core::mem::transmute::<usize, fn (DekoPPtr<DekoIpIMessage>)>(addr);
 
-    f(arg);
+    f(DekoPPtr(vstd::simple_pptr::PPtr(arg as *const DekoIpIMessage as usize, PhantomData)));
 }
+
+/// This function handles the set affinity IPI message.
+#[verus_spec(
+    with
+        Tracked(perm): Tracked<&DekoPointsTo<DekoIpIMessage>>,
+    requires
+        ptr@ == perm.pptr(),
+        perm.is_init(),
+        perm.wf(),
+)]
+pub fn handle_set_affinity(ptr: DekoPPtr<DekoIpIMessage>) {
+    kinfo!("Handling set affinity IPI message", ptr);
+
+    let msg = ptr.borrow(Tracked(&perm));
+
+    match msg {
+        DekoIpIMessage::AffinityChange { task } => {
+            let (cpu, Tracked(cpu_perms)) = DekoCpuCtx::this_cpu();
+
+            let rq = &cpu.borrow(Tracked(&cpu_perms.ptr_perm)).run_queue;
+            kpanic_if!(
+                core::hint::unlikely(rq.is_none()),
+                "CPU has no run queue to set affinity task",
+            );
+
+            deko_rwlock_write_atomic_data! {
+                rq.as_ref().unwrap(),
+                rq,
+                rq_perm,
+                {
+                    // Set this task to running.
+                    deko_rwlock_write_atomic_data! {
+                        &task.as_ref().data.state,
+                        task_state,
+                        __,
+                        {
+                            task_state.state = DekoRunnableState::RUNNING;
+                        }
+                    }
+
+                    // Then enqueue it to the run queue.
+                    #[verus_spec(with Tracked(rq_perm.borrow_mut()))]
+                    rq.handle_task(task.clone());
+                }
+            }
+
+            schedule();
+        },
+        _ => {
+            kpanic_if!(
+                true,
+                "handle_set_affinity received non-affinity-change message",
+            );
+        },
+    }
+}
+
+func_ptr!(handle_set_affinity);
 
 } // verus!
