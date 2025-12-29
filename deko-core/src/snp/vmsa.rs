@@ -3,7 +3,7 @@ use core::ops::Index;
 use deko_macros::{with_atomic_pred, DekoDebug};
 use deko_std::array::Array;
 use deko_std::bits::bit_u32_and_auto;
-use deko_std::mem::{PAGE_SIZE, PAGE_SIZE_2M};
+use deko_std::mem::{PAGE_SIZE, PAGE_SIZE_2M, PERCPU_VMSA_BASE};
 use deko_std::prelude::VirtAddr;
 use deko_std::ptr::{addr_of_ref, DekoPPtr, DekoPointsTo};
 use deko_std::sync::DekoAtomicData;
@@ -17,7 +17,7 @@ use crate::cpu::regs::{
     read_cr0, read_cr4, read_efer, DEKO_CS, DEKO_CS_ATTRIBUTES, DEKO_DS, DEKO_DS_ATTRIBUTES,
     DEKO_TR_ATTRIBUTES, DEKO_TSS,
 };
-use crate::cpu::X86Tss;
+use crate::cpu::{DekoCpuCtx, X86Tss};
 use crate::mm::DEKO_FRAME_ALLOCATOR_FULL;
 use crate::snp::{
     rmpadjust, DekoCpuCtxPermission, PageTablePermission, RmpFlags, Rmp_ALL_BITS, SnpStatusFlags,
@@ -26,6 +26,18 @@ use crate::snp::{
 use crate::{die, kdebug, kerror, kinfo, kunimplemented};
 
 verus! {
+
+fn real_mode_code_segment(rip: u64) -> VMSASegment {
+    VMSASegment { selector: 0xf000, base: rip & 0xffff_0000u64, limit: 0xffff, flags: 0x9b }
+}
+
+fn real_mode_data_segment() -> VMSASegment {
+    VMSASegment { selector: 0, flags: 0x93, limit: 0xFFFF, base: 0 }
+}
+
+fn real_mode_sys_seg(flags: u16) -> VMSASegment {
+    VMSASegment { selector: 0, base: 0, limit: 0xffff, flags }
+}
 
 #[repr(C)]
 #[derive(DekoDebug, Clone, Copy)]
@@ -246,6 +258,7 @@ pub struct VmsaPage {
 impl WellFormed for VmsaPage {
     open spec fn wf(&self) -> bool {
         &&& self.idx < 2
+        &&& self.page.addr() + 2 * PAGE_SIZE <= u64::MAX
     }
 }
 
@@ -266,6 +279,34 @@ with_atomic_pred! {
     fields: { page },
     perm_fields: { ptr_perm },
     ptr_perm.pptr() == page.view() && ptr_perm.is_init() && ptr_perm.wf()
+}
+
+#[verus_verify]
+impl VMSA {
+    /// Returns a pointer to the current VMSA.
+    #[inline]
+    #[verifier::external_body]
+    #[verus_spec(r =>
+        with
+            Tracked(cpu_perm): Tracked<&DekoCpuCtxPermission>,
+                -> vmsa_perm: Tracked<DekoPointsTo<VMSA>>,
+        requires
+            cpu_perm.wf_with(cpu_ctx),
+        ensures
+            vmsa_perm@.pptr() == r@,
+            vmsa_perm@.is_init(),
+            vmsa_perm@.wf(),
+
+    )]
+    pub fn this_vmsa(cpu_ctx: DekoPPtr<DekoCpuCtx>) -> DekoPPtr<VMSA> {
+        unsafe {
+            // Perform a dummy raed and ensure that no #PF occurs.
+            let _ = &*(PERCPU_VMSA_BASE.0 as *const VMSA);
+        }
+
+        proof_with!(|= Tracked::assume_new());
+        DekoPPtr(vstd::simple_pptr::PPtr(PERCPU_VMSA_BASE.0 as usize, core::marker::PhantomData))
+    }
 }
 
 #[verus_verify]
@@ -334,6 +375,17 @@ impl VmsaInitialContext {
 
 #[verus_verify]
 impl VmsaPage {
+    #[inline]
+    #[verus_spec(r =>
+        requires
+            self.wf(),
+        ensures
+            r.wf(),
+    )]
+    pub fn vaddr(&self) -> VirtAddr {
+        VirtAddr::new(self.page.addr() as u64 + (self.idx as u64) * PAGE_SIZE)
+    }
+
     /// Allocates a VMSA page.
     #[verus_spec(r =>
         with
@@ -396,6 +448,66 @@ impl VmsaPage {
             page,
             idx,  // indicate which VMSA we use
         }
+    }
+
+    /// Initializes the VMSA page for guest.
+    #[verifier::external_body]
+    #[verus_spec(r =>
+        with
+            Tracked(perm): Tracked<&mut VmsaPagePermission>,
+        requires
+            old(perm).ptr_perm.wf(),
+            old(perm).ptr_perm.pptr() == self.page@,
+            self.wf(),
+        ensures
+            perm.ptr_perm.wf(),
+            perm.ptr_perm.pptr() == self.page@,
+            perm.ptr_perm.is_init(),
+    )]
+    pub fn init_guest_vmsa(&self, reset_rip: u64) -> u64 {
+        // This is similar to init_from, but only initializes the necessary fields
+        // for guest VMSA.
+        // SAFETY: We have the permission to the VMSA page, and we ensure that
+        // the pointer is valid and properly aligned because we deref it
+        // from a valid DekoPPtr.
+        //
+        // This prevents stack overflow. Verus does not support creating a &mut in
+        // place so this requires some unsafe pointer manipulations instead.
+        let this = unsafe {
+            let ptr = self.page.borrow(Tracked(&perm.ptr_perm)).as_ptr().wrapping_add(
+                self.idx * PAGE_SIZE as usize,
+            ) as *mut VMSA;
+
+            kdebug!("write bytes vmsa");
+
+            core::ptr::write_bytes(ptr as *mut u8, 0, core::mem::size_of::<VMSA>());
+
+            &mut *ptr
+        };
+
+        this.cs = real_mode_code_segment(reset_rip);
+        this.ds = real_mode_data_segment();
+        this.es = real_mode_data_segment();
+        this.ss = real_mode_data_segment();
+        this.fs = real_mode_data_segment();
+        this.gs = real_mode_data_segment();
+        this.gdt = real_mode_sys_seg(0);
+        this.idt = real_mode_sys_seg(0);
+        this.ldt = real_mode_sys_seg(0x82);  // LDT available.
+        this.tr = real_mode_sys_seg(0x8b);  // 32-bit TSS available.
+
+        this.rip = reset_rip & 0xffffu64;
+        this.rflags = 0x2;
+        this.cr0 = 0x6000_0010;
+        this.vmpl = 2;
+        this.g_pat = 0x0007040600070406u64;
+        this.xcr0 = 1;
+        this.mxcsr = 0x1f80;
+        this.x87_ftw = 0x5555;
+        this.x87_fcw = 0x0040;
+        this.sev_features = SnpStatusFlags::get_status().bits() >> 2;  // make this sev.
+
+        this.sev_features
     }
 
     /// Initializes the VMSA page from the initial context.

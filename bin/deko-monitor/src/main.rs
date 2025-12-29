@@ -7,6 +7,7 @@
 
 use core::ptr::eq;
 
+use deko_core::collections::get_unchecked;
 use deko_core::cpu::gdt::GLOBAL_GDT;
 use deko_core::cpu::idt::{create_early_idt, init_early_idt, init_global_idt, Idt};
 use deko_core::cpu::regs::{cr0_init, cr4_init, load_cr3, sse_init};
@@ -184,49 +185,58 @@ fn do_make_ap_online(cpus: &[ACPICPUInfo]) {
                 CPUID_MAX_COUNT
             );
 
-        let handle = PERCPU_AREAS.acquire_read();
-        let DekoAtomicData { data: percpu_area, .. } = handle.borrow();
-        let Some(ref percpu_area) = percpu_area else {
-            die("PERCPU_AREAS is not initialized");
-        };
+        deko_rwlock_read_atomic_data! {
+            PERCPU_AREAS,
+            percpu_area,
+            __,
+            {
+                let Some(ref percpu_area) = percpu_area else {
+                    die("PERCPU_AREAS is not initialized");
+                };
 
-        kpanic_if!(
-            core::hint::unlikely(cpu_info.apic_id as usize >= percpu_area.0.len()),
-            "AP CPU ID out of bounds in per-CPU shared area: got;", cpu_info.apic_id
-        );
+                kpanic_if!(
+                    core::hint::unlikely(cpu_info.apic_id as usize >= percpu_area.0.len()),
+                    "AP CPU ID out of bounds in per-CPU shared area: got;", cpu_info.apic_id
+                );
 
-        let cpu_area = &percpu_area.0[cpu_info.apic_id as usize];
-        start_application_processor(cpu_area);
-        handle.release_read();
+                start_application_processor(get_unchecked(&percpu_area.0, cpu_info.apic_id as usize));
+            }
+        }
 
         // Wait for the CPU to be online.
         loop
             invariant
                 cpu_info.apic_id < CPUID_MAX_COUNT as u32,
         {
-            let handle = PERCPU_AREAS.acquire_read();
-            let DekoAtomicData { data: percpu_area, perm } = handle.borrow();
-            let Some(ref percpu_area) = percpu_area else {
-                die("PERCPU_AREAS is not initialized");
+            core::hint::spin_loop();
+
+            let is_online =
+                deko_rwlock_read_atomic_data! {
+                PERCPU_AREAS,
+                percpu_area,
+                percpu_area_perm,
+                {
+                    let Some(ref percpu_area) = percpu_area else {
+                        die("PERCPU_AREAS is not initialized");
+                    };
+
+                    kpanic_if!(
+                        core::hint::unlikely(cpu_info.apic_id as usize >= percpu_area.0.len()),
+                        "AP CPU ID out of bounds in per-CPU shared area: got;", cpu_info.apic_id
+                    );
+
+                    let cpu_area = &percpu_area.0[cpu_info.apic_id as usize];
+                    let tracked this_perm = percpu_area_perm.borrow().shared_perms.tracked_borrow(
+                        cpu_info.apic_id as int,
+                    );
+
+                    cpu_area.online.load(Tracked(&this_perm.online_perm))
+                }
             };
 
-            kpanic_if!(
-                core::hint::unlikely(cpu_info.apic_id as usize >= percpu_area.0.len()),
-                "AP CPU ID out of bounds in per-CPU shared area: got;", cpu_info.apic_id
-            );
-
-            let cpu_area = &percpu_area.0[cpu_info.apic_id as usize];
-            let tracked this_perm = perm.borrow().shared_perms.tracked_borrow(
-                cpu_info.apic_id as int,
-            );
-
-            let is_online = cpu_area.online.load(Tracked(&this_perm.online_perm));
-
-            handle.release_read();
             if is_online {
                 break ;
             }
-            core::hint::spin_loop();
         }
 
         i += 1;

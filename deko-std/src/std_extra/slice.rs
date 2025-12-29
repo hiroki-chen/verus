@@ -1,4 +1,5 @@
 use core::cmp::Ordering;
+use core::slice::SliceIndex;
 
 use vstd::prelude::*;
 use vstd::std_specs::cmp::OrdSpec;

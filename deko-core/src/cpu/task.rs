@@ -30,7 +30,8 @@ use crate::collections::Vec;
 use crate::cpu::ipi::{DekoIpIMessage, DekoIpiRequest};
 use crate::cpu::irq::irq_enable;
 use crate::cpu::regs::{sse_restore_context, sse_save_context};
-use crate::cpu::{self, DekoCpuCtx, DekoCpuCtxPermission, CPUID_MAX_COUNT, CPU_NUM};
+use crate::cpu::{self, DekoCpuCtx, DekoCpuCtxPermission, CPUID_MAX_COUNT, CPU_NUM, PERCPU_AREAS};
+use crate::imp::vmsa::VMSA;
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
 use crate::mm::paging::{
     bit_not_in_addr_region, bit_not_overlapping, PageTable, PageTablePermission, PteFlags,
@@ -1420,13 +1421,18 @@ impl DekoRunnable {
             self.wf(),
     )]
     pub fn read_state(&self) -> (DekoRunnableState, bool) {
-        let handle = self.state.acquire_read();
-        let DekoAtomicData { data, .. } = handle.borrow();
+        let (state, idle_task) =
+            deko_rwlock_read_atomic_data! {
+            self.state,
+            state,
+            __,
+            {
+                let idle_task = state.idle_task;
+                let state = state.state;
 
-        let state = data.state;
-        let idle_task = data.idle_task;
-
-        handle.release_read();
+                (state, idle_task)
+            }
+        };
 
         (state, idle_task)
     }
@@ -1869,12 +1875,27 @@ pub fn set_cpu_affinity(which: usize) {
     // can match `Some` in `after_switch`.
 }
 
-// BUG: Newly created task will trigger a page fault somewhere.
-// next task rsp is: 0xFFFFF000027CF68 and this reads garbage.
-/// This function spawns child processes on the current BSP but
-/// sets affinity to other APs, so that the child processes
-/// will run on other APs after scheduling. All the context switches
-/// occur on the same CPU core so extra care must be taken.
+/// The main entry point for the kernel service loop.
+///
+/// This function serves as the divergent execution path for the Boot CPU (BSP)
+/// and Application Processors (APs). It is responsible for initializing the
+/// scheduling environment for secondary cores and entering the guest execution loop.
+///
+/// # Behavior
+///
+/// * **Boot CPU (`cpu_index == 0`):**
+///   1. Retrieves the total number of active CPUs from global atomic data.
+///   2. Validates that the current CPU has a valid RunQueue and VM Region.
+///   3. Iterates through all available APs (indices `1` to `cpu_nums`).
+///   4. Creates a new kernel task (`serv_main_ap`) for each AP.
+///   5. Schedules these tasks to start the secondary cores.
+///
+/// * **Application Processors (`cpu_index > 0`):**
+///   1. Logs the wake-up event via IPI affinity.
+///   2. Sets the CPU affinity to ensure the task is pinned to its respective core.
+///
+/// Finally, regardless of the core index, the execution flow attempts to enter
+/// the guest context via [`try_enter_guest`].
 #[verus_spec(
     requires
         cpu_index < CPUID_MAX_COUNT,
@@ -1960,20 +1981,75 @@ pub fn serv_main(cpu_index: usize) {
         set_cpu_affinity(cpu_index);
     }
 
+    // Try to enter the guest again.
     loop {
-        // Try to enter the guest again.
-        try_enter_guest();
+        let msg = try_enter_guest();
     }
 }
 
 func_ptr!(serv_main);
 
-/// Try to enter the guest OS if possible.
+/// Attempts to transfer control to the Guest VM.
+///
+/// This function acts as the primary "World Switch" loop for the kernel. Its
+/// purpose is to execute the VMRUN (or equivalent) instruction to run the
+/// guest code. Upon a generic VM exit, it handles necessary housekeeping
+/// and immediately attempts to re-enter the guest.
+///
+/// This function is called by [`serv_main`] after the scheduling environment.
+/// Sometimes when we finish serving the VM exits, we want to re-enter the guest
+/// immediately without going back to the scheduler.
+///
+/// This function never returns as the control flow must be implicitly transferred
+/// to the guest context and it can request anything via VM exits.
 #[verifier::exec_allows_no_decreases_clause]
 pub fn try_enter_guest() {
     kdebug!("Trying to enter guest...");
 
+    let (this_cpu_ptr, Tracked(this_cpu_perm)) = DekoCpuCtx::this_cpu();
+    let this_cpu = this_cpu_ptr.borrow(Tracked(&this_cpu_perm.ptr_perm));
+    let this_cpu_index = this_cpu.cpu_id as usize;
+
+    #[verus_spec(
+        invariant
+            this_cpu_index < CPUID_MAX_COUNT,
+            this_cpu_perm.wf_with(this_cpu_ptr),
+    )]
     loop {
+        deko_rwlock_read_atomic_data! {
+            PERCPU_AREAS,
+            percpu_areas,
+            __,
+            {
+                let Some(ref percpu_areas) = percpu_areas else {
+                    die("No percpu areas found.");
+                };
+
+                kpanic_if!(
+                    core::hint::unlikely(this_cpu_index >= percpu_areas.0.len()),
+                    "CPU index out of bounds when entering guest.",
+                ); // annoying,
+
+                let vmsa_ref = &percpu_areas.0[this_cpu_index].guest_vmsa;
+
+                deko_rwlock_read_atomic_data! {
+                    vmsa_ref,
+                    vmsa,
+                    vmsa_perm,
+                    {
+                        // If no caa found then this is meaningless and
+                        // we just ignore the request.
+                        if let Some(caa_addr) = vmsa.caa {
+                            if let Some(vmsa_addr) = vmsa.vmsa {
+                                let vmsa =
+                                #[verus_spec(with Tracked(&this_cpu_perm) => mut vmsa_perm)]
+                                VMSA::this_vmsa(this_cpu_ptr);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

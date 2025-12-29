@@ -120,12 +120,14 @@ impl<V: WellFormed + Heap> DekoBuddyAllocator<V> {
     }
 
     pub fn remaining(&self) -> (r: u64) {
-        let read_handle = self.allocator.acquire_read();
-        let allocator = read_handle.borrow();
-
-        let res = allocator.data.remaining();
-        read_handle.release_read();
-        res
+        deko_rwlock_read_atomic_data! {
+            self.allocator,
+            allocator,
+            __,
+            {
+                allocator.remaining()
+            }
+        }
     }
 
     pub fn init(&self, heap_start: u64, heap_size: u64, order: u64)
@@ -133,17 +135,17 @@ impl<V: WellFormed + Heap> DekoBuddyAllocator<V> {
             self.wf(),
             crate::heap::valid_heap_param(heap_start, heap_size, order),
     {
-        let mut write_handle = self.allocator.acquire_write();
-        let mut allocator = write_handle.get();
-
-        // If already initialized, we do nothing.
-        if allocator.data.is_init_impl() {
-            write_handle.release_write(allocator);
-            return ;
+        deko_rwlock_write_atomic_data! {
+            self.allocator,
+            allocator,
+            __,
+            {
+                // If already initialized, we do nothing.
+                if !allocator.is_init_impl() {
+                    allocator.init(heap_start, heap_size, order);
+                }
+            }
         }
-        allocator.data.init(heap_start, heap_size, order);
-
-        write_handle.release_write(allocator);
     }
 
     /// This API is *hidden* because we do not want the caller to manipulate any

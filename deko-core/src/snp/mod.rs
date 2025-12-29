@@ -9,7 +9,7 @@ use vstd::invariant;
 use vstd::prelude::*;
 use vstd::simple_pptr::PPtr;
 
-use crate::collections::Vec;
+use crate::collections::{get_unchecked, Vec};
 use crate::cpu::apic::Apic;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
 use crate::cpu::{
@@ -1055,26 +1055,35 @@ fn prepare_fw_launch(
     let cpuid = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).cpu_id;
 
     if let Some(caa) = fw_meta.caa_page {
-        let shared_handle = PERCPU_AREAS.acquire_read();
-        let DekoAtomicData { data, perm, } = shared_handle.borrow();
+        deko_rwlock_read_atomic_data! {
+            PERCPU_AREAS,
+            percpu_areas,
+            percpu_areas_perm,
+            {
+                let Some(ref percpu_areas) = percpu_areas else {
+                    die("PERCPU_AREAS is not initialized");
+                };
 
-        let Some(ref shared) = data else {
-            die("PERCPU_AREAS is not initialized");
-        };
+                kpanic_if!(
+                    cpuid as usize >= percpu_areas.0.len(),
+                    "CPU ID out of bounds for PERCPU_AREAS",
+                    cpuid,
+                );
 
-        kpanic_if!(
-            cpuid as usize >= shared.0.len(),
-            "CPU ID out of bounds for PERCPU_AREAS",
-            cpuid,
-        );
+                let cpu_shared = get_unchecked(&percpu_areas.0, cpuid as usize);
 
-        let cpu_shared = &shared.0[cpuid as usize];
-        let mut guest_vmsa = cpu_shared.guest_vmsa.acquire_write();
-        let DekoAtomicData { data: mut v, .. } = guest_vmsa.get();
-        v.generation = v.generation.saturating_add(1);
-        v.caa = Some(caa);
-        guest_vmsa.release_write(DekoAtomicData::new(v));
-        shared_handle.release_read();
+                deko_rwlock_write_atomic_data! {
+                    cpu_shared.guest_vmsa,
+                    guest_vmsa,
+                    guest_vmsa_perm,
+                    {
+                        guest_vmsa.generation = guest_vmsa.generation.saturating_add(1);
+                        guest_vmsa.gen_in_use = 0;
+                        guest_vmsa.caa = Some(caa);
+                    }
+                }
+            }
+        }
     }
 
     // Allocate new VMSA for this CPU and then

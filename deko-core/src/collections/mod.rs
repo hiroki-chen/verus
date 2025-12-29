@@ -21,6 +21,23 @@ pub type Vec<T> = alloc::vec::Vec<T, DekoAllocatorApi>;
 /// A type alias for a vector declaration that uses the Deko page frame allocator as its allocator.
 pub type VecDeque<T> = alloc::collections::vec_deque::VecDeque<T, DekoAllocatorApi>;
 
+/// Wrapper around `get_unchecked` for slices.
+///
+/// The trait implementation in core is not directly usable in Verus.
+#[inline(always)]
+#[track_caller]
+#[verifier::external_body]
+#[verus_spec(r =>
+    requires
+        0 <= index < v@.len(),
+    ensures
+        r == v@[index as int],
+)]
+pub fn get_unchecked<T>(v: &[T], index: usize) -> &T {
+    // SAFETY: Precondition ensures that this never goes out of bounds.
+    unsafe { v.get_unchecked(index) }
+}
+
 /// Updates the element at the given index in the vector to the given value.
 ///
 /// Since Verus does not support mutable references to elements in a vector,

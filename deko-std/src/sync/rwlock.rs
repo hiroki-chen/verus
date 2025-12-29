@@ -861,17 +861,53 @@ impl<V: WellFormed, P, Pred: RwLockPredicate<DekoAtomicData<V, P>>> Predicate<
 }
 
 } // verus!
-/// A macro to acquire a read lock, execute a block, and release the lock.
+/// A convenience macro to safely acquire a read lock, execute a critical section, and release the lock.
 ///
-/// If you explicitly need to get the handle instead of the value, do not
-/// use this macro and instead call `acquire_read` and `release_read`
-/// manually to do so.
+/// This macro handles the `acquire_read` and `release_read` lifecycle automatically. It binds the
+/// protected data and its associated verification permission to the provided identifiers for use
+/// within the code block.
 ///
-/// # Warning
+/// # Parameters
+/// * `$lock`: The lock instance to acquire.
+/// * `$data_binding`: The name to bind the immutable reference of the protected data to.
+/// * `$perm_binding`: The name to bind the `Tracked` permission to.
+/// * `$body`: The block of code to execute. This block supports Verus syntax.
 ///
-/// This body is a critical section protected by the read lock. Make sure
-/// that the body will unexpectedly alter the control flow so that the lock
-/// is left held. For example, do not use `return` or `break` inside the body.
+/// # Returns
+/// Returns the value evaluated by the last expression in `$body`.
+///
+/// # ⚠️ Critical Warning: Control Flow
+///
+/// **Do not use `return`, `break`, or `continue` to exit the `$body` block.**
+///
+/// This macro manually manages lock release *after* the body executes. If you interrupt the
+/// control flow (e.g., by breaking out of a loop from inside the macro), the `release_read()` call
+/// will be skipped, causing a **deadlock** where the lock is held forever.
+///
+/// If you need to exit a loop based on a value read inside the lock, return that value from the
+/// macro and check it in the outer scope.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let is_ready = deko_rwlock_read_atomic_data!(
+///     my_lock,      // The lock
+///     data,         // Bind data to 'data'
+///     perm,         // Bind permissions to 'perm'
+///     {
+///         // Verus syntax is supported here
+///         proof {
+///             perm.validate(data);
+///         }
+///         // Return a value to the outer scope
+///         data.ready_flag == 1
+///     }
+/// );
+///
+/// if is_ready {
+///     break; // SAFE: Break happens after the lock is released
+/// }
+/// ```
 #[macro_export]
 macro_rules! deko_rwlock_read_atomic_data {
     ($lock:expr, $data_binding:ident, $perm_binding:ident, $body:tt) => {{
@@ -888,31 +924,48 @@ macro_rules! deko_rwlock_read_atomic_data {
     }}
 }
 
-/// A macro to acquire a write lock, execute a block, and release the lock.
+/// A convenience macro to safely acquire a write lock, execute a critical section, and release the lock.
 ///
-/// If you explicitly need to get the handle instead of the value, do not
-/// use this macro and instead call `acquire_write` and `release_write`
-/// manually to do so.
+/// This macro handles the `acquire_write` and `release_write` lifecycle automatically. It binds the
+/// protected data and its associated verification permission to the provided identifiers as mutable
+/// references.
+///
+/// # Parameters
+/// * `$lock`: The lock instance to acquire.
+/// * `$data_binding`: The name to bind the mutable reference of the protected data to.
+/// * `$perm_binding`: The name to bind the mutable `Tracked` permission to.
+/// * `$body`: The block of code to execute. This block supports Verus syntax.
+///
+/// # Returns
+/// Returns the value evaluated by the last expression in `$body`.
+///
+/// # ⚠️ Critical Warning: Control Flow
+///
+/// **Do not use `return`, `break`, or `continue` to exit the `$body` block.**
+///
+/// This macro manually manages lock release *after* the body executes. If you interrupt the
+/// control flow (e.g., by breaking out of a loop from inside the macro), the `release_write()` call
+/// will be skipped, causing a **deadlock** where the lock is held forever.
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// deko_rwlock_write_atomic_data!(my_lock, data, perm, {
-///     // modify data and perm as needed
-///     data.field += 1;
+/// deko_rwlock_write_atomic_data!(
+///     my_lock,       // The lock
+///     data,          // Bind mutable data to 'data'
+///     perm,          // Bind mutable permissions to 'perm'
+///     {
+///         data.counter += 1;
 ///
-///     proof {
-///         perm.some_spec_holds(&data);
+///         // Verus syntax: manipulating ghost state
+///         proof {
+///             perm.update(data.counter);
+///         }
+///
+///         data.counter // Returns the new count
 ///     }
-/// });
+/// );
 /// ```
-///
-/// The lock will be automatically dropped at the end of the block.
-///
-/// # Warning
-/// This body is a critical section protected by the read lock. Make sure
-/// that the body will unexpectedly alter the control flow so that the lock
-/// is left held. For example, do not use `return` or `break` inside the body.
 #[macro_export]
 macro_rules! deko_rwlock_write_atomic_data {
     ($lock:expr, $data_binding:ident, $perm_binding:ident, $body:tt) => {{

@@ -21,7 +21,7 @@ use crate::mm::paging::{
     Pte_ALL_BITS, PRESENT, RECURSIVE_INDEX,
 };
 use crate::mm::stack::DekoKernelStack;
-use crate::mm::vm;
+use crate::mm::{vm, DEKO_FRAME_ALLOCATOR_FULL};
 use crate::{die, kdebug, kinfo, kpanic_if, kunimplemented, kwarn, vec};
 
 verus! {
@@ -333,6 +333,31 @@ pub struct RawMapping {
 /// invariant together and is not very ergnomic to use. We may need to provide some helper
 /// functions to make it easier to create.
 pub type Mapping = DekoArc<DekoRwLock<VmMapping, (), VmMappingPred>, (), DekoSimpleRwLockPred>;
+
+/// Creates a new [`Mapping`] from the given [`VmMapping`].
+#[verus_spec(r =>
+    requires
+        vm_mapping.wf(),
+    ensures
+        r.wf(),
+)]
+pub fn make_mapping(vm_mapping: VmMapping) -> Mapping {
+    let mapping_lock = DekoRwLock::new(
+        DekoAtomicData::new(vm_mapping),
+        (),
+        Ghost(VmMappingPred {  }),
+    );
+
+    proof {
+        use_type_invariant(&mapping_lock);
+    }
+
+    DekoArc::new(
+        DekoAtomicData::new(mapping_lock),
+        &DEKO_FRAME_ALLOCATOR_FULL,
+        Ghost(DekoSimpleRwLockPred {  }),
+    )
+}
 
 /// A [`VmMapping`] represents a backing mapping from the offset to a base to the physical
 /// address with a fixed size used in the [`VirtualMemory] struct for translating virtual
@@ -1292,6 +1317,7 @@ impl VirtualMemoryRegion {
     /// Removes the mapping from a given base address from the region.
     ///
     /// If the given address is not found then we return [`Option::None`].
+    #[verifier::spinoff_prover]
     #[verus_spec(r =>
         with
             Tracked(perm): Tracked<&mut VirtualMemoryRegionPermission>,
@@ -1302,6 +1328,7 @@ impl VirtualMemoryRegion {
                 vaddr.wf(),
                 vaddr@ >= VADDR_UPPER_MASK,
             ensures
+                self.wf(),
                 self.wf_with(perm),
                 r matches Some(vm) ==> {
                     &&& vm.wf()
@@ -1377,6 +1404,7 @@ impl VirtualMemoryRegion {
             self.areas@.len() == old(self).areas@.len() + 1,
             old(perm).pgtable_perm.private_bit == perm.pgtable_perm.private_bit,
             old(perm).pgtable_perm.shared_bit == perm.pgtable_perm.shared_bit,
+            old(self).id == self.id,
     )]
     #[verifier::spinoff_prover]
     pub fn insert_at_vaddr(&mut self, vaddr: VirtAddr, vm_block: VirtualMemory) {
