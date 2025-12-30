@@ -38,6 +38,7 @@ pub mod dbg;
 pub mod elf;
 pub mod fs;
 pub mod fw;
+pub mod guest;
 pub mod hal;
 pub mod imp;
 pub mod logging;
@@ -311,9 +312,9 @@ macro_rules! ktodo {
 
 #[macro_export]
 macro_rules! kpanic_if {
-    ($cond:expr, $($msg:expr),* $(,)?) => {
+    ($cond:expr, $($msg:tt)*) => {
         if $cond {
-            $crate::kerror!("Panic at", core::file!(), ":", core::line!(), ": ", $($msg,)*);
+            $crate::kerror!("Panic at", core::file!(), ":", core::line!(), ": ", $($msg)*);
             $crate::die("");
         }
     };

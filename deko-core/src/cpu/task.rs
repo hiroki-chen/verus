@@ -27,10 +27,16 @@ use vstd::prelude::*;
 use vstd::std_specs::cmp::{PartialEqSpec, PartialEqSpecImpl, PartialOrdSpecImpl};
 
 use crate::collections::Vec;
-use crate::cpu::ipi::{DekoIpIMessage, DekoIpiRequest};
+use crate::cpu::ipi::{wait_ipi_blocking, DekoIpIMessage, DekoIpiRequest};
 use crate::cpu::irq::irq_enable;
 use crate::cpu::regs::{sse_restore_context, sse_save_context};
-use crate::cpu::{self, DekoCpuCtx, DekoCpuCtxPermission, CPUID_MAX_COUNT, CPU_NUM, PERCPU_AREAS};
+use crate::cpu::{
+    self, flush_tlb_global, DekoCpuCtx, DekoCpuCtxPermission, CPUID_MAX_COUNT, CPU_NUM,
+    PERCPU_AREAS,
+};
+use crate::guest::DekoGuestExitInformation;
+use crate::imp::doorbell::HVDoorbell;
+use crate::imp::ghcb::{vmpl_switch, GuestHostCommunicationBlock};
 use crate::imp::vmsa::VMSA;
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
 use crate::mm::paging::{
@@ -1828,7 +1834,7 @@ func_ptr!(cpu_idle);
         which < CPUID_MAX_COUNT,
 )]
 pub fn set_cpu_affinity(which: usize) {
-    kinfo!("Setting CPU affinity to core ", which);
+    kinfo!("Setting CPU affinity to core", which);
 
     let (cpu, Tracked(perm)) = DekoCpuCtx::this_cpu();
     let cpu = cpu.borrow(Tracked(&perm.ptr_perm));
@@ -1948,7 +1954,6 @@ pub fn serv_main(cpu_index: usize) {
                 current.wf(),
             decreases cpu_nums - i,
         {
-            // BUG: FIX ME. Something isn't right here.
             proof_with!(Tracked(perm) => Tracked(new_perm));
             let serv_task = DekoRunnable::new(
                 this_cpu,
@@ -1981,9 +1986,25 @@ pub fn serv_main(cpu_index: usize) {
         set_cpu_affinity(cpu_index);
     }
 
+    wait_ipi_blocking();  // ensure all cores are synchronized.
+
+    kinfo!("Service core ", cpu_index, " entering guest execution loop.");
     // Try to enter the guest again.
+    #[verus_spec(
+        invariant
+            cpu_index < CPUID_MAX_COUNT,
+    )]
     loop {
-        let msg = try_enter_guest();
+        match try_enter_guest() {
+            // The core does not have a guest created yet.
+            // let it enter idle state.
+            DekoGuestExitInformation::CoreNotCreated => {
+                cpu_idle(cpu_index);
+            },
+            _ => {
+                kunimplemented!("Handling other guest exit information is not implemented yet.");
+            },
+        }
     }
 }
 
@@ -2003,51 +2024,95 @@ func_ptr!(serv_main);
 /// This function never returns as the control flow must be implicitly transferred
 /// to the guest context and it can request anything via VM exits.
 #[verifier::exec_allows_no_decreases_clause]
-pub fn try_enter_guest() {
+pub fn try_enter_guest() -> DekoGuestExitInformation {
     kdebug!("Trying to enter guest...");
 
     let (this_cpu_ptr, Tracked(this_cpu_perm)) = DekoCpuCtx::this_cpu();
     let this_cpu = this_cpu_ptr.borrow(Tracked(&this_cpu_perm.ptr_perm));
     let this_cpu_index = this_cpu.cpu_id as usize;
+    if this_cpu.doorbell.is_none() {
+        die("No doorbell assigned to the CPU.");
+    }
+    let Tracked(this_cpu_perm) = DekoCpuCtx::update_guest_vmsa(
+        this_cpu_ptr,
+        Tracked(this_cpu_perm),
+    );
 
     #[verus_spec(
         invariant
             this_cpu_index < CPUID_MAX_COUNT,
             this_cpu_perm.wf_with(this_cpu_ptr),
+            this_cpu_perm.ptr_perm.value().doorbell is Some,
     )]
     loop {
+        let cpu = this_cpu_ptr.borrow(Tracked(&this_cpu_perm.ptr_perm));
         deko_rwlock_read_atomic_data! {
             PERCPU_AREAS,
             percpu_areas,
             __,
             {
-                let Some(ref percpu_areas) = percpu_areas else {
-                    die("No percpu areas found.");
-                };
-
-                kpanic_if!(
-                    core::hint::unlikely(this_cpu_index >= percpu_areas.0.len()),
-                    "CPU index out of bounds when entering guest.",
-                ); // annoying,
+                crate::check_shared_cpu_idx!(this_cpu_index as usize, percpu_areas, percpu_areas);
 
                 let vmsa_ref = &percpu_areas.0[this_cpu_index].guest_vmsa;
 
-                deko_rwlock_read_atomic_data! {
+                let should_end = deko_rwlock_read_atomic_data! {
                     vmsa_ref,
                     vmsa,
                     vmsa_perm,
                     {
+                        let mut should_end = true;
                         // If no caa found then this is meaningless and
                         // we just ignore the request.
                         if let Some(caa_addr) = vmsa.caa {
                             if let Some(vmsa_addr) = vmsa.vmsa {
+                                proof_decl! {
+                                    let tracked mut this_vmsa_perm;
+                                }
+
                                 let vmsa =
-                                #[verus_spec(with Tracked(&this_cpu_perm) => mut vmsa_perm)]
+                                #[verus_spec(with Tracked(&this_cpu_perm) => Tracked(mut this_vmsa_perm))]
                                 VMSA::this_vmsa(this_cpu_ptr);
+
+                                #[verus_spec(with Tracked(&mut this_vmsa_perm))]
+                                VMSA::enable(vmsa);
+
+                                should_end = false;
                             }
                         }
+
+                        should_end
                     }
+                };
+
+                if should_end {
+                    return DekoGuestExitInformation::CoreNotCreated;
                 }
+
+                no_irq_zone(|| {
+                    flush_tlb_global();
+
+                    // Need to update the guest APIC status here so no interrupt will
+                    // be delivered.
+                    let no_further_signal = deko_rwlock_read_atomic_data! {
+                        cpu.doorbell.as_ref().unwrap(),
+                        doorbell,
+                        doorbell_perm,
+                        {
+                            #[verus_spec(with Tracked(doorbell_perm.borrow()))]
+                            HVDoorbell::no_further_signal(*doorbell)
+                        }
+                    };
+
+                    if no_further_signal {
+                        // let r = vmpl_switch(2); // switch to VMPL2
+                        crate::imp::vmpl_run(2);
+
+                        // if r != 0 {
+                        //     kerror!("Failed to switch to VMPL2: error code ", r => hex);
+                        // }
+                    }
+                });
+
             }
         }
     }

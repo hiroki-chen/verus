@@ -26,7 +26,7 @@ use vstd::prelude::*;
 use crate::collections::{get_unchecked, update_vec};
 use crate::cpu::apic::X86Apic;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
-use crate::cpu::ipi::{CpuIpiArea, CpuIpiAreaPermission};
+use crate::cpu::ipi::{add_ipi_available_cpu, CpuIpiArea, CpuIpiAreaPermission};
 use crate::cpu::regs::{read_cr3, sse_init, Cr4Flags};
 use crate::cpu::task::{
     cpu_idle_func_ptr, schedule_init, DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred,
@@ -1041,6 +1041,7 @@ impl DekoCpuCtx {
             perm.wf_with(ptr),
         ensures
             r@.wf_with(ptr),
+            r@.ptr_perm.value().doorbell == perm.ptr_perm.value().doorbell,
     {
         broadcast use PteFlags::lemma_each_bit_is_valid;
 
@@ -1048,6 +1049,8 @@ impl DekoCpuCtx {
             bit_u64_and_auto();
             bit_u32_and_auto();
         }
+
+        kdebug!("Updating guest VMSA...");
 
         let tracked mut perm = perm;
 
@@ -1128,6 +1131,7 @@ impl DekoCpuCtx {
                                         assume(caa_paddr@ + PAGE_SIZE as u64 <= 0x1_0000_0000_0000);
                                         assume(vmsa_paddr@ + PAGE_SIZE as u64 <= 0x1_0000_0000_0000);
 
+                                        kinfo!("vmsa_paddr =>", vmsa_paddr);
                                         let caa_mapping = make_mapping(VmMapping::PhysMem {
                                             paddr: caa_paddr,
                                             size: PAGE_SIZE as _,
@@ -1140,6 +1144,7 @@ impl DekoCpuCtx {
                                         (caa_mapping, vmsa_mapping)
                                     };
 
+
                                     proof_decl! {
                                         let tracked mut caa_mapping_perm;
                                         let tracked mut vmsa_mapping_perm;
@@ -1147,10 +1152,10 @@ impl DekoCpuCtx {
 
                                     let caa_mapping =
                                         #[verus_spec(with Ghost(&vm_region) => Tracked(caa_mapping_perm))]
-                                        VirtualMemory::new(create_vaddr_range(PERCPU_CAA_BASE, PAGE_SIZE as _), caa_mapping, PteFlags::nx_kernel());
+                                        VirtualMemory::new(create_vaddr_range(PERCPU_CAA_BASE, 1), caa_mapping, PteFlags::nx_kernel());
                                     let vmsa_mapping =
                                         #[verus_spec(with Ghost(&vm_region) => Tracked(vmsa_mapping_perm))]
-                                        VirtualMemory::new(create_vaddr_range(PERCPU_VMSA_BASE, PAGE_SIZE as _), vmsa_mapping, PteFlags::nx_kernel());
+                                        VirtualMemory::new(create_vaddr_range(PERCPU_VMSA_BASE, 1), vmsa_mapping, PteFlags::nx_kernel());
 
                                     kpanic_if!(
                                         core::hint::unlikely(vm_region.areas.len() >= u64::MAX as usize - 2),
@@ -2022,7 +2027,6 @@ pub fn start_application_processor(which: &PerCpuShared) {
         sev_features,
         0,
         vmsa,
-        1,
     );
 }
 
@@ -2062,53 +2066,43 @@ unsafe extern "C" fn ap_start() -> ! {
 
     sse_init();
 
-    let mut per_cpu_shared_lock = PERCPU_AREAS.acquire_write();
-    let DekoAtomicData { data: mut per_cpu_areas, mut perm } = per_cpu_shared_lock.get();
+    add_ipi_available_cpu();
 
-    let Some(mut per_cpu_areas) = per_cpu_areas else {
-        die("Per-CPU shared areas not initialized");
-    };
+    deko_rwlock_write_atomic_data! {
+        PERCPU_AREAS,
+        percpu_areas,
+        percpu_areas_perm,
+        {
+            crate::check_shared_cpu_idx!(cpuid as usize, percpu_areas, percpu_areas);
 
-    kpanic_if!(
-        core::hint::unlikely(cpuid as usize >= per_cpu_areas.0.len()),
-        "AP CPU ID out of bounds in per-CPU shared area: got;",
-        cpuid, "max", per_cpu_areas.0.len(),
-        "check if BSP initialized the CPU count correctly"
-    );
+            let this = &percpu_areas.0[cpuid as usize];
 
-    let this = &per_cpu_areas.0[cpuid as usize];
+            let tracked mut this_perm = percpu_areas_perm.borrow_mut().shared_perms.tracked_remove(cpuid as int);
+            let ghost old = this_perm;
+            loop
+                invariant
+                    this_perm.online_perm.is_for(this.online),
+                    this_perm.ipi_irr_perm == old.ipi_irr_perm,
+                    this_perm.ipi_pending_perm == old.ipi_pending_perm,
+                    this_perm.nmi_pending_perm == old.nmi_pending_perm,
+                    this_perm.ipi_shared_perm == old.ipi_shared_perm,
+            {
+                core::hint::spin_loop();
 
-    kpanic_if!(
-        core::hint::unlikely(this.cpu_index != cpuid as usize),
-        "Per-CPU shared area CPU index mismatch: expected",
-        cpuid, "got", this.cpu_index
-    );
+                match this.online.compare_exchange_weak(Tracked(&mut this_perm.online_perm), false, true) {
+                    Ok(old) if old => {
+                        die("AP CPU is already marked online in per-CPU shared area");
+                    },
+                    Ok(_) => break ,
+                    Err(_) => continue ,
+                }
+            }
 
-    let tracked mut this_perm = perm.borrow_mut().shared_perms.tracked_remove(cpuid as int);
-    let ghost old = this_perm;
-    loop
-        invariant
-            this_perm.online_perm.is_for(this.online),
-            this_perm.ipi_irr_perm == old.ipi_irr_perm,
-            this_perm.ipi_pending_perm == old.ipi_pending_perm,
-            this_perm.nmi_pending_perm == old.nmi_pending_perm,
-            this_perm.ipi_shared_perm == old.ipi_shared_perm,
-    {
-        core::hint::spin_loop();
-
-        match this.online.compare_exchange_weak(Tracked(&mut this_perm.online_perm), false, true) {
-            Ok(old) if old => {
-                die("AP CPU is already marked online in per-CPU shared area");
-            },
-            Ok(_) => break ,
-            Err(_) => continue ,
+            proof {
+                percpu_areas_perm.borrow_mut().shared_perms.tracked_insert(cpuid as int, this_perm);
+            }
         }
     }
-
-    proof {
-        perm.borrow_mut().shared_perms.tracked_insert(cpuid as int, this_perm);
-    }
-    per_cpu_shared_lock.release_write(DekoAtomicData::new_with(Some(per_cpu_areas), perm));
 
     kinfo!("Application processor started;", cpuid => hex, "entering idle loop.");
 
@@ -2143,3 +2137,19 @@ pub fn flush_tlb_global() {
 }
 
 } // verus!
+#[macro_export]
+macro_rules! check_shared_cpu_idx {
+    ($idx:expr, $against:ident, $binding:ident) => {
+        let Some(ref $binding) = $against else {
+            $crate::die("Per-CPU areas not initialized");
+        };
+
+        $crate::kpanic_if!(
+            core::hint::unlikely($idx >= $binding.0.len(),),
+            "CPU index out of bounds",
+            $idx,
+            "but max is",
+            $binding.0.len(),
+        );
+    };
+}

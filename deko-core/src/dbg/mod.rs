@@ -224,6 +224,8 @@ fn print_stack_frame(frame: StackFrame) {
 
 #[verifier::external_body]
 pub fn print_stack(skip: usize) {
+    return;
+
     let unwinder = StackUnwinder::unwind_this_cpu();
     kinfo!("---BACKTRACE---:");
     for frame in unwinder.skip(skip) {

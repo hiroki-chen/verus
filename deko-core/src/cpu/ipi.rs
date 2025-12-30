@@ -1,6 +1,6 @@
 use core::ffi::c_void;
 use core::marker::PhantomData;
-use core::sync::atomic::AtomicU64;
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use deko_macros::DekoDebug;
 use deko_std::prelude::{func_ptr, DekoPointsTo};
@@ -21,6 +21,26 @@ use crate::cpu::{
 use crate::{die, kdebug, kinfo, kpanic_if, kwarn};
 
 verus! {
+
+pub exec static IPI_AVAILABLE_CPU_COUNT: AtomicUsize = AtomicUsize::new(1);
+
+#[inline]
+pub fn add_ipi_available_cpu() {
+    IPI_AVAILABLE_CPU_COUNT.fetch_add(1, Ordering::SeqCst);
+}
+
+#[inline]
+pub fn get_ipi_available_cpu_count() -> usize {
+    IPI_AVAILABLE_CPU_COUNT.load(Ordering::SeqCst)
+}
+
+#[verifier::exec_allows_no_decreases_clause]
+pub fn wait_ipi_blocking() {
+    IPI_AVAILABLE_CPU_COUNT.fetch_sub(1, Ordering::SeqCst);
+    while get_ipi_available_cpu_count() != 0 {
+        core::hint::spin_loop();
+    }
+}
 
 // global layout CpuIpiArea is 8;
 const VECTOR_IPI: u32 = 0xe0;

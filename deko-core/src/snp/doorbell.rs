@@ -131,6 +131,21 @@ impl HVDoorbell {
             ],
         }
     }
+
+    #[verus_spec(r =>
+        with
+            Tracked(hv_perm): Tracked<&HvDoorbellPtrPermission>,
+        requires
+            hv_perm.ptr_perm.wf(),
+            hv_perm.ptr_perm.is_init(),
+            hv_perm.ptr_perm.pptr() == hv_ptr@,
+            hv_perm.hv_perm.flags_perm.is_for(hv_perm.ptr_perm.value().flags),
+    )]
+    pub fn no_further_signal(hv_ptr: DekoPPtr<HVDoorbell>) -> bool {
+        let hv = hv_ptr.borrow(Tracked(&hv_perm.ptr_perm));
+
+        hv.flags.load(Tracked(&hv_perm.hv_perm.flags_perm)) & 0x80 == 0
+    }
 }
 
 with_permission! {

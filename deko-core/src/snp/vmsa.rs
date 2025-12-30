@@ -3,6 +3,7 @@ use core::ops::Index;
 use deko_macros::{with_atomic_pred, DekoDebug};
 use deko_std::array::Array;
 use deko_std::bits::bit_u32_and_auto;
+use deko_std::boot::IgvmParams;
 use deko_std::mem::{PAGE_SIZE, PAGE_SIZE_2M, PERCPU_VMSA_BASE};
 use deko_std::prelude::VirtAddr;
 use deko_std::ptr::{addr_of_ref, DekoPPtr, DekoPointsTo};
@@ -21,9 +22,9 @@ use crate::cpu::{DekoCpuCtx, X86Tss};
 use crate::mm::DEKO_FRAME_ALLOCATOR_FULL;
 use crate::snp::{
     rmpadjust, DekoCpuCtxPermission, PageTablePermission, RmpFlags, Rmp_ALL_BITS, SnpStatusFlags,
-    BIT_VMSA,
+    ALT_INJ, BIT_VMSA, REST_INJ,
 };
-use crate::{die, kdebug, kerror, kinfo, kunimplemented};
+use crate::{die, kdebug, kerror, kinfo, kunimplemented, kwarn};
 
 verus! {
 
@@ -140,6 +141,7 @@ pub struct VMSA {
     pub cr4: u64,
     #[deko(hex)]
     pub cr3: u64,
+    #[deko(hex)]
     pub cr0: u64,
     pub dr7: u64,
     pub dr6: u64,
@@ -211,6 +213,7 @@ pub struct VMSA {
     pub guest_exitinfo2: u64,
     pub guest_exitintinfo: VmsaEventInject,
     pub guest_nrip: u64,
+    #[deko(hex)]
     pub sev_features: u64,
     pub vintr_ctrl: VIntrCtrl,
     pub guest_exit_code: GuestVMExit,
@@ -222,9 +225,12 @@ pub struct VMSA {
     #[deko(skip)]
     pub reserved_3f0: Array<u8, 16>,
     pub x87_dp: u64,
+    #[deko(hex)]
     pub mxcsr: u32,
+    #[deko(hex)]
     pub x87_ftw: u16,
     pub x87_fsw: u16,
+    #[deko(hex)]
     pub x87_fcw: u16,
     pub x87_fop: u16,
     pub x87_ds: u16,
@@ -283,6 +289,85 @@ with_atomic_pred! {
 
 #[verus_verify]
 impl VMSA {
+    #[inline(always)]
+    #[verifier::external_body]
+    #[verus_spec(
+        with
+            Tracked(ptr_perm): Tracked<&mut DekoPointsTo<Self>>,
+        requires
+            old(ptr_perm).wf(),
+            old(ptr_perm).is_init(),
+            old(ptr_perm).pptr() == ptr@,
+        ensures
+            ptr_perm.wf(),
+            ptr_perm.is_init(),
+            ptr_perm.pptr() == ptr@,
+    )]
+    pub fn enable(ptr: DekoPPtr<Self>) {
+        let this = unsafe { &mut *(ptr.addr() as *mut Self) };
+
+        // Set the SVME bit in EFER to enable VMSA.
+        this.efer |= (1 << 12);
+
+        kdebug!("Enabled VMSA:", this);
+        kdebug!("virt addr of vmsa:", ptr);
+
+    }
+
+    #[inline(always)]
+    #[verifier::external_body]
+    #[verus_spec(
+        with
+            Tracked(ptr_perm): Tracked<&mut DekoPointsTo<Self>>,
+        requires
+            old(ptr_perm).wf(),
+            old(ptr_perm).is_init(),
+            old(ptr_perm).pptr() == ptr@,
+        ensures
+            ptr_perm.wf(),
+            ptr_perm.is_init(),
+            ptr_perm.pptr() == ptr@,
+    )]
+    pub fn disable(ptr: DekoPPtr<Self>) {
+        let this = unsafe { &mut *(ptr.addr() as *mut Self) };
+
+        // Clear the SVME bit in EFER to disable VMSA.
+        this.efer &= !(1 << 12);
+    }
+
+    /// Populates the body of the guest VMSA from the parameters coming
+    /// from boot arguments.
+    ///
+    /// This function is marked as `external_body` because we must modify
+    /// the thing in place to avoid stack copy which will overflow the
+    /// stack implicitly.
+    #[verifier::external_body]
+    #[verus_spec(
+        with
+            Tracked(ptr_perm): Tracked<&mut DekoPointsTo<Self>>,
+        requires
+            old(ptr_perm).wf(),
+            old(ptr_perm).is_init(),
+            old(ptr_perm).pptr() == ptr@,
+        ensures
+            ptr_perm.wf(),
+            ptr_perm.is_init(),
+            ptr_perm.pptr() == ptr@,
+    )]
+    pub fn populate_from_igvm_params(ptr: DekoPPtr<Self>, igvm_params: &IgvmParams<'_>) {
+        if let Some(guest_ctx) = igvm_params.igvm_guest_context {
+            kdebug!("Guest context:", guest_ctx);
+
+            let this = unsafe { &mut *(ptr.addr() as *mut Self) };
+
+            // Now we populate the guest VMSA body from the guest context.
+            // I'm being lazy here because no context is needed but sometimes
+            // it is needed.
+        } else {
+            kinfo!("No guest context in IGVM detected!");
+        }
+    }
+
     /// Returns a pointer to the current VMSA.
     #[inline]
     #[verifier::external_body]
@@ -437,6 +522,8 @@ impl VmsaPage {
         }
 
         // Perform a RMPADJUST to set the page as VMSA.
+
+        kdebug!("Adjusting RMP for VMSA page at vaddr:", vaddr, " with flags:", flags.bits() => hex);
         rmpadjust(vaddr, PAGE_SIZE, flags, Tracked(pgtable_perm));
 
         proof_with!(|= Tracked(
@@ -498,14 +585,18 @@ impl VmsaPage {
 
         this.rip = reset_rip & 0xffffu64;
         this.rflags = 0x2;
-        this.cr0 = 0x6000_0010;
+        this.cr0 = 0x60000010;
         this.vmpl = 2;
+        this.dr6 = 0xffff0ff0;
+        this.dr7 = 0x400;
         this.g_pat = 0x0007040600070406u64;
         this.xcr0 = 1;
+        this.efer = (1 << 12);  // enable SVME.
         this.mxcsr = 0x1f80;
         this.x87_ftw = 0x5555;
         this.x87_fcw = 0x0040;
-        this.sev_features = SnpStatusFlags::get_status().bits() >> 2;  // make this sev.
+        this.sev_features = (SnpStatusFlags::get_status().bits() & !REST_INJ) >> 2;  // make this sev.
+        kinfo!("Initialized guest VMSA:", this);
 
         this.sev_features
     }

@@ -477,6 +477,8 @@ fn deko_main(cpu_index: usize) {
         // Initialize the guest driver.
         init_snp_guest_driver();
 
+        deko_core::imp::launch_fw(&igvm_params);
+
         proof_with!(Tracked(cpu_ctx_perm) => Tracked(mut new_perm));
         let serv_task = DekoRunnable::new(
             this_cpu,
@@ -512,9 +514,9 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
     dbg::print_stack(3);
 
-    unsafe {
-        core::arch::asm!("ud2");
-    }
+    // unsafe {
+    //     core::arch::asm!("ud2");
+    // }
 
     loop {
     }

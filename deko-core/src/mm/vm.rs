@@ -455,9 +455,12 @@ impl VmMapping {
     pub fn phys_at(&self, offset: u64) -> Option<PhysAddr> {
         match self {
             VmMapping::PhysMem { paddr, size } => {
-                kpanic_if!(core::hint::unlikely(
-                    offset >= *size,
-                ), "Offset out of bounds in VmMapping::phys_at");
+                kpanic_if!(
+                    core::hint::unlikely(offset > *size),
+                    "Offset out of bounds in VmMapping::phys_at",
+                    offset => hex,
+                    *size => hex,
+                );
 
                 Some(PhysAddr(paddr.0 + offset))
             },
@@ -1080,13 +1083,15 @@ impl VirtualMemoryRegion {
             None => VirtAddr(self.start_pfn),
         };
 
-        let size = {
-            let read_handle = mapping.as_ref().data.acquire_read();
-            let size = read_handle.borrow().data.mapping_size();
-
-            read_handle.release_read();
-            size
-        };
+        let size =
+            deko_rwlock_read_atomic_data!(
+            mapping.as_ref().data,
+            mapping,
+            __,
+            {
+                mapping.mapping_size()
+            }
+        );
 
         // Convert align to nr_pages.
         let align_pages = align >> 12;
@@ -1722,7 +1727,7 @@ impl VirtualMemory {
         let mapping_size = mapping_data.mapping_size();
         let flags = PteFlags::from_bits_truncate(self.flags.bits() | PRESENT);
 
-        kdebug!("VirtualMemory::map: mapping for", self.range);
+        kdebug!("VirtualMemory::map: mapping for", self.range, "size is", mapping_size => hex);
 
         let mut offset = 0;
         #[verus_spec(

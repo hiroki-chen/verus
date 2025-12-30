@@ -23,14 +23,42 @@ use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::paging::{PageTable, PteFlags};
 use crate::mm::{virt_to_phys, virt_to_phys_checked};
 use crate::prelude::*;
-use crate::snp::doorbell::{self, HVDoorbell};
+use crate::snp::doorbell::{self, HVDoorbell, HvDoorbellPtrPermission};
 use crate::snp::{
     PageStateChangeOp, GHCB_BUFFER_SIZE, PSC_GFN_MASK, PSC_OP_PRIVATE, PSC_OP_PSMASH,
     PSC_OP_SHARED, PSC_OP_UNSMASH,
 };
 use crate::{bits, kdebug, kerror, kinfo, kpanic_if, kunimplemented};
 
+core::arch::global_asm!(include_str!("switch.S"), options(att_syntax));
+
+extern "C" {
+    /// Performs a VMPL switch using assembly code (`vmmcall`). This function takes
+    /// as input a pointer to the hypervisor doorbell structure and the target VMPL level.
+    ///
+    /// Prior to calling this function the caller must ensure that `NoFurtherSignal` is
+    /// unset to allow the switch to proceed.
+    ///
+    /// # Safety
+    ///
+    /// This function is unsafe because it performs low-level operations that can affect
+    /// the system's stability and security. It directly interacts with hardware and
+    /// requires careful handling of pointers and VMPL levels.
+    #[link_section = ".text"]
+    fn __vmpl_switch(target_vmpl: u32) -> u64;
+}
+
 verus! {
+
+#[inline(always)]
+#[verifier::external_body]
+#[verus_spec(
+    requires
+        target_vmpl <= 3,
+)]
+pub fn vmpl_switch(target_vmpl: u32) -> u64 {
+    unsafe { __vmpl_switch(target_vmpl) }
+}
 
 pub broadcast axiom fn axiom_shared_buffer_size_wf()
     ensures
@@ -276,6 +304,7 @@ pub enum GHCBExitCode {
     AP_CREATE = 0x80000013,
     HV_DOORBELL = 0x8000_0014,
     HV_IPI = 0x8000_0015,
+    SNP_VMPL_RUN = 0x8000_0018,
     CONFIGURE_INT_INJ = 0x8000_001B,
     DISABLE_ALT_INJ = 0x8000_001C,
     SPECIFIC_EOI = 0x8000_001D,
@@ -667,6 +696,28 @@ impl GuestHostCommunicationBlock {
         (val, Tracked(perm))
     }
 
+    pub fn vmpl_run(
+        ptr: DekoPPtr<Self>,
+        Tracked(perm): Tracked<DekoPointsTo<Self>>,
+        target_vmpl: u32,
+    ) -> (r: Tracked<DekoPointsTo<Self>>)
+        requires
+            target_vmpl <= 3,
+            perm.wf(),
+            perm.is_init(),
+            perm.pptr() == ptr@,
+        ensures
+            r@.wf(),
+            r@.is_init(),
+            r@.pptr() == ptr@,
+    {
+        let Tracked(perm) = Self::clear(ptr, Tracked(perm));
+
+        let info_1 = target_vmpl as u64;
+
+        Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::SNP_VMPL_RUN, info_1, 0)
+    }
+
     #[verifier::external_body]
     pub fn ioin(
         ptr: DekoPPtr<Self>,
@@ -719,6 +770,7 @@ impl GuestHostCommunicationBlock {
     ///
     /// Preconditions: We should ensure that the RIP and RSP must be mapped
     /// in the new page table.
+    #[inline]
     pub fn ap_create(
         ptr: DekoPPtr<Self>,
         Tracked(perm): Tracked<DekoPointsTo<Self>>,
@@ -726,6 +778,26 @@ impl GuestHostCommunicationBlock {
         sev_features: u64,
         vmpl: u64,
         vmsa: PhysAddr,
+    ) -> (r: Tracked<DekoPointsTo<Self>>)
+        requires
+            perm.wf(),
+            perm.is_init(),
+            perm.pptr() == ptr@,
+        ensures
+            r@.wf(),
+            r@.is_init(),
+            r@.pptr() == ptr@,
+    {
+        Self::register_vmsa(ptr, Tracked(perm), vmsa, apic_id as _, vmpl, sev_features, 1)
+    }
+
+    pub fn register_vmsa(
+        ptr: DekoPPtr<Self>,
+        Tracked(perm): Tracked<DekoPointsTo<Self>>,
+        vmsa_gpa: PhysAddr,
+        apic_id: u64,
+        vmpl: u64,
+        sev_features: u64,
         how: u64,
     ) -> (r: Tracked<DekoPointsTo<Self>>)
         requires
@@ -738,9 +810,9 @@ impl GuestHostCommunicationBlock {
             r@.pptr() == ptr@,
     {
         let Tracked(perm) = Self::clear(ptr, Tracked(perm));
+        let info_1 = ((apic_id as u64) << 32) | (vmpl & 0xf) << 16 |  (how & 0b11);
+        let info_2 = vmsa_gpa.0;
 
-        let info_1 = ((apic_id as u64) << 32) | (vmpl & 0xf) << 16 | (how & 0b11) /* (VMRUN) */;
-        let info_2 = vmsa.0;
         let Tracked(perm) = Self::set_rax(ptr, Tracked(perm), sev_features);
 
         Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::AP_CREATE, info_1, info_2)

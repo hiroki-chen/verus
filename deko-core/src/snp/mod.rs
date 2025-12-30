@@ -25,6 +25,7 @@ use crate::mm::{
 };
 use crate::snp::doorbell::init_hv_doorbell;
 use crate::snp::ghcb::{current_ghcb, msr_register_ghcb_gpa, GuestHostCommunicationBlock};
+use crate::snp::vmsa::VMSA;
 use crate::{
     die, kdebug, kerror, kinfo, kpanic_if, kwarn, vec, DekoKernelLaunchInfo, Stage2LaunchInfo,
 };
@@ -980,6 +981,60 @@ pub fn flush_tlb() {
     }
 }
 
+/// Performs the launch of the guest firmware (OVMF).
+#[verus_spec(
+    requires
+        igvm_params.wf(),
+)]
+pub fn launch_fw(
+    igvm_params: &IgvmParams<'_>,
+) {
+    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpu_id = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).cpu_id;
+    let ghcb = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).ghcb;
+
+    let vmsa_paddr = deko_rwlock_read_atomic_data! {
+        PERCPU_AREAS,
+        percpu_areas,
+        __,
+        {
+            crate::check_shared_cpu_idx!(cpu_id as usize, percpu_areas, percpu_areas);
+
+            let guest_vmsa = &percpu_areas.0[cpu_id as usize].guest_vmsa;
+
+            deko_rwlock_read_atomic_data! {
+                guest_vmsa,
+                guest_vmsa,
+                __,
+                {
+                    guest_vmsa.vmsa
+                }
+            }
+        }
+    };
+
+    let Some(paddr) = vmsa_paddr else {
+        die("No VMSA paddr found.");
+    };
+
+    kinfo!("The paddr of the VMSA is found at", paddr);
+
+    proof_with!(Tracked(&cpu_perm) => Tracked(vmsa_perm));
+    let vmsa = VMSA::this_vmsa(cpu);
+
+    proof_with!(Tracked(&mut vmsa_perm));
+    VMSA::populate_from_igvm_params(vmsa, igvm_params);
+
+    let sev_features = vmsa.borrow(Tracked(&vmsa_perm)).sev_features;
+
+    // We now register vmsa through ghcb.
+    kinfo!("Registering the guest VMSA page. paddr => ", paddr);
+
+    GuestHostCommunicationBlock::register_vmsa(ghcb, Tracked(cpu_perm.ghcb_perm), paddr, 0, 2, sev_features, 0);
+
+    kinfo!("Finished registration");
+}
+
 /// Performs the necessary preparations for launching guest boot firmware.
 ///
 /// This probes the IGVM parameters to locate the SEV firmware metadata
@@ -1036,6 +1091,7 @@ pub fn prepare_guest_fw(
         // copy the ACPI table into the fw so that
         // the guest fw can use it.
         copy_apci_tables_to_fw(&fw_meta, kernel_prange.clone(), cpuid_table);
+        // Copy secrets page and caa page to fw.
         // validate fw.
         proof_with!(Tracked(pgtable_perm));
         validate_fw(igvm_params, kernel_prange);
@@ -1088,6 +1144,8 @@ fn prepare_fw_launch(
 
     // Allocate new VMSA for this CPU and then
     // update the guest mappings.
+    DekoCpuCtx::allocate_guest_vmsa(cpu, Tracked(&mut cpu_perm));
+    let _ = DekoCpuCtx::update_guest_vmsa(cpu, Tracked(cpu_perm));
 }
 
 /// Copies the CPUID page to the SEV firmware metadata location.
@@ -1194,11 +1252,19 @@ unsafe fn do_modify_fw_secrets_page(
         1,
     );
 
+    {
+        let temp_mapping = TempMapping::new(create_paddr_range(caa_page, 1)).expect("Failed to create temporary mapping for CAA page copy");
+        // Now empty caa.
+        core::ptr::write_bytes(temp_mapping.inner.start.0 as *mut u8, 0, PAGE_SIZE as usize);
+    }
+
     // Then set up the necessary fields.
     let secrets_page = &mut *(to.inner.start.0 as *mut SecretsPage);
 
     secrets_page.vmpck[0] = [0u8;VMPCK_SIZE];
     secrets_page.vmpck[1] = [0u8;VMPCK_SIZE];
+    secrets_page.vmpck[2] = [0u8;VMPCK_SIZE];
+    secrets_page.vmpck[3] = [0u8;VMPCK_SIZE];
     secrets_page.svsm_base = kernel_region.start.0;
     secrets_page.svsm_size = (kernel_region.end.0 - kernel_region.start.0) as u64;
     secrets_page.svsm_caa = caa_page.0;
@@ -1362,7 +1428,7 @@ fn validate_fw_memory_region(prange: PaddrRange) {
 fn validate_fw(igvm_params: &IgvmParams<'_>, kernel_region: PaddrRange) {
     broadcast use RmpFlags::lemma_each_bit_is_valid;
 
-    let fw_flash = get_fw_regions_from_igvm(igvm_params);
+    let fw_flash: alloc::vec::Vec<Range<PhysAddr>, crate::mm::frame_allocator::DekoAllocatorApi> = get_fw_regions_from_igvm(igvm_params);
     // I'm being lazy here: we need to check OVMF:
     // Flash range is 3GiB-4GiB and one ends at 4GiB (0x100_000_000)
 
@@ -1450,14 +1516,6 @@ fn validate_fw(igvm_params: &IgvmParams<'_>, kernel_region: PaddrRange) {
     }
 }
 
-/// Launches the guest boot firmware.
-#[verus_spec(
-    requires
-        header.wf(),
-)]
-pub fn launch_guest_fw(header: &DekoKernelLaunchInfo) {
-}
-
 #[inline]
 #[verus_spec(
     requires
@@ -1468,6 +1526,16 @@ pub fn launch_guest_fw(header: &DekoKernelLaunchInfo) {
 pub fn page_state_change(mm: PaddrRange, op: PageStateChangeOp) {
     let (ghcb, Tracked(perm)) = current_ghcb();
     GuestHostCommunicationBlock::pstate_change(ghcb, Tracked(perm), mm, op);
+}
+
+#[inline]
+#[verus_spec(
+    requires
+        vmpl <= 3,
+)]
+pub fn vmpl_run(vmpl: u32) {
+    let (ghcb, Tracked(perm)) = current_ghcb();
+    GuestHostCommunicationBlock::vmpl_run(ghcb, Tracked(perm), vmpl);
 }
 
 #[inline]
