@@ -311,7 +311,6 @@ impl VMSA {
 
         kdebug!("Enabled VMSA:", this);
         kdebug!("virt addr of vmsa:", ptr);
-
     }
 
     #[inline(always)]

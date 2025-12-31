@@ -351,7 +351,9 @@ macro_rules! kinfo {
             $crate::logging::print_str("[INFO] ");
             $crate::logging::print_str($crate::logging::RESET_COLOR);
             $crate::logging::print_cpu_id();
-            $crate::print_args_internal!($($args)*);
+            $crate::logging::print_str(core::file!());
+            $crate::logging::print_str(":");
+            $crate::print_args_internal!(core::line!(), $($args)*);
             $crate::logging::print_str("\n");
 
             _guard.release_write_no_val();
@@ -370,7 +372,9 @@ macro_rules! kwarn {
             $crate::logging::print_str("[WARN] ");
             $crate::logging::print_str($crate::logging::RESET_COLOR);
             $crate::logging::print_cpu_id();
-            $crate::print_args_internal!($($args)*);
+            $crate::logging::print_str(core::file!());
+            $crate::logging::print_str(":");
+            $crate::print_args_internal!(core::line!(), $($args)*);
             $crate::logging::print_str("\n");
 
             _guard.release_write_no_val();
@@ -389,7 +393,9 @@ macro_rules! kerror {
             $crate::logging::print_str("[ERROR] ");
             $crate::logging::print_str($crate::logging::RESET_COLOR);
             $crate::logging::print_cpu_id();
-            $crate::print_args_internal!($($args)*);
+            $crate::logging::print_str(core::file!());
+            $crate::logging::print_str(":");
+            $crate::print_args_internal!(core::line!(), $($args)*);
             $crate::logging::print_str("\n");
 
             _guard.release_write_no_val();
@@ -408,7 +414,9 @@ macro_rules! kdebug {
             $crate::logging::print_str("[DEBUG] ");
             $crate::logging::print_str($crate::logging::RESET_COLOR);
             $crate::logging::print_cpu_id();
-            $crate::print_args_internal!($($args)*);
+            $crate::logging::print_str(core::file!());
+            $crate::logging::print_str(":");
+            $crate::print_args_internal!(core::line!(), $($args)*);
             $crate::logging::print_str("\n");
 
             _guard.release_write_no_val();

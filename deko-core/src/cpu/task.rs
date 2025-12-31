@@ -2001,6 +2001,10 @@ pub fn serv_main(cpu_index: usize) {
             DekoGuestExitInformation::CoreNotCreated => {
                 cpu_idle(cpu_index);
             },
+            DekoGuestExitInformation::VmplSwitchFailed => {
+                kerror!("VMPL switch failed on core ", cpu_index);
+                die("VMPL switch failed.");
+            },
             _ => {
                 kunimplemented!("Handling other guest exit information is not implemented yet.");
             },
@@ -2046,7 +2050,8 @@ pub fn try_enter_guest() -> DekoGuestExitInformation {
     )]
     loop {
         let cpu = this_cpu_ptr.borrow(Tracked(&this_cpu_perm.ptr_perm));
-        deko_rwlock_read_atomic_data! {
+        let r =
+            deko_rwlock_read_atomic_data! {
             PERCPU_AREAS,
             percpu_areas,
             __,
@@ -2089,6 +2094,9 @@ pub fn try_enter_guest() -> DekoGuestExitInformation {
                 }
 
                 no_irq_zone(|| {
+                    // Also need to update the guest interrupt delivery information here.
+                    // TODO: apic controller update.
+
                     flush_tlb_global();
 
                     // Need to update the guest APIC status here so no interrupt will
@@ -2106,13 +2114,33 @@ pub fn try_enter_guest() -> DekoGuestExitInformation {
                     if no_further_signal {
                         let r = vmpl_switch(2); // switch to VMPL2
 
+                        loop {} // for debugging we enter only once.
+
                         if r != 0 {
                             kerror!("Failed to switch to VMPL2: error code ", r => hex);
                         }
-                    }
-                });
 
+                        r
+
+                        // Now we need to read the VMSA to fetch the
+                        // information process the guest's request.
+                    } else {
+                        1
+                    }
+                })
             }
+        };
+
+        if r != 0 {
+            return DekoGuestExitInformation::VmplSwitchFailed;
+        }
+        // If r == 0 then we have successfully entered the guest
+        // and now we are back due to a VM exit.
+        //
+        // Now we parse the information.
+
+        if let Some(info) = DekoGuestExitInformation::get_guest_exit_information() {
+            return info;
         }
     }
 }

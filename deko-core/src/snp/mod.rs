@@ -155,11 +155,9 @@ pub struct SecretsPage {
     version: u32,
     gctxt: u32,
     fms: u32,
-    #[deko(skip)]
     reserved_00c: u32,
     gosvw: [u8; 16],
     vmpck: [[u8; VMPCK_SIZE]; VMPL_MAX],
-    #[deko(skip)]
     reserved_0a0: [u8; 96],
     vmsa_tweak_bmp: [u64; 8],
     svsm_base: u64,
@@ -169,7 +167,6 @@ pub struct SecretsPage {
     svsm_guest_vmpl: u8,
     reserved_15d: [u8; 3],
     tsc_factor: u32,
-    #[deko(skip)]
     reserved_164: [u8; 3740],
 }
 
@@ -264,20 +261,6 @@ impl SecretsPage {
             );
         }
     }
-}
-
-#[verus_spec(
-    with
-        Tracked(pgtable_perm): Tracked<&PageTablePermission>
-    requires
-        pgtable_perm.mapped(from),
-        from.wf(),
-)]
-pub fn secrets_page_init(from: VirtAddr) {
-    let mut handle = SECRETS_PAGE.acquire_write();
-    proof_with!(Tracked(pgtable_perm));
-    SecretsPage::copy_from_rwlock(&mut handle, from);
-    handle.release_write_no_val();
 }
 
 impl WellFormed for SecretsPage {
@@ -1089,9 +1072,16 @@ pub fn prepare_guest_fw(
         validate_fw_memories(header, igvm_params, &memories);
 
         init_guest_mmap(igvm_params);
+
+        // BUG: Somebody overwrites the secrets/cpuid page so
+        // that vmpl_switch fails due to invalid values read
+        // on these pages.
+
         // copy the ACPI table into the fw so that
         // the guest fw can use it.
         copy_apci_tables_to_fw(&fw_meta, kernel_prange.clone(), cpuid_table);
+
+        check_before_launch(&fw_meta);
         // Copy secrets page and caa page to fw.
         // validate fw.
         proof_with!(Tracked(pgtable_perm));
@@ -1108,6 +1098,8 @@ pub fn prepare_guest_fw(
 fn prepare_fw_launch(
     fw_meta: &SevFWMetaData,
 ) {
+    check_before_launch(fw_meta);
+
     let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
     let cpuid = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).cpu_id;
 
@@ -1149,6 +1141,23 @@ fn prepare_fw_launch(
     let _ = DekoCpuCtx::update_guest_vmsa(cpu, Tracked(cpu_perm));
 }
 
+#[verifier::external_body]
+fn check_before_launch(
+    fw_meta: &SevFWMetaData,
+) {
+        let Some(temp_mapping) = TempMapping::new(create_paddr_range(
+            fw_meta.cpuid_page.unwrap(),
+            1,
+        )) else {
+            kerror!("Failed to create temporary mapping for Secrets page check");
+            die("");
+        };
+
+        let secrets_page = unsafe {  &*(temp_mapping.inner.start.0 as *const CpuidTable) };
+
+        kinfo!("SEV FW Metadata: cpu page before launch: ", secrets_page);
+}
+
 /// Copies the CPUID page to the SEV firmware metadata location.
 ///
 /// This method is necessary as guest boot firmware expects the CPUID page
@@ -1173,10 +1182,9 @@ fn copy_apci_tables_to_fw(
             die("");
         };
 
-        let vaddr = cpuid_mapping.inner.start;
-
-        do_copy_cpuid_to_fw(cpuid_table, vaddr);
+        do_copy_cpuid_to_fw(cpuid_table, cpuid_mapping);
     }
+
     kpanic_if!(fw_meta.caa_page.is_none(), "SEV FW Metadata: CAA page is required for ACPI table copy");
     kpanic_if!(fw_meta.secrets_page.is_none(), "SEV FW Metadata: Secrets page is required for ACPI table copy");
 
@@ -1202,6 +1210,8 @@ fn copy_secrets_page_to_fw(secrets_page: PhysAddr, caa_page: PhysAddr, kernel_re
         die("");
     };
 
+    kinfo!("Created temporary mapping for secrets page", secrets_page, "at", temp_mapping.inner.start);
+
     let lock = SECRETS_PAGE.acquire_read();
     let secrets_page_data = &lock.borrow().data;
 
@@ -1209,6 +1219,7 @@ fn copy_secrets_page_to_fw(secrets_page: PhysAddr, caa_page: PhysAddr, kernel_re
     unsafe {
         do_modify_fw_secrets_page(&secrets_page_data, temp_mapping, kernel_region, caa_page);
     }
+
     lock.release_read();
 }
 
@@ -1242,35 +1253,40 @@ unsafe fn do_modify_fw_secrets_page(
     kernel_region: PaddrRange,
     caa_page: PhysAddr,
 ) {
-    kinfo!("Modifying firmware secrets page at temporary mapping ", to.inner.start);
+    kinfo!("src secrets_page: ", src);
 
     // Zero out the secrets page first.
     core::ptr::write_bytes(to.inner.start.0 as *mut u8, 0, PAGE_SIZE as usize);
     // Copy the secrets page data.
-    core::ptr::copy_nonoverlapping(
+    core::ptr::copy(
         src as *const SecretsPage,
         to.inner.start.0 as *mut SecretsPage,
         1,
     );
 
-    {
-        let temp_mapping = TempMapping::new(create_paddr_range(caa_page, 1)).expect("Failed to create temporary mapping for CAA page copy");
-        // Now empty caa.
-        core::ptr::write_bytes(temp_mapping.inner.start.0 as *mut u8, 0, PAGE_SIZE as usize);
-    }
+    // {
+    //     // Zero out caa
+    //     let temp_mapping = TempMapping::new(create_paddr_range(caa_page, 1)).expect("Failed to create temporary mapping for CAA page copy");
+    //     // Now empty caa.
+    //     core::ptr::write_bytes(temp_mapping.inner.start.0 as *mut u8, 0, PAGE_SIZE as usize);
+    // }
 
     // Then set up the necessary fields.
     let secrets_page = &mut *(to.inner.start.0 as *mut SecretsPage);
 
+    kinfo!("secrets_page looks like before modification: ", secrets_page);
+
     secrets_page.vmpck[0] = [0u8;VMPCK_SIZE];
     secrets_page.vmpck[1] = [0u8;VMPCK_SIZE];
-    secrets_page.vmpck[2] = [0u8;VMPCK_SIZE];
-    secrets_page.vmpck[3] = [0u8;VMPCK_SIZE];
+    // secrets_page.vmpck[2] = [0u8;VMPCK_SIZE];
+    // secrets_page.vmpck[3] = [0u8;VMPCK_SIZE];
     secrets_page.svsm_base = kernel_region.start.0;
     secrets_page.svsm_size = (kernel_region.end.0 - kernel_region.start.0) as u64;
     secrets_page.svsm_caa = caa_page.0;
     secrets_page.svsm_max_version = 1;
     secrets_page.svsm_guest_vmpl = 2;  // guest == 2.
+
+    kinfo!("Modified firmware secrets page at temporary mapping ", to.inner.start, ": ", secrets_page);
 }
 
 /// This functon validates the prevalidated memory regions specified
@@ -1551,12 +1567,17 @@ pub fn vmpl_run(vmpl: u32) {
 #[verus_spec(
     requires
         to.wf(),
-        to@ % PAGE_SIZE == 0,
+        to.inner.start@ % PAGE_SIZE == 0,
 )]
-fn do_copy_cpuid_to_fw(cpuid_table: &CpuidTable, to: VirtAddr) {
+fn do_copy_cpuid_to_fw(cpuid_table: &CpuidTable, to: TempMapping) {
+    kinfo!("CPU ID table is", cpuid_table);
+
     unsafe {
-        core::ptr::copy_nonoverlapping(cpuid_table as _, to.0 as *mut CpuidTable, 1);
+        core::ptr::copy_nonoverlapping(cpuid_table as _, to.inner.start.0 as *mut CpuidTable, 1);
     }
+
+    let fw_cpuid_table = unsafe { &mut *(to.inner.start.0 as *mut CpuidTable) };
+    kinfo!("Copied CPU ID table to firmware location at", to.inner.start, ": ", fw_cpuid_table);
 }
 
 }

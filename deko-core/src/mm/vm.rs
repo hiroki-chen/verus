@@ -69,6 +69,7 @@ pub struct TempMapping {
 }
 
 impl Drop for TempMapping {
+    #[verifier::external_body]
     fn drop(&mut self)
         opens_invariants none
         no_unwind
@@ -97,6 +98,18 @@ impl Drop for TempMapping {
         );
 
         cpu_ptr.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
+
+        // assume now we only have one page.
+        PageTable::unmap_page_4k(
+            pgtable,
+            Tracked(&mut cpu_perm.pgtable_perm),
+            self.inner.start,
+            &cpu.kernel_mapping,
+            private_bit,
+            shared_bit,
+        );
+
+        crate::cpu::flush_tlb_global();
 
         // PageTable::unmap_multiple_pages(pgtable, Tracked(&mut cpu_perm.pgtable_perm), vaddr, ms, private_bit, shared_bit)...
     }
@@ -193,6 +206,8 @@ impl TempMapping {
         );
 
         cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
+
+        kdebug!("TempMapping::new: created temporary mapping:", vrange, "for physical range:", prange);
 
         Some(Self { inner: vrange })
     }

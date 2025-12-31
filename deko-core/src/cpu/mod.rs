@@ -651,7 +651,7 @@ pub struct CpuidFn {
     pub ecx_out: u32,
     #[deko(hex)]
     pub edx_out: u32,
-    #[deko(skip)]
+    // #[deko(skip)]
     pub reserved_1: u64,
 }
 
@@ -699,7 +699,7 @@ pub struct CpuidTable {
     #[deko(skip)]
     pub reserved_2: u64,
     #[deko(hex)]
-    pub func: Array<CpuidFn, CPUID_MAX_COUNT>,
+    pub func: Array<CpuidFn, 64>,
 }
 
 impl View for CpuidTable {
@@ -718,7 +718,7 @@ impl Default for CpuidTable {
             r.count == 0,
             r.reserved_1 == 0,
             r.reserved_2 == 0,
-            r@ =~= Seq::new(CPUID_MAX_COUNT as nat, |i| CpuidFn::empty()),
+            r@ =~= Seq::new(64, |i| CpuidFn::empty()),
     {
         broadcast use deko_std::array::lemma_sized_t_makes_sized_array;
 
@@ -733,7 +733,7 @@ impl CpuidTable {
             r.count == 0,
             r.reserved_1 == 0,
             r.reserved_2 == 0,
-            r@ =~= Seq::new(CPUID_MAX_COUNT as nat, |i| CpuidFn::empty()),
+            r@ =~= Seq::new(64 as nat, |i| CpuidFn::empty()),
     {
         CpuidTable::default()
     }
