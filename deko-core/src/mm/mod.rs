@@ -318,4 +318,19 @@ pub fn dump_frame_allocator_usage() -> u64 {
     DEKO_FRAME_ALLOCATOR_FULL.0.remaining()
 }
 
+#[verifier::external_body]
+#[verus_spec(
+    requires
+        paddr.wf(),
+        paddr@ % PAGE_SIZE == 0,
+)]
+#[inline(always)]
+pub fn zero_page(paddr: VirtAddr) {
+    // SAFETY: Caller must ensure that the physical address is valid and page-aligned.
+    unsafe {
+        let ptr = paddr.0 as *mut u8;
+        core::ptr::write_bytes(ptr, 0, PAGE_SIZE as usize);
+    }
+}
+
 } // verus!

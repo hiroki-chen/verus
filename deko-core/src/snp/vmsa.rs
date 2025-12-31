@@ -591,7 +591,6 @@ impl VmsaPage {
         this.dr7 = 0x400;
         this.g_pat = 0x0007040600070406u64;
         this.xcr0 = 1;
-        this.efer = (1 << 12);  // enable SVME.
         this.mxcsr = 0x1f80;
         this.x87_ftw = 0x5555;
         this.x87_fcw = 0x0040;

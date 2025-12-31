@@ -30,26 +30,19 @@ use crate::snp::{
 };
 use crate::{bits, kdebug, kerror, kinfo, kpanic_if, kunimplemented};
 
-core::arch::global_asm!(include_str!("switch.S"), options(att_syntax));
-
-extern "C" {
-    /// Performs a VMPL switch using assembly code (`vmmcall`). This function takes
-    /// as input a pointer to the hypervisor doorbell structure and the target VMPL level.
-    ///
-    /// Prior to calling this function the caller must ensure that `NoFurtherSignal` is
-    /// unset to allow the switch to proceed.
-    ///
-    /// # Safety
-    ///
-    /// This function is unsafe because it performs low-level operations that can affect
-    /// the system's stability and security. It directly interacts with hardware and
-    /// requires careful handling of pointers and VMPL levels.
-    #[link_section = ".text"]
-    fn __vmpl_switch(target_vmpl: u32) -> u64;
-}
-
 verus! {
 
+/// Performs a VMPL switch using assembly code (`vmmcall`). This function takes
+/// as input a pointer to the hypervisor doorbell structure and the target VMPL level.
+///
+/// Prior to calling this function the caller must ensure that `NoFurtherSignal` is
+/// unset to allow the switch to proceed.
+///
+/// # Safety
+///
+/// This function is unsafe because it performs low-level operations that can affect
+/// the system's stability and security. It directly interacts with hardware and
+/// requires careful handling of pointers and VMPL levels.
 #[inline(always)]
 #[verifier::external_body]
 #[verus_spec(
@@ -57,7 +50,41 @@ verus! {
         target_vmpl <= 3,
 )]
 pub fn vmpl_switch(target_vmpl: u32) -> u64 {
-    unsafe { __vmpl_switch(target_vmpl) }
+    let mut r = 1u64;
+
+    unsafe {
+        core::arch::asm!(
+            r#"
+            .code64
+            .pushsection .text.entry, "ax"
+
+                cmpl    $3,  {0:e}
+                ja      2f
+                movl    $0x16, %eax
+                movl    {0:e}, %edx
+                movl    $0xc0010130, %ecx  // MSR_GHCB
+                wrmsr
+
+                rep; VMMCALL
+
+                rdmsr
+                andl    $0xfff, %eax
+                cmpl    $0x17, %eax
+                jz      2f
+                movq    $0, {1} // success
+            2:
+            .popsection
+            "#,
+            in(reg) target_vmpl,
+            inout(reg) r,
+            out("eax") _,
+            out("ecx") _,
+            out("edx") _,
+            options(att_syntax)
+        );
+    }
+
+    r
 }
 
 pub broadcast axiom fn axiom_shared_buffer_size_wf()

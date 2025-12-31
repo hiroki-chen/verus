@@ -2104,12 +2104,11 @@ pub fn try_enter_guest() -> DekoGuestExitInformation {
                     };
 
                     if no_further_signal {
-                        // let r = vmpl_switch(2); // switch to VMPL2
-                        crate::imp::vmpl_run(2);
+                        let r = vmpl_switch(2); // switch to VMPL2
 
-                        // if r != 0 {
-                        //     kerror!("Failed to switch to VMPL2: error code ", r => hex);
-                        // }
+                        if r != 0 {
+                            kerror!("Failed to switch to VMPL2: error code ", r => hex);
+                        }
                     }
                 });
 

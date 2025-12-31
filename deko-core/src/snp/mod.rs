@@ -20,8 +20,9 @@ use crate::fw::get_fw_regions_from_igvm;
 use crate::mm::paging::{PageTablePermission, PteFlags};
 use crate::mm::vm::TempMapping;
 use crate::mm::{
-    init_guest_mmap, phys_to_virt, virt_to_phys, PageEncryptionMasks, DEKO_FRAME_ALLOCATOR,
-    FEATURE_MASK, MAX_PHYS_ADDR, PHYS_ADDR_SIZE, PTE_MASK_PRIVATE, PTE_MASK_SHARED,
+    init_guest_mmap, phys_to_virt, virt_to_phys, zero_page, PageEncryptionMasks,
+    DEKO_FRAME_ALLOCATOR, FEATURE_MASK, MAX_PHYS_ADDR, PHYS_ADDR_SIZE, PTE_MASK_PRIVATE,
+    PTE_MASK_SHARED,
 };
 use crate::snp::doorbell::init_hv_doorbell;
 use crate::snp::ghcb::{current_ghcb, msr_register_ghcb_gpa, GuestHostCommunicationBlock};
@@ -1326,6 +1327,8 @@ pub(crate) fn validate_fw_memories(
         {
             let this = &memories[i];
 
+            kinfo!("    Validating firmware memory region:", this);
+
             // Consultb the GHCB for page state change.
             if need_page_change {
                 let (ghcb, Tracked(perm)) = current_ghcb();
@@ -1406,6 +1409,9 @@ fn validate_fw_memory_region(prange: PaddrRange) {
 
         let r = rmpadjust(temp_mapping.inner.start, PAGE_SIZE, flags, Tracked(pgtable_perm));
         kpanic_if!(r != 0, "RMPADJUST failed for firmware memory validation at", PhysAddr(cur), "with return code", r);
+
+        zero_page(temp_mapping.inner.start);
+
         cur += PAGE_SIZE;
     }
 }
@@ -1425,6 +1431,7 @@ fn validate_fw_memory_region(prange: PaddrRange) {
         pgtable_perm.shared_bit == old(pgtable_perm).shared_bit,
         pgtable_perm.pgtable_perm == old(pgtable_perm).pgtable_perm,
 )]
+#[verifier::external_body]
 fn validate_fw(igvm_params: &IgvmParams<'_>, kernel_region: PaddrRange) {
     broadcast use RmpFlags::lemma_each_bit_is_valid;
 
@@ -1453,7 +1460,7 @@ fn validate_fw(igvm_params: &IgvmParams<'_>, kernel_region: PaddrRange) {
     {
         let this = &fw_flash[i];
         let nr_pages = (this.end.0 - this.start.0) / PAGE_SIZE as u64;
-        kinfo!("Flash region", i, ":", this);
+        kinfo!("Flash region", i, ":", this, "nr_pages =", nr_pages => hex);
 
         for i in 0..nr_pages as usize
             invariant
@@ -1508,6 +1515,7 @@ fn validate_fw(igvm_params: &IgvmParams<'_>, kernel_region: PaddrRange) {
             }
 
             // Now we can validate the page at `cur`.
+            kdebug!("Validating firmware page at", temp_mapping.inner.start, "for firmware physical address", PhysAddr(cur));
             let r = rmpadjust(temp_mapping.inner.start, PAGE_SIZE, rmp_flags, Tracked(pgtable_perm));
 
             // Panics the system since firmware validation failure is fatal.
@@ -1548,20 +1556,6 @@ pub fn vmpl_run(vmpl: u32) {
 fn do_copy_cpuid_to_fw(cpuid_table: &CpuidTable, to: VirtAddr) {
     unsafe {
         core::ptr::copy_nonoverlapping(cpuid_table as _, to.0 as *mut CpuidTable, 1);
-    }
-}
-
-#[inline]
-#[verifier::external_body]
-#[verus_spec(
-    requires
-        from.wf(),
-        to.wf(),
-        to@ % PAGE_SIZE == 0,
-)]
-fn do_copy_secrets_page_to_fw(from: &SecretsPage, to: &VirtAddr) {
-    unsafe {
-        core::ptr::copy_nonoverlapping(from as *const SecretsPage, to.0 as *mut SecretsPage, 1);
     }
 }
 
