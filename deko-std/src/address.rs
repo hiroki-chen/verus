@@ -1223,20 +1223,21 @@ pub fn create_vaddr_range(start: VirtAddr, len: usize) -> (r: VaddrRange)
 #[inline]
 pub fn create_paddr_range(start: PhysAddr, len: usize) -> (r: PaddrRange)
     requires
-        start@ % PAGE_SIZE == 0,
         len * PAGE_SIZE <= u64::MAX - start@,
     ensures
         r.start == start,
         r.end@ == start@ + (len as u64) * PAGE_SIZE,
-        r.end@ % PAGE_SIZE == 0,
+        start@ % PAGE_SIZE == 0 ==> r.end@ % PAGE_SIZE == 0,
 {
     proof {
-        assert((start@ + len * PAGE_SIZE) % PAGE_SIZE as int == 0) by {
-            vstd::arithmetic::div_mod::lemma_mod_multiples_vanish(
-                len as int,
-                start@ as int,
-                PAGE_SIZE as int,
-            );
+        if start@ % PAGE_SIZE == 0 {
+            assert((start@ + len * PAGE_SIZE) % PAGE_SIZE as int == 0) by {
+                vstd::arithmetic::div_mod::lemma_mod_multiples_vanish(
+                    len as int,
+                    start@ as int,
+                    PAGE_SIZE as int,
+                );
+            }
         }
     }
 

@@ -43,6 +43,14 @@ hv_handler:
   testl   $0x200, ({EXCEP_FLAGS_OFF} - {EXCEP_RCX_OFF})(%rsp)
   jnz    .Lhv_handler_process_hv
 
+  // Check whether the trap RIP is within the guest VMPL return window.
+	leaq	  switch_vmpl_window_start(%rip), %rbx
+	leaq	  switch_vmpl_window_end(%rip), %rcx
+  // cmpq  	%rbx, %rax
+  // jb	hv_not_vmpl_switch
+	// cmp	%rcx, %rax
+	// jae	hv_not_vmpl_switch
+
   // movq	({EXCEP_RIP_OFF} - {EXCEP_RCX_OFF})(%rsp), %rax
 // Stub.
 .Lprocess_pending_hv:

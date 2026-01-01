@@ -121,10 +121,15 @@ pub struct VMSA {
     pub ldt: VMSASegment,
     pub idt: VMSASegment,
     pub tr: VMSASegment,
+    #[deko(hex)]
     pub pl0_ssp: u64,
+    #[deko(hex)]
     pub pl1_ssp: u64,
+    #[deko(hex)]
     pub pl2_ssp: u64,
+    #[deko(hex)]
     pub pl3_ssp: u64,
+    #[deko(hex)]
     pub u_cet: u64,
     #[deko(skip)]
     pub reserved_0c8: u16,
@@ -143,8 +148,11 @@ pub struct VMSA {
     pub cr3: u64,
     #[deko(hex)]
     pub cr0: u64,
+    #[deko(hex)]
     pub dr7: u64,
+    #[deko(hex)]
     pub dr6: u64,
+    #[deko(hex)]
     pub rflags: u64,
     #[deko(hex)]
     pub rip: u64,
@@ -304,6 +312,7 @@ impl VMSA {
             old(ptr_perm).is_init(),
             old(ptr_perm).pptr() == ptr@,
         ensures
+            ptr_perm.value().efer & 0x1000 != 0,
             ptr_perm.wf(),
             ptr_perm.is_init(),
             ptr_perm.pptr() == ptr@,
@@ -313,6 +322,29 @@ impl VMSA {
 
         // Set the SVME bit in EFER to enable VMSA.
         this.efer |= (1 << 12);
+
+        // kinfo!("VMSA enabled:", this);
+    }
+
+    #[inline(always)]
+    #[verifier::external_body]
+    #[verus_spec(
+        with
+            Tracked(ptr_perm): Tracked<&mut DekoPointsTo<Self>>,
+        requires
+            old(ptr_perm).wf(),
+            old(ptr_perm).is_init(),
+            old(ptr_perm).pptr() == ptr@,
+        ensures
+            ptr_perm.value().rax == value,
+            ptr_perm.wf(),
+            ptr_perm.is_init(),
+            ptr_perm.pptr() == ptr@,
+    )]
+    pub fn set_rax(ptr: DekoPPtr<Self>, value: u64) {
+        let this = unsafe { &mut *(ptr.addr() as *mut Self) };
+
+        this.rax = value;
     }
 
     /// Disables the VMSA by clearing the SVME bit in the EFER register.

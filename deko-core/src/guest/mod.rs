@@ -1,39 +1,108 @@
 use deko_macros::DekoDebug;
+use deko_std::address::PhysAddr;
 use deko_std::deko_rwlock_read_atomic_data;
+use deko_std::mem::PERCPU_CAA_BASE;
 use deko_std::prelude::DekoPointsTo;
 use deko_std::ptr::DekoPPtr;
 use deko_std::wf::WellFormed;
 use vstd::prelude::*;
 
-use crate::cpu::{DekoCpuCtx, PERCPU_AREAS};
+use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission, PERCPU_AREAS};
+use crate::guest::service::handle_guest_exit_deko_service;
 use crate::imp::vmsa::{GuestVMExit, VMSA};
-use crate::{kerror, kwarn};
+use crate::{kerror, kinfo, kwarn};
+
+pub(crate) mod service;
 
 verus! {
 
+#[repr(C, packed)]
+#[derive(DekoDebug, Clone, Copy)]
+pub struct CaaArea {
+    pub call_pending: u8,
+    pub mem_available: u8,
+    pub no_eoi_required: u8,
+    #[deko(skip)]
+    pub reserved: [u8; 5],
+}
+
+impl WellFormed for CaaArea {
+    open spec fn wf(&self) -> bool {
+        true
+    }
+}
+
+#[verus_verify]
+impl CaaArea {
+    /// Try to fetch the caa page from the current CPU.
+    #[inline(always)]
+    #[verifier::external_body]
+    #[verus_spec(r =>
+        with
+            Tracked(cpu_perm): Tracked<&DekoCpuCtxPermission>,
+                -> caa_perm: Tracked<DekoPointsTo<CaaArea>>,
+        requires
+            cpu_perm.wf_with(ptr),
+        ensures
+            r@ == caa_perm@.pptr(),
+            caa_perm@.is_init(),
+            caa_perm@.wf(),
+    )]
+    pub fn this_caa(ptr: DekoPPtr<DekoCpuCtx>) -> DekoPPtr<Self> {
+        proof_with!(|= Tracked::assume_new());
+        DekoPPtr(vstd::simple_pptr::PPtr(PERCPU_CAA_BASE.0 as usize, core::marker::PhantomData))
+    }
+}
+
+#[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
+pub enum DekoGuestServError {
+    InvalidParameters,
+    MappingFailed(PhysAddr),
+    RmpAdjustFailed(PhysAddr),
+    UnknownRequest(u32),
+    UnsupportedOperation,
+}
+
+#[verus_verify]
+impl DekoGuestServError {
+    /// Converts the guest service error into a corresponding error code.
+    ///
+    /// The error code will be set as the return value in the guest's VMSA
+    /// after handling the service request (rax).
+    #[verus_spec()]
+    pub fn into_error_code(&self) -> u64 {
+        match self {
+            _ => 0,
+        }
+    }
+
+    #[inline]
+    pub fn is_fatal_error(&self) -> bool {
+        matches!(self,
+            DekoGuestServError::MappingFailed(_) |
+            DekoGuestServError::RmpAdjustFailed(_)
+        )
+    }
+}
+
+pub type DekoGuestServResult<T> = core::result::Result<T, DekoGuestServError>;
+
+pub const DEKO_GUEST_EXIT_PROTOCOL_DEKO_SERVICE: u32 = 0x0;
+
+pub const DEKO_GUEST_EXIT_PROTOCOL_ATTEST_SERVICE: u32 = 0x1;
+
 #[derive(DekoDebug)]
 pub struct DekoGuestRequestParams {
+    #[deko(hex)]
     pub sev_features: u64,
+    #[deko(hex)]
     pub rcx: u64,
+    #[deko(hex)]
     pub rdx: u64,
+    #[deko(hex)]
     pub r8: u64,
 }
 
-// impl DekoGuestRequestParams {
-//     #[verus_spec(
-//         with
-//             Tracked(vmsa_perm): Tracked<DekoPointsTo<VMSA>>,
-//         requires
-//             vmsa_perm.wf(),
-//             vmsa_perm.is_init(),
-//             vmsa_perm.pptr() == vmsa,
-//     )]
-//     pub fn try_parse_vmsa(vmsa: DekoPPtr<VMSA>) -> Self {
-//         let vmsa = vmsa.borrow(Tracked(&vmsa_perm));
-//         Self {
-//         }
-//     }
-// }
 /// Represents the reason for a guest VM exit event intercepted by the VMPL0 monitor.
 ///
 /// This enum captures the state and intent of a guest vCPU when it exits execution
@@ -89,10 +158,12 @@ impl DekoGuestExitInformation {
         let vmsa = vmsa.borrow(Tracked(vmsa_perm));
         let exit_code = vmsa.guest_exit_code.0;
 
-        if exit_code != 0x403  /* VMGEXIT */
+        if exit_code == 0x403  /* VMGEXIT */
          {
             let protocol = (vmsa.rax >> 32) as u32;
             let req = (vmsa.rax & 0xFFFFFFFFu64) as u32;
+            // FIXME: Perhaps there are some packed <-> unpacked issues here.
+            // the bit orders seem reversed.
             let params = DekoGuestRequestParams {
                 sev_features: vmsa.sev_features,
                 rcx: vmsa.rcx,
@@ -140,6 +211,25 @@ impl DekoGuestExitInformation {
                 proof_with!(Tracked(&this_cpu_perm) => Tracked(vmsa_perm));
                 let vmsa = VMSA::this_vmsa(this_cpu);
 
+                proof_with!(Tracked(&this_cpu_perm) => Tracked(mut caa_perm));
+                let caa = CaaArea::this_caa(this_cpu);
+
+                let v = caa.take(Tracked(&mut caa_perm));
+
+                if v.call_pending != 1 {
+                    // No call pending.
+                    return None;
+                }
+                caa.write(
+                    Tracked(&mut caa_perm),
+                    CaaArea {
+                        call_pending: 0,  // clear it.
+                        mem_available: v.mem_available,
+                        no_eoi_required: v.no_eoi_required,
+                        reserved: v.reserved,
+                    },
+                );
+
                 proof_with!(Tracked(&vmsa_perm));
                 Self::try_parse_vmsa(vmsa)
             },
@@ -148,6 +238,30 @@ impl DekoGuestExitInformation {
                 None
             },
         }
+    }
+}
+
+/// Handle a guest exit request based on the provided protocol, request code,
+/// and associated parameters.
+#[verus_spec(r =>
+    with
+        Tracked(cpu_perm): Tracked<&mut DekoCpuCtxPermission>,
+    requires
+        old(cpu_perm).wf(),
+    ensures
+        cpu_perm.wf(),
+)]
+pub fn handle_guest_exit(
+    protocol: u32,
+    req: u32,
+    params: &mut DekoGuestRequestParams,
+) -> DekoGuestServResult<()> {
+    match protocol {
+        DEKO_GUEST_EXIT_PROTOCOL_DEKO_SERVICE => {
+            proof_with!(Tracked(cpu_perm));
+            service::handle_guest_exit_deko_service(req, params)
+        },
+        _ => { Err(DekoGuestServError::UnknownRequest(protocol)) },
     }
 }
 

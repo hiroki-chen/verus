@@ -34,7 +34,7 @@ use crate::cpu::{
     self, flush_tlb_global, DekoCpuCtx, DekoCpuCtxPermission, CPUID_MAX_COUNT, CPU_NUM,
     PERCPU_AREAS,
 };
-use crate::guest::DekoGuestExitInformation;
+use crate::guest::{handle_guest_exit, DekoGuestExitInformation};
 use crate::imp::doorbell::HVDoorbell;
 use crate::imp::ghcb::{vmpl_switch, GuestHostCommunicationBlock};
 use crate::imp::vmsa::VMSA;
@@ -1888,9 +1888,12 @@ pub fn set_cpu_affinity(which: usize) {
     requires
         cpu_index < CPUID_MAX_COUNT,
 )]
+#[verifier::spinoff_prover]
 #[verifier::exec_allows_no_decreases_clause]
 pub fn serv_main(cpu_index: usize) {
     kinfo!("Service core", cpu_index, "entering main service loop.");
+
+    let (this_cpu, Tracked(mut perm)) = DekoCpuCtx::this_cpu();
 
     if cpu_index == 0 {
         let cpu_nums: u64 = match CPU_NUM.get() {
@@ -1899,8 +1902,6 @@ pub fn serv_main(cpu_index: usize) {
         };
 
         kinfo!("Boot CPU: total CPU count = ", cpu_nums);
-
-        let (this_cpu, Tracked(mut perm)) = DekoCpuCtx::this_cpu();
 
         let rq = this_cpu.borrow(Tracked(&perm.ptr_perm)).run_queue.as_ref();
         let vm = this_cpu.borrow(Tracked(&perm.ptr_perm)).vm_region.as_ref();
@@ -1967,24 +1968,48 @@ pub fn serv_main(cpu_index: usize) {
 
     wait_ipi_blocking();  // ensure all cores are synchronized.
 
+    let mut regs = [0u64;4];
+
     // Try to enter the guest again.
     #[verus_spec(
         invariant
             cpu_index < CPUID_MAX_COUNT,
+            // perm.wf_with(this_cpu),
+            perm.wf(),
+            regs@.len() == 4,
     )]
     loop {
-        match try_enter_guest() {
+        match try_enter_guest(&regs) {
             // The core does not have a guest created yet.
             // let it enter idle state.
             DekoGuestExitInformation::CoreNotCreated => {
+                // should be more advanced and adjus the
+                // runqueue for better performance.
                 cpu_idle(cpu_index);
             },
             DekoGuestExitInformation::VmplSwitchFailed => {
                 kerror!("VMPL switch failed on core ", cpu_index);
                 die("VMPL switch failed.");
             },
-            _ => {
-                kunimplemented!("Handling other guest exit information is not implemented yet.");
+            DekoGuestExitInformation::ServiceRequest {
+                protocol,
+                req,
+                mut params,
+            } => match #[verus_spec(with Tracked(&mut perm))]
+            crate::guest::handle_guest_exit(protocol, req, &mut params) {
+                Ok(()) => {
+                    regs = [0u64, params.rcx, params.rdx, params.r8];
+                },
+                Err(e) => {
+                    if e.is_fatal_error() {
+                        kerror!("Fatal error occurred when handling guest exit on core ",
+                                cpu_index, ": ", e);
+                        die("Fatal error when handling guest exit.");
+                    } else {
+                        // Non-fatal error; just return the error code to the guest.
+                        regs = [e.into_error_code(), params.rcx, params.rdx, params.r8];
+                    }
+                },
             },
         }
     }
@@ -2006,7 +2031,11 @@ func_ptr!(serv_main);
 /// This function never returns as the control flow must be implicitly transferred
 /// to the guest context and it can request anything via VM exits.
 #[verifier::exec_allows_no_decreases_clause]
-pub fn try_enter_guest() -> DekoGuestExitInformation {
+#[verus_spec(
+    requires
+        additional_regs@.len() == 4,
+)]
+pub fn try_enter_guest(additional_regs: &[u64]) -> DekoGuestExitInformation {
     let (this_cpu_ptr, Tracked(this_cpu_perm)) = DekoCpuCtx::this_cpu();
     let this_cpu = this_cpu_ptr.borrow(Tracked(&this_cpu_perm.ptr_perm));
     let this_cpu_index: usize = this_cpu.cpu_id as usize;
@@ -2017,6 +2046,15 @@ pub fn try_enter_guest() -> DekoGuestExitInformation {
         this_cpu_ptr,
         Tracked(this_cpu_perm),
     );
+
+    proof_with!(Tracked(&this_cpu_perm) => Tracked(mut vmsa_perm));
+    let vmsa = VMSA::this_vmsa(this_cpu_ptr);
+
+    // This carries the request served by the monitor.
+    // So we need to update rax to indicate whether the
+    // request has been served successfully.
+    proof_with!(Tracked(&mut vmsa_perm));
+    VMSA::set_rax(vmsa, additional_regs[0]);
 
     #[verus_spec(
         invariant
@@ -2088,16 +2126,14 @@ pub fn try_enter_guest() -> DekoGuestExitInformation {
                     };
 
                     if no_further_signal {
-                        // let r = vmpl_switch(2); // switch to VMPL2
-                        crate::imp::vmpl_run(2);
+                        let r = vmpl_switch(2); // switch to VMPL2
+                        // crate::imp::vmpl_run(2);
 
-                        loop {} // for debugging we enter only once.
+                        if r != 0 {
+                            kerror!("Failed to switch to VMPL2: error code ", r => hex);
+                        }
 
-                        // if r != 0 {
-                        //     kerror!("Failed to switch to VMPL2: error code ", r => hex);
-                        // }
-
-                        // r
+                        r
 
                         // Now we need to read the VMSA to fetch the
                         // information process the guest's request.

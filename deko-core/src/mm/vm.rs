@@ -22,6 +22,7 @@ use crate::mm::paging::{
 };
 use crate::mm::stack::DekoKernelStack;
 use crate::mm::{vm, DEKO_FRAME_ALLOCATOR_FULL};
+use crate::snp::flush_tlb;
 use crate::{die, kdebug, kinfo, kpanic_if, kunimplemented, kwarn, vec};
 
 verus! {
@@ -204,6 +205,8 @@ impl TempMapping {
             cpu_taken.shared_bit(),
             Tracked(&mut cpu_perm.pgtable_perm),
         );
+
+        flush_tlb();
 
         cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
 

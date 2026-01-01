@@ -231,8 +231,6 @@ impl HVDoorbell {
             shared_bit,
         );
 
-        crate::kinfo!("private_bit: ", private_bit, ", shared_bit: ", shared_bit, ", doorbell_vaddr: ", vaddr,);
-
         let Some(doorbell_paddr) = virt_to_phys_checked(
             private_bit,
             shared_bit,

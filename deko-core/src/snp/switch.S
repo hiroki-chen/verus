@@ -25,7 +25,7 @@ switch_vmpl_window_end:
     rdmsr
     andl $0xFFF, %eax
     cmpl $0x17, %eax
-    jz switch_vmpl_cancel
+    jne switch_vmpl_cancel
     xorl %eax, %eax
     ret
 

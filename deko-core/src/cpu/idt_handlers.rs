@@ -71,8 +71,17 @@ unsafe extern "C" fn ex_handler_double_fault(ctx: &mut X86ExceptionContext) {
     die("Double Fault Exception");
 }
 
+// We do not attempt to recover from early page faults.
+// This handler is nevertheless useful as we can log the faulting
+// address and error code for debugging purposes.
 #[no_mangle]
-unsafe extern "C" fn ex_handler_page_fault_early() {
+unsafe extern "C" fn ex_handler_page_fault_early(ctx: &X86ExceptionContext) {
+    kerror!("Early Page Fault Exception occurred during early boot.");
+    let errno = ctx.error_code;
+    let cr2 = crate::cpu::regs::read_cr2();
+    pretty_pf_errno(errno as _);
+    kerror!("faulting address (CR2):", cr2 => hex);
+    die("Early Page Fault Exception");
 }
 
 #[no_mangle]

@@ -100,8 +100,6 @@ fn init_cpuid_table(addr: VirtAddr) {
         igvm_params.wf(),
 )]
 fn start_application_processors(igvm_params: &IgvmParams<'_>) {
-    kinfo!("igvm_params.madt_data", igvm_params.igvm_madt);
-
     // CPU topology can be either from IGVM MADT or from firmware ACPI tables, but
     // we try to read it from IGVM MADT first.
     if let Some(cpus) = igvm_params.load_cpu_info(DekoAllocatorApi {  }) {
@@ -393,15 +391,6 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
 
     init_ghcb_logging(debug_serial_port);
     print_banner();
-
-    deko_rwlock_read_atomic_data! {
-        deko_core::imp::SECRETS_PAGE,
-        s,
-        __,
-        {
-            kinfo!("Secrets page initialized:", s);
-        }
-    }
 
     kinfo!("The remaining memory in frame allocator:",
         DEKO_FRAME_ALLOCATOR_FULL.0.remaining(),

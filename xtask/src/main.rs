@@ -190,6 +190,15 @@ enum Commands {
     BootstrapOvmf,
 
     LineCount,
+
+    StressTest {
+        #[arg(short, long, default_value = "10")]
+        iter: usize,
+        #[arg(short = 'T', long, default_value = "30")]
+        timeout: u64,
+        #[arg(short, long)]
+        config_path: Option<PathBuf>,
+    },
 }
 
 impl Default for FinalQemuConfig {
@@ -604,7 +613,7 @@ impl Builder {
         Ok(())
     }
 
-    pub fn qemu(&self, config_path: Option<PathBuf>) -> Result<()> {
+    fn prepare_qemu_command(&self, config_path: Option<PathBuf>) -> Result<Command> {
         let config_path = config_path.unwrap_or_else(|| self.config.qemu_config_path());
 
         let config = match load_qemu_config(&config_path) {
@@ -614,9 +623,6 @@ impl Builder {
                 Default::default()
             }
         };
-
-        println!("✓ Launching QEMU");
-        println!("Configuration: {:#?}", config);
 
         // Find QEMU binary using priority: QEMU_BIN > tools/bin > PATH
         let qemu_binary = self.find_qemu_binary()?;
@@ -642,7 +648,6 @@ impl Builder {
                 format!("{}:{}", lib_paths.join(":"), current_ld_path)
             };
             cmd.env("LD_LIBRARY_PATH", &new_ld_path);
-            println!("✓ Set LD_LIBRARY_PATH={}", new_ld_path);
         }
 
         cmd.args(["-accel", "kvm", "-cpu", "host"]);
@@ -677,21 +682,116 @@ impl Builder {
 
         if config.debug {
             cmd.arg("-s");
-            println!("✓ Debugging mode enabled: QEMU will start with GDB server on port 1234");
         }
 
         if !config.extra_config.is_empty() {
-            println!("✓ Adding extra QEMU configurations: {:?}", config.extra_config);
             for extra in &config.extra_config {
                 let parts: Vec<&str> = extra.split_whitespace().collect();
                 cmd.args(&parts);
             }
         }
 
+        Ok(cmd)
+    }
+
+    pub fn qemu(&self, config_path: Option<PathBuf>) -> Result<()> {
+        let mut cmd = self.prepare_qemu_command(config_path)?;
+        println!("✓ Launching QEMU");
         println!("✓ Executing command: {:?}", cmd);
 
         let mut child = cmd.spawn().context("Failed to spawn QEMU")?;
         child.wait().context("QEMU process failed")?;
+
+        Ok(())
+    }
+
+    pub fn stress_test(
+        &self,
+        iter: usize,
+        timeout: u64,
+        config_path: Option<PathBuf>,
+    ) -> Result<()> {
+        use std::io::{BufRead, BufReader};
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        println!("{} Starting QEMU stress test", "🧪".bright_cyan().bold());
+        println!("Iterations: {}", iter);
+        println!("Timeout per run: {}s", timeout);
+
+        let mut passed = 0;
+        let mut failed = 0;
+
+        for i in 1..=iter {
+            print!("Iteration {}/{}: ", i, iter);
+            std::io::stdout().flush()?;
+
+            let mut cmd = self.prepare_qemu_command(config_path.clone())?;
+
+            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+            let mut child = cmd.spawn().context("Failed to spawn QEMU")?;
+            let stdout = child.stdout.take().unwrap();
+
+            // Channel to communicate result: true = success, false = failure (invalid argument)
+            let (tx, rx) = mpsc::channel::<bool>();
+
+            // Spawn thread to read stdout
+            let tx_clone = tx.clone();
+            thread::spawn(move || {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines() {
+                    match line {
+                        Ok(l) => {
+                            if l.contains("SecCoreStartupWithStack(0xFFFCC000, 0x820000)") {
+                                let _ = tx_clone.send(true);
+                                break;
+                            }
+                            if l.contains("invalid argument") {
+                                let _ = tx_clone.send(false);
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            // Wait for result or timeout
+            match rx.recv_timeout(Duration::from_secs(timeout)) {
+                Ok(true) => {
+                    println!("{}", "PASSED".green());
+                    passed += 1;
+                }
+                Ok(false) => {
+                    println!("{}", "FAILED (invalid argument)".red());
+                    failed += 1;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    println!("{}", "FAILED (timeout)".red());
+                    failed += 1;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    // QEMU process likely exited without outputting expected string
+                    println!("{}", "FAILED (process exited early)".red());
+                    failed += 1;
+                }
+            }
+
+            // Ensure QEMU is killed
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+
+        println!("\n{}", "═".repeat(60));
+        println!("Total: {}", iter);
+        println!("Passed: {}", passed.to_string().green());
+        println!("Failed: {}", failed.to_string().red());
+
+        if failed > 0 {
+            bail!("Stress test failed with {} errors", failed);
+        }
 
         Ok(())
     }
@@ -838,6 +938,10 @@ fn main() -> Result<()> {
         }
 
         Commands::Qemu { config_path } => builder.qemu(config_path),
+
+        Commands::StressTest { iter, timeout, config_path } => {
+            builder.stress_test(iter, timeout, config_path)
+        }
 
         Commands::Build { target, release } => builder.build(target, release),
 

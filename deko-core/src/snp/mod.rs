@@ -727,8 +727,6 @@ pub fn wrmsr(msr: u32, value: u64) {
     let low = value as u32;
     let high = (value >> 32) as u32;
 
-    kinfo!("WRMSR: msr=", msr, ", value=", value=>hex, " (high=", high=>hex, ", low=", low=>hex, ")");
-
     GuestHostCommunicationBlock::wrmsr(ghcb, Tracked(perm), msr, high, low);
 }
 
@@ -1153,7 +1151,7 @@ fn check_before_launch(
 
     let secrets_page = unsafe {  &*(temp_mapping.inner.start.0 as *const CpuidTable) };
 
-    kinfo!("SEV FW Metadata: cpu page before launch: ", secrets_page);
+    kdebug!("SEV FW Metadata: cpu page before launch: ", secrets_page);
 }
 
 /// Copies the CPUID page to the SEV firmware metadata location.
@@ -1208,8 +1206,6 @@ fn copy_secrets_page_to_fw(secrets_page: PhysAddr, caa_page: PhysAddr, kernel_re
         die("");
     };
 
-    kinfo!("Created temporary mapping for secrets page", secrets_page, "at", temp_mapping.inner.start);
-
     let lock = SECRETS_PAGE.acquire_read();
     let secrets_page_data = &lock.borrow().data;
 
@@ -1251,8 +1247,6 @@ unsafe fn do_modify_fw_secrets_page(
     kernel_region: PaddrRange,
     caa_page: PhysAddr,
 ) {
-    kinfo!("src secrets_page: ", src);
-
     // Zero out the secrets page first.
     core::ptr::write_bytes(to.inner.start.0 as *mut u8, 0, PAGE_SIZE as usize);
     // Copy the secrets page data.
@@ -1564,14 +1558,12 @@ pub fn vmpl_run(vmpl: u32) {
         to.inner.start@ % PAGE_SIZE == 0,
 )]
 fn do_copy_cpuid_to_fw(cpuid_table: &CpuidTable, to: TempMapping) {
-    kinfo!("CPU ID table is", cpuid_table);
-
     unsafe {
         core::ptr::copy_nonoverlapping(cpuid_table as _, to.inner.start.0 as *mut CpuidTable, 1);
     }
 
     let fw_cpuid_table = unsafe { &mut *(to.inner.start.0 as *mut CpuidTable) };
-    kinfo!("Copied CPU ID table to firmware location at", to.inner.start, ": ", fw_cpuid_table);
+    kdebug!("Copied CPU ID table to firmware location at", to.inner.start, ": ", fw_cpuid_table);
 }
 
 }
