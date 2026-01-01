@@ -1098,8 +1098,6 @@ pub fn prepare_guest_fw(
 fn prepare_fw_launch(
     fw_meta: &SevFWMetaData,
 ) {
-    check_before_launch(fw_meta);
-
     let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
     let cpuid = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).cpu_id;
 
@@ -1145,17 +1143,17 @@ fn prepare_fw_launch(
 fn check_before_launch(
     fw_meta: &SevFWMetaData,
 ) {
-        let Some(temp_mapping) = TempMapping::new(create_paddr_range(
-            fw_meta.cpuid_page.unwrap(),
-            1,
-        )) else {
-            kerror!("Failed to create temporary mapping for Secrets page check");
-            die("");
-        };
+    let Some(temp_mapping) = TempMapping::new(create_paddr_range(
+        fw_meta.cpuid_page.unwrap(),
+        1,
+    )) else {
+        kerror!("Failed to create temporary mapping for Secrets page check");
+        die("");
+    };
 
-        let secrets_page = unsafe {  &*(temp_mapping.inner.start.0 as *const CpuidTable) };
+    let secrets_page = unsafe {  &*(temp_mapping.inner.start.0 as *const CpuidTable) };
 
-        kinfo!("SEV FW Metadata: cpu page before launch: ", secrets_page);
+    kinfo!("SEV FW Metadata: cpu page before launch: ", secrets_page);
 }
 
 /// Copies the CPUID page to the SEV firmware metadata location.
@@ -1264,17 +1262,15 @@ unsafe fn do_modify_fw_secrets_page(
         1,
     );
 
-    // {
-    //     // Zero out caa
-    //     let temp_mapping = TempMapping::new(create_paddr_range(caa_page, 1)).expect("Failed to create temporary mapping for CAA page copy");
-    //     // Now empty caa.
-    //     core::ptr::write_bytes(temp_mapping.inner.start.0 as *mut u8, 0, PAGE_SIZE as usize);
-    // }
+    {
+        // Zero out caa
+        let temp_mapping = TempMapping::new(create_paddr_range(caa_page, 1)).expect("Failed to create temporary mapping for CAA page copy");
+        // Now empty caa.
+        core::ptr::write_bytes(temp_mapping.inner.start.0 as *mut u8, 0, PAGE_SIZE as usize);
+    }
 
     // Then set up the necessary fields.
     let secrets_page = &mut *(to.inner.start.0 as *mut SecretsPage);
-
-    kinfo!("secrets_page looks like before modification: ", secrets_page);
 
     secrets_page.vmpck[0] = [0u8;VMPCK_SIZE];
     secrets_page.vmpck[1] = [0u8;VMPCK_SIZE];
@@ -1285,8 +1281,6 @@ unsafe fn do_modify_fw_secrets_page(
     secrets_page.svsm_caa = caa_page.0;
     secrets_page.svsm_max_version = 1;
     secrets_page.svsm_guest_vmpl = 2;  // guest == 2.
-
-    kinfo!("Modified firmware secrets page at temporary mapping ", to.inner.start, ": ", secrets_page);
 }
 
 /// This functon validates the prevalidated memory regions specified

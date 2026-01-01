@@ -18,7 +18,7 @@ use crate::cpu::regs::{
     read_cr0, read_cr4, read_efer, DEKO_CS, DEKO_CS_ATTRIBUTES, DEKO_DS, DEKO_DS_ATTRIBUTES,
     DEKO_TR_ATTRIBUTES, DEKO_TSS,
 };
-use crate::cpu::{DekoCpuCtx, X86Tss};
+use crate::cpu::{flush_tlb_global, DekoCpuCtx, X86Tss};
 use crate::mm::DEKO_FRAME_ALLOCATOR_FULL;
 use crate::snp::{
     rmpadjust, DekoCpuCtxPermission, PageTablePermission, RmpFlags, Rmp_ALL_BITS, SnpStatusFlags,
@@ -289,6 +289,11 @@ with_atomic_pred! {
 
 #[verus_verify]
 impl VMSA {
+    /// Enables the VMSA by setting the SVME bit in the EFER register.
+    ///
+    /// This function modifies the EFER (Extended Feature Enable Register) field
+    /// of the VMSA to set the SVME (Secure Virtual Machine Enable) bit (bit 12).
+    /// This is necessary to mark the VMSA as valid for secure execution.
     #[inline(always)]
     #[verifier::external_body]
     #[verus_spec(
@@ -308,11 +313,13 @@ impl VMSA {
 
         // Set the SVME bit in EFER to enable VMSA.
         this.efer |= (1 << 12);
-
-        kdebug!("Enabled VMSA:", this);
-        kdebug!("virt addr of vmsa:", ptr);
     }
 
+    /// Disables the VMSA by clearing the SVME bit in the EFER register.
+    ///
+    /// This function modifies the EFER (Extended Feature Enable Register) field
+    /// of the VMSA to clear the SVME (Secure Virtual Machine Enable) bit (bit 12).
+    /// This effectively disables the VMSA for secure execution.
     #[inline(always)]
     #[verifier::external_body]
     #[verus_spec(
@@ -525,6 +532,8 @@ impl VmsaPage {
         kdebug!("Adjusting RMP for VMSA page at vaddr:", vaddr, " with flags:", flags.bits() => hex);
         rmpadjust(vaddr, PAGE_SIZE, flags, Tracked(pgtable_perm));
 
+        // flush_tlb_global();
+
         proof_with!(|= Tracked(
             VmsaPagePermission {
                 ptr_perm: perm,
@@ -594,7 +603,6 @@ impl VmsaPage {
         this.x87_ftw = 0x5555;
         this.x87_fcw = 0x0040;
         this.sev_features = (SnpStatusFlags::get_status().bits() & !REST_INJ) >> 2;  // make this sev.
-        kinfo!("Initialized guest VMSA:", this);
 
         this.sev_features
     }

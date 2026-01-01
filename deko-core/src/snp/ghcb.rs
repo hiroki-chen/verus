@@ -242,7 +242,8 @@ macro_rules! ghcb_getter {
                     // Check
                     let offset = core::mem::offset_of!(Self, $field);
                     if !Self::is_valid(ptr, perm, offset) {
-                        vstd::vpanic!("Field not valid");
+                        $crate::kerror!("Field not valid");
+                        $crate::die("");
                     }
 
                     let Tracked(pperm) = Tracked::< $permname >::assume_new();
@@ -710,6 +711,8 @@ impl GuestHostCommunicationBlock {
             r@.is_init(),
             r@.pptr() == ptr@,
     {
+        kinfo!("vmpl_run called!!");
+
         let Tracked(perm) = Self::clear(ptr, Tracked(perm));
 
         let info_1 = target_vmpl as u64;

@@ -1029,6 +1029,8 @@ impl DekoCpuCtx {
             private_bit,
             shared_bit,
         );
+
+        flush_tlb_global();
     }
 
     /// Tries to update the mapping of the guest VMSA on this CPU.
@@ -1844,12 +1846,8 @@ impl DekoCpuCtx {
             }
         }
 
-        kinfo!("Scheduling...");
-
         // Now perform a scheduling.
         task::schedule();
-
-        kinfo!("Returned from scheduling.");
     }
 
     pub fn cleanup_terminated_task(

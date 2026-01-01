@@ -341,7 +341,6 @@ pub unsafe extern "C" fn handle_hv_doorbell(hvdb: DekoPPtr<HVDoorbell>) {
 
     match vector as usize {
         IPI_VECTOR => {
-            kinfo!("Handling HV Doorbell IPI interrupt!",);
             // Dummy implementation for now.
             let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
 

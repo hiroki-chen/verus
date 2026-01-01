@@ -2431,6 +2431,8 @@ impl Page {
             cur_paddr += PAGE_SIZE;
         }
 
+        flush_tlb_global();
+
         // REST WE FIX LATER.
         assume(pgtable_perm.mapped_region(vaddr));
     }

@@ -14,7 +14,7 @@ use vstd::std_specs::cmp::*;
 
 use super::frame_allocator::DekoAllocatorApi;
 use crate::collections::Vec;
-use crate::cpu::DekoCpuCtx;
+use crate::cpu::{flush_tlb_global, DekoCpuCtx};
 use crate::mm::paging::{
     all_in_range_paddrs, all_normalized_vaddrs, bit_not_in_addr_region, bit_not_overlapping,
     index_at_level, make_private_address, PageTable, PageTableEntry, PageTablePermission, PteFlags,
@@ -1801,6 +1801,8 @@ impl VirtualMemory {
                 assume(offset <= mapping_size);
             }
         }
+
+        flush_tlb_global();
 
         read_handle.release_read();
     }

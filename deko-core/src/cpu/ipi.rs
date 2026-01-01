@@ -314,7 +314,6 @@ impl DekoIpiRequest {
             i += 1;
         }
 
-        kinfo!("Now waiting for other CPUs to handle the IPI...");
         // Now let's wait for others to complete their handling.
         #[verus_spec(
             invariant
@@ -405,8 +404,6 @@ fn send_ipi_to(target: usize, from: &X86Apic) {
         }
     };
 
-    kinfo!("icr write...");
-
     let from_id = from.id();
     from.icr_write(low, high);
 }
@@ -423,8 +420,6 @@ impl DekoCpuCtx {
     pub fn handle_ipi_req(ptr: DekoPPtr<Self>) {
         let cpu_borrowed = ptr.borrow(Tracked(&cpu_perm.ptr_perm));
         let cpu_id = cpu_borrowed.cpu_id as usize;
-
-        kdebug!("CPU", cpu_id => hex, "handling IPI request");
 
         // First quickly grab the set of CPUs that have requested IPIs.
         let cpu_set =
@@ -453,8 +448,6 @@ impl DekoCpuCtx {
 
         for i in 0..CPUID_MAX_COUNT {
             if (cpu_set & (1 << i)) != 0 {
-                kdebug!("CPU", cpu_id => hex, "handling IPI from CPU", i => hex);
-
                 // Now we must handle the IPI from CPU i; this requires us to
                 // obtain mutable access to the IPI area.
                 let (handler, msg) =
@@ -511,8 +504,6 @@ impl DekoCpuCtx {
                 }
             }
         }
-
-        kdebug!("CPU", cpu_id => hex, "finished handling IPI request");
     }
 }
 
@@ -541,8 +532,6 @@ unsafe fn make_ipi_handle_call(addr: usize, arg: &DekoIpIMessage) {
         perm.wf(),
 )]
 pub fn handle_set_affinity(ptr: DekoPPtr<DekoIpIMessage>) {
-    kinfo!("Handling set affinity IPI message", ptr);
-
     let msg = ptr.borrow(Tracked(&perm));
 
     match msg {
@@ -575,8 +564,6 @@ pub fn handle_set_affinity(ptr: DekoPPtr<DekoIpIMessage>) {
                     rq.handle_task(task.clone());
                 }
             }
-
-            // schedule();
         },
         _ => {
             kpanic_if!(

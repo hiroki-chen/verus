@@ -1553,9 +1553,6 @@ pub fn schedule() {
                         }
                     };
 
-                    kinfo!("Old CPU index for next task: ", old_cpu);
-                    kinfo!("New CPU index for next task: ", cpu_id);
-
                     // SSE Save context.
                     sse_save_context(cur.as_ref().data.xsave.addr() as u64);
 
@@ -1563,22 +1560,13 @@ pub fn schedule() {
 
                     // SSE restore context.
                     sse_restore_context(cur.as_ref().data.xsave.addr() as u64);
-                } else {
-                    kdebug!("No task switch needed.");
                 }
             },
     );
-
-    kdebug!("Returned from task switch.");
-
     after_switch();
-
-    kdebug!("After switch handling done.");
 
     // Remove the terminated task from the task list, if any.
     DekoCpuCtx::cleanup_terminated_task(cpu, Tracked(&perm));
-
-    kinfo!("Task scheduling complete.");
 }
 
 /// Attempts to perform the task switch.
@@ -1784,8 +1772,6 @@ func_ptr!(run_kernel_tasks);
 )]
 #[verifier::exec_allows_no_decreases_clause]
 pub fn cpu_idle(which: usize) -> DekoRunnablePtr {
-    kinfo!("CPU core ", which, " entering idle state.");
-
     #[verus_spec(
         invariant
             which < CPUID_MAX_COUNT,
@@ -1834,8 +1820,6 @@ func_ptr!(cpu_idle);
         which < CPUID_MAX_COUNT,
 )]
 pub fn set_cpu_affinity(which: usize) {
-    kinfo!("Setting CPU affinity to core", which);
-
     let (cpu, Tracked(perm)) = DekoCpuCtx::this_cpu();
     let cpu = cpu.borrow(Tracked(&perm.ptr_perm));
 
@@ -1858,8 +1842,6 @@ pub fn set_cpu_affinity(which: usize) {
 
             // Block the task now.
             let current_task: DekoRunnablePtr = rq_data.current.as_ref().unwrap().clone();
-
-            kinfo!("current task before migration: ", current_task.as_ref().data);
 
             deko_rwlock_write_atomic_data! {
                 current_task.as_ref().data.state,
@@ -1974,21 +1956,17 @@ pub fn serv_main(cpu_index: usize) {
             // But this task never gets run?????
             DekoCpuCtx::start_kernel_task(this_cpu, Tracked(&mut new_perm), serv_task);
 
-            kinfo!("Service main for AP core ", i, " started.");
-
             proof {
                 perm = new_perm;
             }
         }
     } else {
-        kinfo!("Making CPU core", cpu_index, "awake by IPI affinity message.");
         // Migrate the task to self.
         set_cpu_affinity(cpu_index);
     }
 
     wait_ipi_blocking();  // ensure all cores are synchronized.
 
-    kinfo!("Service core ", cpu_index, " entering guest execution loop.");
     // Try to enter the guest again.
     #[verus_spec(
         invariant
@@ -2029,11 +2007,9 @@ func_ptr!(serv_main);
 /// to the guest context and it can request anything via VM exits.
 #[verifier::exec_allows_no_decreases_clause]
 pub fn try_enter_guest() -> DekoGuestExitInformation {
-    kdebug!("Trying to enter guest...");
-
     let (this_cpu_ptr, Tracked(this_cpu_perm)) = DekoCpuCtx::this_cpu();
     let this_cpu = this_cpu_ptr.borrow(Tracked(&this_cpu_perm.ptr_perm));
-    let this_cpu_index = this_cpu.cpu_id as usize;
+    let this_cpu_index: usize = this_cpu.cpu_id as usize;
     if this_cpu.doorbell.is_none() {
         die("No doorbell assigned to the CPU.");
     }
@@ -2112,15 +2088,16 @@ pub fn try_enter_guest() -> DekoGuestExitInformation {
                     };
 
                     if no_further_signal {
-                        let r = vmpl_switch(2); // switch to VMPL2
+                        // let r = vmpl_switch(2); // switch to VMPL2
+                        crate::imp::vmpl_run(2);
 
                         loop {} // for debugging we enter only once.
 
-                        if r != 0 {
-                            kerror!("Failed to switch to VMPL2: error code ", r => hex);
-                        }
+                        // if r != 0 {
+                        //     kerror!("Failed to switch to VMPL2: error code ", r => hex);
+                        // }
 
-                        r
+                        // r
 
                         // Now we need to read the VMSA to fetch the
                         // information process the guest's request.
