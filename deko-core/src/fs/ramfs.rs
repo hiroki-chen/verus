@@ -27,10 +27,10 @@ pub fn init_ramfs(addr_range: PaddrRange) {
     let mut this_cpu_taken = this_cpu.take(Tracked(&mut cpu_perm.ptr_perm));
     let nr_pages = (addr_range.end.0 - addr_range.start.0) / PAGE_SIZE;
 
-    kpanic_if!((nr_pages >= this_cpu_taken.temp_mapping.nr_pages as u64), // reserve oen page for safety
+    kpanic_if!((nr_pages >= this_cpu_taken.temp_mapping_4k.nr_pages as u64), // reserve oen page for safety
         "RAM FS too large:", nr_pages, "pages");
 
-    let temp_mapping = this_cpu_taken.temp_mapping.allocate(nr_pages as usize, 0);
+    let temp_mapping = this_cpu_taken.temp_mapping_4k.allocate(nr_pages as usize, 0);
 
     this_cpu.write(Tracked(&mut cpu_perm.ptr_perm), this_cpu_taken);  // put back
 

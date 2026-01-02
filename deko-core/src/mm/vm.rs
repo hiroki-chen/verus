@@ -78,6 +78,7 @@ impl Drop for TempMapping {
         let (cpu_ptr, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
         let cpu: &DekoCpuCtx = cpu_ptr.borrow(Tracked(&cpu_perm.ptr_perm));
         let pgtable = cpu.pgtable();
+        let ms = cpu.kernel_mapping();
         let private_bit = cpu.private_bit();
         let shared_bit = cpu.shared_bit();
 
@@ -87,41 +88,38 @@ impl Drop for TempMapping {
             self.inner.end.0 < self.inner.start.0 || self.inner.start.0 % PAGE_SIZE != 0
                 || self.inner.end.0 % PAGE_SIZE != 0 || self.inner.start.0 < VADDR_UPPER_MASK || (
             self.inner.end.0 - self.inner.start.0) / PAGE_SIZE
-                > cpu_taken.temp_mapping.nr_pages as u64 || self.inner.start.0
-                < cpu_taken.temp_mapping.vaddr_start.0,
+                > cpu_taken.temp_mapping_4k.nr_pages as u64 || self.inner.start.0
+                < cpu_taken.temp_mapping_4k.vaddr_start.0,
         // make verus happy
         ) {
+            kwarn!("TempMapping::drop: invalid temporary mapping detected during drop:", self.inner);
             return ;
         }
-        cpu_taken.temp_mapping.deallocate(
+        let nr_pages = ((self.inner.end.0 - self.inner.start.0) / PAGE_SIZE) as usize;
+
+        cpu_taken.temp_mapping_4k.deallocate(
             self.inner.start,
             ((self.inner.end.0 - self.inner.start.0) / PAGE_SIZE) as usize,
         );
 
         cpu_ptr.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
 
-        // assume now we only have one page.
-        PageTable::unmap_page_4k(
+        PageTable::unmap_page_multiple(
             pgtable,
             Tracked(&mut cpu_perm.pgtable_perm),
-            self.inner.start,
-            &cpu.kernel_mapping,
+            self.inner.clone(),
+            &ms,
             private_bit,
             shared_bit,
         );
 
         crate::cpu::flush_tlb_global();
-
-        // PageTable::unmap_multiple_pages(pgtable, Tracked(&mut cpu_perm.pgtable_perm), vaddr, ms, private_bit, shared_bit)...
     }
 }
 
 #[verus_verify]
 impl TempMapping {
     /// Attempts to create a new temporary mapping for the given physical address range.
-    ///
-    /// Please note this assumes the page is always aligned to 4KiB and we do not intend
-    /// to support huge pages here.
     #[verus_spec(r =>
         requires
             prange.wf(),
@@ -136,21 +134,19 @@ impl TempMapping {
                 &&& (tm.inner.end@ - tm.inner.start@) == (prange.end@ - prange.start@)
             }
     )]
-    pub fn new(prange: PaddrRange) -> Option<Self> {
-        broadcast use crate::mm::PteFlags::lemma_each_bit_is_valid;
-
+    fn new_4k(prange: PaddrRange) -> Option<Self> {
         let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
-        let max_nr_pages = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).temp_mapping().nr_pages;
+        let max_nr_pages = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).temp_mapping_4k().nr_pages;
 
         let nr_pages = ((prange.end.0 - prange.start.0) / PAGE_SIZE) as usize;
         if nr_pages == 0 || nr_pages + 1 > max_nr_pages {
-            kwarn!("TempMapping::new: invalid number of pages requested:", nr_pages);
+            kwarn!("invalid number of pages requested:", nr_pages, "max allowed:", max_nr_pages);
             return None;
         }
         let flags = PteFlags::data();
         let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
 
-        let vaddr = match cpu_taken.temp_mapping.allocate(nr_pages, 0) {
+        let vaddr = match cpu_taken.temp_mapping_4k.allocate(nr_pages, 0) {
             Some(vaddr) => vaddr,
             None => {
                 kwarn!("TempMapping::new: unable to allocate temporary mapping of", nr_pages, "pages");
@@ -213,6 +209,109 @@ impl TempMapping {
         kdebug!("TempMapping::new: created temporary mapping:", vrange, "for physical range:", prange);
 
         Some(Self { inner: vrange })
+    }
+
+    /// Attempts to create a new temporary mapping for the given physical address range.
+    #[verifier::external_body]
+    #[verus_spec(r =>
+        requires
+            prange.wf(),
+            prange.start@ % PAGE_SIZE_2M == 0,
+            prange.end@ % PAGE_SIZE_2M == 0,
+            prange.end@ <= 0x000f_ffff_ffff_f000,
+        ensures
+            r matches Some(tm) ==> {
+                &&& tm.wf()
+                &&& tm.inner.start@ >= VADDR_UPPER_MASK
+                &&& tm.inner.start@ % PAGE_SIZE_2M == 0
+                &&& (tm.inner.end@ - tm.inner.start@) == (prange.end@ - prange.start@)
+            }
+    )]
+    fn new_2m(prange: PaddrRange) -> Option<Self> {
+        let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
+        let max_nr_pages = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).temp_mapping_2m.nr_pages;
+        let nr_pages = ((prange.end.0 - prange.start.0) / PAGE_SIZE_2M) as usize;
+
+        if nr_pages == 0 || nr_pages + 1 > max_nr_pages {
+            kwarn!("invalid number of 2M pages requested:", nr_pages, "max allowed:", max_nr_pages);
+            return None;
+        }
+        let flags = PteFlags::data();
+        let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
+
+        let vaddr = match cpu_taken.temp_mapping_2m.allocate(nr_pages, 0) {
+            Some(vaddr) => vaddr,
+            None => {
+                kwarn!("TempMapping::new_2m: unable to allocate temporary mapping of", nr_pages, "2M pages");
+
+                // Remember to put back the cpu permission
+                cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
+                return None;
+            },
+        };
+
+        let vrange = VaddrRange {
+            start: vaddr,
+            end: VirtAddr(vaddr.0 + (nr_pages as u64) * PAGE_SIZE_2M),
+        };
+
+        proof {
+            assert(flags.bits() & Pte_ALL_BITS == flags.bits()) by {
+                bit_u64_and_auto();
+            }
+        }
+
+        PageTable::map_page_multiple(
+            cpu_taken.pgtable(),
+            vrange.clone(),
+            prange.start,
+            flags,
+            &cpu_taken.kernel_mapping(),
+            cpu_taken.private_bit(),
+            cpu_taken.shared_bit(),
+            Tracked(&mut cpu_perm.pgtable_perm),
+        );
+
+        flush_tlb_global();
+
+        Some(Self { inner: vrange })
+    }
+
+    /// Creates a new temporary virtual mapping for the specified physical address range.
+    ///
+    /// This function acts as a dispatcher: it opportunistically uses a 2 MiB huge page
+    /// mapping if the range is suitably aligned and sized. Otherwise, it falls back to
+    /// standard 4 KiB pages.
+    ///
+    /// # Requirements
+    /// * The physical address range must be at least 4 KiB aligned.
+    /// * The range must be physically valid (see verification specifications).
+    ///
+    /// # Returns
+    /// * `Some(TempMapping)` if the mapping was successfully created.
+    /// * `None` if the mapping failed (e.g., out of temporary slots or page table memory).
+    #[verus_spec(r =>
+        requires
+            prange.wf(),
+            prange.start@ % PAGE_SIZE == 0,
+            prange.end@ % PAGE_SIZE == 0,
+            prange.end@ <= 0x000f_ffff_ffff_f000,
+        ensures
+            r matches Some(tm) ==> {
+                &&& tm.wf()
+                &&& tm.inner.start@ >= VADDR_UPPER_MASK
+                &&& tm.inner.start@ % PAGE_SIZE == 0
+                &&& (tm.inner.end@ - tm.inner.start@) == (prange.end@ - prange.start@)
+            }
+    )]
+    pub fn new(prange: PaddrRange) -> Option<Self> {
+        // Check if that page has been aligned to 2MB boundaries;
+        // if so we can create a 2M mapping.
+        if prange.start.0 % PAGE_SIZE_2M == 0 && prange.end.0 % PAGE_SIZE_2M == 0 {
+            Self::new_2m(prange)
+        } else {
+            Self::new_4k(prange)
+        }
     }
 }
 

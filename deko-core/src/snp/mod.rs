@@ -53,6 +53,12 @@ pub enum PageStateChangeOp {
     Unsmash,
 }
 
+/// Illegal input parameters
+pub(crate) const PVALIDATE_FAIL_INPUT: u64 = 0x1;
+
+/// Page size mismatch between guest (2M) and RMP entry (4K)
+pub(crate) const PVALIDATE_SIZEMISMATCH: u64 = 0x6;
+
 pub(crate) const PSC_OP_SHIFT: u8 = 52;
 
 pub(crate) const PSC_OP_PRIVATE: u64 = 1 << PSC_OP_SHIFT;
@@ -645,9 +651,6 @@ pub fn pvalidate(
         old(pgtable_perm).wf(),
         old(pgtable_perm).mapped(VirtAddr(vaddr)),
     ensures
-        pgtable_perm.wf(),
-        // old(pgtable_perm).private_bit() == pgtable_perm.private_bit(),
-        // old(pgtable_perm).shared_bit() == pgtable_perm.shared_bit(),
         old(pgtable_perm) == pgtable_perm,
 {
     let ret: u64;
@@ -1414,7 +1417,7 @@ fn validate_fw_memory_region(prange: PaddrRange) {
         let r = rmpadjust(temp_mapping.inner.start, PAGE_SIZE, flags, Tracked(pgtable_perm));
         kpanic_if!(r != 0, "RMPADJUST failed for firmware memory validation at", PhysAddr(cur), "with return code", r);
 
-        zero_page(temp_mapping.inner.start);
+        zero_page(temp_mapping.inner.start, 1);
 
         cur += PAGE_SIZE;
     }

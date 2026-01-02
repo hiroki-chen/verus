@@ -34,7 +34,7 @@ use crate::cpu::{
     self, flush_tlb_global, DekoCpuCtx, DekoCpuCtxPermission, CPUID_MAX_COUNT, CPU_NUM,
     PERCPU_AREAS,
 };
-use crate::guest::{handle_guest_exit, DekoGuestExitInformation};
+use crate::guest::{handle_guest_exit, DekoGuestExitInformation, DekoGuestServError};
 use crate::imp::doorbell::HVDoorbell;
 use crate::imp::ghcb::{vmpl_switch, GuestHostCommunicationBlock};
 use crate::imp::vmsa::VMSA;
@@ -1172,7 +1172,8 @@ impl DekoRunnable {
             vm_region,
             apic,
             run_queue,
-            temp_mapping,
+            temp_mapping_4k,
+            temp_mapping_2m,
             deko_vmsa,
             doorbell,
         } = cpu_taken;
@@ -1277,7 +1278,8 @@ impl DekoRunnable {
             vm_region: Some(vm_region),
             apic,
             run_queue,
-            temp_mapping,
+            temp_mapping_4k,
+            temp_mapping_2m,
             deko_vmsa,
             doorbell,
         };
@@ -2001,13 +2003,13 @@ pub fn serv_main(cpu_index: usize) {
                     regs = [0u64, params.rcx, params.rdx, params.r8];
                 },
                 Err(e) => {
-                    if e.is_fatal_error() {
-                        kerror!("Fatal error occurred when handling guest exit on core ",
-                                cpu_index, ": ", e);
-                        die("Fatal error when handling guest exit.");
-                    } else {
-                        // Non-fatal error; just return the error code to the guest.
-                        regs = [e.into_error_code(), params.rcx, params.rdx, params.r8];
+                    match e {
+                        DekoGuestServError::FatalError => {
+                            die("Fatal error occurred when handling guest request.");
+                        },
+                        DekoGuestServError::SoftError(e) => {
+                            regs = [e.into_error_code(), params.rcx, params.rdx, params.r8];
+                        },
                     }
                 },
             },

@@ -325,11 +325,11 @@ pub fn dump_frame_allocator_usage() -> u64 {
         paddr@ % PAGE_SIZE == 0,
 )]
 #[inline(always)]
-pub fn zero_page(paddr: VirtAddr) {
+pub fn zero_page(paddr: VirtAddr, len: usize) {
     // SAFETY: Caller must ensure that the physical address is valid and page-aligned.
     unsafe {
         let ptr = paddr.0 as *mut u8;
-        core::ptr::write_bytes(ptr, 0, PAGE_SIZE as usize);
+        core::ptr::write_bytes(ptr, 0, len * PAGE_SIZE as usize);
     }
 }
 

@@ -55,33 +55,41 @@ impl CaaArea {
 }
 
 #[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
+pub enum DekoGuestServResultCode {
+    Success,
+    Incomplete,
+    UnsupportedProtocol,
+    UnsupportedCall,
+    InvalidAddr,
+    InvalidFormat,
+    InvalidParam,
+    InvalidReq,
+    Busy,
+    Other(u64),
+}
+
+#[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
 pub enum DekoGuestServError {
-    InvalidParameters,
-    MappingFailed(PhysAddr),
-    RmpAdjustFailed(PhysAddr),
-    UnknownRequest(u32),
-    UnsupportedOperation,
+    SoftError(DekoGuestServResultCode),
+    FatalError,
 }
 
 #[verus_verify]
-impl DekoGuestServError {
-    /// Converts the guest service error into a corresponding error code.
-    ///
-    /// The error code will be set as the return value in the guest's VMSA
-    /// after handling the service request (rax).
+impl DekoGuestServResultCode {
     #[verus_spec()]
     pub fn into_error_code(&self) -> u64 {
         match self {
-            _ => 0,
+            DekoGuestServResultCode::Success => 0,
+            DekoGuestServResultCode::Incomplete => 0x8000_0000,
+            DekoGuestServResultCode::UnsupportedProtocol => 0x8000_0001,
+            DekoGuestServResultCode::UnsupportedCall => 0x8000_0002,
+            DekoGuestServResultCode::InvalidAddr => 0x8000_0003,
+            DekoGuestServResultCode::InvalidFormat => 0x8000_0004,
+            DekoGuestServResultCode::InvalidParam => 0x8000_0005,
+            DekoGuestServResultCode::InvalidReq => 0x8000_0006,
+            DekoGuestServResultCode::Busy => 0x8000_0007,
+            DekoGuestServResultCode::Other(code) => 0x8000_1000u64.wrapping_add(*code),
         }
-    }
-
-    #[inline]
-    pub fn is_fatal_error(&self) -> bool {
-        matches!(self,
-            DekoGuestServError::MappingFailed(_) |
-            DekoGuestServError::RmpAdjustFailed(_)
-        )
     }
 }
 
@@ -261,7 +269,7 @@ pub fn handle_guest_exit(
             proof_with!(Tracked(cpu_perm));
             service::handle_guest_exit_deko_service(req, params)
         },
-        _ => { Err(DekoGuestServError::UnknownRequest(protocol)) },
+        _ => { Err(DekoGuestServError::SoftError(DekoGuestServResultCode::UnsupportedProtocol)) },
     }
 }
 

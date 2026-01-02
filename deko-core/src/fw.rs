@@ -425,8 +425,9 @@ pub fn get_fw_regions_from_igvm(igvm_params: &IgvmParams<'_>) -> Vec<PaddrRange>
 pub fn invalidate_early_boot_mem(header: &DekoKernelLaunchInfo, igvm_params: &IgvmParams<'_>) {
     let need_psc = igvm_params.igvm_param_page.environment_info & 0x1 != 0;
 
-    // Read some old memories from the configuration.
-    if igvm_params.igvm_param_block.firmware.in_low_memory != 0 {
+    // The firmware might use the low memory regions so we need to
+    // invalidate them before usage so as to avoid any extra RMP faults later.
+    if igvm_params.igvm_param_block.firmware.in_low_memory == 0 {
         kinfo!("Invalidating low memory used by firmware [0x0 - 0x", LOWMEM_END => hex , ")");
 
         proof_with!(Tracked(pgtable_perm));
@@ -528,8 +529,12 @@ fn invalidate_boot_memory(header: &DekoKernelLaunchInfo, prange: PaddrRange, nee
         );
 
         kpanic_if!(r != 0, "PVALIDATE failed to invalidate early boot memory at", PhysAddr(cur), "with return code", r);
-        kpanic_if!(!changed, "PVALIDATE CF indicates failure to invalidate early boot memory at", PhysAddr(cur), mapping.inner,);
 
+        if !changed {
+            kerror!("Warning: PVALIDATE did not change page state when invalidating early boot memory at", PhysAddr(cur), "already invalid!");
+
+            break ;
+        }
         cur += PAGE_SIZE;
     }
 

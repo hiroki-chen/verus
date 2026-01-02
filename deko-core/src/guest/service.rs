@@ -6,12 +6,14 @@ use deko_std::wf::WellFormed;
 use vstd::prelude::*;
 
 use crate::cpu::{flush_tlb_global, DekoCpuCtxPermission};
-use crate::guest::{DekoGuestRequestParams, DekoGuestServError, DekoGuestServResult};
+use crate::guest::{
+    DekoGuestRequestParams, DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode,
+};
 use crate::imp::RmpFlags;
 use crate::mm::vm::TempMapping;
 use crate::mm::zero_page;
-use crate::snp::{pvalidate, rmpadjust};
-use crate::{kerror, kinfo};
+use crate::snp::{pvalidate, rmpadjust, validate_vaddr_region};
+use crate::{kdebug, kerror, kinfo, kwarn};
 
 verus! {
 
@@ -77,6 +79,7 @@ pub(super) fn write_guest<T>(addr: VirtAddr, val: T) {
 }
 
 /// Issues a pvalidate operation for a single page at the given physical address.
+#[verifier::spinoff_prover]
 #[verus_spec(r =>
     with
         Tracked(cpu_perm): Tracked<&mut DekoCpuCtxPermission>,
@@ -99,17 +102,17 @@ fn pvalidate_guest_one_page(paddr: PhysAddr) -> DekoGuestServResult<()> {
     let inner = paddr.0;
     let huge_page = (inner & 0x3) == 1;
     let validate = (inner & 0x4) == 4;
-
-    // Currently we do not support huge page validation.
-    if huge_page {
-        kerror!("Guest pvalidate: huge page not supported:", paddr);
-        return Err(DekoGuestServError::UnsupportedOperation);
-    }
     let guest_pa = inner & !(PAGE_SIZE as u64 - 1);
+    let (len, page_size) = if huge_page {
+        (512, PAGE_SIZE_2M)
+    } else {
+        (1, PAGE_SIZE)
+    };
 
-    if core::hint::unlikely(guest_pa >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE) {
+    if core::hint::unlikely(!huge_page && guest_pa >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE) || (
+    huge_page && guest_pa >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE_2M) {
         kerror!("Guest pvalidate: physical address out of range:", guest_pa);
-        return Err(DekoGuestServError::InvalidParameters);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
     proof {
         assert(guest_pa@ % PAGE_SIZE == 0) by (bit_vector)
@@ -118,44 +121,57 @@ fn pvalidate_guest_one_page(paddr: PhysAddr) -> DekoGuestServResult<()> {
                 PAGE_SIZE == 0x1000,
         ;
     }
+
     // Need to first check if the physical address is
     // within the expected guest physical regions.
     if false {
         kerror!("Guest pvalidate: invalid physical address:", guest_pa);
-        return Err(DekoGuestServError::InvalidParameters);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
-    if let Some(temp_va) = TempMapping::new(create_paddr_range(PhysAddr(guest_pa), 1)) {
-        assume(cpu_perm.pgtable_perm.mapped(temp_va.inner.start));
+    if let Some(temp_va) = TempMapping::new(create_paddr_range(PhysAddr(guest_pa), len)) {
+        assume(cpu_perm.pgtable_perm.mapped_region(temp_va.inner));
 
         let (r, has_changed) = pvalidate(
             temp_va.inner.start.0,
-            PAGE_SIZE,
-            true,
+            page_size,
+            validate,
             Tracked(&mut cpu_perm.pgtable_perm),
         );
 
+        if r != 0 {
+            // if r != 0 then we possibly have a specific page size mismatch
+            // or the page is already in the desired state.
+            //
+            // this leaves the guest for handling the rest.
+            kdebug!("Guest pvalidate: pvalidate failed at gpa:", PhysAddr(guest_pa), "with return code:", r, " has_changed:", has_changed);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Other(r)));
+        }
+        if !has_changed {
+            // Means ignore the carry flag even if the change has failed.
+            if inner & 0x8 == 0x8 {
+                return Ok(());
+            } else {
+                // No change has occurred.
+                kdebug!("Guest pvalidate: no change has occurred for gpa:", PhysAddr(guest_pa) => hex);
+                return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Other(0x10)));
+            }
+        }
         if validate {
-            zero_page(temp_va.inner.start);
+            zero_page(temp_va.inner.start, len);
 
             if rmpadjust(
                 temp_va.inner.start,
-                PAGE_SIZE,
+                page_size,
                 RmpFlags::rwx_guest_vmpl2(),
                 Tracked(&mut cpu_perm.pgtable_perm),
             ) != 0 {
-                return Err(DekoGuestServError::RmpAdjustFailed(PhysAddr(guest_pa)));
+                return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidReq));
             }
-            if r != 0 || !has_changed {
-                // We do not allow twice validation of the same page.
-                return Err(DekoGuestServError::InvalidParameters);
-            }
-        } else {
-            crate::kwarn!("Not yet implementated");
         }
-
         Ok(())
     } else {
-        Err(DekoGuestServError::MappingFailed(PhysAddr(guest_pa)))
+        kerror!("Guest pvalidate: failed to create temporary mapping for gpa:", guest_pa => hex);
+        Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy))
     }
 }
 
@@ -170,14 +186,14 @@ fn pvalidate_guest_one_page(paddr: PhysAddr) -> DekoGuestServResult<()> {
         cpu_perm.wf(),
 )]
 fn handle_deko_service_pvalidate(params: &DekoGuestRequestParams) -> DekoGuestServResult<()> {
-    crate::kinfo!("Handling guest pvalidate request", params);
+    crate::kdebug!("Handling guest pvalidate request", params);
 
     // During booting the page must not be aligned to PAGE_SIZE
     // but it must uphold the alignment requirement of x64 that
     // physical addresses must be aligned to qword.
     if core::hint::unlikely(params.rcx % (core::mem::size_of::<u64>() as u64) != 0) {
         kerror!("Guest pvalidate: unaligned physical address: ", params.rcx);
-        return Err(DekoGuestServError::InvalidParameters);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
     // SANITY CHECK #2: Check if this request is valid.
     // i.e., if this gpa is within the valid guest
@@ -185,13 +201,13 @@ fn handle_deko_service_pvalidate(params: &DekoGuestRequestParams) -> DekoGuestSe
 
     if false {  /* Placeholder for now. */
         kerror!("Guest pvalidate: invalid physical address: ", params.rcx);
-        return Err(DekoGuestServError::InvalidParameters);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
     // Make Verus happy.
 
     if core::hint::unlikely(params.rcx >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE) {
         kerror!("Guest pvalidate: physical address out of range: ", params.rcx);
-        return Err(DekoGuestServError::InvalidParameters);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
     let offset = params.rcx % PAGE_SIZE as u64;
     let guest_pa = PhysAddr(params.rcx & !(PAGE_SIZE as u64 - 1));
@@ -230,10 +246,12 @@ fn handle_deko_service_pvalidate(params: &DekoGuestRequestParams) -> DekoGuestSe
 
         // Sanitize the input parameter.
         if entries == 0 || entries > max_entries as u16 || entries <= next {
-            return Err(DekoGuestServError::InvalidParameters);
+            kerror!("Guest pvalidate: invalid request parameters: entries=", entries, " next=", next, " max_entries=", max_entries);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
         }
         // Now process the page validation entries.
 
+        let mut pvalidate_result = Ok(());
         for i in next..entries
             invariant
                 max_entries == (PAGE_SIZE - offset - core::mem::size_of::<
@@ -260,12 +278,16 @@ fn handle_deko_service_pvalidate(params: &DekoGuestRequestParams) -> DekoGuestSe
             let this_entry = read_guest_copied::<u64>(VirtAddr(cur));
             let this_entry = PhysAddr(this_entry);
 
-            proof_with!(Tracked(cpu_perm));
-            let r = pvalidate_guest_one_page(this_entry);
+            pvalidate_result =
+            #[verus_spec(with Tracked(cpu_perm))]
+            pvalidate_guest_one_page(this_entry);
 
-            match r {
+            match pvalidate_result {
                 Ok(()) => guest_req.next = guest_req.next + 1,
-                Err(e) => return Err(e),
+                Err(e) => match e {
+                    DekoGuestServError::SoftError(_) => break ,
+                    DekoGuestServError::FatalError => return pvalidate_result,
+                },
             };
         }
 
@@ -274,11 +296,11 @@ fn handle_deko_service_pvalidate(params: &DekoGuestRequestParams) -> DekoGuestSe
 
         flush_tlb_global();
 
-        Ok(())
+        pvalidate_result
     } else {
         kerror!("Guest pvalidate: failed to create temporary mapping for gpa: ", guest_pa.0);
 
-        Err(DekoGuestServError::MappingFailed(guest_pa))
+        Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy))
     }
 }
 
@@ -295,12 +317,17 @@ pub(super) fn handle_guest_exit_deko_service(
     req: u32,
     params: &mut DekoGuestRequestParams,
 ) -> DekoGuestServResult<()> {
+    kdebug!("Handling guest deko service request: ", req, " with params: ", params);
+
     match req {
         DEKO_SERVICE_PVALIDATE => {
             proof_with!(Tracked(cpu_perm));
             handle_deko_service_pvalidate(params)
         },
-        _ => { Err(DekoGuestServError::UnknownRequest(req)) },
+        _ => {
+            kerror!("Unsupported deko service request: ", req);
+            Err(DekoGuestServError::SoftError(DekoGuestServResultCode::UnsupportedProtocol))
+        },
     }
 }
 

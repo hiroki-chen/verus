@@ -66,7 +66,7 @@ unsafe extern "C" fn ex_handler_double_fault(ctx: &mut X86ExceptionContext) {
     let rip = ctx.frame.rip;
     let rsp = ctx.frame.rsp;
     let addr = crate::cpu::regs::read_cr2();
-    kerror!("Double Fault Exception occurred: rip =", rip => hex, rsp => hex, "CR2 =" , addr => hex);
+    kerror!("Double Fault Exception occurred: rip =", rip => hex, "rsp =", rsp => hex, "CR2 =" , addr => hex);
     // No recovery possible.
     die("Double Fault Exception");
 }

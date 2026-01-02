@@ -563,8 +563,14 @@ pub struct DekoCpuCtx {
     pub apic: X86Apic,
     /// Runqueue
     pub run_queue: Option<DekoRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred>>,
-    /// Temporary mapping.
-    pub temp_mapping: VirtualMemoryTemporary,
+    /// Temporary mapping for creating temporary mappings to a 4k physical page.
+    pub temp_mapping_4k: VirtualMemoryTemporary,
+    /// Temporary mapping for creating temporary mappings to a 2M physical page.
+    ///
+    /// Note that for efficiency this mapping is not frequently used; unless, for
+    /// example, a guest explicitly requests us to perform some validations on a
+    /// 2M page (pvalidate, for example).
+    pub temp_mapping_2m: VirtualMemoryTemporary,
     /// The VMSA.
     pub deko_vmsa: DekoOnceCell<VmsaPage, VmsaPagePermission, VmsaPagePred>,
     /// The doorbell for SEV-SNP restricted interrupt mode.
@@ -766,7 +772,7 @@ impl WellFormed for DekoCpuCtx {
         &&& self.deko_vmsa.wf()
         &&& self.cpu_id < CPUID_MAX_COUNT as u64
         &&& self.magic == CPU_AREA_MAGIC
-        &&& self.temp_mapping.wf()
+        &&& self.temp_mapping_4k.wf()
     }
 }
 
@@ -802,7 +808,7 @@ impl DekoCpuCtx {
     }
 
     pub open spec fn temp_mapping_spec(&self) -> &VirtualMemoryTemporary {
-        &self.temp_mapping
+        &self.temp_mapping_4k
     }
 
     pub open spec fn shared_bit_spec(&self) -> u64 {
@@ -851,7 +857,7 @@ impl DekoCpuCtx {
 
     #[verifier::when_used_as_spec(temp_mapping_spec)]
     #[inline]
-    pub fn temp_mapping(&self) -> (r: &VirtualMemoryTemporary)
+    pub fn temp_mapping_4k(&self) -> (r: &VirtualMemoryTemporary)
         requires
             self.wf(),
         ensures
@@ -859,7 +865,7 @@ impl DekoCpuCtx {
         opens_invariants none
         no_unwind
     {
-        &self.temp_mapping
+        &self.temp_mapping_4k
     }
 
     #[verifier::when_used_as_spec(shared_bit_spec)]
@@ -982,7 +988,8 @@ impl DekoCpuCtx {
             ist_stack,
             apic: X86Apic {  },
             run_queue,
-            temp_mapping: VirtualMemoryTemporary::new_zeroed(),
+            temp_mapping_4k: VirtualMemoryTemporary::new_zeroed(),
+            temp_mapping_2m: VirtualMemoryTemporary::new_zeroed(),
             deko_vmsa: DekoOnceCell::new(Ghost(VmsaPagePred {  })),
             doorbell: None,
         }
@@ -1102,7 +1109,8 @@ impl DekoCpuCtx {
                                         vm_region,
                                         apic,
                                         run_queue,
-                                        temp_mapping,
+                                        temp_mapping_4k,
+                                        temp_mapping_2m,
                                         deko_vmsa,
                                         doorbell,
                                     } = ptr.take(Tracked(&mut perm.ptr_perm));
@@ -1189,7 +1197,8 @@ impl DekoCpuCtx {
                                             vm_region: Some(vm_region),
                                             apic,
                                             run_queue,
-                                            temp_mapping,
+                                            temp_mapping_4k,
+                                            temp_mapping_2m,
                                             deko_vmsa,
                                             doorbell,
                                         },
@@ -1723,9 +1732,13 @@ impl DekoCpuCtx {
             Some(run_queue),
         );
 
-        cpu_ctx.temp_mapping.set(
+        cpu_ctx.temp_mapping_4k.set(
             PERCPU_TEMP_BASE_4K,
             ((PERCPU_TEMP_END_4K.0 - PERCPU_TEMP_BASE_4K.0) / PAGE_SIZE) as usize,
+        );
+        cpu_ctx.temp_mapping_2m.set(
+            PERCPU_TEMP_BASE_2M,
+            ((PERCPU_TEMP_END_2M.0 - PERCPU_TEMP_BASE_2M.0) / PAGE_SIZE_2M) as usize,
         );
 
         cpu_ctx.set_ist_stack_tss(IST_DF, top_of_ist_stack);

@@ -1141,6 +1141,75 @@ impl Page {
         )
     }
 
+    #[verifier::external_body]  // unverified; do it later.
+    pub fn unmap_page_multiple(
+        ptr: DekoPPtr<Self>,
+        Tracked(perm): Tracked<&mut PageTablePermission>,
+        vrange: VaddrRange,
+        ms: &MappingSpace,
+        private_bit: u64,
+        shared_bit: u64,
+    )
+        requires
+            old(perm).wf(),
+            old(perm).pgtable_perm.pptr() == ptr@,
+            old(perm).pgtable_perm.is_init(),
+            vrange.wf(),
+            vrange.start@ % PAGE_SIZE == 0,
+            vrange.end@ % PAGE_SIZE == 0,
+            ms.wf(),
+            ms == old(perm).mapping_space,
+            private_bit == old(perm).private_bit,
+            shared_bit == old(perm).shared_bit,
+        ensures
+            perm.wf(),
+            perm.pgtable_perm.pptr() == old(perm).pgtable_perm.pptr(),
+            perm.mapping_space == old(perm).mapping_space,
+            perm.private_bit == old(perm).private_bit,
+            perm.shared_bit == old(perm).shared_bit,
+    {
+        // broadcast use lemma_index_at_level_spec_lt_page_entry_num;
+        let mut cur_vaddr = vrange.start.0;
+
+        while cur_vaddr <= vrange.end.0 {
+            // First query the page table if it is huge.
+            let mapping = PageTable::walk(
+                ptr,
+                Tracked(perm),
+                VirtAddr(cur_vaddr),
+                ms,
+                private_bit,
+                shared_bit,
+            );
+
+            match mapping {
+                Mapping::Level0(page, idx) => {
+                    Page::update_entry_by_ptr(
+                        page,
+                        Tracked::assume_new(),
+                        idx,
+                        PageTableEntry(PhysAddr(0)),
+                    );
+
+                    cur_vaddr += PAGE_SIZE;
+                },
+                Mapping::Level1(page, idx) => {
+                    Page::update_entry_by_ptr(
+                        page,
+                        Tracked::assume_new(),
+                        idx,
+                        PageTableEntry(PhysAddr(0)),
+                    );
+
+                    cur_vaddr += PAGE_SIZE_2M;
+                },
+                _ => {
+                    kerror!("unmap_page_multiple: unmapping non-4k pages not yet implemented",);
+                },
+            }
+        }
+    }
+
     /// Makes a virtual page shared by revoking its validation, updating the page state,
     /// and modifying the page tables accordingly.
     pub fn make_page_shared_4k(
@@ -2397,8 +2466,6 @@ impl Page {
             // Check if we can map 2M page.
             if cur_vaddr % PAGE_SIZE_2M == 0 && cur_paddr % PAGE_SIZE_2M == 0 && cur_vaddr
                 + PAGE_SIZE_2M <= end_vaddr {
-                kdebug!("[2MB] Mapping page at vaddr: ", VirtAddr(cur_vaddr), " to paddr: ", PhysAddr(cur_paddr));
-
                 if Page::map_page_2m(
                     page,
                     Tracked(pgtable_perm),
