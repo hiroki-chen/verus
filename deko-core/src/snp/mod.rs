@@ -957,14 +957,55 @@ pub fn get_sev_fw_metadata(igvm_params: &IgvmParamBlock) -> Option<SevFWMetaData
 pub fn flush_tlb() {
     unsafe {
         core::arch::asm!(
-            "invlpgb",
-            in("rax") 4u64,
-            in("rcx") 0u64,
-            in("rdx") 0u64,
+            "movq %cr3, %rax",
+            "movq %rax, %cr3",
+            out("rax") _,
             options(att_syntax)
         );
     }
 }
+
+/// Broadcasts a TLB flush for a range of pages to ALL cores using hardware acceleration.
+///
+/// This replaces the need for IPI-based shootdowns for the specified range.
+///
+/// Use this function if you need to flush TLB entries across multiple CPUs efficiently;
+/// remember this does not flush ALL TLB entries, only those in the specified range.
+///
+/// # Arguments
+/// * `va`: The starting Virtual Address to flush.
+/// * `count`: The number of 4KB pages to flush (Max 0xFFFF).
+/// * `asid`: The Address Space ID (0 for Kernel/Global usually).
+/// * `global`: If true, flushes Global (G) pages.
+#[verifier::external_body]
+pub fn flush_tlb_broadcast(va: u64, count: u16, asid: u16, global: bool) {
+    // EDX Layout for INVLPGB:
+    // Bit 0:    VALID (Must be 1)
+    // Bit 1:    GLOBAL (Flush global pages?)
+    // Bits 2-?: Reserved
+    // Bits 16-31: ASID (if not global)
+    let mut edx: u32 = 1; // Valid bit
+    if global {
+        edx |= 1 << 1; // Set Global Bit
+    }
+
+    edx |= (asid as u32) << 16; // Set ASID
+
+    // EAX = Virtual Address
+    // ECX = Page Count
+    unsafe {
+        core::arch::asm!(
+            "invlpgb",
+            in("rax") va,
+            in("ecx") count,
+            in("edx") edx,
+            options(nostack, preserves_flags)
+        );
+
+        core::arch::asm!("tlbsync", options(nostack, preserves_flags));
+    }
+}
+
 
 /// Performs the launch of the guest firmware (OVMF).
 #[verus_spec(

@@ -15,6 +15,9 @@ core::arch::global_asm!(
     EXCEP_CS_OFF = const offset_of!(X86ExceptionContext, frame.cs),
     EXCEP_RCX_OFF = const offset_of!(X86ExceptionContext, regs.rcx),
     EXCEP_RIP_OFF = const offset_of!(X86ExceptionContext, frame.rip),
+    EXCEP_RSP_OFF = const offset_of!(X86ExceptionContext, frame.rsp),
+    EXCEP_FRAME_OFF = const offset_of!(X86ExceptionContext, frame),
+
     options(att_syntax)
 );
 

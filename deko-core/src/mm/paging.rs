@@ -8,7 +8,7 @@ use vstd::{assert_by_contradiction, prelude::*};
 
 use super::DEKO_MAPPING_SPACE;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
-use crate::cpu::{flush_tlb_global, DekoCpuCtx, DekoCpuCtxPermission};
+use crate::cpu::{flush_tlb_global_percpu, DekoCpuCtx, DekoCpuCtxPermission};
 use crate::elf::ElfFile;
 use crate::hal::is_stage2;
 use crate::mm::{
@@ -1273,7 +1273,7 @@ impl Page {
 
         PageTable::set_shared_4k(ptr, Tracked(perm), vaddr, ms, private_bit, shared_bit);
 
-        flush_tlb_global();
+        flush_tlb_global_percpu();
     }
 
     /// This function lifts a pointer to a page table entry into a page.
@@ -2295,7 +2295,7 @@ impl Page {
             }
         }
 
-        crate::imp::flush_tlb();
+        flush_tlb_global_percpu();
     }
 
     // should we add vaddr as ghost param?
@@ -2497,8 +2497,6 @@ impl Page {
             cur_vaddr += PAGE_SIZE;
             cur_paddr += PAGE_SIZE;
         }
-
-        flush_tlb_global();
 
         // REST WE FIX LATER.
         assume(pgtable_perm.mapped_region(vaddr));

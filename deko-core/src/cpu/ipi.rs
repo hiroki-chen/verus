@@ -7,7 +7,9 @@ use deko_std::prelude::{func_ptr, DekoPointsTo};
 use deko_std::ptr::DekoPPtr;
 use deko_std::sync::{DekoAtomicData, DekoSimpleRwLock};
 use deko_std::wf::WellFormed;
-use deko_std::{deko_rwlock_read_atomic_data, deko_rwlock_write_atomic_data, with_permission};
+use deko_std::{
+    deko_rwlock_read_atomic_data, deko_rwlock_write_atomic_data, func, with_permission,
+};
 use vstd::atomic::*;
 use vstd::cell::{PCell, PointsTo};
 use vstd::prelude::*;
@@ -15,8 +17,8 @@ use vstd::prelude::*;
 use crate::cpu::apic::{Apic, X86Apic};
 use crate::cpu::task::{schedule, DekoRunnablePtr, DekoRunnableState};
 use crate::cpu::{
-    DekoCpuCtx, DekoCpuCtxPermission, PerCpuAreas, PerCpuAreasPermission, CPUID_MAX_COUNT,
-    PERCPU_AREAS,
+    flush_tlb_global_percpu, DekoCpuCtx, DekoCpuCtxPermission, PerCpuAreas, PerCpuAreasPermission,
+    CPUID_MAX_COUNT, PERCPU_AREAS,
 };
 use crate::{die, kdebug, kinfo, kpanic_if, kwarn};
 
@@ -249,6 +251,11 @@ impl DekoIpiRequest {
             self.sender,
         );
 
+        let f = match &self.message {
+            DekoIpIMessage::TlbShootdown => handle_tlb_shootdown_func_ptr() as usize,
+            DekoIpIMessage::AffinityChange { .. } => handle_set_affinity_func_ptr() as usize,
+        };
+
         // Prepare the message on the shared area so
         // other CPUs can read it when they receive the IPI.
         let mut cpu_nums = 0u32;
@@ -291,7 +298,7 @@ impl DekoIpiRequest {
                     &mut inner,
                     id,
                     cpu_nums as usize,
-                    handle_set_affinity_func_ptr() as usize,
+                    f,
                 );
 
                 cpu_areas = Some(inner);
@@ -575,5 +582,27 @@ pub fn handle_set_affinity(ptr: DekoPPtr<DekoIpIMessage>) {
 }
 
 func_ptr!(handle_set_affinity);
+
+#[verus_spec(
+    with
+        Tracked(perm): Tracked<&DekoPointsTo<DekoIpIMessage>>,
+    requires
+        ptr@ == perm.pptr(),
+        perm.is_init(),
+        perm.wf(),
+)]
+pub fn handle_tlb_shootdown(ptr: DekoPPtr<DekoIpIMessage>) {
+    let msg = ptr.borrow(Tracked(&perm));
+
+    kpanic_if!(
+        core::hint::unlikely(!matches!(msg, DekoIpIMessage::TlbShootdown)),
+        "handle_tlb_shootdown received non-TLB-shootdown message",
+    );
+
+    // Perform the TLB shootdown.
+    flush_tlb_global_percpu();
+}
+
+func_ptr!(handle_tlb_shootdown);
 
 } // verus!

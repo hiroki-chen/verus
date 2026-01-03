@@ -5,10 +5,10 @@ use deko_std::address::{create_paddr_range, PhysAddr, VirtAddr};
 use deko_std::bits::{bit_u32_and_auto, bit_u64_and_auto};
 use deko_std::mem::{PAGE_SIZE, PAGE_SIZE_2M};
 use deko_std::wf::WellFormed;
-use deko_std::{deko_rwlock_read_atomic_data, deko_rwlock_write_atomic_data};
+use deko_std::{deko_rwlock_read_atomic_data, deko_rwlock_write_atomic_data, trace_enable};
 use vstd::prelude::*;
 
-use crate::cpu::{flush_tlb_global, DekoCpuCtxPermission, PERCPU_AREAS};
+use crate::cpu::{flush_tlb_global_percpu, DekoCpuCtxPermission, PERCPU_AREAS};
 use crate::guest::{
     DekoGuestRequestParams, DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode,
 };
@@ -219,6 +219,11 @@ fn handle_deko_service_pvalidate(params: &DekoGuestRequestParams) -> DekoGuestSe
     let guest_pa = PhysAddr(params.rcx & !(PAGE_SIZE as u64 - 1));
     // Obtain the offset within the page.
 
+    if core::hint::unlikely(
+        offset + core::mem::size_of::<DekoGuestPValidateReq>() as u64 > PAGE_SIZE as u64,
+    ) {
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
     proof {
         let guest_pa = guest_pa@;
         let rcx = params.rcx;
@@ -231,7 +236,6 @@ fn handle_deko_service_pvalidate(params: &DekoGuestRequestParams) -> DekoGuestSe
 
     // Now we need to create a temporary mapping for the guest
     // physical address so that we can access the request structure.
-
     let paddr_range = create_paddr_range(guest_pa, 1);
     let temp_mapping = TempMapping::new(paddr_range);
 
@@ -245,7 +249,6 @@ fn handle_deko_service_pvalidate(params: &DekoGuestRequestParams) -> DekoGuestSe
 
         let entries = guest_req.entries;
         let next = guest_req.next;
-
         let max_entries = (PAGE_SIZE - offset - core::mem::size_of::<
             DekoGuestPValidateReq,
         >() as u64) / core::mem::size_of::<u64>() as u64;
@@ -311,7 +314,7 @@ fn handle_deko_service_pvalidate(params: &DekoGuestRequestParams) -> DekoGuestSe
         // Write back to the guest request structure.
         write_guest(VirtAddr(temp_va.inner.start.0 + offset), guest_req);
 
-        flush_tlb_global();
+        flush_tlb_global_percpu();
 
         pvalidate_result
     } else {
@@ -319,6 +322,21 @@ fn handle_deko_service_pvalidate(params: &DekoGuestRequestParams) -> DekoGuestSe
 
         Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy))
     }
+}
+
+#[verus_spec(r =>
+    with
+        Tracked(cpu_perm): Tracked<&mut DekoCpuCtxPermission>,
+    requires
+        old(cpu_perm).wf(),
+    ensures
+        cpu_perm.wf(),
+)]
+pub fn handle_deko_service_vcpu_destroy(params: &DekoGuestRequestParams) -> DekoGuestServResult<
+    (),
+> {
+    kwarn!("Guest vCPU destroy: not implemented yet");
+    Err(DekoGuestServError::SoftError(DekoGuestServResultCode::UnsupportedProtocol))
 }
 
 #[verus_spec(r =>
@@ -345,7 +363,7 @@ fn handle_deko_service_vcpu_create(params: &DekoGuestRequestParams) -> DekoGuest
     let caa_page = params.rdx;
     let sev_features = params.sev_features;
 
-    kdebug!(
+    kinfo!(
         "Guest vCPU create: vcpu_id =", vcpu_id,
         "vmsa_page =", vmsa_page => hex,
         "caa_page =", caa_page => hex,
@@ -433,6 +451,15 @@ fn handle_deko_service_vcpu_create(params: &DekoGuestRequestParams) -> DekoGuest
 
     assume(cpu_perm.pgtable_perm.mapped_region(vmsa_mapping.inner));
 
+    rmpadjust(
+        vmsa_mapping.inner.start,
+        PAGE_SIZE,
+        RmpFlags::from_bits_truncate(RmpFlags::vmpl3().bits()),
+        Tracked(&mut cpu_perm.pgtable_perm),
+    );
+
+    flush_tlb_global_percpu();
+
     // Now adjust the permission.
     if rmpadjust(
         vmsa_mapping.inner.start,
@@ -447,6 +474,8 @@ fn handle_deko_service_vcpu_create(params: &DekoGuestRequestParams) -> DekoGuest
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidReq));
     }
     RMP_GUARD.store(false, core::sync::atomic::Ordering::Release);
+
+    flush_tlb_global_percpu();
 
     deko_rwlock_read_atomic_data! {
         PERCPU_AREAS,
@@ -499,16 +528,21 @@ pub(super) fn handle_guest_exit_deko_service(
     req: u32,
     params: &mut DekoGuestRequestParams,
 ) -> DekoGuestServResult<()> {
-    kdebug!("Handling guest deko service request: ", req, " with params: ", params);
-
     match req {
         DEKO_SERVICE_PVALIDATE => {
             proof_with!(Tracked(cpu_perm));
             handle_deko_service_pvalidate(params)
         },
         DEKO_SERVICE_CREATE_VCPU => {
+            trace_enable(true);
             proof_with!(Tracked(cpu_perm));
             handle_deko_service_vcpu_create(params)
+        },
+        DEKO_SERVICE_DESTROY_VCPU => {
+            trace_enable(false);
+
+            proof_with!(Tracked(cpu_perm));
+            handle_deko_service_vcpu_destroy(params)
         },
         _ => {
             kerror!("Unsupported deko service request: ", req);

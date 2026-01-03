@@ -1,10 +1,10 @@
 use deko_macros::DekoDebug;
 use deko_std::address::PhysAddr;
-use deko_std::deko_rwlock_read_atomic_data;
 use deko_std::mem::PERCPU_CAA_BASE;
 use deko_std::prelude::DekoPointsTo;
 use deko_std::ptr::DekoPPtr;
 use deko_std::wf::WellFormed;
+use deko_std::{deko_rwlock_read_atomic_data, trace_is_enabled};
 use vstd::prelude::*;
 
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission, PERCPU_AREAS};

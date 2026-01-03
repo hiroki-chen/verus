@@ -18,8 +18,7 @@ use vstd::atomic::{
 };
 use vstd::prelude::*;
 
-use super::flush_tlb;
-use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
+use crate::cpu::{flush_tlb_global_percpu, DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::paging::{PageTable, PteFlags};
 use crate::mm::{virt_to_phys, virt_to_phys_checked};
 use crate::prelude::*;
@@ -136,7 +135,7 @@ pub fn validate_ghcb(
         1 << 0,
     );
 
-    flush_tlb();
+    flush_tlb_global_percpu();
 
     // Register the GHCB GPA with the hypervisor.
     msr_register_ghcb_gpa(ghcb_paddr);
@@ -711,8 +710,6 @@ impl GuestHostCommunicationBlock {
             r@.is_init(),
             r@.pptr() == ptr@,
     {
-        kinfo!("vmpl_run called!!");
-
         let Tracked(perm) = Self::clear(ptr, Tracked(perm));
 
         let info_1 = target_vmpl as u64;

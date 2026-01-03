@@ -1,3 +1,5 @@
 memory = "64G"
 debug = false
 extra_config = ["-d", "int,cpu_reset", "-D", "qemu.log"]
+# For debugging please reduce cores to catch early logic bugs.
+smp_cores = 2

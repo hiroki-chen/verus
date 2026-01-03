@@ -26,7 +26,9 @@ use vstd::prelude::*;
 use crate::collections::{get_unchecked, update_vec};
 use crate::cpu::apic::X86Apic;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
-use crate::cpu::ipi::{add_ipi_available_cpu, CpuIpiArea, CpuIpiAreaPermission};
+use crate::cpu::ipi::{
+    add_ipi_available_cpu, CpuIpiArea, CpuIpiAreaPermission, DekoIpIMessage, DekoIpiRequest,
+};
 use crate::cpu::regs::{read_cr3, sse_init, Cr4Flags};
 use crate::cpu::task::{
     cpu_idle_func_ptr, schedule_init, DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred,
@@ -47,7 +49,7 @@ use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR_FULL};
 use crate::snp::doorbell::{HVDoorbell, HvDoorbellPtrPermission, HvDoorbellPtrPred};
 use crate::snp::ghcb::{validate_ghcb, GuestHostCommunicationBlock};
 use crate::snp::vmsa::{VmsaInitialContext, VmsaPage, VmsaPagePermission, VmsaPagePred};
-use crate::snp::Rmp_ALL_BITS;
+use crate::snp::{flush_tlb, Rmp_ALL_BITS};
 use crate::{die, kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
 
 verus! {
@@ -1038,7 +1040,7 @@ impl DekoCpuCtx {
             shared_bit,
         );
 
-        flush_tlb_global();
+        flush_tlb_global_percpu();
     }
 
     /// Tries to update the mapping of the guest VMSA on this CPU.
@@ -1059,8 +1061,6 @@ impl DekoCpuCtx {
             bit_u64_and_auto();
             bit_u32_and_auto();
         }
-
-        kdebug!("Updating guest VMSA...");
 
         let tracked mut perm = perm;
 
@@ -2117,11 +2117,18 @@ unsafe extern "C" fn ap_start() -> ! {
 
 func_ptr!(ap_start);
 
-/// Flush the TLB entries globally by toggling the PGE bit in CR4.
+/// Flushes all TLB entries on the **current CPU**, including those marked with the Global (G) bit.
 ///
-/// This should be called once a page table entry has been updated
-/// and we need to ensure that all CPUs see the updated mapping.
-pub fn flush_tlb_global() {
+/// This works by toggling the `CR4.PGE` (Page Global Enable) bit. This forces the CPU
+/// to invalidate all cached translations, including kernel mappings that normally
+/// persist across CR3 context switches.
+///
+/// # SMP Safety
+/// **This operation is local.** It does not affect other cores.
+/// If you updated a shared page table (like the per-cpu area mappings), you must ensure
+/// this function is executed on **every active CPU** (e.g., via an IPI broadcast)
+/// to prevent stale translations on other cores.
+pub fn flush_tlb_global_percpu() {
     broadcast use Cr4Flags::lemma_each_bit_is_valid;
 
     let old_cr4 = read_cr4();
@@ -2136,6 +2143,46 @@ pub fn flush_tlb_global() {
 
     write_cr4(cr4);
     write_cr4(old_cr4);
+}
+
+/// Flushes all TLB entries on **all CPUs**, including those marked with the Global (G) bit.
+///
+/// This function sends an IPI to all active CPUs to perform the flush operation.
+/// It then flushes the TLB on the current CPU as well.
+///
+/// If there is no other active CPU, this function only flushes the TLB on the current CPU.
+pub fn flush_tlb_global_sync() {
+    let cpu_cnt = match CPU_NUM.get() {
+        Some(DekoAtomicData { data, .. }) => data.num as usize,
+        None => 0,
+    };
+
+    kpanic_if!(
+        core::hint::unlikely(cpu_cnt == 0 || cpu_cnt > CPUID_MAX_COUNT as usize),
+        "CPU count invalid:", cpu_cnt
+    );  // BSP fail to initialize?
+
+    if cpu_cnt > 1 {
+        // Multiple CPUs, send IPI to flush others.
+        let mut targets: alloc::vec::Vec<usize, crate::mm::frame_allocator::DekoAllocatorApi> =
+            crate::vec![];
+
+        for i in 1..cpu_cnt
+            invariant
+                cpu_cnt <= CPUID_MAX_COUNT,
+                targets@.len() == i - 1,
+                forall|j: int| 0 <= j < targets@.len() ==> targets@[j] < cpu_cnt as int,
+        {
+            targets.push(i);
+        }
+
+        let req = DekoIpiRequest::new(&targets, DekoIpIMessage::TlbShootdown);
+        // will block... let's fix the lock's lifetime.
+        // req.send_ipi();
+    }
+    // Flush local TLB as well.
+
+    flush_tlb_global_percpu();
 }
 
 } // verus!

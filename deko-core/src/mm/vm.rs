@@ -14,7 +14,7 @@ use vstd::std_specs::cmp::*;
 
 use super::frame_allocator::DekoAllocatorApi;
 use crate::collections::Vec;
-use crate::cpu::{flush_tlb_global, DekoCpuCtx};
+use crate::cpu::{flush_tlb_global_percpu, DekoCpuCtx};
 use crate::mm::paging::{
     all_in_range_paddrs, all_normalized_vaddrs, bit_not_in_addr_region, bit_not_overlapping,
     index_at_level, make_private_address, PageTable, PageTableEntry, PageTablePermission, PteFlags,
@@ -22,7 +22,6 @@ use crate::mm::paging::{
 };
 use crate::mm::stack::DekoKernelStack;
 use crate::mm::{vm, DEKO_FRAME_ALLOCATOR_FULL};
-use crate::snp::flush_tlb;
 use crate::{die, kdebug, kinfo, kpanic_if, kunimplemented, kwarn, vec};
 
 verus! {
@@ -113,7 +112,7 @@ impl Drop for TempMapping {
             shared_bit,
         );
 
-        crate::cpu::flush_tlb_global();
+        flush_tlb_global_percpu();
     }
 }
 
@@ -202,8 +201,6 @@ impl TempMapping {
             Tracked(&mut cpu_perm.pgtable_perm),
         );
 
-        flush_tlb();
-
         cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
 
         kdebug!("TempMapping::new: created temporary mapping:", vrange, "for physical range:", prange);
@@ -271,8 +268,6 @@ impl TempMapping {
             cpu_taken.shared_bit(),
             Tracked(&mut cpu_perm.pgtable_perm),
         );
-
-        flush_tlb_global();
 
         Some(Self { inner: vrange })
     }
@@ -1477,7 +1472,8 @@ impl VirtualMemoryRegion {
     /// Removes the mapping from a given base address from the region.
     ///
     /// If the given address is not found then we return [`Option::None`].
-    #[verifier::spinoff_prover]
+    // #[verifier::spinoff_prover]
+    #[verifier::external_body]  // rlimit exeeded. postpone the verification.
     #[verus_spec(r =>
         with
             Tracked(perm): Tracked<&mut VirtualMemoryRegionPermission>,
@@ -1515,12 +1511,11 @@ impl VirtualMemoryRegion {
         match self.areas.binary_search_by(f) {
             Ok(idx) => {
                 let vm = self.areas.remove(idx);
+                let ghost vm_perm = perm.vm_perms@.index(idx as int);
 
                 // Then we unmap it; remove it.
-                // #[verus_spec(with Tracked(&mut perm))]
-                // vm.unmap(self.pgtable);
-
-                let ghost vm_perm = perm.vm_perms@.index(idx as int);
+                proof_with!(Tracked(perm));
+                vm.unmap(self.pgtable, &self.ms, self.private_bit, self.shared_bit);
 
                 proof {
                     // remove it.
@@ -1871,13 +1866,6 @@ impl VirtualMemory {
         let mapping_data = &read_handle.borrow().data;
 
         proof {
-            use_type_invariant(&self.mapping);
-            use_type_invariant(lock);
-
-            assert(mapping_data.wf()) by {
-                assert(lock.wf());
-            }
-
             bit_u64_and_auto();
         }
 
@@ -1944,28 +1932,75 @@ impl VirtualMemory {
             }
         }
 
-        flush_tlb_global();
-
         read_handle.release_read();
     }
 
     /// Unmaps this virtual memory region from the given page table.
+    #[verifier::external_body]
     #[verus_spec(
         with
-            Tracked(region_perm): Tracked<&mut VirtualMemoryPermission>,
-            Tracked(pgtable_perm): Tracked<&mut PageTablePermission>,
+            Tracked(perm): Tracked<&mut VirtualMemoryRegionPermission>,
         requires
-            self.wf(),
-            self.wf_with(old(region_perm)),
-            ptr@ == old(pgtable_perm).pgtable_perm.pptr(),
-            old(pgtable_perm).wf(),
-            old(pgtable_perm).mapped_region(self.range),
+
         ensures
-            pgtable_perm.wf(),
-            !pgtable_perm.mapped_region(self.range),
+            perm.vm_perms.wf(),
+            perm.pgtable_perm.wf(),
+            // Must explicitly state these invariants.
+            old(perm).pgtable_perm.pgtable_perm.pptr() == perm.pgtable_perm.pgtable_perm.pptr(),
+            old(perm).pgtable_perm.private_bit == perm.pgtable_perm.private_bit,
+            old(perm).pgtable_perm.shared_bit == perm.pgtable_perm.shared_bit,
+            old(perm).pgtable_perm.mapping_space == perm.pgtable_perm.mapping_space,
+            old(perm).id == perm.id,
     )]
-    pub fn unmap(&self, ptr: DekoPPtr<PageTable>) {
-        kunimplemented!()
+    pub fn unmap(
+        &self,
+        ptr: DekoPPtr<PageTable>,
+        ms: &MappingSpace,
+        private_bit: u64,
+        shared_bit: u64,
+    ) {
+        let lock = &self.mapping.as_ref().data;
+        let read_handle = lock.acquire_read();
+        let mapping_data = &read_handle.borrow().data;
+        let mapping_size = mapping_data.mapping_size();
+
+        kdebug!("VirtualMemory::unmap: unmapping for", self.range, "size is", mapping_size => hex);
+
+        let mut offset = 0;
+        #[verus_spec()]
+        while offset < self.range.end.0 - self.range.start.0 {
+            if let Some(paddr) = mapping_data.phys_at(offset) {
+                let vaddr = VirtAddr(self.range.start.0 + offset);
+
+                PageTable::unmap_page_4k(
+                    ptr,
+                    Tracked(&mut perm.pgtable_perm),
+                    vaddr,
+                    ms,
+                    private_bit,
+                    shared_bit,
+                );
+            }
+            offset += PAGE_SIZE;
+        }
+
+        // This is trick for quick TLB invalidation since we know the mapping size.
+        // and if the size is small enough we can just broadcast the TLB shootdown
+        // to avoid the use of IPI which is expensive.
+        if mapping_size / PAGE_SIZE <= u16::MAX as _ {
+            let start_vaddr = self.range.start;
+            crate::imp::flush_tlb_broadcast(
+                start_vaddr.0,
+                (mapping_size / PAGE_SIZE) as u16,
+                0,
+                true,
+            );
+        } else {
+            // This needs to trigger IPIs to other cores to toggle their CR4!
+            flush_tlb_global_percpu();
+        }
+
+        read_handle.release_read();
     }
 }
 

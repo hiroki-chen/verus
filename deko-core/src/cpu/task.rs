@@ -31,8 +31,8 @@ use crate::cpu::ipi::{wait_ipi_blocking, DekoIpIMessage, DekoIpiRequest};
 use crate::cpu::irq::irq_enable;
 use crate::cpu::regs::{sse_restore_context, sse_save_context};
 use crate::cpu::{
-    self, flush_tlb_global, DekoCpuCtx, DekoCpuCtxPermission, CPUID_MAX_COUNT, CPU_NUM,
-    PERCPU_AREAS,
+    self, flush_tlb_global_percpu, flush_tlb_global_sync, DekoCpuCtx, DekoCpuCtxPermission,
+    CPUID_MAX_COUNT, CPU_NUM, PERCPU_AREAS,
 };
 use crate::guest::{handle_guest_exit, DekoGuestExitInformation, DekoGuestServError};
 use crate::imp::doorbell::HVDoorbell;
@@ -1886,8 +1886,7 @@ pub fn cpu_idle(which: usize) -> DekoRunnablePtr {
 
         if let Some(task) = task {
             // schedule this task.
-            kinfo!("Waking up task ", task.as_ref().data.id => hex, "name:", task.as_ref().data.name);
-
+            kdebug!("Waking up task ", task.as_ref().data.id => hex, "name:", task.as_ref().data.name);
             // Now we need to schedule to this task.
             schedule_this_task(task);
         }
@@ -1980,8 +1979,6 @@ pub fn set_cpu_affinity(which: usize) {
 #[verifier::spinoff_prover]
 #[verifier::exec_allows_no_decreases_clause]
 pub fn serv_main(cpu_index: usize) {
-    kinfo!("Service core", cpu_index, "entering main service loop.");
-
     let (this_cpu, Tracked(mut perm)) = DekoCpuCtx::this_cpu();
 
     if cpu_index == 0 {
@@ -2195,7 +2192,7 @@ pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
                     // Also need to update the guest interrupt delivery information here.
                     // TODO: apic controller update.
 
-                    flush_tlb_global();
+                    flush_tlb_global_sync();
 
                     // Need to update the guest APIC status here so no interrupt will
                     // be delivered.
@@ -2218,7 +2215,6 @@ pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
                         }
 
                         r
-
                         // Now we need to read the VMSA to fetch the
                         // information process the guest's request.
                     } else {
@@ -2238,11 +2234,23 @@ pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
         if r != 0 {
             return DekoGuestExitInformation::VmplSwitchFailed;
         }
+        // At this point we need to disable VMSA to prevent any
+        // accidental VM entry.
+
+        proof_decl! {
+            let tracked mut this_vmsa_perm;
+        }
+
+        let vmsa = #[verus_spec(with Tracked(&this_cpu_perm) => Tracked(mut this_vmsa_perm))]
+        VMSA::this_vmsa(this_cpu_ptr);
+
+        #[verus_spec(with Tracked(&mut this_vmsa_perm))]
+        VMSA::disable(vmsa);
+
         // If r == 0 then we have successfully entered the guest
         // and now we are back due to a VM exit.
         //
         // Now we parse the information.
-
         if let Some(info) = DekoGuestExitInformation::get_guest_exit_information() {
             return info;
         }
