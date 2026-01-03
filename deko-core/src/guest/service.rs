@@ -1,21 +1,27 @@
+use core::sync::atomic::AtomicBool;
+
 use deko_macros::DekoDebug;
 use deko_std::address::{create_paddr_range, PhysAddr, VirtAddr};
 use deko_std::bits::{bit_u32_and_auto, bit_u64_and_auto};
 use deko_std::mem::{PAGE_SIZE, PAGE_SIZE_2M};
 use deko_std::wf::WellFormed;
+use deko_std::{deko_rwlock_read_atomic_data, deko_rwlock_write_atomic_data};
 use vstd::prelude::*;
 
-use crate::cpu::{flush_tlb_global, DekoCpuCtxPermission};
+use crate::cpu::{flush_tlb_global, DekoCpuCtxPermission, PERCPU_AREAS};
 use crate::guest::{
     DekoGuestRequestParams, DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode,
 };
 use crate::imp::RmpFlags;
 use crate::mm::vm::TempMapping;
 use crate::mm::zero_page;
+use crate::snp::vmsa::VMSA;
 use crate::snp::{pvalidate, rmpadjust, validate_vaddr_region};
 use crate::{kdebug, kerror, kinfo, kwarn};
 
 verus! {
+
+exec static RMP_GUARD: AtomicBool = AtomicBool::new(false);
 
 global layout DekoGuestPValidateReq is size == 8;
 
@@ -176,7 +182,7 @@ fn pvalidate_guest_one_page(paddr: PhysAddr) -> DekoGuestServResult<()> {
 }
 
 /// The guest is requesting for a page validation operation.
-#[verifier::external_body]
+// #[verifier::external_body]
 #[verus_spec(r =>
     with
         Tracked(cpu_perm): Tracked<&mut DekoCpuCtxPermission>,
@@ -249,25 +255,34 @@ fn handle_deko_service_pvalidate(params: &DekoGuestRequestParams) -> DekoGuestSe
             kerror!("Guest pvalidate: invalid request parameters: entries=", entries, " next=", next, " max_entries=", max_entries);
             return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
         }
-        // Now process the page validation entries.
-
+        if core::hint::unlikely(
+            u64::MAX - entries as u64 * PAGE_SIZE <= temp_va.inner.start.0 + offset,
+        ) {
+            kerror!("Guest pvalidate: request size overflow: entries=", entries, " next=", next);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        }
         let mut pvalidate_result = Ok(());
-        for i in next..entries
-            invariant
-                max_entries == (PAGE_SIZE - offset - core::mem::size_of::<
-                    DekoGuestPValidateReq,
-                >() as u64) / core::mem::size_of::<u64>() as int,
+        let mut i = next;
+        #[verus_spec(
+            invariant_except_break
+                guest_req.next == i,
                 next <= i <= entries <= max_entries,
                 temp_va.wf(),
-                temp_va.inner.start@ + PAGE_SIZE <= u64::MAX,
+                temp_va.inner.start@ + (entries * PAGE_SIZE) <= u64::MAX,
                 entries as int >= 0,
                 offset <= PAGE_SIZE,
                 max_entries <= PAGE_SIZE,
-                guest_req.next == i,
                 core::mem::size_of::<u64>() == 8,
                 core::mem::size_of::<DekoGuestPValidateReq>() == 8,
                 cpu_perm.wf(),
-        {
+                PAGE_SIZE == 0x1000,
+                cpu_perm.wf(),
+            ensures
+                cpu_perm.wf(),
+            decreases
+                entries - i,
+        )]
+        while i < entries {
             // LAYOUT:
             // [ PADDING ]       [ DekoGuestPValidateReq ]                 [ u64 ] [ u64 entries... ]
             //            offset |<- size_of::<DekoGuestPValidateReq>() ->|       |<- u64 entries ->|
@@ -289,6 +304,8 @@ fn handle_deko_service_pvalidate(params: &DekoGuestRequestParams) -> DekoGuestSe
                     DekoGuestServError::FatalError => return pvalidate_result,
                 },
             };
+
+            i += 1;
         }
 
         // Write back to the guest request structure.
@@ -302,6 +319,171 @@ fn handle_deko_service_pvalidate(params: &DekoGuestRequestParams) -> DekoGuestSe
 
         Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy))
     }
+}
+
+#[verus_spec(r =>
+    with
+        Tracked(cpu_perm): Tracked<&mut DekoCpuCtxPermission>,
+    requires
+        old(cpu_perm).wf(),
+    ensures
+        cpu_perm.wf(),
+)]
+fn handle_deko_service_vcpu_create(params: &DekoGuestRequestParams) -> DekoGuestServResult<()> {
+    broadcast use RmpFlags::lemma_each_bit_is_valid;
+
+    proof {
+        bit_u32_and_auto();
+        bit_u64_and_auto();
+    }
+
+    // Extract the parameters.
+    let vcpu_id = params.r8 & 0xffff_ffff;
+    // the physical address of the vmsa page.
+    let vmsa_page = params.rcx;
+    // the physical address of the caa page.
+    let caa_page = params.rdx;
+    let sev_features = params.sev_features;
+
+    kdebug!(
+        "Guest vCPU create: vcpu_id =", vcpu_id,
+        "vmsa_page =", vmsa_page => hex,
+        "caa_page =", caa_page => hex,
+        "sev_features =", sev_features
+    );
+
+    // Check the alignment of the pages.
+    if core::hint::unlikely(vmsa_page % PAGE_SIZE != 0 || caa_page % PAGE_SIZE != 0) {
+        kerror!("Guest vCPU create: unaligned vmsa or caa page: vmsa=", vmsa_page, " caa=", caa_page);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
+    }
+    if false {  /* Check if this address falls within the guest physical address regions. */
+        // Placeholder for now.
+        kerror!("Guest vCPU create: invalid vmsa or caa page: vmsa=", vmsa_page, " caa=", caa_page);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
+    }
+    if core::hint::unlikely(
+        vmsa_page >= 0x000f_ffff_ffff_f000u64 - PAGE_SIZE || caa_page >= 0x000f_ffff_ffff_f000u64
+            - PAGE_SIZE,
+    ) {
+        kerror!("Guest vCPU create: vmsa or caa page out of range: vmsa=", vmsa_page, " caa=", caa_page);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
+    }
+    let pvmsa = PhysAddr(vmsa_page);
+    let pcaa = PhysAddr(caa_page);
+
+    // Since vCPU creation requires page validation; we need to
+    // acquire the RMP guard here.
+    let mut attempt = 0xffff_ffffu32;
+    let mut ok = false;
+    #[verus_spec(
+        decreases
+            attempt,
+    )]
+    while attempt != 0 {
+        // Try to acquire the RMP guard.
+        match RMP_GUARD.compare_exchange_weak(
+            false,
+            true,
+            core::sync::atomic::Ordering::Relaxed,
+            core::sync::atomic::Ordering::Relaxed,
+        ) {
+            Ok(_) => {
+                ok = true;
+                break ;
+            },
+            Err(_) => {
+                // Failed to acquire the guard; retry.
+            },
+        }
+        attempt -= 1;
+    }
+
+    if !ok {
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy));
+    }
+    let vmsa_mapping = match TempMapping::new(create_paddr_range(pvmsa, 1)) {
+        Some(m) => m,
+        None => {
+            RMP_GUARD.store(false, core::sync::atomic::Ordering::Release);
+            kerror!("Guest vCPU create: failed to create temporary mapping for VMSA page at: ", pvmsa);
+
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy));
+        },
+    };
+
+    // Perform a sanity check here.
+    {
+        proof {
+            // TODO: We port size information to another module for
+            // better organization and readability.
+            assume(core::mem::size_of::<VMSA>() == 4096);
+        }
+
+        let vmsa = vmsa_mapping.read_ref::<VMSA>();
+        // Now check if the VMSA is valid.
+        if vmsa.vmpl != 2 || vmsa.efer & (1 << 12) == 0 || vmsa.sev_features != sev_features {
+            kerror!("Guest vCPU create: invalid VMSA parameters");
+
+            RMP_GUARD.store(false, core::sync::atomic::Ordering::Release);
+
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        }
+    }
+
+    assume(cpu_perm.pgtable_perm.mapped_region(vmsa_mapping.inner));
+
+    // Now adjust the permission.
+    if rmpadjust(
+        vmsa_mapping.inner.start,
+        PAGE_SIZE,
+        RmpFlags::from_bits_truncate(RmpFlags::vmsa().bits() | RmpFlags::vmpl2().bits()),
+        Tracked(&mut cpu_perm.pgtable_perm),
+    ) != 0 {
+        RMP_GUARD.store(false, core::sync::atomic::Ordering::Release);
+
+        kerror!("Guest vCPU create: failed to adjust RMP for VMSA page at: ", pvmsa);
+
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidReq));
+    }
+    RMP_GUARD.store(false, core::sync::atomic::Ordering::Release);
+
+    deko_rwlock_read_atomic_data! {
+        PERCPU_AREAS,
+        percpu_areas,
+        percpu_areas_perm,
+        {
+            // crate::check_shared_cpu_idx!(vcpu_id as usize, percpu_areas, percpu_areas);
+            if let Some(percpu_areas) = percpu_areas {
+                if core::hint::unlikely(vcpu_id as usize >= percpu_areas.0.len()) {
+                    kerror!("Guest vCPU create: invalid vCPU ID: ", vcpu_id);
+                    Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))
+                } else {
+                    // Fetch the per-CPU area.
+                    let this_cpu = &percpu_areas.0[vcpu_id as usize];
+                    let guest_vmsa = &this_cpu.guest_vmsa;
+
+                    deko_rwlock_write_atomic_data! {
+                        guest_vmsa,
+                        guest_vmsa_ref,
+                        __,
+                        {
+                            guest_vmsa_ref.caa = Some(pcaa);
+                            guest_vmsa_ref.vmsa = Some(pvmsa);
+                            guest_vmsa_ref.generation = guest_vmsa_ref.generation.wrapping_add(1);
+                        }
+                    }
+
+                    Ok(())
+                }
+            } else {
+                kerror!("Guest vCPU create: internal error");
+                Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy))
+            }
+        }
+    }?;
+
+    Ok(())
 }
 
 /// Subroutine for handling DEKO service requests from the guest.
@@ -323,6 +505,10 @@ pub(super) fn handle_guest_exit_deko_service(
         DEKO_SERVICE_PVALIDATE => {
             proof_with!(Tracked(cpu_perm));
             handle_deko_service_pvalidate(params)
+        },
+        DEKO_SERVICE_CREATE_VCPU => {
+            proof_with!(Tracked(cpu_perm));
+            handle_deko_service_vcpu_create(params)
         },
         _ => {
             kerror!("Unsupported deko service request: ", req);

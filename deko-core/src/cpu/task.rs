@@ -1523,8 +1523,43 @@ pub unsafe fn schedule_init() {
     );
 }
 
+/// Schedules the given task to run on the current CPU.
+#[verus_spec(
+    requires
+        task.wf(),
+)]
+pub fn schedule_this_task(task: DekoRunnablePtr) {
+    let (cpu, Tracked(perm)) = DekoCpuCtx::this_cpu();
+    let cpu = cpu.borrow(Tracked(&perm.ptr_perm));
+    let rq = cpu.run_queue.as_ref();
+    // make verus happy.
+    kpanic_if!(core::hint::unlikely(rq.is_none()), "No run queue found when scheduling task");
+
+    // First we set this task as the running.
+    deko_rwlock_write_atomic_data! {
+        rq.unwrap(),
+        runqueue,
+        runqueue_perm,
+        {
+            deko_rwlock_write_atomic_data! {
+                &task.as_ref().data.state,
+                state,
+                __,
+                {
+                    state.state = DekoRunnableState::RUNNING;
+                }
+            }
+
+            // Then let it
+            #[verus_spec(with Tracked(runqueue_perm.borrow_mut()))]
+            runqueue.handle_task(task);
+        }
+    }
+
+    schedule();
+}
+
 /// Schedules the next task to run on the current CPU.
-#[verifier::external_body]  // temporary until we debug what's wrong
 pub fn schedule() {
     let (cpu, Tracked(perm)) = DekoCpuCtx::this_cpu();
     let cpu_id = cpu.borrow(Tracked(&perm.ptr_perm)).cpu_id;
@@ -1764,6 +1799,55 @@ fn into(f: u64, args: u64) -> (__: !) {
 
 func_ptr!(run_kernel_tasks);
 
+/// Put the current CPU into a busy-wait idle state and set up the
+/// runqueue accordingly for next wake up.
+pub fn cpu_go_idle(which: usize) {
+    let (cpu, Tracked(perm)) = DekoCpuCtx::this_cpu();
+    let cpu = cpu.borrow(Tracked(&perm.ptr_perm));
+
+    kpanic_if!(
+        core::hint::unlikely(cpu.run_queue.is_none()),
+        "No run queue is assigned to the CPU.",
+    );
+
+    kpanic_if!(
+        core::hint::unlikely(which != cpu.cpu_id as usize),
+        "CPU ID mismatch when going idle.",
+    );
+
+    deko_rwlock_write_atomic_data! {
+        cpu.run_queue.as_ref().unwrap(),
+        rq,
+        __,
+        {
+            kpanic_if!(
+                core::hint::unlikely(rq.current.is_none()),
+                "No current task is running on the CPU.",
+            );
+
+            deko_rwlock_write_atomic_data! {
+                rq.current.as_ref().unwrap().as_ref().data.state,
+                state,
+                __,
+                {
+                    // set this task as BLOCKED.
+                    state.state = DekoRunnableState::BLOCKED;
+                }
+            }
+
+            kpanic_if!(
+                core::hint::unlikely(rq.wake.is_some()),
+                "Run queue wake field is already set.",
+            );
+
+            // Set the wake field to wake up this task later.
+            rq.wake = Some(rq.current.as_ref().unwrap().clone());
+        }
+    };
+
+    schedule();
+}
+
 /// Put the current CPU into idle state and halt it for saving the
 /// power unless some other cores wake it up by sending an IPI.
 #[verus_spec(r =>
@@ -1802,7 +1886,10 @@ pub fn cpu_idle(which: usize) -> DekoRunnablePtr {
 
         if let Some(task) = task {
             // schedule this task.
-            kinfo!("Waking up task ", task.as_ref().data.id => hex, " on CPU core ", which);
+            kinfo!("Waking up task ", task.as_ref().data.id => hex, "name:", task.as_ref().data.name);
+
+            // Now we need to schedule to this task.
+            schedule_this_task(task);
         }
         schedule();
     }
@@ -1970,7 +2057,7 @@ pub fn serv_main(cpu_index: usize) {
 
     wait_ipi_blocking();  // ensure all cores are synchronized.
 
-    let mut regs = [0u64;4];
+    let mut r = 0;
 
     // Try to enter the guest again.
     #[verus_spec(
@@ -1978,16 +2065,13 @@ pub fn serv_main(cpu_index: usize) {
             cpu_index < CPUID_MAX_COUNT,
             // perm.wf_with(this_cpu),
             perm.wf(),
-            regs@.len() == 4,
     )]
     loop {
-        match try_enter_guest(&regs) {
+        match try_enter_guest(r) {
             // The core does not have a guest created yet.
             // let it enter idle state.
             DekoGuestExitInformation::CoreNotCreated => {
-                // should be more advanced and adjus the
-                // runqueue for better performance.
-                cpu_idle(cpu_index);
+                cpu_go_idle(cpu_index);
             },
             DekoGuestExitInformation::VmplSwitchFailed => {
                 kerror!("VMPL switch failed on core ", cpu_index);
@@ -2000,7 +2084,7 @@ pub fn serv_main(cpu_index: usize) {
             } => match #[verus_spec(with Tracked(&mut perm))]
             crate::guest::handle_guest_exit(protocol, req, &mut params) {
                 Ok(()) => {
-                    regs = [0u64, params.rcx, params.rdx, params.r8];
+                    r = 0;
                 },
                 Err(e) => {
                     match e {
@@ -2008,7 +2092,7 @@ pub fn serv_main(cpu_index: usize) {
                             die("Fatal error occurred when handling guest request.");
                         },
                         DekoGuestServError::SoftError(e) => {
-                            regs = [e.into_error_code(), params.rcx, params.rdx, params.r8];
+                            r = e.into_error_code();
                         },
                     }
                 },
@@ -2034,17 +2118,15 @@ func_ptr!(serv_main);
 /// to the guest context and it can request anything via VM exits.
 #[verifier::exec_allows_no_decreases_clause]
 #[verus_spec(
-    requires
-        additional_regs@.len() == 4,
 )]
-pub fn try_enter_guest(additional_regs: &[u64]) -> DekoGuestExitInformation {
+pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
     let (this_cpu_ptr, Tracked(this_cpu_perm)) = DekoCpuCtx::this_cpu();
     let this_cpu = this_cpu_ptr.borrow(Tracked(&this_cpu_perm.ptr_perm));
     let this_cpu_index: usize = this_cpu.cpu_id as usize;
     if this_cpu.doorbell.is_none() {
         die("No doorbell assigned to the CPU.");
     }
-    let Tracked(this_cpu_perm) = DekoCpuCtx::update_guest_vmsa(
+    let Tracked(mut this_cpu_perm) = DekoCpuCtx::update_guest_vmsa(
         this_cpu_ptr,
         Tracked(this_cpu_perm),
     );
@@ -2056,7 +2138,7 @@ pub fn try_enter_guest(additional_regs: &[u64]) -> DekoGuestExitInformation {
     // So we need to update rax to indicate whether the
     // request has been served successfully.
     proof_with!(Tracked(&mut vmsa_perm));
-    VMSA::set_rax(vmsa, additional_regs[0]);
+    VMSA::set_rax(vmsa, prev_errno);
 
     #[verus_spec(
         invariant
@@ -2145,6 +2227,13 @@ pub fn try_enter_guest(additional_regs: &[u64]) -> DekoGuestExitInformation {
                 })
             }
         };
+
+        let new_perm = DekoCpuCtx::update_guest_vmsa(this_cpu_ptr, Tracked(this_cpu_perm));
+        let Tracked(new_perm) = new_perm;
+
+        proof {
+            this_cpu_perm = new_perm;
+        }
 
         if r != 0 {
             return DekoGuestExitInformation::VmplSwitchFailed;

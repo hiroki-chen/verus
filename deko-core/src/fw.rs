@@ -531,6 +531,7 @@ fn invalidate_boot_memory(header: &DekoKernelLaunchInfo, prange: PaddrRange, nee
         kpanic_if!(r != 0, "PVALIDATE failed to invalidate early boot memory at", PhysAddr(cur), "with return code", r);
 
         if !changed {
+            // Not sure if we should instead treat this as a fatal error.
             kerror!("Warning: PVALIDATE did not change page state when invalidating early boot memory at", PhysAddr(cur), "already invalid!");
 
             break ;

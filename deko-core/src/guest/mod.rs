@@ -269,7 +269,10 @@ pub fn handle_guest_exit(
             proof_with!(Tracked(cpu_perm));
             service::handle_guest_exit_deko_service(req, params)
         },
-        _ => { Err(DekoGuestServError::SoftError(DekoGuestServResultCode::UnsupportedProtocol)) },
+        _ => {
+            kerror!("Unsupported guest exit protocol: ", protocol);
+            Err(DekoGuestServError::SoftError(DekoGuestServResultCode::UnsupportedProtocol))
+        },
     }
 }
 

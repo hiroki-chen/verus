@@ -122,6 +122,7 @@ with_atomic_pred!(
     data.wf()
 );
 
+#[derive(DekoDebug)]
 pub struct GuestVmsaRef {
     pub vmsa: Option<PhysAddr>,
     pub caa: Option<PhysAddr>,
@@ -1075,16 +1076,7 @@ impl DekoCpuCtx {
             percpu_areas,
             percpu_areas_perm,
             {
-                let Some(ref percpu_areas) = percpu_areas else {
-                    die("Per-CPU areas not initialized");
-                };
-
-                kpanic_if!(
-                    core::hint::unlikely(
-                        cpu_idx >= percpu_areas.0.len(),
-                    ),
-                    "CPU index out of bounds"
-                );
+                crate::check_shared_cpu_idx!(cpu_idx, percpu_areas, percpu_areas);
 
                 let guest_vmsa = &get_unchecked(&percpu_areas.0, cpu_idx).guest_vmsa;
                 deko_rwlock_write_atomic_data! {
@@ -1129,10 +1121,10 @@ impl DekoCpuCtx {
                                     // and re-insert the new ones.
                                     //
                                     // Missing mappings are fine as we are going to insert new ones anyway.
-                                    // #[verus_spec(with Tracked(&mut vm_region_perm) => _)]
-                                    // let _ = vm_region.remove(PERCPU_VMSA_BASE);
-                                    // #[verus_spec(with Tracked(&mut vm_region_perm) => _)]
-                                    // let _ = vm_region.remove(PERCPU_CAA_BASE);
+                                    #[verus_spec(with Tracked(&mut vm_region_perm) => _)]
+                                    let _ = vm_region.remove(PERCPU_VMSA_BASE);
+                                    #[verus_spec(with Tracked(&mut vm_region_perm) => _)]
+                                    let _ = vm_region.remove(PERCPU_CAA_BASE);
 
                                     let (caa_mapping, vmsa_mapping) = {
                                         // add these to global invariants.
@@ -1141,7 +1133,6 @@ impl DekoCpuCtx {
                                         assume(caa_paddr@ + PAGE_SIZE as u64 <= 0x1_0000_0000_0000);
                                         assume(vmsa_paddr@ + PAGE_SIZE as u64 <= 0x1_0000_0000_0000);
 
-                                        kinfo!("vmsa_paddr =>", vmsa_paddr);
                                         let caa_mapping = make_mapping(VmMapping::PhysMem {
                                             paddr: caa_paddr,
                                             size: PAGE_SIZE as _,

@@ -26,7 +26,19 @@ use crate::snp::{
 };
 use crate::{die, kdebug, kerror, kinfo, kunimplemented, kwarn};
 
+const _: () = {
+    assert!(core::mem::size_of::<VMSASegment>() == 0x10);
+    assert!(core::mem::size_of::<VmsaTableRegister>() == 0x10);
+    assert!(core::mem::size_of::<VMSA>() == 4096);
+};
+
 verus! {
+
+global layout VMSA is size == 4096;
+
+global layout VMSASegment is size == 16;
+
+global layout VmsaTableRegister is size == 16;
 
 fn real_mode_code_segment(rip: u64) -> VMSASegment {
     VMSASegment { selector: 0xf000, base: rip & 0xffff_0000u64, limit: 0xffff, flags: 0x9b }

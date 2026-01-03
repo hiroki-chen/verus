@@ -325,6 +325,44 @@ impl WellFormed for TempMapping {
 }
 
 #[verus_verify]
+impl TempMapping {
+    /// Try to read a reference of type `T` from the temporary mapping.
+    ///
+    /// Note that there would no semantic checks for now (can be added later; though).
+    #[inline]
+    #[verifier::external_body]
+    #[verus_spec(
+        requires
+            self.wf(),
+            self.inner.end@ - self.inner.start@ >= core::mem::size_of::<T>() as u64,
+    )]
+    pub fn read_ref<T: Sized>(&self) -> &T {
+        let ptr = self.inner.start.0 as *const T;
+
+        // SAFETY: This operation is safe because `self` guarantees that the
+        // temporary mapping is valid for at least `size_of::<T>()` bytes.
+        // Additionally, the lifetime of the returned reference is tied to
+        // `self`, ensuring that the mapping remains valid while the reference
+        // is in use.
+        //
+        // Also this mapping is created on the current CPU context, so
+        // no page fault will occur when accessing this mapping.
+        unsafe { &*ptr }
+    }
+
+    /// Try to read a copied value of type `T` from the temporary mapping.
+    #[inline]
+    #[verus_spec(
+        requires
+            self.wf(),
+            self.inner.end@ - self.inner.start@ >= core::mem::size_of::<T>() as u64,
+    )]
+    pub fn read_copied<T: Copy>(&self) -> T {
+        *self.read_ref::<T>()
+    }
+}
+
+#[verus_verify]
 impl VirtualMemoryTemporary {
     /// Creates a new temporary mapping manager with the given
     /// starting virtual address and number of pages.
@@ -1452,6 +1490,8 @@ impl VirtualMemoryRegion {
             ensures
                 self.wf(),
                 self.wf_with(perm),
+                old(perm).pgtable_perm.private_bit == perm.pgtable_perm.private_bit,
+                old(perm).pgtable_perm.shared_bit == perm.pgtable_perm.shared_bit,
                 r matches Some(vm) ==> {
                     &&& vm.wf()
                     &&& vm_perm@ matches Some(vm_perm_val) && vm.wf_with(&vm_perm_val) && vm_perm_val.parent_id == self.id
