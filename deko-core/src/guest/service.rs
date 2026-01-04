@@ -8,7 +8,9 @@ use deko_std::wf::WellFormed;
 use deko_std::{deko_rwlock_read_atomic_data, deko_rwlock_write_atomic_data, trace_enable};
 use vstd::prelude::*;
 
-use crate::cpu::{flush_tlb_global_percpu, DekoCpuCtxPermission, PERCPU_AREAS};
+use crate::cpu::{
+    flush_tlb_global_percpu, flush_tlb_global_sync, DekoCpuCtxPermission, PERCPU_AREAS,
+};
 use crate::guest::{
     DekoGuestRequestParams, DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode,
 };
@@ -324,6 +326,7 @@ fn handle_deko_service_pvalidate(params: &DekoGuestRequestParams) -> DekoGuestSe
     }
 }
 
+/// The guest is requesting for vCPU destruction.
 #[verus_spec(r =>
     with
         Tracked(cpu_perm): Tracked<&mut DekoCpuCtxPermission>,
@@ -335,8 +338,54 @@ fn handle_deko_service_pvalidate(params: &DekoGuestRequestParams) -> DekoGuestSe
 pub fn handle_deko_service_vcpu_destroy(params: &DekoGuestRequestParams) -> DekoGuestServResult<
     (),
 > {
-    kwarn!("Guest vCPU destroy: not implemented yet");
-    Err(DekoGuestServError::SoftError(DekoGuestServResultCode::UnsupportedProtocol))
+    broadcast use RmpFlags::lemma_each_bit_is_valid;
+
+    proof {
+        bit_u32_and_auto();
+        bit_u64_and_auto();
+    }
+
+    let vmsa = params.rcx;
+
+    if core::hint::unlikely(vmsa % PAGE_SIZE != 0) {
+        kerror!("Guest vCPU destroy: unaligned vmsa page: vmsa=", vmsa);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
+    }
+    if false {  /* Check if this address falls within the guest physical address regions. */
+        // Placeholder for now.
+        kerror!("Guest vCPU destroy: invalid vmsa page: vmsa=", vmsa);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
+    }
+    if core::hint::unlikely(vmsa >= 0x000f_ffff_ffff_f000u64 - PAGE_SIZE) {
+        kerror!("Guest vCPU destroy: vmsa page out of range: vmsa=", vmsa);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
+    }
+    // Map it temporarily.
+
+    let pvmsa = PhysAddr(vmsa);
+    let vmsa_mapping = match TempMapping::new(create_paddr_range(pvmsa, 1)) {
+        Some(m) => m,
+        None => {
+            kerror!("Guest vCPU destroy: failed to create temporary mapping for VMSA page at: ", pvmsa);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy));
+        },
+    };
+
+    assume(cpu_perm.pgtable_perm.mapped_region(vmsa_mapping.inner));
+
+    // Now we adjust the RMP permissions.
+    if rmpadjust(
+        vmsa_mapping.inner.start,
+        PAGE_SIZE,
+        RmpFlags::rwx_guest_vmpl2(),
+        Tracked(&mut cpu_perm.pgtable_perm),
+    ) != 0 {
+        kerror!("Guest vCPU destroy: failed to adjust RMP for VMSA page at: ", pvmsa);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidReq));
+    }
+    flush_tlb_global_sync();
+
+    Ok(())
 }
 
 #[verus_spec(r =>
