@@ -14,6 +14,7 @@ use deko_core::cpu::regs::{cr0_init, cr4_init, load_cr3, sse_init};
 use deko_core::cpu::task::{
     self, cpu_idle, run_kernel_tasks, schedule_init, DekoRunQueue, DekoRunQueuePred, DekoRunnable,
 };
+use deko_core::cpu::tlb::set_tlb_flush_smp;
 use deko_core::cpu::{
     set_availabe_cpu_nums, start_application_processor, CpuidTable, DekoCpuCtx,
     DekoCpuCtxPermission, PerCpuShared, CPUID_MAX_COUNT, IST_DF, PERCPU_AREAS,
@@ -113,6 +114,9 @@ fn start_application_processors(igvm_params: &IgvmParams<'_>) {
             return ;
         };
 
+        if acpi_fw.tables.len() > 0 {
+            set_tlb_flush_smp();
+        }
         let mut i = 0;
 
         while i < acpi_fw.tables.len()

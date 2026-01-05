@@ -9,6 +9,7 @@ pub mod msr;
 pub mod regs;
 pub mod smp;
 pub mod task;
+pub mod tlb;
 pub mod types;
 
 use core::borrow::BorrowMut;
@@ -53,7 +54,7 @@ use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR_FULL};
 use crate::snp::doorbell::{HVDoorbell, HvDoorbellPtrPermission, HvDoorbellPtrPred};
 use crate::snp::ghcb::{validate_ghcb, GuestHostCommunicationBlock};
 use crate::snp::vmsa::{VmsaInitialContext, VmsaPage, VmsaPagePermission, VmsaPagePred};
-use crate::snp::{flush_tlb, Rmp_ALL_BITS};
+use crate::snp::Rmp_ALL_BITS;
 use crate::{die, kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
 
 verus! {
@@ -434,7 +435,7 @@ impl View for PerCpuAreas {
 ///
 /// Because this struct is frequently accessed, it is unwise for use to allocate everything
 /// just on the stack as this would cause a lot of stack overflows and bad for performance.
-pub exec static PERCPU_AREAS: DekoUnsafeRwLock<
+pub exec static PERCPU_AREAS: DekoSafeRwLock<
     Option<PerCpuAreas>,
     PerCpuAreasPermission,
     PerCpuAreasOptPred,
@@ -447,7 +448,7 @@ pub exec static PERCPU_AREAS: DekoUnsafeRwLock<
             None,
             Tracked(PerCpuAreasPermission { shared_perms: Seq::tracked_empty() }),
         ),
-        IrqUnSafeLockGuard {  },
+        IrqSafeLockGuard {  },
         Ghost(PerCpuAreasOptPred {  }),
     );
     proof {
@@ -1052,7 +1053,6 @@ impl DekoCpuCtx {
             shared_bit,
         );
 
-        flush_tlb_global_percpu();
     }
 
     /// Tries to update the mapping of the guest VMSA on this CPU.
@@ -1541,6 +1541,7 @@ impl DekoCpuCtx {
             kernel_mapping.clone(),
             private_bit,
             shared_bit,
+            false,
         );
 
         // Create a mapping for the CPU area itself.
@@ -2135,74 +2136,6 @@ unsafe extern "C" fn ap_start() -> ! {
 }
 
 func_ptr!(ap_start);
-
-/// Flushes all TLB entries on the **current CPU**, including those marked with the Global (G) bit.
-///
-/// This works by toggling the `CR4.PGE` (Page Global Enable) bit. This forces the CPU
-/// to invalidate all cached translations, including kernel mappings that normally
-/// persist across CR3 context switches.
-///
-/// # SMP Safety
-/// **This operation is local.** It does not affect other cores.
-/// If you updated a shared page table (like the per-cpu area mappings), you must ensure
-/// this function is executed on **every active CPU** (e.g., via an IPI broadcast)
-/// to prevent stale translations on other cores.
-pub fn flush_tlb_global_percpu() {
-    broadcast use Cr4Flags::lemma_each_bit_is_valid;
-
-    let old_cr4 = read_cr4();
-
-    let cr4 = Cr4Flags::from_bits_truncate(old_cr4.bits() ^ regs::PGE);
-
-    proof {
-        assert(cr4.bits() & regs::Cr4_ALL_BITS == cr4.bits()) by {
-            bit_u64_and_auto();
-        }
-    }
-
-    write_cr4(cr4);
-    write_cr4(old_cr4);
-}
-
-/// Flushes all TLB entries on **all CPUs**, including those marked with the Global (G) bit.
-///
-/// This function sends an IPI to all active CPUs to perform the flush operation.
-/// It then flushes the TLB on the current CPU as well.
-///
-/// If there is no other active CPU, this function only flushes the TLB on the current CPU.
-pub fn flush_tlb_global_sync() {
-    let cpu_cnt = match CPU_NUM.get() {
-        Some(DekoAtomicData { data, .. }) => data.num as usize,
-        None => 0,
-    };
-
-    kpanic_if!(
-        core::hint::unlikely(cpu_cnt == 0 || cpu_cnt > CPUID_MAX_COUNT as usize),
-        "CPU count invalid:", cpu_cnt
-    );  // BSP fail to initialize?
-
-    if cpu_cnt > 1 {
-        // Multiple CPUs, send IPI to flush others.
-        let mut targets: alloc::vec::Vec<usize, crate::mm::frame_allocator::DekoAllocatorApi> =
-            crate::vec![];
-
-        for i in 1..cpu_cnt
-            invariant
-                cpu_cnt <= CPUID_MAX_COUNT,
-                targets@.len() == i - 1,
-                forall|j: int| 0 <= j < targets@.len() ==> targets@[j] < cpu_cnt as int,
-        {
-            targets.push(i);
-        }
-
-        let req = DekoIpiRequest::new(&targets, DekoIpIMessage::TlbShootdown);
-
-        req.send_ipi();
-    }
-    // Flush local TLB as well.
-
-    flush_tlb_global_percpu();
-}
 
 } // verus!
 #[macro_export]

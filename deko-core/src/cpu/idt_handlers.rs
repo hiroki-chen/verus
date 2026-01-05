@@ -54,6 +54,10 @@ pub fn pretty_pf_errno(errno: u64) {
 unsafe extern "C" fn ex_handler_panic(ctx: &mut X86ExceptionContext) {
     kinfo!("Panic Exception occurred:", ctx);
 
+    let doorbell = core::slice::from_raw_parts(ctx.regs.rdi as *const u8, 0x100);
+
+    kinfo!("  ", doorbell);
+
     let (cpu, Tracked(perm)) = crate::cpu::DekoCpuCtx::this_cpu();
     let cpu = cpu.borrow(Tracked(&perm.ptr_perm));
 

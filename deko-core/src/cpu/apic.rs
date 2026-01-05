@@ -90,7 +90,6 @@ pub trait Apic: deko_std::fmt::DekoDebug + WellFormed {
         broadcast use SnpStatusFlags::lemma_each_bit_is_valid;
 
         if SnpStatusFlags::get_status().contains(REST_INJ) {
-            kdebug!("RESTRICTED INJ");
             // Forward this to HV doorbell.
             let (ghcb, Tracked(perm)) = crate::snp::ghcb::current_ghcb();
             GuestHostCommunicationBlock::hv_ipi(

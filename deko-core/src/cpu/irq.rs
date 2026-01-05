@@ -237,9 +237,8 @@ pub fn irq_enable() {
 
         if state {
             raw_irq_enable();
-            // Now we need to process any pending IRQs
-            // via the doorbell page.
-            crate::imp::process_pending_hv_events();
+            // Cleanup any pending events that happened while IRQs were disabled.
+            crate::imp::after_irq_enable();
         }
     }
     this_cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);

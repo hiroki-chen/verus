@@ -30,10 +30,8 @@ use crate::collections::Vec;
 use crate::cpu::ipi::{wait_ipi_blocking, DekoIpIMessage, DekoIpiRequest};
 use crate::cpu::irq::{irq_enable, no_irq_zone, DekoUnsafeRwLock, IrqUnSafeLockGuard};
 use crate::cpu::regs::{sse_restore_context, sse_save_context};
-use crate::cpu::{
-    self, flush_tlb_global_percpu, flush_tlb_global_sync, DekoCpuCtx, DekoCpuCtxPermission,
-    CPUID_MAX_COUNT, CPU_NUM, PERCPU_AREAS,
-};
+use crate::cpu::tlb::{flush_tlb_global_percpu, flush_tlb_global_sync};
+use crate::cpu::{self, DekoCpuCtx, DekoCpuCtxPermission, CPUID_MAX_COUNT, CPU_NUM, PERCPU_AREAS};
 use crate::guest::{handle_guest_exit, DekoGuestExitInformation, DekoGuestServError};
 use crate::imp::doorbell::HVDoorbell;
 use crate::imp::ghcb::{vmpl_switch, GuestHostCommunicationBlock};
@@ -48,6 +46,7 @@ use crate::mm::vm::{
     VirtualMemoryRegionPermission, VirtualMemoryRegionPred, VmMapping, VmMappingPred, VMR_GRANULE,
 };
 use crate::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR, DEKO_FRAME_ALLOCATOR_FULL};
+use crate::snp::after_irq_enable;
 use crate::{dbg, die, kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
 
 core::arch::global_asm!(
@@ -59,6 +58,17 @@ core::arch::global_asm!(
 const _: () = {
     assert!(core::mem::offset_of!(X86ExceptionContext, frame.flags) == 0x98);
 };
+
+extern "C" {
+    /// This symbol is used to re-direct the control flow the HV handling for
+    /// debugging purposes.
+    ///
+    /// When it set to true then the panic handler will be invoked, which then
+    /// dumps all the registers and halts the CPU.
+    #[link_name = "DEBUG"]
+    #[link_section = ".data"]
+    pub static mut debug_hv: bool;
+}
 
 verus! {
 
@@ -912,8 +922,6 @@ impl DekoRunnable {
 
         kdebug!("Allocated VM region for new task: index", idx, "region", region);
 
-        // TODO: Where should the virtual region come from?
-        // Perhaps we'll need some allocator to do so.
         proof_with!(Tracked(pgtable_perm), => Tracked(vm_region_perm));
         let vmr = VirtualMemoryRegion::new(
             region.start,
@@ -923,6 +931,7 @@ impl DekoRunnable {
             ms,
             private_bit,
             shared_bit,
+            true,
         );
 
         DekoArc::new(
@@ -1868,16 +1877,16 @@ pub fn cpu_go_idle(which: usize) {
 )]
 #[verifier::exec_allows_no_decreases_clause]
 pub fn cpu_idle(which: usize) -> DekoRunnablePtr {
-    kinfo!("CPU ", which, " entering idle state.");
-
-    kinfo!("enabled?", cpu::irq::irq_enabled());
-
     #[verus_spec(
         invariant
             which < CPUID_MAX_COUNT,
     )]
     loop {
-        early_dbg();  // <=> hlt, though bad naming
+        kdebug!("CPU ", which, " is going idle.");
+        kdebug!("enabled IRQ?", cpu::irq::irq_enabled());
+        put_cpu_idle();
+        kdebug!("CPU ", which, " is awaken");
+        kdebug!("enabled IRQ?", cpu::irq::irq_enabled());
 
         // Check if there is any IPI sent to this CPU.
         let (cpu, Tracked(perm)) = DekoCpuCtx::this_cpu();
@@ -1909,6 +1918,70 @@ pub fn cpu_idle(which: usize) -> DekoRunnablePtr {
 }
 
 func_ptr!(cpu_idle);
+
+/// Performs the idle operation for the current CPU.
+///
+/// This function requires extra care that it should be
+/// able to be awaken by other cores via software-based IPI
+/// especially for SNP platforms as if doorbell fires right
+/// during cpu disables IRQ, it will be ignored or postponed
+/// until IRQ is re-enabled, which may cause deadlock if no
+/// other interrupts are coming to wake up this core.
+#[verifier::external_body]
+fn put_cpu_idle() {
+    kdebug!("Putting CPU into idle state.");
+    let (cpu, Tracked(mut perm)) = DekoCpuCtx::this_cpu();
+    let cpu = cpu.borrow(Tracked(&perm.ptr_perm));
+    let doorbell_ptr = match cpu.doorbell {
+        Some(
+            ref ptr,
+        ) => deko_rwlock_read_atomic_data! {
+        ptr,
+        doorbell,
+        __,
+        {
+            doorbell.addr() as u64
+        }
+    },
+        None => { 0 },
+    };
+
+    unsafe {
+        let doorbell = core::slice::from_raw_parts(
+            doorbell_ptr as *const u8,
+            core::mem::size_of::<crate::imp::doorbell::HVDoorbell>(),
+        );
+        kdebug!("Doorbell address: ", doorbell_ptr => hex);
+        kdebug!("Doorbell content: ", doorbell => hex);
+        debug_hv = true;
+    }
+
+    no_irq_zone(
+        ||
+            {
+                kpanic_if!(
+                    core::hint::unlikely(cpu.run_queue.is_none()),
+                    "No runqueue is assigned to the CPU.",
+                );
+
+                let should_idle =
+                    deko_rwlock_read_atomic_data! {
+                    cpu.run_queue.as_ref().unwrap(),
+                    rq,
+                    rq_perm,
+                    {
+                        rq.run_list.len() == 0
+                    }
+                };
+
+                if should_idle {
+                    after_irq_enable();
+
+                    crate::imp::idle_halt(doorbell_ptr);
+                }
+            },
+    );
+}
 
 /// Sets the CPU affinity for the current task.
 ///
@@ -2208,6 +2281,7 @@ pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
         if should_end {
             return DekoGuestExitInformation::CoreNotCreated;
         }
+        kdebug!("will try to flush tlb!!!!");
         let r = no_irq_zone(
             ||
                 {
@@ -2215,32 +2289,7 @@ pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
                     // TODO: apic controller update.
                     // Need to update the guest APIC status here so no interrupt will
                     // be delivered.
-                    // flush_tlb_global_sync();
-                    let no_further_signal =
-                        deko_rwlock_read_atomic_data! {
-                            cpu.doorbell.as_ref().unwrap(),
-                            doorbell,
-                            doorbell_perm,
-                            {
-                                #[verus_spec(with Tracked(doorbell_perm.borrow()))]
-                                HVDoorbell::no_further_signal(*doorbell)
-                            }
-                    };
-
-                    if no_further_signal {
-                        let r = vmpl_switch(2);  // switch to VMPL2
-                        // crate::imp::vmpl_run(2);
-
-                        if r != 0 {
-                            kerror!("Failed to switch to VMPL2: error code ", r => hex);
-                        }
-                        r
-                        // Now we need to read the VMSA to fetch the
-                        // information process the guest's request.
-
-                    } else {
-                        1
-                    }
+                    vmpl_switch(2);
                 },
         );
 
@@ -2251,9 +2300,6 @@ pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
             this_cpu_perm = new_perm;
         }
 
-        if r != 0 {
-            return DekoGuestExitInformation::VmplSwitchFailed;
-        }
         // At this point we need to disable VMSA to prevent any
         // accidental VM entry.
 
@@ -2275,6 +2321,10 @@ pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
             return info;
         }
     }
+}
+
+#[no_mangle]
+fn setup_user_task() {
 }
 
 } // verus!

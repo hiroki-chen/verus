@@ -18,7 +18,8 @@ use crate::cpu::regs::{
     read_cr0, read_cr4, read_efer, DEKO_CS, DEKO_CS_ATTRIBUTES, DEKO_DS, DEKO_DS_ATTRIBUTES,
     DEKO_TR_ATTRIBUTES, DEKO_TSS,
 };
-use crate::cpu::{flush_tlb_global_percpu, DekoCpuCtx, X86Tss};
+use crate::cpu::tlb::flush_tlb_global_percpu;
+use crate::cpu::{DekoCpuCtx, X86Tss};
 use crate::mm::DEKO_FRAME_ALLOCATOR_FULL;
 use crate::snp::{
     rmpadjust, DekoCpuCtxPermission, PageTablePermission, RmpFlags, Rmp_ALL_BITS, SnpStatusFlags,
@@ -573,8 +574,6 @@ impl VmsaPage {
 
         kdebug!("Adjusting RMP for VMSA page at vaddr:", vaddr, " with flags:", flags.bits() => hex);
         rmpadjust(vaddr, PAGE_SIZE, flags, Tracked(pgtable_perm));
-
-        flush_tlb_global_percpu();
 
         proof_with!(|= Tracked(
             VmsaPagePermission {

@@ -9,9 +9,8 @@ use deko_std::wf::WellFormed;
 use deko_std::{deko_rwlock_read_atomic_data, deko_rwlock_write_atomic_data, trace_enable};
 use vstd::prelude::*;
 
-use crate::cpu::{
-    flush_tlb_global_percpu, flush_tlb_global_sync, DekoCpuCtxPermission, PERCPU_AREAS,
-};
+use crate::cpu::tlb::{flush_tlb_global_percpu, flush_tlb_global_sync};
+use crate::cpu::{DekoCpuCtxPermission, PERCPU_AREAS};
 use crate::guest::{
     DekoGuestRequestParams, DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode,
 };
@@ -321,8 +320,6 @@ fn handle_deko_service_pvalidate(params: &DekoGuestRequestParams) -> DekoGuestSe
         // Write back to the guest request structure.
         write_guest(VirtAddr(temp_va.inner.start.0 + offset), guest_req);
 
-        flush_tlb_global_percpu();
-
         pvalidate_result
     } else {
         kerror!("Guest pvalidate: failed to create temporary mapping for gpa: ", guest_pa.0);
@@ -514,7 +511,7 @@ fn handle_deko_service_vcpu_create(params: &DekoGuestRequestParams) -> DekoGuest
         Tracked(&mut cpu_perm.pgtable_perm),
     );
 
-    flush_tlb_global_percpu();
+    flush_tlb_global_sync();
 
     // Now adjust the permission.
     if rmpadjust(
@@ -530,8 +527,6 @@ fn handle_deko_service_vcpu_create(params: &DekoGuestRequestParams) -> DekoGuest
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidReq));
     }
     RMP_GUARD.store(false, core::sync::atomic::Ordering::Release);
-
-    flush_tlb_global_percpu();
 
     deko_rwlock_read_atomic_data! {
         PERCPU_AREAS,

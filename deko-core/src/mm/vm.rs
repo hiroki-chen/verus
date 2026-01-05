@@ -15,7 +15,8 @@ use vstd::std_specs::cmp::*;
 use super::frame_allocator::DekoAllocatorApi;
 use crate::collections::Vec;
 use crate::cpu::irq::{DekoUnsafeRwLock, IrqUnSafeLockGuard};
-use crate::cpu::{flush_tlb_global_percpu, DekoCpuCtx};
+use crate::cpu::tlb::{flush_tlb_global_percpu, flush_tlb_global_sync};
+use crate::cpu::DekoCpuCtx;
 use crate::mm::paging::{
     all_in_range_paddrs, all_normalized_vaddrs, bit_not_in_addr_region, bit_not_overlapping,
     index_at_level, make_private_address, PageTable, PageTableEntry, PageTablePermission, PteFlags,
@@ -707,6 +708,8 @@ pub struct VirtualMemoryRegion {
     /// Shared bit for this region.
     #[deko(hex)]
     pub shared_bit: u64,
+    /// Indicates a TLB flush is needed if the region covers multiple cores.
+    pub need_flush_ipi: bool,
 }
 
 /// Tracks the corresponding permissions for a virtual memory region if there is
@@ -1005,6 +1008,7 @@ impl VirtualMemoryRegion {
         ms: MappingSpace,
         private_bit: u64,
         shared_bit: u64,
+        need_flush_ipi: bool,
     ) -> Self {
         broadcast use deko_std::address::lemma_aligned_vaddr_pfn_preserves_order;
 
@@ -1074,6 +1078,7 @@ impl VirtualMemoryRegion {
             ms,
             private_bit,
             shared_bit,
+            need_flush_ipi,
         }
     }
 
@@ -1535,6 +1540,12 @@ impl VirtualMemoryRegion {
                 // Then we unmap it; remove it.
                 proof_with!(Tracked(perm));
                 vm.unmap(self.pgtable, &self.ms, self.private_bit, self.shared_bit);
+
+                if self.need_flush_ipi {
+                    flush_tlb_global_sync();
+                } else {
+                    flush_tlb_global_percpu();
+                }
 
                 proof {
                     // remove it.
@@ -2001,22 +2012,6 @@ impl VirtualMemory {
                 );
             }
             offset += PAGE_SIZE;
-        }
-
-        // This is trick for quick TLB invalidation since we know the mapping size.
-        // and if the size is small enough we can just broadcast the TLB shootdown
-        // to avoid the use of IPI which is expensive.
-        if mapping_size / PAGE_SIZE <= u16::MAX as _ {
-            let start_vaddr = self.range.start;
-            crate::imp::flush_tlb_broadcast(
-                start_vaddr.0,
-                (mapping_size / PAGE_SIZE) as u16,
-                0,
-                true,
-            );
-        } else {
-            // This needs to trigger IPIs to other cores to toggle their CR4!
-            flush_tlb_global_percpu();
         }
 
         read_handle.release_read();

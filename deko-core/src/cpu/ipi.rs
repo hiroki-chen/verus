@@ -16,9 +16,10 @@ use vstd::prelude::*;
 
 use crate::cpu::apic::{Apic, X86Apic};
 use crate::cpu::task::{schedule, DekoRunnablePtr, DekoRunnableState};
+use crate::cpu::tlb::flush_tlb_global_percpu;
 use crate::cpu::{
-    flush_tlb_global_percpu, DekoCpuCtx, DekoCpuCtxPermission, PerCpuAreas, PerCpuAreasPermission,
-    CPUID_MAX_COUNT, PERCPU_AREAS,
+    DekoCpuCtx, DekoCpuCtxPermission, PerCpuAreas, PerCpuAreasPermission, CPUID_MAX_COUNT,
+    PERCPU_AREAS,
 };
 use crate::{die, kdebug, kinfo, kpanic_if, kwarn};
 
@@ -256,6 +257,8 @@ impl DekoIpiRequest {
             DekoIpIMessage::AffinityChange { .. } => handle_set_affinity_func_ptr() as usize,
         };
 
+        kdebug!("Sending", self.message, "IPI...", "targets:", self.targets => hex);
+
         // Prepare the message on the shared area so
         // other CPUs can read it when they receive the IPI.
         let mut cpu_nums = 0u32;
@@ -321,6 +324,7 @@ impl DekoIpiRequest {
             i += 1;
         }
 
+        kdebug!("IPI sent, waiting for handling to complete...");
         // Now let's wait for others to complete their handling.
         #[verus_spec(
             invariant
@@ -354,6 +358,8 @@ impl DekoIpiRequest {
                 break ;
             }
         }
+
+        kdebug!("IPI handling completed on all target CPUs");
     }
 }
 
@@ -374,8 +380,6 @@ fn send_ipi_to(target: usize, from: &X86Apic) {
         | DEST_SHORTHAND_NONE;
     let high = (target as u32);
 
-    kdebug!("Sending IPI", ((high as u64) << 32 | low as u64) => hex, "to target CPU", target => hex);
-
     deko_rwlock_write_atomic_data! {
         PERCPU_AREAS,
         cpu_areas,
@@ -395,6 +399,8 @@ fn send_ipi_to(target: usize, from: &X86Apic) {
             }
         }
     };
+
+    kdebug!("Sending IPI", ((high as u64) << 32 | low as u64) => hex, "to target CPU", target => hex);
 
     let from_id = from.id();
     from.icr_write(low, high);
@@ -440,6 +446,7 @@ impl DekoCpuCtx {
 
         for i in 0..CPUID_MAX_COUNT {
             if (cpu_set & (1 << i)) != 0 {
+                kdebug!("Handling IPI request from CPU", i => hex, "on CPU", cpu_id => hex);
                 // Now we must handle the IPI from CPU i; this requires us to
                 // obtain mutable access to the IPI area.
                 let (handler, msg) =
@@ -488,7 +495,7 @@ impl DekoCpuCtx {
                 };
 
                 if let Some(msg) = msg {
-                    // kinfo!("Handling IPI request on CPU", cpu_id => hex, msg);
+                    kdebug!("make_ipi_handle_call on", cpu_id => hex, msg);
                     unsafe {
                         make_ipi_handle_call(handler as usize, &msg);
                     }
@@ -525,6 +532,8 @@ unsafe fn make_ipi_handle_call(addr: usize, arg: &DekoIpIMessage) {
         perm.wf(),
 )]
 pub fn handle_set_affinity(ptr: DekoPPtr<DekoIpIMessage>) {
+    kdebug!("handle_set_affinity called");
+
     let msg = ptr.borrow(Tracked(&perm));
 
     match msg {
@@ -537,6 +546,9 @@ pub fn handle_set_affinity(ptr: DekoPPtr<DekoIpIMessage>) {
                 "CPU has no run queue to set affinity task",
             );
 
+            kdebug!("handle_set_affinity: setting task affinity... acquiring lock...");
+
+            // BUG: Someone holds the lock and deadlocked.
             deko_rwlock_write_atomic_data! {
                 rq.as_ref().unwrap(),
                 rq,
@@ -557,6 +569,8 @@ pub fn handle_set_affinity(ptr: DekoPPtr<DekoIpIMessage>) {
                     rq.handle_task(task.clone());
                 }
             }
+
+            kdebug!("handle_set_affinity: task set to RUNNING and enqueued");
         },
         _ => {
             kpanic_if!(
@@ -586,7 +600,7 @@ pub fn handle_tlb_shootdown(ptr: DekoPPtr<DekoIpIMessage>) {
     );
 
     // Perform the TLB shootdown.
-    flush_tlb_global_percpu();
+
 }
 
 func_ptr!(handle_tlb_shootdown);

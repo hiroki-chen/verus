@@ -19,7 +19,8 @@ use vstd::atomic::{
 use vstd::prelude::*;
 
 use crate::cpu::irq::no_irq_zone;
-use crate::cpu::{flush_tlb_global_percpu, DekoCpuCtx, DekoCpuCtxPermission};
+use crate::cpu::tlb::{flush_tlb_global_percpu, flush_tlb_global_sync};
+use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::paging::{PageTable, PteFlags};
 use crate::mm::{virt_to_phys, virt_to_phys_checked};
 use crate::prelude::*;
@@ -32,7 +33,7 @@ use crate::{bits, kdebug, kerror, kinfo, kpanic_if, kunimplemented};
 
 extern "C" {
     #[link_section = ".text"]
-    fn switch_to_vmpl_unsafe(target_vmpl: u32) -> u64;
+    fn switch_to_vmpl_unsafe(hv_doorbell: *const doorbell::HVDoorbell, target_vmpl: u32) -> bool;
 }
 
 core::arch::global_asm!(include_str!("switch.S"), options(att_syntax));
@@ -55,8 +56,26 @@ verus! {
     requires
         target_vmpl <= 3,
 )]
-pub fn vmpl_switch(target_vmpl: u32) -> u64 {
-    unsafe { switch_to_vmpl_unsafe(target_vmpl) }
+pub fn vmpl_switch(target_vmpl: u32) -> bool {
+    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+    kpanic_if!(
+        cpu_borrow.doorbell.is_none(),
+        "GHCB doorbell pointer is None",
+    );
+
+    let doorbell_ptr =
+        deko_rwlock_read_atomic_data! {
+        cpu_borrow.doorbell.as_ref().unwrap(),
+        ptr,
+        __,
+        {
+            *ptr
+        }
+    };
+
+    unsafe { switch_to_vmpl_unsafe(doorbell_ptr.addr() as *const doorbell::HVDoorbell, target_vmpl)
+    }
 }
 
 pub broadcast axiom fn axiom_shared_buffer_size_wf()
@@ -136,7 +155,7 @@ pub fn validate_ghcb(
         1 << 0,
     );
 
-    flush_tlb_global_percpu();
+    flush_tlb_global_sync();
 
     // Register the GHCB GPA with the hypervisor.
     msr_register_ghcb_gpa(ghcb_paddr);

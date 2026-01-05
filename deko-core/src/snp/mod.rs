@@ -12,7 +12,7 @@ use vstd::simple_pptr::PPtr;
 use crate::collections::{get_unchecked, Vec};
 use crate::cpu::apic::Apic;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
-use crate::cpu::irq::{DekoUnsafeRwLock, IrqState, IrqUnSafeLockGuard};
+use crate::cpu::irq::{raw_irq_enable, DekoUnsafeRwLock, IrqState, IrqUnSafeLockGuard};
 use crate::cpu::{
     CpuidTable, DekoCpuCtx, DekoCpuCtxPermission, PerCpuAreas, PerCpuShared, CPUID_MAX_COUNT,
     CPU_AREA_MAGIC, PERCPU_AREAS,
@@ -43,6 +43,8 @@ pub mod vmsa;
 extern "C" {
     /// A global flag to indicate whether the AP has been started.
     static mut ap_flag: AtomicU32;
+    #[link_name = "snp_idle_halt"]
+    fn __snp_idle_halt(doorbell: *const doorbell::HVDoorbell);
 }
 
 verus! {
@@ -957,52 +959,31 @@ pub fn get_sev_fw_metadata(igvm_params: &IgvmParamBlock) -> Option<SevFWMetaData
     }
 }
 
-#[verifier::external_body]
 #[inline]
-pub fn flush_tlb() {
-    unsafe {
-        core::arch::asm!(
-            "movq %cr3, %rax",
-            "movq %rax, %cr3",
-            out("rax") _,
-            options(att_syntax)
-        );
-    }
+pub fn flush_tlb_global_sync() {
+    flush_tlb_broadcast(4 | 8, 0 , 0);
 }
 
 /// Broadcasts a TLB flush for a range of pages to ALL cores using hardware acceleration.
 ///
 /// This replaces the need for IPI-based shootdowns for the specified range.
 ///
-/// Use this function if you need to flush TLB entries across multiple CPUs efficiently;
-/// remember this does not flush ALL TLB entries, only those in the specified range.
-///
-/// # Arguments
-/// * `va`: The starting Virtual Address to flush.
-/// * `count`: The number of 4KB pages to flush (Max 0xFFFF).
-/// * `asid`: The Address Space ID (0 for Kernel/Global usually).
-/// * `global`: If true, flushes Global (G) pages.
+/// Use this function if you need to flush TLB entries across multiple CPUs efficiently.
 #[verifier::external_body]
-pub fn flush_tlb_broadcast(va: u64, count: u16, asid: u16, global: bool) {
+pub fn flush_tlb_broadcast(rax: u64, ecx: u32, edx: u16) {
     // EDX Layout for INVLPGB:
     // Bit 0:    VALID (Must be 1)
     // Bit 1:    GLOBAL (Flush global pages?)
     // Bits 2-?: Reserved
     // Bits 16-31: ASID (if not global)
-    let mut edx: u32 = 1; // Valid bit
-    if global {
-        edx |= 1 << 1; // Set Global Bit
-    }
 
-    edx |= (asid as u32) << 16; // Set ASID
-
-    // EAX = Virtual Address
+    // EAX = Virtual Address or all
     // ECX = Page Count
     unsafe {
         core::arch::asm!(
             "invlpgb",
-            in("rax") va,
-            in("ecx") count,
+            in("rax") rax,
+            in("ecx") ecx,
             in("edx") edx,
             options(nostack, preserves_flags)
         );
@@ -1010,7 +991,6 @@ pub fn flush_tlb_broadcast(va: u64, count: u16, asid: u16, global: bool) {
         core::arch::asm!("tlbsync", options(nostack, preserves_flags));
     }
 }
-
 
 /// Performs the launch of the guest firmware (OVMF).
 #[verus_spec(
@@ -1615,10 +1595,33 @@ fn do_copy_cpuid_to_fw(cpuid_table: &CpuidTable, to: TempMapping) {
     kdebug!("Copied CPU ID table to firmware location at", to.inner.start, ": ", fw_cpuid_table);
 }
 
+/// When a guest receives a #HV notification at any time, guest may choose
+/// to acknowledge it immediately or to defer it until it enables interrupts.
+///
+/// Interrupt re-enabling code paths need to explicitly check for pending #HVs.
 #[inline]
 #[verifier::exec_allows_no_decreases_clause]
-pub fn process_pending_hv_events() {
+pub fn after_irq_enable() {
     doorbell::process_pending_hv_events();
+}
+
+/// # HV is delivered without regard to interrupt shadows, so chances are high
+/// that the guest will lose the ability to control interaction between HLT and
+/// interrupts.
+///
+/// This code is a guard to ensure that guest can properly suspend when no interrupts
+/// are pending while also ensuring that a guest will neither miss pending interrupts
+/// or suspend forever and become "ghost".
+#[inline]
+#[verifier::external_body]
+pub fn idle_halt(doorbell: u64) {
+    unsafe {
+        // let info = core::slice::from_raw_parts(doorbell as *const u8, core::mem::size_of::<doorbell::HVDoorbell>());
+
+        // // kdebug!("Entering idle halt with doorbell info:", info);
+
+        __snp_idle_halt(doorbell as *const doorbell::HVDoorbell)
+    }
 }
 
 }

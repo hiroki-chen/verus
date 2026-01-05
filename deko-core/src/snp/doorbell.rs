@@ -1,8 +1,42 @@
+//! This module implements the support for restricted interrupt injection on SEV-SNPs.
+//!
+//! To protect against malicious injection attacks, SNP supports two mutually
+//! exclusive features to enforce Interrupt and Event injection security protections:
+//!
+//! - Restricted Interrupt Injection feature
+//! - Alternate Interrupt Injection feature (not used in our monitor)
+//!
+//! In restricted interrupt injection mode (can be checked via sev features),
+//! the hypervisor cannot fire invoke any IDT routines directly but #HV vector (28)
+//! as a proxy function to singal pending events; the detailed interrupt information
+//! will be then written into a per-vCPU "doorbell" page negotiated with the hypervisor
+//! via the GHCB protocol `register_hv` which is marked as shared in the RMP entries.
+//!
+//! However, with doorbell interrupts, the thing works slightly differently with
+//! traditional OS interrupt handling and CPU IPIs as cores with IF cleared will lost
+//! the interrupts if not properly handled (as doorbell is software-based mechanism).
+//! Therefore, in the hv handler routine we need to check if "we" are within a context
+//! where IRQs are disabled and then restart the HV handling afterwards.
+//!
+//! The workflow is shown as below:
+//!
+//! 1. KVM/Host injects interrupts using the HV_VECTOR and prepares the doorbell page.
+//! 2. Guest CPU traps into the HV_VECTOR handler.
+//! 3. In the handler, we check if this is an NMI/MC; if so we handle it directly.
+//!    - Otherwise check if EFLAGS.IF == 1 via exception frame.
+//!      - If so, handle the doorbell immediately if vector is non-zero.
+//!      - If not, iret to resume the interrupted instruction.
+//! 4. Upon IRQ re-enabling, check any pending events via the doorbell page via
+//!    `doorbell.pending_event.vector != 0`.
+//!
+//! See also [here](https://lpc.events/event/16/contributions/1321/).
+use core::mem::offset_of;
 use core::ptr::addr_of;
 
 use deko_macros::{with_atomic_pred, DekoDebug};
 use deko_std::address::VirtAddr;
 use deko_std::mem::PAGE_SIZE;
+use deko_std::misc::early_die;
 use deko_std::ptr::{DekoPPtr, DekoPPtrPred, DekoPointsTo};
 use deko_std::sync::{DekoAtomicData, DekoRwLock};
 use deko_std::wf::WellFormed;
@@ -17,6 +51,7 @@ use crate::cpu::idt::IPI_VECTOR;
 use crate::cpu::irq::{
     irq_disable, irq_enable, raw_irq_disable, raw_irq_enable, IrqUnSafeLockGuard,
 };
+use crate::cpu::task::{debug_hv, X86ExceptionContext};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::paging::PageTable;
 use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR_FULL};
@@ -29,6 +64,31 @@ extern "C" {
     #[link_section = ".data"]
     pub static mut HV_DOORBELL_ADDR: usize;
 }
+
+core::arch::global_asm!(
+    include_str!("hv_handler.S"),
+    EXCEP_FLAGS_OFF = const offset_of!(X86ExceptionContext, frame.flags),
+    EXCEP_CS_OFF = const offset_of!(X86ExceptionContext, frame.cs),
+    EXCEP_RIP_OFF = const offset_of!(X86ExceptionContext, frame.rip),
+    EXCEP_RSP_OFF = const offset_of!(X86ExceptionContext, frame.rsp),
+    EXCEP_FRAME_OFF = const offset_of!(X86ExceptionContext, frame),
+    EXCEP_RAX_OFF = const offset_of!(X86ExceptionContext, regs.rax),
+    EXCEP_RBX_OFF = const offset_of!(X86ExceptionContext, regs.rbx),
+    EXCEP_RCX_OFF = const offset_of!(X86ExceptionContext, regs.rcx),
+    EXCEP_RDX_OFF = const offset_of!(X86ExceptionContext, regs.rdx),
+    EXCEP_RSI_OFF = const offset_of!(X86ExceptionContext, regs.rsi),
+    EXCEP_RDI_OFF = const offset_of!(X86ExceptionContext, regs.rdi),
+    EXCEP_R15_OFF = const offset_of!(X86ExceptionContext, regs.r15),
+    EXCEP_R14_OFF = const offset_of!(X86ExceptionContext, regs.r14),
+    EXCEP_R13_OFF = const offset_of!(X86ExceptionContext, regs.r13),
+    EXCEP_R12_OFF = const offset_of!(X86ExceptionContext, regs.r12),
+    EXCEP_R11_OFF = const offset_of!(X86ExceptionContext, regs.r11),
+    EXCEP_R10_OFF = const offset_of!(X86ExceptionContext, regs.r10),
+    EXCEP_R9_OFF = const offset_of!(X86ExceptionContext, regs.r9),
+    EXCEP_R8_OFF = const offset_of!(X86ExceptionContext, regs.r8),
+    EXCEP_RBP_OFF = const offset_of!(X86ExceptionContext, regs.rbp),
+    options(att_syntax)
+);
 
 verus! {
 
@@ -56,6 +116,8 @@ pub fn init_hv_doorbell(
     unsafe {
         HV_DOORBELL_ADDR =
         addr_of!((*(ptr.addr() as *const DekoAtomicData<DekoPPtr<HVDoorbell>, HvDoorbellPtrPermission>)).data) as usize;
+
+        kinfo!("Initialized HV_DOORBELL_ADDR to", HV_DOORBELL_ADDR => hex);
     }
 }
 
@@ -193,7 +255,7 @@ impl HVDoorbell {
     /// virtual address across all CPUs to obtain the pointer to the
     /// inner [`HVDoorbell`].
     #[verus_spec()]
-    fn init_hv_doorbell_addr() {
+    pub fn init_hv_doorbell_addr() {
         let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
         let cpu_borrowed = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
         let doorbell = cpu_borrowed.doorbell.as_ref();
@@ -247,6 +309,8 @@ impl HVDoorbell {
             die("");
         };
 
+        kdebug!("Allocated HVDoorbell at virtual address:", vaddr => hex, "physical address:", doorbell_paddr => hex);
+
         kpanic_if!(core::hint::unlikely(doorbell_paddr.0 % PAGE_SIZE != 0),
             "HVDoorbell physical address is not page-aligned!"
         );
@@ -269,8 +333,6 @@ impl HVDoorbell {
         );
 
         cpu.put(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
-
-        Self::init_hv_doorbell_addr();
     }
 }
 
@@ -298,6 +360,7 @@ impl HVDoorbell {
 /// - Implementations must not block, allocate, or take locks that can deadlock
 ///   in interrupt context.
 #[doc(hidden)]
+#[verifier::external_body]
 #[no_mangle]
 #[allow(improper_ctypes_definitions)]
 #[verifier::exec_allows_no_decreases_clause]
@@ -320,7 +383,12 @@ impl HVDoorbell {
         hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb_perm.ptr_perm.value().per_vmpl_events),
 )]
 pub unsafe extern "C" fn handle_hv_doorbell(hvdb: DekoPPtr<HVDoorbell>) {
-    kdebug!("doorbell rang");
+    // kdebug!("doorbell rang");
+    let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
+    let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
+
+    proof_with!(Tracked(&mut cpu_perm.irq_state_perm));
+    cpu_taken.nested_irq.push(true);
 
     let hvdb = hvdb.borrow(Tracked(&hvdb_perm.ptr_perm));
     let vector = hvdb.vector.load(Tracked(&mut hvdb_perm.hv_perm.vector_perm));
@@ -355,18 +423,21 @@ pub unsafe extern "C" fn handle_hv_doorbell(hvdb: DekoPPtr<HVDoorbell>) {
 
     match vector as usize {
         IPI_VECTOR => {
-            let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
-
-            irq_enable();
+            cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
 
             proof_with!(Tracked(&cpu_perm));
             DekoCpuCtx::handle_ipi_req(cpu);
 
-            irq_disable();
+            let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
+            proof_with!(Tracked(&mut cpu_perm.irq_state_perm));
+            cpu_taken.nested_irq.pop();
+            cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
         },
         _ => {
             // Unknown vector.
-            kwarn!("Unknown HV Doorbell vector received: ", vector, "as we only handle IPI");
+            proof_with!(Tracked(&mut cpu_perm.irq_state_perm));
+            cpu_taken.nested_irq.pop();
+            cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
         },
     }
 
@@ -394,11 +465,12 @@ pub fn process_pending_hv_events() {
             doorbell_perm,
             {
                 let doorbell = doorbell_ptr.borrow(Tracked(&doorbell_perm.borrow().ptr_perm));
-                if doorbell.flags.load(Tracked(&doorbell_perm.borrow().hv_perm.flags_perm)) & 0x80 != 0 {
-                    kdebug!("Processing pending HV doorbell events");
+                let flags = doorbell.flags.load(Tracked(&doorbell_perm.borrow().hv_perm.flags_perm));
+                let vector = doorbell.vector.load(Tracked(&doorbell_perm.borrow().hv_perm.vector_perm));
+
+                if flags & 0x80 != 0 || vector != 0 {
                     // No further signal.
-                    // Disable IRQ again.
-                    raw_irq_disable();
+                    irq_disable();
 
                     unsafe {
                         #[verus_spec(with Tracked(doorbell_perm.borrow_mut()))]
