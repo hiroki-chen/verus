@@ -1958,8 +1958,6 @@ impl DekoCpuCtx {
             },
         );
 
-        raw_irq_enable();
-
         kinfo!("Created idle task for CPU ", cpu_id);
 
         proof_with!(Tracked(&mut new_perm));

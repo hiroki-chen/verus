@@ -1502,8 +1502,8 @@ pub unsafe fn schedule_init() {
     no_irq_zone(
         ||
             {
-                let (cpu, Tracked(perm)) = DekoCpuCtx::this_cpu();
-                let cpu = cpu.borrow(Tracked(&perm.ptr_perm));
+                let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
+                let cpu = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
 
                 match &cpu.run_queue {
                     Some(runqueue) => {
@@ -1516,6 +1516,11 @@ pub unsafe fn schedule_init() {
 
                         proof_with!(Tracked(&mut perm));
                         let task = runqueue.schedule_init();
+
+                        cpu.nested_irq.state.store(
+                            Tracked(&mut cpu_perm.irq_state_perm.state_perm),
+                            true,
+                        );
 
                         handle.release_write(DekoAtomicData::new_with(runqueue, Tracked(perm)));
                         // perform the actual context switch
@@ -1581,8 +1586,8 @@ pub fn schedule() {
                 let work = DekoCpuCtx::schedule_prep(cpu, Tracked(&perm));
                 if let Some((cur, next)) = work {
                     // id generation is somehow incorrect.
-                    kinfo!("Switching from task ", cur.as_ref().data.id => hex, " name", cur.as_ref().data.name);
-                    kinfo!("Switching to task ", next.as_ref().data.id => hex, " name", next.as_ref().data.name);
+                    kdebug!("Switching from task ", cur.as_ref().data.id => hex, " name", cur.as_ref().data.name);
+                    kdebug!("Switching to task ", next.as_ref().data.id => hex, " name", next.as_ref().data.name);
 
                     let next_state = &next.as_ref().data.state;
 
@@ -1772,7 +1777,13 @@ pub extern "C" fn run_kernel_tasks(
     // Then we enter the entry.
     irq_enable();
 
-    kinfo!("enabled?", cpu::irq::irq_enabled());
+    // We must forcibly enable the interrupts here because `irq_enable` only
+    // restores the interrupt state. Since we are in a `no_irq_zone` when
+    // switching to this task, the saved state is "disabled" so `irq_enable`
+    // will not enable the interrupts.
+    // crate::cpu::irq::raw_irq_enable();
+
+    // kinfo!("enabled?", cpu::irq::irq_enabled());
 
     after_switch();
 
@@ -2123,8 +2134,6 @@ func_ptr!(serv_main);
 #[verus_spec(
 )]
 pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
-    kinfo!("Attempting to enter guest...");
-
     let (this_cpu_ptr, Tracked(this_cpu_perm)) = DekoCpuCtx::this_cpu();
     let this_cpu = this_cpu_ptr.borrow(Tracked(&this_cpu_perm.ptr_perm));
     let this_cpu_index: usize = this_cpu.cpu_id as usize;
