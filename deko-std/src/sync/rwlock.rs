@@ -822,20 +822,20 @@ impl<V, S: Spin, Pred: RwLockPredicate<V>> RwLock<V, S, Pred> {
     }
 }
 
-impl<V: WellFormed> DekoSimpleRwLock<V> {
-    pub const fn new_simple(v: V) -> (r: Self) {
-        RwLock::new(DekoAtomicData::new(v), (), Ghost(TrivialPredicate::new()))
+impl<V: WellFormed, S: Spin> DekoSimpleRwLock<V, S> {
+    pub const fn new_simple(v: V, s: S) -> (r: Self) {
+        RwLock::new(DekoAtomicData::new(v), s, Ghost(TrivialPredicate::new()))
     }
 }
 
 /// A type alias for a [`RwLock`] that uses [`DekoAtomicData`] as its
 /// atomic storage type; the backing spin type is the default `()` with
 /// no IRQs allowed during locks held.
-pub type DekoRwLock<V, P, Pred> = RwLock<DekoAtomicData<V, P>, SpinNoIrq, Pred>;
+pub type DekoRwLock<V, P, S, Pred> = RwLock<DekoAtomicData<V, P>, S, Pred>;
 
-pub type DekoSimpleRwLock<V> = RwLock<
+pub type DekoSimpleRwLock<V, S> = RwLock<
     DekoAtomicDataNoPerm<V>,
-    SpinNoIrq,
+    S,
     TrivialPredicate<DekoAtomicDataNoPerm<V>>,
 >;
 
@@ -844,18 +844,18 @@ pub type DekoSimpleRwLock<V> = RwLock<
 /// the inner data `V`'s invariant is called.
 pub struct DekoSimpleRwLockPred;
 
-impl<V: WellFormed, P, Pred: RwLockPredicate<DekoAtomicData<V, P>>> Predicate<
-    DekoAtomicData<DekoRwLock<V, P, Pred>, ()>,
+impl<V: WellFormed, P, S: Spin, Pred: RwLockPredicate<DekoAtomicData<V, P>>> Predicate<
+    DekoAtomicData<DekoRwLock<V, P, S, Pred>, ()>,
 > for DekoSimpleRwLockPred {
-    open spec fn inv(self, v: DekoAtomicData<DekoRwLock<V, P, Pred>, ()>) -> bool {
+    open spec fn inv(self, v: DekoAtomicData<DekoRwLock<V, P, S, Pred>, ()>) -> bool {
         &&& v.data.wf()
     }
 }
 
-impl<V: WellFormed, P, Pred: RwLockPredicate<DekoAtomicData<V, P>>> Predicate<
-    DekoRwLock<V, P, Pred>,
+impl<V: WellFormed, P, S: Spin, Pred: RwLockPredicate<DekoAtomicData<V, P>>> Predicate<
+    DekoRwLock<V, P, S, Pred>,
 > for DekoSimpleRwLockPred {
-    open spec fn inv(self, v: DekoRwLock<V, P, Pred>) -> bool {
+    open spec fn inv(self, v: DekoRwLock<V, P, S, Pred>) -> bool {
         &&& v.wf()
     }
 }

@@ -16,7 +16,7 @@ use crate::cpu::DekoCpuCtx;
 use crate::mm::frame_allocator::DekoAllocatorApi;
 use crate::mm::paging::PageTablePermission;
 use crate::mm::vm::TempMapping;
-use crate::{die, kerror, kinfo, kpanic_if, kunimplemented, vec, DekoKernelLaunchInfo};
+use crate::{die, kerror, kinfo, kpanic_if, kunimplemented, kwarn, vec, DekoKernelLaunchInfo};
 
 verus! {
 
@@ -532,7 +532,7 @@ fn invalidate_boot_memory(header: &DekoKernelLaunchInfo, prange: PaddrRange, nee
 
         if !changed {
             // Not sure if we should instead treat this as a fatal error.
-            kerror!("Warning: PVALIDATE did not change page state when invalidating early boot memory at", PhysAddr(cur), "already invalid!");
+            kwarn!("Warning: PVALIDATE did not change page state when invalidating early boot memory at", PhysAddr(cur), "already invalid!");
 
             break ;
         }

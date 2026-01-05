@@ -252,7 +252,7 @@ impl DekoIpiRequest {
         );
 
         let f = match &self.message {
-            DekoIpIMessage::TlbShootdown => handle_tlb_shootdown_func_ptr() as usize,
+            DekoIpIMessage::TlbShootdown => { handle_tlb_shootdown_func_ptr() as usize },
             DekoIpIMessage::AffinityChange { .. } => handle_set_affinity_func_ptr() as usize,
         };
 
@@ -330,22 +330,17 @@ impl DekoIpiRequest {
         loop {
             core::hint::spin_loop();
 
+            // if matches!(self.message, DekoIpIMessage::TlbShootdown) {
+            //     kinfo!("checking .... ", id => hex);
+            // }
+
             let pending =
                 deko_rwlock_read_atomic_data!(
                 PERCPU_AREAS,
                 cpu_areas,
                 cpu_areas_perm,
                 {
-                    let Some(ref cpu_areas) = cpu_areas else {
-                        die("PERCPU_AREAS is not initialized");
-                    };
-                    kpanic_if!(
-                        core::hint::unlikely(id >= cpu_areas.0.len()),
-                        "Target CPU ID",
-                        id,
-                        "exceeds current CPU count",
-                        cpu_areas.0.len(),
-                    );
+                    crate::check_shared_cpu_idx!(id as usize, cpu_areas, cpu_areas);
 
                     // Obtain a reference to this CPU's IPI area.
                     let ipi_area = &cpu_areas.0[id].ipi_shared;
@@ -386,17 +381,7 @@ fn send_ipi_to(target: usize, from: &X86Apic) {
         cpu_areas,
         cpu_areas_perm,
         {
-            let Some(ref cpu_areas) = cpu_areas else {
-                die("PERCPU_AREAS is not initialized");
-            };
-
-            kpanic_if!(
-                core::hint::unlikely(target >= cpu_areas.0.len()),
-                "Target CPU ID",
-                target,
-                "exceeds current CPU count",
-                cpu_areas.0.len(),
-            );
+            crate::check_shared_cpu_idx!(target as usize, cpu_areas, cpu_areas);
 
             // Obtain a reference to the target CPU's IPI area.
             let ipi_area = &cpu_areas.0[target].ipi_shared;
@@ -503,6 +488,7 @@ impl DekoCpuCtx {
                 };
 
                 if let Some(msg) = msg {
+                    // kinfo!("Handling IPI request on CPU", cpu_id => hex, msg);
                     unsafe {
                         make_ipi_handle_call(handler as usize, &msg);
                     }

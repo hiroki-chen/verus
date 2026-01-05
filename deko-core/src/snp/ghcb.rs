@@ -18,6 +18,7 @@ use vstd::atomic::{
 };
 use vstd::prelude::*;
 
+use crate::cpu::irq::no_irq_zone;
 use crate::cpu::{flush_tlb_global_percpu, DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::paging::{PageTable, PteFlags};
 use crate::mm::{virt_to_phys, virt_to_phys_checked};
@@ -552,9 +553,9 @@ impl GuestHostCommunicationBlock {
             ||
                 {
                     write_msr(MSR_AMD64_SEV_ES_GHCB, ghcb_pa);
+                    raw_vmgexit();
                 },
         );
-        raw_vmgexit();
 
         // Make error information more detailed.
         let sw_exit_info_1 = Self::get_exit_info_1(ptr, Tracked(&perm));

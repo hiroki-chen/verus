@@ -77,7 +77,10 @@ verus! {
 
 /// This is a globally accessible flag to indicate whether tracing (some debugging)
 /// is enabled.
-pub exec static TRACE_ON: DekoSimpleRwLock<bool> = DekoSimpleRwLock::new_simple(false);
+pub exec static TRACE_ON: DekoSimpleRwLock<bool, SpinNoIrq> = DekoSimpleRwLock::new_simple(
+    false,
+    (),
+);
 
 #[verifier::external_body]
 pub fn trace_enable(enabled: bool) {

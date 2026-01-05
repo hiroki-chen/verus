@@ -11,7 +11,7 @@ verus! {
 
 /// The adapter that allows using `DekoHeap` as an allocator.
 #[verifier::external]
-unsafe impl<V: WellFormed + Heap> core::alloc::Allocator for DekoBuddyAllocator<V> {
+unsafe impl<V: WellFormed + Heap, S: Spin> core::alloc::Allocator for DekoBuddyAllocator<V, S> {
     fn allocate(&self, layout: core::alloc::Layout) -> Result<
         core::ptr::NonNull<[u8]>,
         core::alloc::AllocError,
@@ -95,28 +95,28 @@ pub const HEAP_SIZE_FULL: usize = 13;
 /// is a large contigunous memory already mapped by the monitor. Basically this is just a wrapper
 /// around the `DekoHeap` type.
 #[verifier::reject_recursive_types(V)]
-pub struct DekoBuddyAllocator<V: WellFormed + Heap> {
+pub struct DekoBuddyAllocator<V: WellFormed + Heap, S: Spin> {
     /// The allocator that manages the heap.
     ///
     /// This is a RwLock to allow concurrent access to the heap.
     /// Note that this is not a global allocator, so we do not use
     /// the `GlobalAlloc` trait.
-    allocator: DekoRwLock<V, (), DekoHeapPredicate>,
+    allocator: DekoRwLock<V, (), S, DekoHeapPredicate>,
 }
 
-impl<V: WellFormed + Heap> DekoBuddyAllocator<V> {
+impl<V: WellFormed + Heap, S: Spin> DekoBuddyAllocator<V, S> {
     /// Creates a new `DekoHeapAllocator` with the given heap.
     ///
     /// The caller must ensure that the heap is properly initialized and
     /// the memory is mapped.
-    pub const fn new(v: V, Ghost(pred): Ghost<DekoHeapPredicate>) -> (s: Self)
+    pub const fn new(v: V, spin: S, Ghost(pred): Ghost<DekoHeapPredicate>) -> (s: Self)
         requires
             v.wf(),
             pred.deep_inv(v),
         ensures
             s.wf(),
     {
-        Self { allocator: DekoRwLock::new(DekoAtomicData::new(v), (), Ghost(pred)) }
+        Self { allocator: DekoRwLock::new(DekoAtomicData::new(v), spin, Ghost(pred)) }
     }
 
     pub fn remaining(&self) -> (r: u64) {
@@ -253,7 +253,7 @@ impl<V: WellFormed + Heap> DekoBuddyAllocator<V> {
     }
 }
 
-impl<V: WellFormed + Heap> WellFormed for DekoBuddyAllocator<V> {
+impl<V: WellFormed + Heap, S: Spin> WellFormed for DekoBuddyAllocator<V, S> {
     closed spec fn wf(&self) -> bool {
         true
     }

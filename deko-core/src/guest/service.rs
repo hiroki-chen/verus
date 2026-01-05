@@ -4,6 +4,7 @@ use deko_macros::DekoDebug;
 use deko_std::address::{create_paddr_range, PhysAddr, VirtAddr};
 use deko_std::bits::{bit_u32_and_auto, bit_u64_and_auto};
 use deko_std::mem::{PAGE_SIZE, PAGE_SIZE_2M};
+use deko_std::misc::early_dbg;
 use deko_std::wf::WellFormed;
 use deko_std::{deko_rwlock_read_atomic_data, deko_rwlock_write_atomic_data, trace_enable};
 use vstd::prelude::*;
@@ -96,6 +97,7 @@ pub(super) fn write_guest<T>(addr: VirtAddr, val: T) {
         old(cpu_perm).wf(),
     ensures
         cpu_perm.wf(),
+        cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
 )]
 fn pvalidate_guest_one_page(paddr: PhysAddr) -> DekoGuestServResult<()> {
     broadcast use RmpFlags::lemma_each_bit_is_valid;
@@ -192,6 +194,7 @@ fn pvalidate_guest_one_page(paddr: PhysAddr) -> DekoGuestServResult<()> {
         old(cpu_perm).wf(),
     ensures
         cpu_perm.wf(),
+        cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
 )]
 fn handle_deko_service_pvalidate(params: &DekoGuestRequestParams) -> DekoGuestServResult<()> {
     crate::kdebug!("Handling guest pvalidate request", params);
@@ -245,6 +248,7 @@ fn handle_deko_service_pvalidate(params: &DekoGuestRequestParams) -> DekoGuestSe
         // SAFETY: We have verified that the guest_pa is valid
         // and the temporary mapping guarantees that we have
         // mapped the physical address on the current core.
+        // todo: use temp_mapping read.
         let mut guest_req = read_guest_copied::<DekoGuestPValidateReq>(
             VirtAddr(temp_va.inner.start.0 + offset),
         );
@@ -281,9 +285,10 @@ fn handle_deko_service_pvalidate(params: &DekoGuestRequestParams) -> DekoGuestSe
                 core::mem::size_of::<DekoGuestPValidateReq>() == 8,
                 cpu_perm.wf(),
                 PAGE_SIZE == 0x1000,
-                cpu_perm.wf(),
+                cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
             ensures
                 cpu_perm.wf(),
+                cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
             decreases
                 entries - i,
         )]
@@ -334,6 +339,7 @@ fn handle_deko_service_pvalidate(params: &DekoGuestRequestParams) -> DekoGuestSe
         old(cpu_perm).wf(),
     ensures
         cpu_perm.wf(),
+        cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
 )]
 pub fn handle_deko_service_vcpu_destroy(params: &DekoGuestRequestParams) -> DekoGuestServResult<
     (),
@@ -395,6 +401,7 @@ pub fn handle_deko_service_vcpu_destroy(params: &DekoGuestRequestParams) -> Deko
         old(cpu_perm).wf(),
     ensures
         cpu_perm.wf(),
+        cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
 )]
 fn handle_deko_service_vcpu_create(params: &DekoGuestRequestParams) -> DekoGuestServResult<()> {
     broadcast use RmpFlags::lemma_each_bit_is_valid;
@@ -564,20 +571,101 @@ fn handle_deko_service_vcpu_create(params: &DekoGuestRequestParams) -> DekoGuest
     Ok(())
 }
 
-/// Subroutine for handling DEKO service requests from the guest.
+/// The SVSM calling area (CA) is used to communicate between the Linux
+/// and the SVSM. Since the firmware supplied CA for the BSP is likely
+/// to be in reserved memory, switch off that CA to a kernel provided
+/// CA is done using the SVSM core protocol call.
 #[verus_spec(r =>
     with
         Tracked(cpu_perm): Tracked<&mut DekoCpuCtxPermission>,
     requires
         old(cpu_perm).wf(),
+        old(cpu_perm).ptr_perm.value().cpu_id == cpu_idx,
     ensures
         cpu_perm.wf(),
+        cpu_perm.ptr_perm.value().cpu_id == cpu_idx,
+)]
+fn handle_deko_service_remap_ca(
+    params: &mut DekoGuestRequestParams,
+    cpu_idx: u64,
+) -> DekoGuestServResult<()> {
+    // static void __init svsm_setup(struct cc_blob_sev_info *cc_info)
+    let ca_pa = params.rcx;
+
+    if core::hint::unlikely(ca_pa % PAGE_SIZE != 0) {
+        kerror!("Guest remap CA: unaligned CA page: ca_pa=", ca_pa);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
+    }
+    if false {  /* Check if this address falls within the guest physical address regions. */
+        // Placeholder for now.
+        kerror!("Guest remap CA: invalid CA page: ca_pa=", ca_pa);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
+    }
+    if core::hint::unlikely(ca_pa >= 0x000f_ffff_ffff_f000u64 - PAGE_SIZE) {
+        kerror!("Guest remap CA: ca page out of range: ca_pa=", ca_pa);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
+    }
+    let ca_mapping = match TempMapping::new(create_paddr_range(PhysAddr(ca_pa), 1)) {
+        Some(m) => m,
+        None => {
+            kerror!("Guest remap CA: failed to create temporary mapping for CA page at: ", PhysAddr(ca_pa));
+
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy));
+        },
+    };
+
+    kinfo!("created temporary mapping for CA at: ", ca_mapping.inner.start);
+
+    // Clear it.
+    ca_mapping.write_bytes(0, PAGE_SIZE as usize);
+
+    deko_rwlock_read_atomic_data! {
+        PERCPU_AREAS,
+        percpu_areas,
+        percpu_areas_perm,
+        {
+            crate::check_shared_cpu_idx!(cpu_idx as usize, percpu_areas, percpu_areas);
+            let this_cpu = &percpu_areas.0[cpu_idx as usize];
+
+            deko_rwlock_write_atomic_data! {
+                this_cpu.guest_vmsa,
+                guest_vmsa,
+                __,
+                {
+                    guest_vmsa.caa = Some(PhysAddr(ca_pa));
+                    guest_vmsa.generation = guest_vmsa.generation.wrapping_add(1);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Subroutine for handling DEKO service requests from the guest.
+///
+/// Note during process handling there would be lock held so obtaining
+/// the cpu permission is necessary.
+#[verus_spec(r =>
+    with
+        Tracked(cpu_perm): Tracked<&mut DekoCpuCtxPermission>,
+    requires
+        old(cpu_perm).wf(),
+        old(cpu_perm).ptr_perm.value().cpu_id == cpu_idx,
+    ensures
+        cpu_perm.wf(),
+        cpu_perm.ptr_perm.value().cpu_id == cpu_idx,
 )]
 pub(super) fn handle_guest_exit_deko_service(
     req: u32,
     params: &mut DekoGuestRequestParams,
+    cpu_idx: u64,
 ) -> DekoGuestServResult<()> {
     match req {
+        DEKO_SERVICE_REMAP_CA => {
+            proof_with!(Tracked(cpu_perm));
+            handle_deko_service_remap_ca(params, cpu_idx)
+        },
         DEKO_SERVICE_PVALIDATE => {
             proof_with!(Tracked(cpu_perm));
             handle_deko_service_pvalidate(params)

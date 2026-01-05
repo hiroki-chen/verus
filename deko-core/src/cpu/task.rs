@@ -6,7 +6,7 @@ use deko_macros::{with_atomic_pred, DekoDebug};
 use deko_std::address::{MappingSpace, VaddrRange, VirtAddr};
 use deko_std::array::Array;
 use deko_std::bits::bit_u64_and_auto;
-use deko_std::cpu::{no_irq_zone, CpuID, X86GeneralRegs};
+use deko_std::cpu::{CpuID, X86GeneralRegs};
 use deko_std::list::{LinkedList, Node};
 use deko_std::mem::bitalloc::{DekoBitAlloc, DekoBitmapAllocator1024};
 use deko_std::mem::{
@@ -28,7 +28,7 @@ use vstd::std_specs::cmp::{PartialEqSpec, PartialEqSpecImpl, PartialOrdSpecImpl}
 
 use crate::collections::Vec;
 use crate::cpu::ipi::{wait_ipi_blocking, DekoIpIMessage, DekoIpiRequest};
-use crate::cpu::irq::irq_enable;
+use crate::cpu::irq::{irq_enable, no_irq_zone, DekoUnsafeRwLock, IrqUnSafeLockGuard};
 use crate::cpu::regs::{sse_restore_context, sse_save_context};
 use crate::cpu::{
     self, flush_tlb_global_percpu, flush_tlb_global_sync, DekoCpuCtx, DekoCpuCtxPermission,
@@ -56,20 +56,20 @@ core::arch::global_asm!(
     options(att_syntax)
 );
 
+const _: () = {
+    assert!(core::mem::offset_of!(X86ExceptionContext, frame.flags) == 0x98);
+};
+
 verus! {
 
 pub const DEKO_DEFAULT_STACK_SIZE: u64 = 0x10000;
 
-pub exec static DEKO_KTASK_BIT_ALLOC: DekoSimpleRwLock<DekoBitmapAllocator1024>
+pub exec static DEKO_KTASK_BIT_ALLOC: DekoSimpleRwLock<DekoBitmapAllocator1024, IrqUnSafeLockGuard>
     ensures
         DEKO_KTASK_BIT_ALLOC.wf(),
 {
     let allocator = DekoBitmapAllocator1024::new_empty();
-    let r = DekoSimpleRwLock::new(
-        DekoAtomicData::new(allocator),
-        (),
-        Ghost(TrivialPredicate::new()),
-    );
+    let r = DekoSimpleRwLock::new_simple(allocator, IrqUnSafeLockGuard {  });
 
     proof {
         use_type_invariant(&r);
@@ -133,7 +133,7 @@ pub struct X86InterruptFrame {
 #[repr(C)]
 #[derive(DekoDebug, Clone, Copy)]
 pub struct X86ExceptionContext {
-    // pub ssp: usize,
+    pub ssp: usize,
     pub regs: X86GeneralRegs,
     pub error_code: usize,
     pub frame: X86InterruptFrame,
@@ -233,13 +233,16 @@ with_atomic_pred! {
     data.wf() && data.wf_with(perm)
 }
 
-pub exec static DEKO_TASK_LIST: DekoRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred> =
-    {
+pub exec static DEKO_TASK_LIST: DekoUnsafeRwLock<
+    DekoRunQueue,
+    DekoRunQueuePermission,
+    DekoRunQueuePred,
+> = {
     let (queue, Tracked(queue_perm)) = DekoRunQueue::new();
 
     DekoRwLock::new(
         DekoAtomicData { data: queue, perm: Tracked(queue_perm) },
-        (),
+        IrqUnSafeLockGuard {  },
         Ghost(DekoRunQueuePred {  }),
     )
 };
@@ -857,7 +860,7 @@ pub struct DekoRunnable {
     /// The priority of the task.
     pub priority: u8,
     /// The page table of the task.
-    pub pgtable: DekoRwLock<DekoPPtr<PageTable>, PageTablePermission, DekoPagaTablePred>,
+    pub pgtable: DekoUnsafeRwLock<DekoPPtr<PageTable>, PageTablePermission, DekoPagaTablePred>,
     /// The stack owned by the task.
     pub stack: VaddrRange,
     /// The area allocated for XSAVE/XSTOR.
@@ -868,7 +871,7 @@ pub struct DekoRunnable {
     /// The memory management.
     pub mm: DekoArc<VirtualMemoryRegion, VirtualMemoryRegionPermission, VirtualMemoryRegionPred>,
     /// The state of this task.
-    pub state: DekoRwLock<DekoRunnableSchedState, (), DekoRunnableSchedStatePred>,
+    pub state: DekoUnsafeRwLock<DekoRunnableSchedState, (), DekoRunnableSchedStatePred>,
 }
 
 #[verus_verify]
@@ -1036,7 +1039,7 @@ impl DekoRunnable {
 
             let mapping_lock = DekoRwLock::new(
                 DekoAtomicData::new(stack),
-                (),
+                IrqUnSafeLockGuard {  },
                 Ghost(VmMappingPred {  }),
             );
 
@@ -1107,6 +1110,7 @@ impl DekoRunnable {
             ctx_perm_updated@.wf_with(cpu),
             ctx_perm_updated@.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
             ctx_perm_updated@.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
+            ctx_perm_updated@.ptr_perm.value().cpu_id == ctx_perm.ptr_perm.value().cpu_id,
             // r@.???
     )]
     pub fn new(cpu: DekoPPtr<DekoCpuCtx>, args: DekoTaskArgs) -> DekoRunnablePtr {
@@ -1176,6 +1180,7 @@ impl DekoRunnable {
             temp_mapping_2m,
             deko_vmsa,
             doorbell,
+            nested_irq,
         } = cpu_taken;
         kpanic_if!(core::hint::unlikely(
             vm_region.is_none(),
@@ -1194,6 +1199,7 @@ impl DekoRunnable {
             pgtable_perm: cpu_pgtable_perm,
             ghcb_perm,
             vm_region_perm,
+            irq_state_perm,
         } = ctx_perm;
 
         let mut vm_region = vm_region.unwrap();
@@ -1231,7 +1237,7 @@ impl DekoRunnable {
             id: generate_id(),
             pgtable: RwLock::new(
                 DekoAtomicData::new_with(new_pgtable, Tracked(pgtable_perm)),
-                (),
+                IrqUnSafeLockGuard {  },
                 Ghost(DekoPagaTablePred {  }),
             ),
             priority: 0,
@@ -1250,7 +1256,7 @@ impl DekoRunnable {
 
                 DekoRwLock::new(
                     DekoAtomicData::new(sched_state),
-                    (),
+                    IrqUnSafeLockGuard {  },
                     Ghost(DekoRunnableSchedStatePred {  }),
                 )
             },
@@ -1282,12 +1288,14 @@ impl DekoRunnable {
             temp_mapping_2m,
             deko_vmsa,
             doorbell,
+            nested_irq,
         };
         let tracked ctx_perm = DekoCpuCtxPermission {
             ptr_perm,
             pgtable_perm: cpu_pgtable_perm,
             ghcb_perm,
             vm_region_perm: Some(vm_region_perm),
+            irq_state_perm,
         };
         cpu.write(Tracked(&mut ctx_perm.ptr_perm), cpu_new);
 
@@ -1573,8 +1581,8 @@ pub fn schedule() {
                 let work = DekoCpuCtx::schedule_prep(cpu, Tracked(&perm));
                 if let Some((cur, next)) = work {
                     // id generation is somehow incorrect.
-                    kdebug!("Switching from task ", cur.as_ref().data.id => hex);
-                    kdebug!("Switching to task ", next.as_ref().data.id => hex);
+                    kinfo!("Switching from task ", cur.as_ref().data.id => hex, " name", cur.as_ref().data.name);
+                    kinfo!("Switching to task ", next.as_ref().data.id => hex, " name", next.as_ref().data.name);
 
                     let next_state = &next.as_ref().data.state;
 
@@ -1675,7 +1683,7 @@ fn after_switch() {
             &[which as usize],
             DekoIpIMessage::AffinityChange { task: task.clone() },
         );
-        // Incomplete;
+
         req.send_ipi();
     }
 }
@@ -1696,17 +1704,6 @@ fn do_context_switch(pre: u64, next: u64, cr3_next: u64, stack_next: u64) {
     kdebug!("Switching context: next=", next => hex);
     kdebug!("Switching context: cr3_next=", cr3_next => hex);
     kdebug!("Switching context: stack_next=", stack_next => hex);
-
-    // let rsp = unsafe { (next as *const DekoRunnable).read().rsp };
-
-    // kdebug!("Next task rsp = ", rsp => hex);
-
-    // let v = unsafe { core::slice::from_raw_parts(rsp as *const u64, 18) };
-
-    // kdebug!("Next task rsp content: ");
-    // for i in 0..v.len() {
-    //     kdebug!("\t[", i, "] = ", v[i] => hex);
-    // }
 
     unsafe {
         core::arch::asm!(
@@ -1774,6 +1771,8 @@ pub extern "C" fn run_kernel_tasks(
     // Now we need to re-enable the interrupts.
     // Then we enter the entry.
     irq_enable();
+
+    kinfo!("enabled?", cpu::irq::irq_enabled());
 
     after_switch();
 
@@ -1858,6 +1857,10 @@ pub fn cpu_go_idle(which: usize) {
 )]
 #[verifier::exec_allows_no_decreases_clause]
 pub fn cpu_idle(which: usize) -> DekoRunnablePtr {
+    kinfo!("CPU ", which, " entering idle state.");
+
+    kinfo!("enabled?", cpu::irq::irq_enabled());
+
     #[verus_spec(
         invariant
             which < CPUID_MAX_COUNT,
@@ -1979,9 +1982,8 @@ pub fn set_cpu_affinity(which: usize) {
 #[verifier::spinoff_prover]
 #[verifier::exec_allows_no_decreases_clause]
 pub fn serv_main(cpu_index: usize) {
-    let (this_cpu, Tracked(mut perm)) = DekoCpuCtx::this_cpu();
-
     if cpu_index == 0 {
+        let (this_cpu, Tracked(mut perm)) = DekoCpuCtx::this_cpu();
         let cpu_nums: u64 = match CPU_NUM.get() {
             Some(DekoAtomicData { data, .. }) => data.num,
             None => 1,
@@ -2038,11 +2040,12 @@ pub fn serv_main(cpu_index: usize) {
                 },
             );
 
-            kinfo!("Spawning service main on AP core ", i);
+            kinfo!("Creating service main task for AP core ", i);
             // Set service main for other APs.
             // But this task never gets run?????
             DekoCpuCtx::start_kernel_task(this_cpu, Tracked(&mut new_perm), serv_task);
 
+            kinfo!("Spawned service main on AP core ", i);
             proof {
                 perm = new_perm;
             }
@@ -2060,8 +2063,6 @@ pub fn serv_main(cpu_index: usize) {
     #[verus_spec(
         invariant
             cpu_index < CPUID_MAX_COUNT,
-            // perm.wf_with(this_cpu),
-            perm.wf(),
     )]
     loop {
         match try_enter_guest(r) {
@@ -2074,25 +2075,30 @@ pub fn serv_main(cpu_index: usize) {
                 kerror!("VMPL switch failed on core ", cpu_index);
                 die("VMPL switch failed.");
             },
-            DekoGuestExitInformation::ServiceRequest {
-                protocol,
-                req,
-                mut params,
-            } => match #[verus_spec(with Tracked(&mut perm))]
-            crate::guest::handle_guest_exit(protocol, req, &mut params) {
-                Ok(()) => {
-                    r = 0;
-                },
-                Err(e) => {
-                    match e {
-                        DekoGuestServError::FatalError => {
-                            die("Fatal error occurred when handling guest request.");
-                        },
-                        DekoGuestServError::SoftError(e) => {
-                            r = e.into_error_code();
-                        },
-                    }
-                },
+            DekoGuestExitInformation::ServiceRequest { protocol, req, mut params } => {
+                let (this_cpu, Tracked(mut perm)) = DekoCpuCtx::this_cpu();
+                let this_cpu_id = this_cpu.borrow(Tracked(&perm.ptr_perm)).cpu_id as usize;
+                kpanic_if!(
+                    core::hint::unlikely(this_cpu_id != cpu_index),
+                    "CPU ID mismatch when handling guest exit."
+                );
+
+                match #[verus_spec(with Tracked(&mut perm))]
+                crate::guest::handle_guest_exit(protocol, req, &mut params, cpu_index as u64) {
+                    Ok(()) => {
+                        r = 0;
+                    },
+                    Err(e) => {
+                        match e {
+                            DekoGuestServError::FatalError => {
+                                die("Fatal error occurred when handling guest request.");
+                            },
+                            DekoGuestServError::SoftError(e) => {
+                                r = e.into_error_code();
+                            },
+                        }
+                    },
+                }
             },
         }
     }
@@ -2117,6 +2123,8 @@ func_ptr!(serv_main);
 #[verus_spec(
 )]
 pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
+    kinfo!("Attempting to enter guest...");
+
     let (this_cpu_ptr, Tracked(this_cpu_perm)) = DekoCpuCtx::this_cpu();
     let this_cpu = this_cpu_ptr.borrow(Tracked(&this_cpu_perm.ptr_perm));
     let this_cpu_index: usize = this_cpu.cpu_id as usize;
@@ -2145,7 +2153,7 @@ pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
     )]
     loop {
         let cpu = this_cpu_ptr.borrow(Tracked(&this_cpu_perm.ptr_perm));
-        let r =
+        let should_end =
             deko_rwlock_read_atomic_data! {
             PERCPU_AREAS,
             percpu_areas,
@@ -2155,7 +2163,7 @@ pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
 
                 let vmsa_ref = &percpu_areas.0[this_cpu_index].guest_vmsa;
 
-                let should_end = deko_rwlock_read_atomic_data! {
+                deko_rwlock_read_atomic_data! {
                     vmsa_ref,
                     vmsa,
                     vmsa_perm,
@@ -2182,47 +2190,50 @@ pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
 
                         should_end
                     }
-                };
-
-                if should_end {
-                    return DekoGuestExitInformation::CoreNotCreated;
                 }
+            }
+        };
 
-                no_irq_zone(|| {
+        // The lock is released early here.
+
+        if should_end {
+            return DekoGuestExitInformation::CoreNotCreated;
+        }
+        let r = no_irq_zone(
+            ||
+                {
                     // Also need to update the guest interrupt delivery information here.
                     // TODO: apic controller update.
-
-                    flush_tlb_global_sync();
-
                     // Need to update the guest APIC status here so no interrupt will
                     // be delivered.
-                    let no_further_signal = deko_rwlock_read_atomic_data! {
-                        cpu.doorbell.as_ref().unwrap(),
-                        doorbell,
-                        doorbell_perm,
-                        {
-                            #[verus_spec(with Tracked(doorbell_perm.borrow()))]
-                            HVDoorbell::no_further_signal(*doorbell)
-                        }
+                    // flush_tlb_global_sync();
+                    let no_further_signal =
+                        deko_rwlock_read_atomic_data! {
+                            cpu.doorbell.as_ref().unwrap(),
+                            doorbell,
+                            doorbell_perm,
+                            {
+                                #[verus_spec(with Tracked(doorbell_perm.borrow()))]
+                                HVDoorbell::no_further_signal(*doorbell)
+                            }
                     };
 
                     if no_further_signal {
-                        let r = vmpl_switch(2); // switch to VMPL2
+                        let r = vmpl_switch(2);  // switch to VMPL2
                         // crate::imp::vmpl_run(2);
 
                         if r != 0 {
                             kerror!("Failed to switch to VMPL2: error code ", r => hex);
                         }
-
                         r
                         // Now we need to read the VMSA to fetch the
                         // information process the guest's request.
+
                     } else {
                         1
                     }
-                })
-            }
-        };
+                },
+        );
 
         let new_perm = DekoCpuCtx::update_guest_vmsa(this_cpu_ptr, Tracked(this_cpu_perm));
         let Tracked(new_perm) = new_perm;

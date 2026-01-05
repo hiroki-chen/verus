@@ -17,6 +17,7 @@ use deko_std::prelude::*;
 use vstd::prelude::*;
 
 use crate::collections::Vec;
+use crate::cpu::irq::IrqUnSafeLockGuard;
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::imp::{page_state_change, PageStateChangeOp};
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
@@ -29,11 +30,11 @@ verus! {
 /// This bookkeeps the global memory maps for physical memory regions, i.e.,
 /// valid memories that can be used system-wide.
 #[doc(hidden)]
-exec static MMAP: DekoSimpleRwLock<Vec<PaddrRange>>
+exec static MMAP: DekoSimpleRwLock<Vec<PaddrRange>, IrqUnSafeLockGuard>
     ensures
         MMAP.wf(),
 {
-    let r = DekoSimpleRwLock::new(DekoAtomicData::new(vec![]), (), Ghost(TrivialPredicate::new()));
+    let r = DekoSimpleRwLock::new_simple(vec![], IrqUnSafeLockGuard {  });
 
     proof {
         use_type_invariant(&r);

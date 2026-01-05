@@ -256,18 +256,21 @@ impl DekoGuestExitInformation {
         Tracked(cpu_perm): Tracked<&mut DekoCpuCtxPermission>,
     requires
         old(cpu_perm).wf(),
+        old(cpu_perm).ptr_perm.value().cpu_id == cpu_idx,
     ensures
         cpu_perm.wf(),
+        cpu_perm.ptr_perm.value().cpu_id == cpu_idx,
 )]
 pub fn handle_guest_exit(
     protocol: u32,
     req: u32,
     params: &mut DekoGuestRequestParams,
+    cpu_idx: u64,
 ) -> DekoGuestServResult<()> {
     match protocol {
         DEKO_GUEST_EXIT_PROTOCOL_DEKO_SERVICE => {
             proof_with!(Tracked(cpu_perm));
-            service::handle_guest_exit_deko_service(req, params)
+            service::handle_guest_exit_deko_service(req, params, cpu_idx)
         },
         _ => {
             kerror!("Unsupported guest exit protocol: ", protocol);

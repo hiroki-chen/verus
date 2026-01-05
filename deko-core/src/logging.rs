@@ -9,6 +9,7 @@ use deko_std::prelude::*;
 #[cfg(feature = "logging")]
 use vstd::prelude::*;
 
+use crate::cpu::irq::IrqUnSafeLockGuard;
 use crate::hal::{PlatformType, PLATFORM};
 use crate::snp::logging::GHCB_IO_PORT;
 
@@ -78,11 +79,15 @@ pub struct Console;
 pub const CONSOLE: Console = Console;
 
 // Now we need a lock to protect concurrent access to the console.
-pub exec static CONSOLE_LOCK: DekoSimpleRwLock<()>
+pub exec static CONSOLE_LOCK: DekoSimpleRwLock<(), IrqUnSafeLockGuard>
     ensures
         CONSOLE_LOCK.wf(),
 {
-    let r = DekoSimpleRwLock::new(DekoAtomicData::new(()), (), Ghost(TrivialPredicate::new()));
+    let r = DekoSimpleRwLock::new(
+        DekoAtomicData::new(()),
+        IrqUnSafeLockGuard {  },
+        Ghost(TrivialPredicate::new()),
+    );
 
     proof {
         use_type_invariant(&r);

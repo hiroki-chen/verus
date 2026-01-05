@@ -12,6 +12,7 @@ use vstd::simple_pptr::PPtr;
 use crate::collections::{get_unchecked, Vec};
 use crate::cpu::apic::Apic;
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
+use crate::cpu::irq::{DekoUnsafeRwLock, IrqState, IrqUnSafeLockGuard};
 use crate::cpu::{
     CpuidTable, DekoCpuCtx, DekoCpuCtxPermission, PerCpuAreas, PerCpuShared, CPUID_MAX_COUNT,
     CPU_AREA_MAGIC, PERCPU_AREAS,
@@ -28,7 +29,8 @@ use crate::snp::doorbell::init_hv_doorbell;
 use crate::snp::ghcb::{current_ghcb, msr_register_ghcb_gpa, GuestHostCommunicationBlock};
 use crate::snp::vmsa::VMSA;
 use crate::{
-    die, kdebug, kerror, kinfo, kpanic_if, kwarn, vec, DekoKernelLaunchInfo, Stage2LaunchInfo,
+    die, kdebug, kerror, kinfo, kpanic_if, ktrace, kwarn, vec, DekoKernelLaunchInfo,
+    Stage2LaunchInfo,
 };
 
 pub mod doorbell;
@@ -137,14 +139,13 @@ pub fn init_secrets_page(addr: VirtAddr) {
     }
 }
 
-// FIXME:This needs heap allocation.
-pub exec static SECRETS_PAGE: DekoRwLock<SecretsPage, SecretsPagePermission, SecretsPagePred>
+pub exec static SECRETS_PAGE: DekoUnsafeRwLock<SecretsPage, SecretsPagePermission, SecretsPagePred>
     ensures
         SECRETS_PAGE.wf(),
 {
     let r = DekoRwLock::new(
         DekoAtomicData::new_with(SecretsPage::new(), Tracked(SecretsPagePermission {  })),
-        (),
+        IrqUnSafeLockGuard {  },
         Ghost(SecretsPagePred {  }),
     );
 
@@ -230,7 +231,7 @@ impl SecretsPage {
         this: &mut WriteHandle<
             '_,
             DekoAtomicData<Self, SecretsPagePermission>,
-            (),
+            IrqUnSafeLockGuard,
             SecretsPagePred,
         >,
         from: VirtAddr,
@@ -480,6 +481,8 @@ pub fn init_platform_end(
 
     // Print IGVM parameter information for debugging
     kdebug!("IGVM Parameters\n\t", igvm_params);
+
+    kinfo!("enabled interrupt?", crate::cpu::irq::rflags() => hex);
 }
 
 pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxPermission>) -> (r: (
@@ -517,6 +520,7 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
     // Get the platform-specific PTE mask values for this CPU
     let masks = get_page_encryption_masks();
 
+    let (irq_state, Tracked(irq_state_perm)) = IrqState::new();
     // Use the existing context that was passed in from setup_env
     // This context already has the proper stage2_launch_info and other components
     let bsp_percpu = DekoCpuCtx::new(
@@ -530,6 +534,7 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
         None,  // ctx_switch_stack
         None,  // ist_stack
         None,
+        irq_state,
     );
     bsp_percpu_ptr.write(Tracked(&mut bsp_percpu_perm), bsp_percpu);
 
@@ -538,6 +543,7 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
         pgtable_perm: ctx_perm.pgtable_perm,
         ghcb_perm,
         vm_region_perm: None,
+        irq_state_perm,
     };
 
     assume(cpu_ctx_perm.wf_with(bsp_percpu_ptr));
@@ -746,7 +752,6 @@ pub fn setup_apic(ctx: DekoPPtr<DekoCpuCtx>, Tracked(ctx_perm): Tracked<&mut Dek
 
     if SnpStatusFlags::get_status().contains(REST_INJ) {
         kinfo!("SNP: Using restricted interrupt mode");
-
         doorbell::HVDoorbell::allocate();
     }
     let apic = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).apic();
@@ -1563,7 +1568,7 @@ fn validate_fw(igvm_params: &IgvmParams<'_>, kernel_region: PaddrRange) {
             }
 
             // Now we can validate the page at `cur`.
-            kdebug!("Validating firmware page at", temp_mapping.inner.start, "for firmware physical address", PhysAddr(cur));
+            ktrace!("Validating firmware page at", temp_mapping.inner.start, "for firmware physical address", PhysAddr(cur));
             let r = rmpadjust(temp_mapping.inner.start, PAGE_SIZE, rmp_flags, Tracked(pgtable_perm));
 
             // Panics the system since firmware validation failure is fatal.
@@ -1608,6 +1613,12 @@ fn do_copy_cpuid_to_fw(cpuid_table: &CpuidTable, to: TempMapping) {
 
     let fw_cpuid_table = unsafe { &mut *(to.inner.start.0 as *mut CpuidTable) };
     kdebug!("Copied CPU ID table to firmware location at", to.inner.start, ": ", fw_cpuid_table);
+}
+
+#[inline]
+#[verifier::exec_allows_no_decreases_clause]
+pub fn process_pending_hv_events() {
+    doorbell::process_pending_hv_events();
 }
 
 }

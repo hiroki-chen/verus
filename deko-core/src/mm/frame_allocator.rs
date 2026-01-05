@@ -4,6 +4,7 @@ use deko_std::prelude::*;
 use vstd::prelude::*;
 use vstd::raw_ptr::PointsToRaw;
 
+use crate::cpu::irq::IrqUnSafeLockGuard;
 use crate::hal::is_stage2;
 use crate::mm::{DEKO_FRAME_ALLOCATOR, DEKO_FRAME_ALLOCATOR_FULL};
 
@@ -25,10 +26,12 @@ verus! {
 ///     p.write(Tracked(&mut perm), 42);
 /// ```
 #[verifier::reject_recursive_types(ORDER)]
-pub struct DekoPageFrameAllocator<const ORDER: usize>(pub DekoBuddyAllocator<DekoHeap<ORDER>>);
+pub struct DekoPageFrameAllocator<const ORDER: usize>(
+    pub DekoBuddyAllocator<DekoHeap<ORDER>, IrqUnSafeLockGuard>,
+);
 
 impl<const ORDER: usize> View for DekoPageFrameAllocator<ORDER> {
-    type V = DekoBuddyAllocator<DekoHeap<ORDER>>;
+    type V = DekoBuddyAllocator<DekoHeap<ORDER>, IrqUnSafeLockGuard>;
 
     #[verifier::inline]
     open spec fn view(&self) -> Self::V {
@@ -79,7 +82,7 @@ impl<const ORDER: usize> DekoPageFrameAllocator<ORDER> {
         let ghost f = DekoHeapPredicate;
         let heap = DekoHeap::<ORDER>::new(Ghost(f));
 
-        Self(DekoBuddyAllocator::new(heap, Ghost(f)))
+        Self(DekoBuddyAllocator::new(heap, IrqUnSafeLockGuard {  }, Ghost(f)))
     }
 }
 

@@ -67,7 +67,7 @@ hv_handler:
 	// commit to processing all #HV events immediately.
 	testl	$0x200, ({EXCEP_FLAGS_OFF} - {EXCEP_RCX_OFF})(%rsp)
 	jnz	continue_hv
-// Check whether the trap RIP is within any code that may require
+	// Check whether the trap RIP is within any code that may require
 	// RIP redirection
 	leaq	hv_redirect_window_start(%rip), %rbx
 	leaq	hv_redirect_window_end(%rip), %rcx

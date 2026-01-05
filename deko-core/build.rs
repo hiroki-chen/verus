@@ -218,6 +218,9 @@ fn gen_idt_handler() {
         pushq	%r13
         pushq	%r14
         pushq	%r15
+        xorl	%eax, %eax
+	    rdsspq	%rax
+	    pushq	%rax
     .endm
 
     {body}

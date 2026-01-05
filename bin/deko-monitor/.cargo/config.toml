@@ -1,6 +1,8 @@
 rustflags = [
 	"-C", "force-frame-pointers",
 	"-C", "linker-flavor=ld",
+	"-C", "link-arg=/ALIGN:4096",
+  "-C", "link-arg=/FILEALIGN:4096",
 	"--cfg", "aes_force_soft",
 	"--cfg", "polyval_force_soft",
 ]

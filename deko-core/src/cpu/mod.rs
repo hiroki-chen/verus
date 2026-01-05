@@ -29,6 +29,10 @@ use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
 use crate::cpu::ipi::{
     add_ipi_available_cpu, CpuIpiArea, CpuIpiAreaPermission, DekoIpIMessage, DekoIpiRequest,
 };
+use crate::cpu::irq::{
+    raw_irq_enable, DekoSafeRwLock, DekoUnsafeRwLock, IrqSafeLockGuard, IrqState,
+    IrqStatePermission, IrqUnSafeLockGuard,
+};
 use crate::cpu::regs::{read_cr3, sse_init, Cr4Flags};
 use crate::cpu::task::{
     cpu_idle_func_ptr, schedule_init, DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred,
@@ -156,7 +160,7 @@ pub struct PerCpuShared {
     pub apic_id: u32,  // the id of the local apic
     pub cpu_index: usize,
     #[deko(skip)]
-    pub guest_vmsa: DekoSimpleRwLock<GuestVmsaRef>,
+    pub guest_vmsa: DekoSimpleRwLock<GuestVmsaRef, IrqUnSafeLockGuard>,
     #[deko(skip)]
     pub online: PAtomicBool,
     #[deko(skip)]
@@ -262,6 +266,7 @@ impl PerCpuShared {
         let (ipi_irr, Tracked(ipi_irr_perm)) = Self::new_ipi_irr();
         let guest_vmsa = DekoSimpleRwLock::new_simple(
             GuestVmsaRef { vmsa: None, caa: None, generation: 0, gen_in_use: 0 },
+            IrqUnSafeLockGuard {  },
         );
         let (ipi_shared, Tracked(ipi_shared_perm)) = CpuIpiArea::new();
 
@@ -429,7 +434,7 @@ impl View for PerCpuAreas {
 ///
 /// Because this struct is frequently accessed, it is unwise for use to allocate everything
 /// just on the stack as this would cause a lot of stack overflows and bad for performance.
-pub exec static PERCPU_AREAS: DekoRwLock<
+pub exec static PERCPU_AREAS: DekoUnsafeRwLock<
     Option<PerCpuAreas>,
     PerCpuAreasPermission,
     PerCpuAreasOptPred,
@@ -442,7 +447,7 @@ pub exec static PERCPU_AREAS: DekoRwLock<
             None,
             Tracked(PerCpuAreasPermission { shared_perms: Seq::tracked_empty() }),
         ),
-        (),
+        IrqUnSafeLockGuard {  },
         Ghost(PerCpuAreasOptPred {  }),
     );
     proof {
@@ -565,7 +570,7 @@ pub struct DekoCpuCtx {
     /// APIC interface for this CPU.
     pub apic: X86Apic,
     /// Runqueue
-    pub run_queue: Option<DekoRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred>>,
+    pub run_queue: Option<DekoSafeRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred>>,
     /// Temporary mapping for creating temporary mappings to a 4k physical page.
     pub temp_mapping_4k: VirtualMemoryTemporary,
     /// Temporary mapping for creating temporary mappings to a 2M physical page.
@@ -580,8 +585,11 @@ pub struct DekoCpuCtx {
     ///
     /// The lock only protects the pointer itself from other vCPUs.
     pub doorbell: Option<
-        DekoRwLock<DekoPPtr<HVDoorbell>, HvDoorbellPtrPermission, HvDoorbellPtrPred>,
+        DekoUnsafeRwLock<DekoPPtr<HVDoorbell>, HvDoorbellPtrPermission, HvDoorbellPtrPred>,
     >,
+    /// How many disable requests are nested.
+    #[deko(skip)]
+    pub nested_irq: IrqState,
 }
 
 with_permission! {
@@ -590,6 +598,7 @@ with_permission! {
     pgtable_perm: PageTablePermission,
     ghcb_perm: DekoPointsTo<GuestHostCommunicationBlock>,
     vm_region_perm: Option<VirtualMemoryRegionPermission>,
+    irq_state_perm: IrqStatePermission,
 }
 
 impl DekoCpuCtxPermission {
@@ -638,6 +647,7 @@ impl WellFormed for DekoCpuCtxPermission {
         &&& self.ghcb_perm.is_init()
         &&& self.ghcb_perm.wf()
         &&& self.ghcb_perm.pptr() == self.ptr_perm.value().ghcb_spec()@
+        &&& self.irq_state_perm.wf_with(&self.ptr_perm.value().nested_irq)
     }
 }
 
@@ -839,7 +849,7 @@ impl DekoCpuCtx {
     }
 
     pub open spec fn run_queue_spec(&self) -> Option<
-        &DekoRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred>,
+        &DekoSafeRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred>,
     > {
         match &self.run_queue {
             Some(rq) => Some(rq),
@@ -960,7 +970,8 @@ impl DekoCpuCtx {
         vm_region: Option<VirtualMemoryRegion>,
         ctx_switch_stack: Option<VirtAddr>,
         ist_stack: Option<DekoIstStack>,
-        run_queue: Option<DekoRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred>>,
+        run_queue: Option<DekoSafeRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred>>,
+        irq_state: IrqState,
     ) -> (r: Self)
         requires
             cpu_id < CPUID_MAX_COUNT as u64,
@@ -995,6 +1006,7 @@ impl DekoCpuCtx {
             temp_mapping_2m: VirtualMemoryTemporary::new_zeroed(),
             deko_vmsa: DekoOnceCell::new(Ghost(VmsaPagePred {  })),
             doorbell: None,
+            nested_irq: irq_state,
         }
     }
 
@@ -1105,6 +1117,7 @@ impl DekoCpuCtx {
                                         temp_mapping_2m,
                                         deko_vmsa,
                                         doorbell,
+                                        nested_irq,
                                     } = ptr.take(Tracked(&mut perm.ptr_perm));
 
                                     let tracked DekoCpuCtxPermission {
@@ -1112,6 +1125,7 @@ impl DekoCpuCtx {
                                         pgtable_perm,
                                         ghcb_perm,
                                         vm_region_perm,
+                                        irq_state_perm,
                                     } = perm;
 
                                     let mut vm_region = vm_region.unwrap();
@@ -1192,6 +1206,7 @@ impl DekoCpuCtx {
                                             temp_mapping_2m,
                                             deko_vmsa,
                                             doorbell,
+                                            nested_irq,
                                         },
                                     );
 
@@ -1203,6 +1218,7 @@ impl DekoCpuCtx {
                                         pgtable_perm,
                                         ghcb_perm,
                                         vm_region_perm: Some(vm_region_perm),
+                                        irq_state_perm,
                                     } )
                                 },
                                 _ => {
@@ -1535,9 +1551,9 @@ impl DekoCpuCtx {
                 assume(mapping.wf());
             }
 
-            let arc = DekoRwLock::new(
+            let arc = DekoUnsafeRwLock::new(
                 DekoAtomicData::new_with(mapping, Tracked(())),
-                (),
+                IrqUnSafeLockGuard,
                 Ghost(VmMappingPred {  }),
             );
 
@@ -1604,9 +1620,9 @@ impl DekoCpuCtx {
                     assert(0x8000u64 >> 12 == 8) by (bit_vector);
                 }
             }
-            let arc = DekoRwLock::new(
+            let arc = DekoUnsafeRwLock::new(
                 DekoAtomicData::new_with(stack, Tracked(())),
-                (),
+                IrqUnSafeLockGuard,
                 Ghost(VmMappingPred {  }),
             );
 
@@ -1661,9 +1677,9 @@ impl DekoCpuCtx {
                 }
             }
 
-            let arc = DekoRwLock::new(
+            let arc = DekoUnsafeRwLock::new(
                 DekoAtomicData::new_with(stack, Tracked(())),
-                (),
+                IrqUnSafeLockGuard {  },
                 Ghost(VmMappingPred {  }),
             );
 
@@ -1704,9 +1720,10 @@ impl DekoCpuCtx {
         let (run_queue, Tracked(run_queue_perm)) = DekoRunQueue::new();
         let run_queue = DekoRwLock::new(
             DekoAtomicData::new_with(run_queue, Tracked(run_queue_perm)),
-            (),
+            IrqSafeLockGuard {  },
             Ghost(DekoRunQueuePred {  }),
         );
+        let (irq_state, Tracked(irq_state_perm)) = IrqState::new();
 
         let mut cpu_ctx = DekoCpuCtx::new(
             init_pgtable,
@@ -1721,6 +1738,7 @@ impl DekoCpuCtx {
             None,
             // None,
             Some(run_queue),
+            irq_state,
         );
 
         cpu_ctx.temp_mapping_4k.set(
@@ -1814,6 +1832,7 @@ impl DekoCpuCtx {
             perm.wf_with(ptr),
             perm.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
             perm.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
+            perm.ptr_perm.value().cpu_id == old(perm).ptr_perm.value().cpu_id,
     {
         let cpu = ptr.borrow(Tracked(&perm.ptr_perm));
 
@@ -1938,6 +1957,8 @@ impl DekoCpuCtx {
                 },
             },
         );
+
+        raw_irq_enable();
 
         kinfo!("Created idle task for CPU ", cpu_id);
 
@@ -2177,8 +2198,8 @@ pub fn flush_tlb_global_sync() {
         }
 
         let req = DekoIpiRequest::new(&targets, DekoIpIMessage::TlbShootdown);
-        // will block... let's fix the lock's lifetime.
-        // req.send_ipi();
+
+        req.send_ipi();
     }
     // Flush local TLB as well.
 

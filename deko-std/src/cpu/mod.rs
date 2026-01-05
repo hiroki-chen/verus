@@ -133,20 +133,6 @@ pub fn write_msr(msr: u32, value: u64) {
     }
 }
 
-/// Enter a zone where interrupts are disabled.
-#[verifier::external_body]
-pub fn no_irq_zone<T>(f: impl FnOnce() -> T) -> T {
-    unsafe {
-        core::arch::asm!("cli", options(att_syntax, preserves_flags, nomem));
-    }
-    let v = f();
-    unsafe {
-        core::arch::asm!("sti", options(att_syntax, preserves_flags, nomem));
-    }
-
-    v
-}
-
 } // verus!
 verus! {
 

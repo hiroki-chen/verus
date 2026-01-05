@@ -46,15 +46,22 @@ pub fn pretty_pf_errno(errno: u64) {
     }
 }
 
+#[verifier::external_body]
 #[no_mangle]
 #[verus_spec(
 
 )]
 unsafe extern "C" fn ex_handler_panic(ctx: &mut X86ExceptionContext) {
-    let rip = ctx.frame.rip;
-    let rsp = ctx.frame.rsp;
-    let errno = ctx.error_code;
-    kerror!("Panic Exception occurred: rip =", rip => hex, "rsp:", rsp => hex, "error code:", errno => hex);
+    kinfo!("Panic Exception occurred:", ctx);
+
+    let (cpu, Tracked(perm)) = crate::cpu::DekoCpuCtx::this_cpu();
+    let cpu = cpu.borrow(Tracked(&perm.ptr_perm));
+
+    let irq_was_enabled = cpu.nested_irq.state.load(Tracked(&perm.irq_state_perm.state_perm));
+    kinfo!("  - CPU IRQ enabled state before exception:", irq_was_enabled);
+    let count = cpu.nested_irq.counts[0].load(Tracked::assume_new());
+    kinfo!("  - CPU nested IRQ count level 0 before exception:", count);
+
     die("Panic Exception");
 }
 

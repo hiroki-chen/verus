@@ -14,6 +14,7 @@ use vstd::std_specs::cmp::*;
 
 use super::frame_allocator::DekoAllocatorApi;
 use crate::collections::Vec;
+use crate::cpu::irq::{DekoUnsafeRwLock, IrqUnSafeLockGuard};
 use crate::cpu::{flush_tlb_global_percpu, DekoCpuCtx};
 use crate::mm::paging::{
     all_in_range_paddrs, all_normalized_vaddrs, bit_not_in_addr_region, bit_not_overlapping,
@@ -22,7 +23,7 @@ use crate::mm::paging::{
 };
 use crate::mm::stack::DekoKernelStack;
 use crate::mm::{vm, DEKO_FRAME_ALLOCATOR_FULL};
-use crate::{die, kdebug, kinfo, kpanic_if, kunimplemented, kwarn, vec};
+use crate::{die, kdebug, kinfo, kpanic_if, ktrace, kunimplemented, kwarn, vec};
 
 verus! {
 
@@ -203,7 +204,7 @@ impl TempMapping {
 
         cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
 
-        kdebug!("TempMapping::new: created temporary mapping:", vrange, "for physical range:", prange);
+        ktrace!("TempMapping::new: created temporary mapping:", vrange, "for physical range:", prange);
 
         Some(Self { inner: vrange })
     }
@@ -321,6 +322,20 @@ impl WellFormed for TempMapping {
 
 #[verus_verify]
 impl TempMapping {
+    /// Try to write `len` bytes of `byte` to the temporary mapping.
+    #[inline]
+    #[verifier::external_body]
+    #[verus_spec(
+        requires
+            self.wf(),
+            len as u64 <= self.inner.end@ - self.inner.start@,
+    )]
+    pub fn write_bytes(&self, byte: u8, len: usize) {
+        unsafe {
+            core::ptr::write_bytes(self.inner.start.0 as *mut u8, byte, len);
+        }
+    }
+
     /// Try to read a reference of type `T` from the temporary mapping.
     ///
     /// Note that there would no semantic checks for now (can be added later; though).
@@ -482,7 +497,11 @@ pub struct RawMapping {
 /// This currently looks ugly because it mingles the `DekoArc` and `DekoRwLock` types with
 /// invariant together and is not very ergnomic to use. We may need to provide some helper
 /// functions to make it easier to create.
-pub type Mapping = DekoArc<DekoRwLock<VmMapping, (), VmMappingPred>, (), DekoSimpleRwLockPred>;
+pub type Mapping = DekoArc<
+    DekoUnsafeRwLock<VmMapping, (), VmMappingPred>,
+    (),
+    DekoSimpleRwLockPred,
+>;
 
 /// Creates a new [`Mapping`] from the given [`VmMapping`].
 #[verus_spec(r =>
@@ -494,7 +513,7 @@ pub type Mapping = DekoArc<DekoRwLock<VmMapping, (), VmMappingPred>, (), DekoSim
 pub fn make_mapping(vm_mapping: VmMapping) -> Mapping {
     let mapping_lock = DekoRwLock::new(
         DekoAtomicData::new(vm_mapping),
-        (),
+        IrqUnSafeLockGuard {  },
         Ghost(VmMappingPred {  }),
     );
 

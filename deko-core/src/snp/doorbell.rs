@@ -6,15 +6,21 @@ use deko_std::mem::PAGE_SIZE;
 use deko_std::ptr::{DekoPPtr, DekoPPtrPred, DekoPointsTo};
 use deko_std::sync::{DekoAtomicData, DekoRwLock};
 use deko_std::wf::WellFormed;
-use deko_std::{boxed_ptr, with_permission};
+use deko_std::{
+    boxed_ptr, deko_rwlock_read_atomic_data, deko_rwlock_write_atomic_data, with_permission,
+};
 use vstd::atomic::{PAtomicU8, PermissionU8};
 use vstd::prelude::*;
 
 use crate::cpu::apic::Apic;
 use crate::cpu::idt::IPI_VECTOR;
+use crate::cpu::irq::{
+    irq_disable, irq_enable, raw_irq_disable, raw_irq_enable, IrqUnSafeLockGuard,
+};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::paging::PageTable;
 use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR_FULL};
+use crate::snp::doorbell;
 use crate::snp::ghcb::{current_ghcb, GuestHostCommunicationBlock};
 use crate::{die, kdebug, kerror, kinfo, kpanic_if, kwarn};
 
@@ -257,7 +263,7 @@ impl HVDoorbell {
         cpu_taken.doorbell = Some(
             DekoRwLock::new(
                 DekoAtomicData::new_with(doorbell_ptr, Tracked(db_perm)),
-                (),
+                IrqUnSafeLockGuard {  },
                 Ghost(HvDoorbellPtrPred {  }),
             ),
         );
@@ -297,19 +303,25 @@ impl HVDoorbell {
 #[verifier::exec_allows_no_decreases_clause]
 #[verus_spec(r =>
     with
-        Tracked(hvdb_perm): Tracked<HvDoorbellPtrPermission>,
+        Tracked(hvdb_perm): Tracked<&mut HvDoorbellPtrPermission>,
     requires
-        hvdb_perm.ptr_perm.pptr() == hvdb@,
-        hvdb_perm.ptr_perm.is_init(),
-        hvdb_perm.ptr_perm.wf(),
-
+        old(hvdb_perm).ptr_perm.pptr() == hvdb@,
+        old(hvdb_perm).ptr_perm.is_init(),
+        old(hvdb_perm).ptr_perm.wf(),
+        old(hvdb_perm).hv_perm.vector_perm.is_for(old(hvdb_perm).ptr_perm.value().vector),
+        old(hvdb_perm).hv_perm.flags_perm.is_for(old(hvdb_perm).ptr_perm.value().flags),
+        old(hvdb_perm).hv_perm.no_eoi_required_perm.is_for(old(hvdb_perm).ptr_perm.value().no_eoi_required),
+        old(hvdb_perm).hv_perm.per_vmpl_events_perm.is_for(old(hvdb_perm).ptr_perm.value().per_vmpl_events),
+    ensures
+        hvdb_perm.ptr_perm == old(hvdb_perm).ptr_perm,
         hvdb_perm.hv_perm.vector_perm.is_for(hvdb_perm.ptr_perm.value().vector),
         hvdb_perm.hv_perm.flags_perm.is_for(hvdb_perm.ptr_perm.value().flags),
         hvdb_perm.hv_perm.no_eoi_required_perm.is_for(hvdb_perm.ptr_perm.value().no_eoi_required),
         hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb_perm.ptr_perm.value().per_vmpl_events),
 )]
 pub unsafe extern "C" fn handle_hv_doorbell(hvdb: DekoPPtr<HVDoorbell>) {
-    let tracked mut hvdb_perm = hvdb_perm;
+    kdebug!("doorbell rang");
+
     let hvdb = hvdb.borrow(Tracked(&hvdb_perm.ptr_perm));
     let vector = hvdb.vector.load(Tracked(&mut hvdb_perm.hv_perm.vector_perm));
     // Clear the flag.
@@ -323,6 +335,10 @@ pub unsafe extern "C" fn handle_hv_doorbell(hvdb: DekoPPtr<HVDoorbell>) {
     loop
         invariant
             hvdb_perm.hv_perm.vector_perm.is_for(hvdb.vector),
+            hvdb_perm.hv_perm.flags_perm.is_for(hvdb.flags),
+            hvdb_perm.hv_perm.no_eoi_required_perm.is_for(hvdb.no_eoi_required),
+            hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb.per_vmpl_events),
+            hvdb_perm.ptr_perm == old(hvdb_perm).ptr_perm,
     {
         match hvdb.vector.compare_exchange_weak(
             Tracked(&mut hvdb_perm.hv_perm.vector_perm),
@@ -339,11 +355,14 @@ pub unsafe extern "C" fn handle_hv_doorbell(hvdb: DekoPPtr<HVDoorbell>) {
 
     match vector as usize {
         IPI_VECTOR => {
-            // Dummy implementation for now.
             let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+
+            irq_enable();
 
             proof_with!(Tracked(&cpu_perm));
             DekoCpuCtx::handle_ipi_req(cpu);
+
+            irq_disable();
         },
         _ => {
             // Unknown vector.
@@ -352,6 +371,45 @@ pub unsafe extern "C" fn handle_hv_doorbell(hvdb: DekoPPtr<HVDoorbell>) {
     }
 
     kdebug!("completed HV doorbell handling");
+}
+
+/// Process any pending hypervisor events signaled via the doorbell page.
+///
+/// This is because #HV will be delivered even when interrupts are disabled,
+/// so we need to check the doorbell page after enabling interrupts.
+///
+/// In the assembly code this event processing will be delayed to avoid
+/// interrupt storm; when the target core enables interrupts, this means
+/// it is ready to process pending events.
+#[verus_spec()]
+#[verifier::exec_allows_no_decreases_clause]
+pub fn process_pending_hv_events() {
+    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpu_borrowed = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+
+    if let Some(doorbell) = &cpu_borrowed.doorbell {
+        deko_rwlock_write_atomic_data! {
+            doorbell,
+            doorbell_ptr,
+            doorbell_perm,
+            {
+                let doorbell = doorbell_ptr.borrow(Tracked(&doorbell_perm.borrow().ptr_perm));
+                if doorbell.flags.load(Tracked(&doorbell_perm.borrow().hv_perm.flags_perm)) & 0x80 != 0 {
+                    kdebug!("Processing pending HV doorbell events");
+                    // No further signal.
+                    // Disable IRQ again.
+                    raw_irq_disable();
+
+                    unsafe {
+                        #[verus_spec(with Tracked(doorbell_perm.borrow_mut()))]
+                        handle_hv_doorbell(doorbell_ptr);
+                    }
+
+                    raw_irq_enable();
+                }
+            }
+        }
+    }
 }
 
 } // verus!
