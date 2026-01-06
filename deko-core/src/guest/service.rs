@@ -416,12 +416,12 @@ fn handle_deko_service_vcpu_create(params: &DekoGuestRequestParams) -> DekoGuest
     let caa_page = params.rdx;
     let sev_features = params.sev_features;
 
-    kinfo!(
-        "Guest vCPU create: vcpu_id =", vcpu_id,
-        "vmsa_page =", vmsa_page => hex,
-        "caa_page =", caa_page => hex,
-        "sev_features =", sev_features
-    );
+    // kinfo!(
+    //     "Guest vCPU create: vcpu_id =", vcpu_id,
+    //     "vmsa_page =", vmsa_page => hex,
+    //     "caa_page =", caa_page => hex,
+    //     "sev_features =", sev_features
+    // );
 
     // Check the alignment of the pages.
     if core::hint::unlikely(vmsa_page % PAGE_SIZE != 0 || caa_page % PAGE_SIZE != 0) {
@@ -608,8 +608,6 @@ fn handle_deko_service_remap_ca(
             return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy));
         },
     };
-
-    kinfo!("created temporary mapping for CA at: ", ca_mapping.inner.start);
 
     // Clear it.
     ca_mapping.write_bytes(0, PAGE_SIZE as usize);

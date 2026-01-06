@@ -17,7 +17,10 @@ unsafe impl<V: WellFormed + Heap, S: Spin> core::alloc::Allocator for DekoBuddyA
         core::alloc::AllocError,
     > {
         match self.alloc_impl(layout.size(), layout.align()) {
-            ptr if ptr != 0 => {
+            ptr if ptr != 0 && ptr % layout.align() as u64 == 0 => {
+                // if ptr > 0x000f_ffff_ffff_f000u64 {
+                //     return Err(core::alloc::AllocError);
+                // }
                 let slice_ptr = core::ptr::slice_from_raw_parts_mut(ptr as *mut u8, layout.size());
                 core::ptr::NonNull::new(slice_ptr).ok_or(core::alloc::AllocError)
             },
@@ -25,6 +28,7 @@ unsafe impl<V: WellFormed + Heap, S: Spin> core::alloc::Allocator for DekoBuddyA
         }
     }
 
+    #[inline]
     unsafe fn deallocate(&self, ptr: core::ptr::NonNull<u8>, layout: core::alloc::Layout) {
         self.dealloc_impl(ptr.as_ptr(), layout.size(), layout.align());
     }
@@ -69,7 +73,7 @@ unsafe impl<V: WellFormed + Heap, S: Spin> core::alloc::Allocator for DekoBuddyA
 pub const HEAP_SIZE_STAGE2: usize = 10;
 
 /// Minblock = ?
-pub const HEAP_SIZE_FULL: usize = 13;
+pub const HEAP_SIZE_FULL: usize = 21;
 
 /// The _true_ global allocator for Deko that manages the physical pages.
 ///
@@ -200,7 +204,7 @@ impl<V: WellFormed + Heap, S: Spin> DekoBuddyAllocator<V, S> {
             size != 0,
             dealloc.addr() == ptr.addr(),
             dealloc.size() == size as nat,
-            dealloc.align() == align as nat,
+            dealloc.align() % align as nat == 0,
             ptr@.provenance == perm.provenance(),
             perm.is_range(ptr.addr() as int, size as int),
         opens_invariants none
@@ -296,7 +300,7 @@ pub trait DekoFrameAllocator: WellFormed + Sized {
             size != 0,
             dealloc.addr() == ptr.addr(),
             dealloc.size() == size as nat,
-            dealloc.align() == align as nat,
+            dealloc.align() % align as nat == 0,
             ptr@.provenance == perm.provenance(),
             perm.is_range(ptr.addr() as int, size as int),
         opens_invariants none

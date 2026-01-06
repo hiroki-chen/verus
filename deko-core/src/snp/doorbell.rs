@@ -53,6 +53,7 @@ use crate::cpu::irq::{
 };
 use crate::cpu::task::{debug_hv, X86ExceptionContext};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
+use crate::mm::frame_allocator::DekoPageFrameBox;
 use crate::mm::paging::PageTable;
 use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR_FULL};
 use crate::snp::doorbell;
@@ -284,11 +285,18 @@ impl HVDoorbell {
         let ghcb = cpu_borrowed.ghcb();
 
         // Note that HVDoorBell needs to be shared.
-        let (doorbell_ptr, Tracked(perm)) = boxed_ptr!(HVDoorbell, &DEKO_FRAME_ALLOCATOR_FULL);
-        let vaddr = VirtAddr::new(doorbell_ptr.addr() as u64);
+        let (doorbell_ptr, Tracked(mut perm)) = DekoPageFrameBox::<HVDoorbell>::new_zeroed_in(
+            &DEKO_FRAME_ALLOCATOR_FULL,
+        );
+        let vaddr = VirtAddr(doorbell_ptr.addr() as u64);
+
+        assume(vaddr.wf());
+        assume(cpu_perm.pgtable_perm.mapped(vaddr));
 
         proof_with!(=> Tracked(doorbell_perm));
         let doorbell = HVDoorbell::new();
+
+        doorbell_ptr.write(Tracked(&mut perm), doorbell);
 
         PageTable::make_page_shared_4k(
             cpu_borrowed.pgtable,
@@ -323,6 +331,21 @@ impl HVDoorbell {
         );
 
         let tracked db_perm = HvDoorbellPtrPermission { hv_perm: doorbell_perm, ptr_perm: perm };
+
+        proof {
+            assert(db_perm.ptr_perm.pptr() == doorbell_ptr@);
+            assert(db_perm.ptr_perm.is_init());
+            assert(db_perm.ptr_perm.wf());
+            assert(db_perm.hv_perm.vector_perm.is_for(db_perm.ptr_perm.value().vector));
+            assert(db_perm.hv_perm.flags_perm.is_for(db_perm.ptr_perm.value().flags));
+            assert(db_perm.hv_perm.no_eoi_required_perm.is_for(
+                db_perm.ptr_perm.value().no_eoi_required,
+            ));
+            assert(db_perm.hv_perm.per_vmpl_events_perm.is_for(
+                db_perm.ptr_perm.value().per_vmpl_events,
+            ));
+        }
+
         let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
         cpu_taken.doorbell = Some(
             DekoRwLock::new(
@@ -332,7 +355,7 @@ impl HVDoorbell {
             ),
         );
 
-        cpu.put(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
+        cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
     }
 }
 
@@ -360,7 +383,6 @@ impl HVDoorbell {
 /// - Implementations must not block, allocate, or take locks that can deadlock
 ///   in interrupt context.
 #[doc(hidden)]
-#[verifier::external_body]
 #[no_mangle]
 #[allow(improper_ctypes_definitions)]
 #[verifier::exec_allows_no_decreases_clause]

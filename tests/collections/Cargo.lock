@@ -141,6 +141,7 @@ dependencies = [
  "deko-macros",
  "deko-std",
  "elf",
+ "heapless",
  "paste",
  "seq-macro",
  "verus_builtin",

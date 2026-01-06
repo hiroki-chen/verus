@@ -315,11 +315,19 @@ fn deko_setup(ctx: DekoPPtr<DekoCpuCtx>, header: &DekoKernelLaunchInfo) -> ! {
     let mut early_idt = Idt { entries: create_early_idt() };
     init_early_idt(&mut early_idt);
 
-    proof_with!(Tracked(&ctx_perm));
-    init_cpuid_table(VirtAddr(header.cpuid_page));
+    if header.cpuid_page != 0 {
+        proof_with!(Tracked(&ctx_perm));
+        init_cpuid_table(VirtAddr(header.cpuid_page));
+    } else {
+        kwarn!("CPUID page is 0 in header; skipping initialization");
+    }
 
-    proof_with!(Tracked(&ctx_perm));
-    deko_core::imp::init_secrets_page(VirtAddr(header.secrets_page));
+    if header.secrets_page != 0 {
+        proof_with!(Tracked(&ctx_perm));
+        deko_core::imp::init_secrets_page(VirtAddr(header.secrets_page));
+    } else {
+        kwarn!("Secrets page is 0 in header; skipping initialization");
+    }
 
     let debug_serial_port = header.debug_serial_port;
     let secrets_page_virt = VirtAddr(header.secrets_page);

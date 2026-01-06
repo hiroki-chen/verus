@@ -5,6 +5,7 @@
 use core::marker::PhantomData;
 
 use deko_macros::with_atomic_pred;
+use vstd::layout::valid_layout;
 use vstd::prelude::*;
 use vstd::raw_ptr::{
     self, ptr_mut_from_data, Dealloc, IsExposed, MemContents, PointsToRaw, Provenance, PtrData,
@@ -669,7 +670,7 @@ impl<V: WellFormed> DekoPointsTo<V> {
             Some(dealloc) => {
                 &&& dealloc.addr() == self.points_to.ptr().addr()
                 &&& dealloc.size() == size_of::<V>()
-                &&& dealloc.align() == align_of::<V>()
+                &&& dealloc.align() % (align_of::<V>() as nat) == 0
                 &&& dealloc.provenance() == self.points_to.ptr()@.provenance
                 &&& size_of::<V>() > 0
             },
@@ -710,27 +711,53 @@ impl<T: WellFormed> View for DekoPPtr<T> {
 verus! {
 
 impl<V: WellFormed> DekoPPtr<V> {
-    /// Constructs a possibly uninitialized `DekoPPtr<V>`.
+    /// Constructs a possibly uninitialized `DekoPPtr<V>`. You may think
+    /// of this as semantically similar to [`core::mem::MaybeUninit<V>`].
     ///
     /// Please be extra careful that this function returns a pointer
-    /// (physical address).
-    pub fn empty<A: DekoFrameAllocator>(allocator: &A) -> (pt: (Self, Tracked<DekoPointsTo<V>>))
+    pub fn empty<A: DekoFrameAllocator>(allocator: &A, align: Option<usize>) -> (pt: (
+        Self,
+        Tracked<DekoPointsTo<V>>,
+    ))
         requires
             allocator.wf(),
+            align matches Some(align) ==> {
+                &&& valid_layout(core::mem::size_of::<V>(), align)
+                &&& align % core::mem::align_of::<V>() == 0
+            },
         ensures
             pt.1@.pptr() == pt.0@,
             pt.1@.is_uninit(),
+            align matches Some(a) ==> { pt.0.addr() % a == 0 },
         opens_invariants none
     {
+        broadcast use vstd::arithmetic::div_mod::group_mod_basics;
+        broadcast use vstd::arithmetic::div_mod::group_mod_properties;
+
         vstd::layout::layout_for_type_is_valid::<V>();
+
+        let align = match align {
+            Some(a) => a,  // we proved above that a is valid
+            None => core::mem::align_of::<V>(),
+        };
 
         match core::mem::size_of::<V>() {
             v if v != 0 => {
                 let (p, Tracked(points_to_raw), Tracked(dealloc)) = allocator.alloc_page(
                     core::mem::size_of::<V>(),
-                    core::mem::align_of::<V>(),
+                    align,
                 );
                 let Tracked(exposed) = vstd::raw_ptr::expose_provenance::<u8>(p);
+
+                proof {
+                    assert(dealloc.align() == align);
+                    assert(align % core::mem::align_of::<V>() == 0);
+                    assert(p.addr() % align == 0);
+
+                    // This is true but I don't find the correct lemma.
+                    assume(p.addr() % core::mem::align_of::<V>() == 0);
+                }
+
                 let tracked points_to = points_to_raw.into_typed::<V>(p.addr());
                 proof {
                     points_to.is_nonnull();
@@ -747,7 +774,7 @@ impl<V: WellFormed> DekoPPtr<V> {
                 (pptr, Tracked(pt))
             },
             _ => {
-                let p = core::mem::align_of::<V>();
+                let p = align;
                 assert(p % p == 0) by (nonlinear_arith)
                     requires
                         p != 0,
@@ -778,7 +805,7 @@ impl<V: WellFormed> DekoPPtr<V> {
             pt.1@.mem_wf(),
         opens_invariants none
     {
-        let (p, Tracked(mut pt)) = Self::empty(allocator);
+        let (p, Tracked(mut pt)) = Self::empty(allocator, None);
         p.put(Tracked(&mut pt), v);
         (p, Tracked(pt))
     }

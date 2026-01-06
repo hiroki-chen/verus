@@ -587,6 +587,13 @@ impl<V: WellFormed, F: Predicate<V>> Arc<V, F> {
     }
 }
 
+// impl<V: WellFormed, F: Predicate<V>> Drop for Arc<V, F> {
+//     fn drop(&mut self)
+//         opens_invariants none
+//         no_unwind
+//     {
+//     }
+// }
 impl<V: WellFormed, F: Predicate<V>> AsRefSpecImpl<V> for Arc<V, F> {
     open spec fn obeys_as_ref_spec() -> bool {
         true

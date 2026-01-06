@@ -41,6 +41,7 @@ use crate::cpu::task::{
 };
 use crate::imp::ghcb::current_ghcb;
 use crate::imp::RmpFlags;
+use crate::mm::frame_allocator::DekoPageFrameBox;
 use crate::mm::paging::{
     bit_not_in_addr_region, bit_not_overlapping, index_at_level_spec, Mapping, Page, PageTable,
     PageTablePath, PageTablePermission, PteFlags, RECURSIVE_INDEX,
@@ -591,6 +592,8 @@ pub struct DekoCpuCtx {
     /// How many disable requests are nested.
     #[deko(skip)]
     pub nested_irq: IrqState,
+    /// Current active stack. This is mostly used for stack unwinder.
+    pub current_stack: VaddrRange,
 }
 
 with_permission! {
@@ -1008,6 +1011,7 @@ impl DekoCpuCtx {
             deko_vmsa: DekoOnceCell::new(Ghost(VmsaPagePred {  })),
             doorbell: None,
             nested_irq: irq_state,
+            current_stack: VirtAddr::new(0)..VirtAddr::new(0),  // set to none.
         }
     }
 
@@ -1118,6 +1122,7 @@ impl DekoCpuCtx {
                                         deko_vmsa,
                                         doorbell,
                                         nested_irq,
+                                        current_stack,
                                     } = ptr.take(Tracked(&mut perm.ptr_perm));
 
                                     let tracked DekoCpuCtxPermission {
@@ -1207,6 +1212,7 @@ impl DekoCpuCtx {
                                             deko_vmsa,
                                             doorbell,
                                             nested_irq,
+                                        current_stack,
                                         },
                                     );
 
@@ -1506,9 +1512,11 @@ impl DekoCpuCtx {
         broadcast use VirtAddr::lemma_page_size_eq_shifts;
         broadcast use VirtAddr::lemma_page_shift_le_max;
         broadcast use VirtAddr::lemma_pfn_roundtrip;
-        // We first allocate a new CPU context for.
+        // We first allocate a new CPU context
 
-        let (cpu_ctx_ptr, Tracked(ctx_perm)) = boxed_ptr!(DekoCpuCtx, allocator);
+        let (cpu_ctx_ptr, Tracked(ctx_perm)) = DekoPageFrameBox::<DekoCpuCtx>::new_zeroed_in(
+            allocator,
+        );
         let (ghcb, Tracked(ghch_perm)) = boxed_ptr!(GuestHostCommunicationBlock, allocator);
 
         // First step is to map itself.
@@ -1896,21 +1904,26 @@ impl DekoCpuCtx {
         }
     }
 
-    pub fn schedule_prep(ptr: DekoPPtr<Self>, Tracked(perm): Tracked<&DekoCpuCtxPermission>) -> (r:
-        Option<(DekoRunnablePtr, DekoRunnablePtr)>)
+    pub fn schedule_prep(
+        ptr: DekoPPtr<Self>,
+        Tracked(perm): Tracked<&mut DekoCpuCtxPermission>,
+    ) -> (r: Option<(DekoRunnablePtr, DekoRunnablePtr)>)
         requires
-            perm.wf_with(ptr),
-            perm.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
+            old(perm).wf_with(ptr),
+            old(perm).ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
         ensures
             r matches Some((cur, next)) ==> {
                 &&& cur.wf()
                 &&& next.wf()
             },
+            perm.wf_with(ptr),
+            perm.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
     {
-        let cpu = ptr.borrow(Tracked(&perm.ptr_perm));
+        let mut cpu = ptr.take(Tracked(&mut perm.ptr_perm));
         let rq = cpu.run_queue.as_ref().unwrap();
 
-        deko_rwlock_write_atomic_data! {
+        let r =
+            deko_rwlock_write_atomic_data! {
             rq,
             runqueue,
             rq_perm,
@@ -1918,12 +1931,19 @@ impl DekoCpuCtx {
                 match runqueue.current {
                     Some(_) => {
                         #[verus_spec(with Tracked(rq_perm.borrow_mut()))]
-                        runqueue.schedule_prep();
+                        runqueue.schedule_prep()
                     },
                     None => None,
                 }
             }
+        };
+
+        if let Some((_, ref next)) = r {
+            cpu.current_stack = next.as_ref().data.stack.clone();
         }
+        ptr.write(Tracked(&mut perm.ptr_perm), cpu);
+
+        r
     }
 
     /// Setup the idle task for this CPU.

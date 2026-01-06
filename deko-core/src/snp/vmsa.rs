@@ -331,10 +331,22 @@ impl VMSA {
             ptr_perm.pptr() == ptr@,
     )]
     pub fn enable(ptr: DekoPPtr<Self>) {
-        let this = unsafe { &mut *(ptr.addr() as *mut Self) };
+        unsafe {
+            // 1. Get the raw pointer to the struct.
+            // DO NOT convert this to &mut Self.
+            let struct_ptr = ptr.addr() as *mut Self;
 
-        // Set the SVME bit in EFER to enable VMSA.
-        this.efer |= (1 << 12);
+            // 2. Calculate the pointer to the 'efer' field specifically.
+            // 'addr_of_mut!' computes the offset without creating an intermediate reference
+            // to the struct, avoiding issues with unaligned/packed data or MMIO restrictions.
+            let efer_field_ptr = core::ptr::addr_of_mut!((*struct_ptr).efer);
+
+            // 3. Use a Volatile Read-Modify-Write.
+            // This guarantees the compiler emits load/store instructions, does not optimize them away,
+            // and does not try to use 'memcpy' or wide registers.
+            let v = core::ptr::read_unaligned(efer_field_ptr) | (1 << 12);
+            core::ptr::write_unaligned(efer_field_ptr, v);
+        }
     }
 
     #[inline(always)]
@@ -353,9 +365,21 @@ impl VMSA {
             ptr_perm.pptr() == ptr@,
     )]
     pub fn set_rax(ptr: DekoPPtr<Self>, value: u64) {
-        let this = unsafe { &mut *(ptr.addr() as *mut Self) };
+        unsafe {
+            // 1. Get the raw pointer to the struct.
+            // DO NOT convert this to &mut Self.
+            let struct_ptr = ptr.addr() as *mut Self;
 
-        this.rax = value;
+            // 2. Calculate the pointer to the 'rax' field specifically.
+            // 'addr_of_mut!' computes the offset without creating an intermediate reference
+            // to the struct, avoiding issues with unaligned/packed data or MMIO restrictions.
+            let rax_field_ptr = core::ptr::addr_of_mut!((*struct_ptr).rax);
+
+            // 3. Use a Volatile Write.
+            // This guarantees the compiler emits a store instruction, does not optimize it away,
+            // and does not try to use 'memcpy' or wide registers.
+            core::ptr::write_unaligned(rax_field_ptr, value);
+        }
     }
 
     /// Disables the VMSA by clearing the SVME bit in the EFER register.
@@ -378,10 +402,22 @@ impl VMSA {
             ptr_perm.pptr() == ptr@,
     )]
     pub fn disable(ptr: DekoPPtr<Self>) {
-        let this = unsafe { &mut *(ptr.addr() as *mut Self) };
+        unsafe {
+            // 1. Get the raw pointer to the struct.
+            // DO NOT convert this to &mut Self.
+            let struct_ptr = ptr.addr() as *mut Self;
 
-        // Clear the SVME bit in EFER to disable VMSA.
-        this.efer &= !(1 << 12);
+            // 2. Calculate the pointer to the 'rax' field specifically.
+            // 'addr_of_mut!' computes the offset without creating an intermediate reference
+            // to the struct, avoiding issues with unaligned/packed data or MMIO restrictions.
+            let efer = core::ptr::addr_of_mut!((*struct_ptr).efer);
+
+            // 3. Use a Volatile Write.
+            // This guarantees the compiler emits a store instruction, does not optimize it away,
+            // and does not try to use 'memcpy' or wide registers.
+            let v = core::ptr::read_unaligned(efer) & (!(1 << 12));
+            core::ptr::write_unaligned(efer, v);
+        }
     }
 
     /// Populates the body of the guest VMSA from the parameters coming

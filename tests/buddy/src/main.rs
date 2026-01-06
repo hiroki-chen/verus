@@ -101,6 +101,7 @@ fn main() {
     test_memory_reuse();
     test_out_of_memory();
     test_fragmentation();
+    test_repro_heap_size_14();
 }
 
 } // verus!
@@ -438,4 +439,28 @@ proptest! {
         }
     }
 
+    // Reproduction test for HEAP_SIZE_FULL=14 issue with non-power-of-2 min_block_size
+    fn test_repro_heap_size_14(_ in alloc_ops_strategy()) {
+        // Target min_block_size = 3.
+        // ORDER = 14. top_order = 13.
+        // heap_size = 3 * 2^13 = 3 * 8192 = 24576 = 0x6000.
+        const HEAP_SIZE: usize = 0x6000; 
+        const HEAP_ALIGN: usize = 0x1000; // Use smaller alignment to fit in small heap
+
+        let (_buffer, heap_start, heap_len) = create_aligned_heap(HEAP_SIZE, HEAP_ALIGN);
+        
+        let mut allocator = DekoHeap::<14>::new(Ghost::assume_new());
+        
+        allocator.init(heap_start, heap_len, 14);
+
+        // Try to allocate something small (16 bytes)
+        let addr = allocator.allocate(16, 16);
+        
+        if addr != 0 {
+            allocator.deallocate(addr, 16, 16);
+        } else {
+             // If allocation fails, it might be due to min_block_size < 16 check
+             // But min_block_size is 3 here.
+        }
+    }
 }

@@ -13,7 +13,7 @@ use crate::elf::{ElfFile, ElfLoadSegment};
 use crate::mm::paging::Page;
 use crate::mm::{init_frame_allocator, DEKO_MAPPING_SPACE};
 use crate::snp::get_igvm_params_block;
-use crate::{die, imp, kdebug, kerror, kinfo, DekoKernelLaunchInfo, Stage2LaunchInfo};
+use crate::{die, imp, kdebug, kerror, kinfo, kwarn, DekoKernelLaunchInfo, Stage2LaunchInfo};
 
 verus! {
 
@@ -275,8 +275,12 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>) -> (__discard: !) {
     imp::init_platform(header);
 
     // TODO: Register the CPUID table: so that we know cpuids of each core.
-    unsafe {
-        register_cpuid_table(header.cpuid_page);
+    if header.cpuid_page != 0 {
+        unsafe {
+            register_cpuid_table(header.cpuid_page);
+        }
+    } else {
+        kwarn!("CPUID page is 0 in header; skipping registration");
     }
 
     // Set up the kernel mapping: now identity
@@ -354,6 +358,9 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>) -> (__discard: !) {
             // SAFETY: The loaded kernel region was correctly calculated above and
             // is sized appropriately to include a copy of the IGVM parameters.
 
+            if header.igvm_params == 0 {
+                die("IGVM params address is 0 in header");
+            }
             proof {
                 // FIXME: Do it later because we have not (yet) proved
                 // that the mapped region for this will not change

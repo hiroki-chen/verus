@@ -1190,6 +1190,7 @@ impl DekoRunnable {
             deko_vmsa,
             doorbell,
             nested_irq,
+            current_stack,
         } = cpu_taken;
         kpanic_if!(core::hint::unlikely(
             vm_region.is_none(),
@@ -1298,6 +1299,7 @@ impl DekoRunnable {
             deko_vmsa,
             doorbell,
             nested_irq,
+            current_stack,
         };
         let tracked ctx_perm = DekoCpuCtxPermission {
             ptr_perm,
@@ -1583,16 +1585,16 @@ pub fn schedule_this_task(task: DekoRunnablePtr) {
 
 /// Schedules the next task to run on the current CPU.
 pub fn schedule() {
-    let (cpu, Tracked(perm)) = DekoCpuCtx::this_cpu();
+    let (cpu, Tracked(mut perm)) = DekoCpuCtx::this_cpu();
     let cpu_id = cpu.borrow(Tracked(&perm.ptr_perm)).cpu_id;
     let rq = cpu.borrow(Tracked(&perm.ptr_perm)).run_queue.as_ref();
     // make verus happy.
     kpanic_if!(core::hint::unlikely(rq.is_none()), "No run queue found when scheduling task");
+    let work = DekoCpuCtx::schedule_prep(cpu, Tracked(&mut perm));
 
     no_irq_zone(
         ||
             {
-                let work = DekoCpuCtx::schedule_prep(cpu, Tracked(&perm));
                 if let Some((cur, next)) = work {
                     // id generation is somehow incorrect.
                     kdebug!("Switching from task ", cur.as_ref().data.id => hex, " name", cur.as_ref().data.name);
@@ -1927,7 +1929,6 @@ func_ptr!(cpu_idle);
 /// during cpu disables IRQ, it will be ignored or postponed
 /// until IRQ is re-enabled, which may cause deadlock if no
 /// other interrupts are coming to wake up this core.
-#[verifier::external_body]
 fn put_cpu_idle() {
     kdebug!("Putting CPU into idle state.");
     let (cpu, Tracked(mut perm)) = DekoCpuCtx::this_cpu();
@@ -1945,16 +1946,6 @@ fn put_cpu_idle() {
     },
         None => { 0 },
     };
-
-    unsafe {
-        let doorbell = core::slice::from_raw_parts(
-            doorbell_ptr as *const u8,
-            core::mem::size_of::<crate::imp::doorbell::HVDoorbell>(),
-        );
-        kdebug!("Doorbell address: ", doorbell_ptr => hex);
-        kdebug!("Doorbell content: ", doorbell => hex);
-        debug_hv = true;
-    }
 
     no_irq_zone(
         ||

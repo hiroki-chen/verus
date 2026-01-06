@@ -5,6 +5,7 @@ use deko_std::prelude::*;
 use vstd::prelude::*;
 
 use crate::cpu::task::X86ExceptionContext;
+use crate::mm::frame_allocator::DekoPageFrameBox;
 use crate::mm::paging::GLOBAL;
 use crate::mm::DEKO_FRAME_ALLOCATOR_FULL;
 use crate::{kinfo, kpanic_if, kwarn};
@@ -108,7 +109,7 @@ pub fn init_global_idt() {
         "Global IDT is already initialized",
     );
 
-    let (idt_ptr, Tracked(mut idt_perm)) = boxed_ptr!(Idt, &DEKO_FRAME_ALLOCATOR_FULL);
+    let (idt_ptr, Tracked(mut idt_perm)) = DekoPageFrameBox::<Idt>::new_zeroed_in(&DEKO_FRAME_ALLOCATOR_FULL);
 
     kinfo!("Populating exception handlers in global IDT");
 

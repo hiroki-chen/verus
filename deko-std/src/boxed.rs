@@ -128,7 +128,7 @@ impl<V: WellFormed, F: Predicate<V>> BoxInner<V, F> {
     /// where they are identity-mapped; i.e., the virtual address equals to their
     /// physical address.
     #[verifier::external_body]
-    pub fn new_zeroed_with_f<A: DekoFrameAllocator>(allocator: &A, Ghost(f): Ghost<F>) -> (s: (
+    fn new_zeroed_with_f<A: DekoFrameAllocator>(allocator: &A, Ghost(f): Ghost<F>) -> (s: (
         Self,
         Tracked<BoxPointsTo<V>>,
     ))
@@ -140,7 +140,7 @@ impl<V: WellFormed, F: Predicate<V>> BoxInner<V, F> {
             s.1@@.is_uninit(),
             s.1@@.wf(),
     {
-        let (pptr, Tracked(mut pptr_perm)) = DekoPPtr::empty(allocator);
+        let (pptr, Tracked(mut pptr_perm)) = DekoPPtr::empty(allocator, None);
 
         if pptr.addr() == 0 || pptr.addr() % core::mem::align_of::<V>() != 0 {
             panic!("BoxInner::new_zeroed_with_f: allocation failed; perhaps out of memory?");
@@ -224,12 +224,17 @@ impl<V: WellFormed, F: Predicate<V>> BoxInner<V, F> {
 }
 
 } // verus!
-  // Perhaps we can add an optional `Tracked<&mut PageTablePermission>` here so
-  // that we always ensure the pointer is valid in the page table.
+/// Creates a pointer out from a boxed value allocated on the heap.
+///
+/// This does not automatically drop the boxed value; the caller is responsible
+/// for deallocating the memory when it is no longer needed. Also, we do not
+/// initialize the content but just clears it to zero.
+///
+/// Important note: if the caller has special alignment requirements, please
+/// use [`crate::ptr::empty`] directly to allocate the memory with the desired
 #[macro_export]
 macro_rules! boxed_ptr {
     ($name:ty, $alloc:expr) => {{
-        verus! {}
         let (boxed, perm) = $crate::boxed::Box::<$name>::new_zeroed($alloc);
 
         let all = boxed.into_ptr(perm);

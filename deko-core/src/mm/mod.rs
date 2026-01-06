@@ -6,6 +6,7 @@
 //! - Kernel page frame allocator that allocates physical pages.
 //! - Some high level allocators that allocates pages from the page frame allocators.
 //! - A memory manager that manages the page tables and memory regions.
+#[cfg(feature = "alloc")]
 pub mod frame_allocator;
 pub mod paging;
 pub mod stack;

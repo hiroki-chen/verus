@@ -148,4 +148,44 @@ unsafe impl core::alloc::Allocator for DekoAllocatorApi {
     }
 }
 
+/// A special wrapper type around the heap-allocated objects that are
+/// aligned to page frame size.
+///
+/// # Examples
+///
+/// ```rust
+/// // Since `doorbell` must be page aligned, we use `DekoPageFrameBox` to allocate it.
+/// let (hv_doorbell, Tracked(ptr_perm)) = DekoPageFrameBox::<HvDoorBell>::new_in(&DekoAllocatorApi);
+/// ```
+pub struct DekoPageFrameBox<T: WellFormed>(core::marker::PhantomData<T>);
+
+impl<T: WellFormed> DekoPageFrameBox<T> {
+    /// Creates a new [`DekoPageFrameBox`] allocated from the given allocator.
+    #[verifier::external_body]
+    pub fn new_zeroed_in<A: DekoFrameAllocator>(allocator: &A) -> (r: (
+        DekoPPtr<T>,
+        Tracked<DekoPointsTo<T>>,
+    ))
+        requires
+            allocator.wf(),
+        ensures
+            r.0.addr() % PAGE_SIZE as usize == 0,
+            r.1@.pptr() == r.0@,
+            r.1@.wf(),
+            r.1@.is_init(),
+    {
+        if PAGE_SIZE as usize % core::mem::align_of::<T>() != 0 {
+            panic!("DekoPageFrameBox can only be used for types with alignment <= PAGE_SIZE");
+        }
+        let (ptr, Tracked(perm)) = DekoPPtr::empty(allocator, Some(PAGE_SIZE as usize));
+
+        // Zero-initialize the allocated memory
+        unsafe {
+            core::ptr::write_bytes(ptr.addr() as *mut u8, 0, core::mem::size_of::<T>());
+        }
+
+        (ptr, Tracked(perm))
+    }
+}
+
 } // verus!

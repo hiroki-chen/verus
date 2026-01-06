@@ -1,3 +1,4 @@
+use core::fmt::{write, Write};
 use core::mem::offset_of;
 use core::ops::RangeBounds;
 
@@ -11,10 +12,13 @@ use core::ops::RangeBounds;
 use deko_macros::DekoDebug;
 use deko_std::address::{VaddrRange, VirtAddr};
 use deko_std::cpu::X86GeneralRegs;
+use deko_std::mem::STACK_SIZE;
 use vstd::prelude::*;
 
 use crate::cpu::task::{DekoRunnableCtx, X86ExceptionContext};
+use crate::cpu::DekoCpuCtx;
 use crate::kinfo;
+use crate::logging::print_str;
 
 verus! {
 
@@ -66,7 +70,6 @@ impl StackUnwinder {
         let Some(stack) = stacks.iter().find(|stack| {
             !stack.is_empty() && (stack.contains(&rsp) || stack.contains(&rbp))
         }) else {
-            kinfo!("check_unwound_frame: rsp", rsp, "rbp", rbp, "not in any stack");
             return UnwoundStackFrame::Invalid;
         };
 
@@ -125,9 +128,10 @@ impl StackUnwinder {
         Self::check_unwound_frame(rbp, rsp, rip, stacks)
     }
 
+    /// Unwind the stack of the current CPU for debugging purposes.
     #[verifier::external_body]
     pub fn unwind_this_cpu() -> Self {
-        let mut rbp: usize;
+        let mut rbp: u64;
         // SAFETY: Inline assembly to read RBP, which does not change any state
         // related to memory safety.
         unsafe {
@@ -138,7 +142,20 @@ impl StackUnwinder {
             );
         };
 
-        todo!()
+        let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+        let cpu_borrowed = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+        let cs_stack = match cpu_borrowed.ctx_switch_stack {
+            Some( stack) => {
+                VirtAddr(stack.0 - STACK_SIZE)..stack
+            },
+            None => {
+                VirtAddr(0)..VirtAddr(0)
+            }
+        };
+        let current_stack = cpu_borrowed.current_stack.clone();
+        let df_stack = VirtAddr(0)..VirtAddr(0); // we do not have this.
+
+        Self::new(VirtAddr(rbp), [current_stack, cs_stack, df_stack])
     }
     #[verifier::external_body]
     fn unwind_exception_frame(rsp: VirtAddr, stacks: &StacksBounds) -> UnwoundStackFrame {
@@ -209,8 +226,8 @@ extern "C" {
 #[verifier::external_body]
 fn print_stack_frame(frame: StackFrame) {
     let mut annotated = false;
-    // At this time the allocator must be initialized.
-    let mut msg = alloc::format!("  [{:016x}]", frame.rip.0);
+    let mut msg = heapless::String::<256>::new();
+    msg.write_fmt(format_args!("  [{:016x}]", frame.rip.0)).unwrap();
 
     if frame.is_exception_frame {
         msg.push_str(" @");
@@ -219,22 +236,22 @@ fn print_stack_frame(frame: StackFrame) {
     if !frame.is_aligned {
         msg.push_str(if annotated { "#" } else { " #" });
     }
-    kinfo!(msg.as_str());
+
+    msg.push_str("\n");
+    print_str(msg.as_str());
 }
 
 #[verifier::external_body]
 pub fn print_stack(skip: usize) {
-    return;
-
     let unwinder = StackUnwinder::unwind_this_cpu();
-    kinfo!("---BACKTRACE---:");
+    print_str("---BACKTRACE---:\n");
     for frame in unwinder.skip(skip) {
         match frame {
             UnwoundStackFrame::Valid(item) => print_stack_frame(item),
-            UnwoundStackFrame::Invalid => kinfo!("  Invalid frame"),
+            UnwoundStackFrame::Invalid => print_str("  Invalid frame\n"),
         }
     }
-    kinfo!("---END---");
+    print_str("---END---\n");
 }
 
 
