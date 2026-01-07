@@ -21,6 +21,7 @@ use vstd::prelude::*;
 use crate::cpu::irq::no_irq_zone;
 use crate::cpu::tlb::{flush_tlb_global_percpu, flush_tlb_global_sync};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
+use crate::logging::CONSOLE_LOCK;
 use crate::mm::paging::{PageTable, PteFlags};
 use crate::mm::{virt_to_phys, virt_to_phys_checked};
 use crate::prelude::*;
@@ -75,8 +76,16 @@ pub fn vmpl_switch(target_vmpl: u32) -> bool {
         }
     };
 
-    unsafe { switch_to_vmpl_unsafe(doorbell_ptr.addr() as *const doorbell::HVDoorbell, target_vmpl)
-    }
+    // Here we need to disable printing.
+    // let guard = CONSOLE_LOCK.acquire_write();
+
+    let r = unsafe {
+        switch_to_vmpl_unsafe(doorbell_ptr.addr() as *const doorbell::HVDoorbell, target_vmpl)
+    };
+
+    // guard.release_write_no_val();
+
+    r
 }
 
 pub broadcast axiom fn axiom_shared_buffer_size_wf()

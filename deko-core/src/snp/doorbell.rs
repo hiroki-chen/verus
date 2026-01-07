@@ -201,19 +201,25 @@ impl HVDoorbell {
         }
     }
 
+    /// Checks if the NoFurtherSignal flag is set in the doorbell flags.
+    ///
+    /// When this flag is set, it indicates that there are no further
+    /// pending events to be signaled by the hypervisor, and the guest
+    /// should not expect any more doorbell notifications.
+    #[inline]
     #[verus_spec(r =>
         with
-            Tracked(hv_perm): Tracked<&HvDoorbellPtrPermission>,
+            Tracked(hv_perm): Tracked<&mut HvDoorbellPtrPermission>,
         requires
-            hv_perm.ptr_perm.wf(),
-            hv_perm.ptr_perm.is_init(),
-            hv_perm.ptr_perm.pptr() == hv_ptr@,
-            hv_perm.hv_perm.flags_perm.is_for(hv_perm.ptr_perm.value().flags),
+            old(hv_perm).ptr_perm.wf(),
+            old(hv_perm).ptr_perm.is_init(),
+            old(hv_perm).ptr_perm.pptr() == hv_ptr@,
+            old(hv_perm).hv_perm.flags_perm.is_for(old(hv_perm).ptr_perm.value().flags),
     )]
     pub fn no_further_signal(hv_ptr: DekoPPtr<HVDoorbell>) -> bool {
         let hv = hv_ptr.borrow(Tracked(&hv_perm.ptr_perm));
 
-        hv.flags.load(Tracked(&hv_perm.hv_perm.flags_perm)) & 0x80 == 0
+        hv.flags.fetch_and(Tracked(&mut hv_perm.hv_perm.flags_perm), !(0x80)) & 0x80 != 0
     }
 }
 
@@ -317,7 +323,7 @@ impl HVDoorbell {
             die("");
         };
 
-        kdebug!("Allocated HVDoorbell at virtual address:", vaddr => hex, "physical address:", doorbell_paddr => hex);
+        kinfo!("Allocated HVDoorbell at virtual address:", vaddr => hex, "physical address:", doorbell_paddr => hex);
 
         kpanic_if!(core::hint::unlikely(doorbell_paddr.0 % PAGE_SIZE != 0),
             "HVDoorbell physical address is not page-aligned!"
@@ -390,7 +396,7 @@ impl HVDoorbell {
     with
         Tracked(hvdb_perm): Tracked<&mut HvDoorbellPtrPermission>,
     requires
-        old(hvdb_perm).ptr_perm.pptr() == hvdb@,
+        old(hvdb_perm).ptr_perm.pptr() == hvdb_ptr@,
         old(hvdb_perm).ptr_perm.is_init(),
         old(hvdb_perm).ptr_perm.wf(),
         old(hvdb_perm).hv_perm.vector_perm.is_for(old(hvdb_perm).ptr_perm.value().vector),
@@ -404,7 +410,7 @@ impl HVDoorbell {
         hvdb_perm.hv_perm.no_eoi_required_perm.is_for(hvdb_perm.ptr_perm.value().no_eoi_required),
         hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb_perm.ptr_perm.value().per_vmpl_events),
 )]
-pub unsafe extern "C" fn handle_hv_doorbell(hvdb: DekoPPtr<HVDoorbell>) {
+pub unsafe extern "C" fn handle_hv_doorbell(hvdb_ptr: DekoPPtr<HVDoorbell>) {
     // kdebug!("doorbell rang");
     let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
     let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
@@ -412,58 +418,54 @@ pub unsafe extern "C" fn handle_hv_doorbell(hvdb: DekoPPtr<HVDoorbell>) {
     proof_with!(Tracked(&mut cpu_perm.irq_state_perm));
     cpu_taken.nested_irq.push(true);
 
-    let hvdb = hvdb.borrow(Tracked(&hvdb_perm.ptr_perm));
+    let hvdb = hvdb_ptr.borrow(Tracked(&hvdb_perm.ptr_perm));
     let vector = hvdb.vector.load(Tracked(&mut hvdb_perm.hv_perm.vector_perm));
     // Clear the flag.
-    let flags = hvdb.flags.fetch_and(
-        Tracked(&mut hvdb_perm.hv_perm.flags_perm),
-        !(0x80)  /* NoFurtherSignal */
-        ,
-    );
+    let flags = hvdb.flags.fetch_and(Tracked(&mut hvdb_perm.hv_perm.flags_perm), !(0x80));
+    if flags & 0x80 != 0 {
+        loop
+            invariant
+                hvdb_perm.hv_perm.vector_perm.is_for(hvdb.vector),
+                hvdb_perm.hv_perm.flags_perm.is_for(hvdb.flags),
+                hvdb_perm.hv_perm.no_eoi_required_perm.is_for(hvdb.no_eoi_required),
+                hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb.per_vmpl_events),
+                hvdb_perm.ptr_perm == old(hvdb_perm).ptr_perm,
+        {
+            match hvdb.vector.compare_exchange_weak(
+                Tracked(&mut hvdb_perm.hv_perm.vector_perm),
+                vector,
+                0,
+            ) {
+                Ok(_) => {
+                    // Successfully cleared the doorbell.
+                    break ;
+                },
+                _ => {},
+            }
+        }
 
-    // Some sanity check for flags...
-    loop
-        invariant
-            hvdb_perm.hv_perm.vector_perm.is_for(hvdb.vector),
-            hvdb_perm.hv_perm.flags_perm.is_for(hvdb.flags),
-            hvdb_perm.hv_perm.no_eoi_required_perm.is_for(hvdb.no_eoi_required),
-            hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb.per_vmpl_events),
-            hvdb_perm.ptr_perm == old(hvdb_perm).ptr_perm,
-    {
-        match hvdb.vector.compare_exchange_weak(
-            Tracked(&mut hvdb_perm.hv_perm.vector_perm),
-            vector,
-            0,
-        ) {
-            Ok(_) => {
-                // Successfully cleared the doorbell.
-                break ;
+        match vector as usize {
+            IPI_VECTOR => {
+                cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
+
+                proof_with!(Tracked(&cpu_perm));
+                DekoCpuCtx::handle_ipi_req(cpu);
+
+                let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
+                proof_with!(Tracked(&mut cpu_perm.irq_state_perm));
+                cpu_taken.nested_irq.pop();
+                cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
+
+                return ;
             },
-            _ => {},
+            _ => {
+                // Unknown vector.
+            },
         }
     }
-
-    match vector as usize {
-        IPI_VECTOR => {
-            cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
-
-            proof_with!(Tracked(&cpu_perm));
-            DekoCpuCtx::handle_ipi_req(cpu);
-
-            let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
-            proof_with!(Tracked(&mut cpu_perm.irq_state_perm));
-            cpu_taken.nested_irq.pop();
-            cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
-        },
-        _ => {
-            // Unknown vector.
-            proof_with!(Tracked(&mut cpu_perm.irq_state_perm));
-            cpu_taken.nested_irq.pop();
-            cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
-        },
-    }
-
-    kdebug!("completed HV doorbell handling");
+    proof_with!(Tracked(&mut cpu_perm.irq_state_perm));
+    cpu_taken.nested_irq.pop();
+    cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
 }
 
 /// Process any pending hypervisor events signaled via the doorbell page.

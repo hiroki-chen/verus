@@ -3,7 +3,7 @@
 use vstd::prelude::*;
 
 use crate::cpu::task::X86ExceptionContext;
-use crate::{die, kdebug, kerror, kinfo};
+use crate::{dbg, die, kdebug, kerror, kinfo};
 
 verus! {
 
@@ -107,6 +107,8 @@ unsafe extern "C" fn ex_handler_page_fault(ctx: &mut X86ExceptionContext) {
     kinfo!("faulting address (CR2):", cr2 => hex);
 
     kinfo!("context:", ctx);
+
+    dbg::print_stack(0);
 
     loop {
     }

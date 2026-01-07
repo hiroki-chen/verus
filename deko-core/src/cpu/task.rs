@@ -1884,11 +1884,11 @@ pub fn cpu_idle(which: usize) -> DekoRunnablePtr {
             which < CPUID_MAX_COUNT,
     )]
     loop {
-        kdebug!("CPU ", which, " is going idle.");
-        kdebug!("enabled IRQ?", cpu::irq::irq_enabled());
+        // kinfo!("CPU ", which, " is going idle.");
+        // kinfo!("enabled IRQ?", cpu::irq::irq_enabled());
         put_cpu_idle();
-        kdebug!("CPU ", which, " is awaken");
-        kdebug!("enabled IRQ?", cpu::irq::irq_enabled());
+        // kinfo!("CPU ", which, " is awaken");
+        // kinfo!("enabled IRQ?", cpu::irq::irq_enabled());
 
         // Check if there is any IPI sent to this CPU.
         let (cpu, Tracked(perm)) = DekoCpuCtx::this_cpu();
@@ -1911,7 +1911,7 @@ pub fn cpu_idle(which: usize) -> DekoRunnablePtr {
 
         if let Some(task) = task {
             // schedule this task.
-            kdebug!("Waking up task ", task.as_ref().data.id => hex, "name:", task.as_ref().data.name);
+            kinfo!("Waking up task ", task.as_ref().data.id => hex, "name:", task.as_ref().data.name);
             // Now we need to schedule to this task.
             schedule_this_task(task);
         }
@@ -2074,7 +2074,6 @@ pub fn serv_main(cpu_index: usize) {
         );
 
         let rq = rq.as_ref().unwrap();
-
         let current =
             deko_rwlock_read_atomic_data! {
             rq,
@@ -2141,8 +2140,9 @@ pub fn serv_main(cpu_index: usize) {
     )]
     loop {
         match try_enter_guest(r) {
-            // The core does not have a guest created yet.
-            // let it enter idle state.
+            // If there is no guest vmsa currently assigned to this core,
+            // then it means the guest has not yet requested a vCPU creation
+            // so we need to put the currnet AP core into idle.
             DekoGuestExitInformation::CoreNotCreated => {
                 cpu_go_idle(cpu_index);
             },
@@ -2201,81 +2201,36 @@ pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
     let (this_cpu_ptr, Tracked(this_cpu_perm)) = DekoCpuCtx::this_cpu();
     let this_cpu = this_cpu_ptr.borrow(Tracked(&this_cpu_perm.ptr_perm));
     let this_cpu_index: usize = this_cpu.cpu_id as usize;
-    if this_cpu.doorbell.is_none() {
-        die("No doorbell assigned to the CPU.");
-    }
-    let Tracked(mut this_cpu_perm) = DekoCpuCtx::update_guest_vmsa(
+    let (ok, Tracked(mut this_cpu_perm)) = DekoCpuCtx::update_guest_vmsa(
         this_cpu_ptr,
         Tracked(this_cpu_perm),
     );
 
-    proof_with!(Tracked(&this_cpu_perm) => Tracked(mut vmsa_perm));
-    let vmsa = VMSA::this_vmsa(this_cpu_ptr);
-
-    // This carries the request served by the monitor.
-    // So we need to update rax to indicate whether the
-    // request has been served successfully.
-    proof_with!(Tracked(&mut vmsa_perm));
-    VMSA::set_rax(vmsa, prev_errno);
-
+    if !ok {
+        return DekoGuestExitInformation::CoreNotCreated;
+    }
     #[verus_spec(
         invariant
             this_cpu_index < CPUID_MAX_COUNT,
             this_cpu_perm.wf_with(this_cpu_ptr),
-            this_cpu_perm.ptr_perm.value().doorbell is Some,
     )]
     loop {
-        let cpu = this_cpu_ptr.borrow(Tracked(&this_cpu_perm.ptr_perm));
-        let should_end =
-            deko_rwlock_read_atomic_data! {
-            PERCPU_AREAS,
-            percpu_areas,
-            __,
-            {
-                crate::check_shared_cpu_idx!(this_cpu_index as usize, percpu_areas, percpu_areas);
+        proof_with!(Tracked(&this_cpu_perm) => Tracked(mut vmsa_perm));
+        let vmsa = VMSA::this_vmsa(this_cpu_ptr);
 
-                let vmsa_ref = &percpu_areas.0[this_cpu_index].guest_vmsa;
+        // This carries the request served by the monitor.
+        // So we need to update rax to indicate whether the
+        // request has been served successfully.
+        proof_with!(Tracked(&mut vmsa_perm));
+        VMSA::set_rax(vmsa, prev_errno);
 
-                deko_rwlock_read_atomic_data! {
-                    vmsa_ref,
-                    vmsa,
-                    vmsa_perm,
-                    {
-                        let mut should_end = true;
-                        // If no caa found then this is meaningless and
-                        // we just ignore the request.
-                        if let Some(caa_addr) = vmsa.caa {
-                            if let Some(vmsa_addr) = vmsa.vmsa {
-                                proof_decl! {
-                                    let tracked mut this_vmsa_perm;
-                                }
+        proof_with!(Tracked(&mut vmsa_perm));
+        VMSA::enable(vmsa);
 
-                                let vmsa =
-                                #[verus_spec(with Tracked(&this_cpu_perm) => Tracked(mut this_vmsa_perm))]
-                                VMSA::this_vmsa(this_cpu_ptr);
-
-                                #[verus_spec(with Tracked(&mut this_vmsa_perm))]
-                                VMSA::enable(vmsa);
-
-                                should_end = false;
-                            }
-                        }
-
-                        should_end
-                    }
-                }
-            }
-        };
-
-        // The lock is released early here.
-
-        if should_end {
-            return DekoGuestExitInformation::CoreNotCreated;
-        }
-        kdebug!("will try to flush tlb!!!!");
-        let r = no_irq_zone(
+        no_irq_zone(
             ||
                 {
+                    // flush_tlb_global_sync();
                     // Also need to update the guest interrupt delivery information here.
                     // TODO: apic controller update.
                     // Need to update the guest APIC status here so no interrupt will
@@ -2284,15 +2239,15 @@ pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
                 },
         );
 
-        let new_perm = DekoCpuCtx::update_guest_vmsa(this_cpu_ptr, Tracked(this_cpu_perm));
+        let (ok, new_perm) = DekoCpuCtx::update_guest_vmsa(this_cpu_ptr, Tracked(this_cpu_perm));
+        if !ok {
+            return DekoGuestExitInformation::CoreNotCreated;
+        }
         let Tracked(new_perm) = new_perm;
 
         proof {
             this_cpu_perm = new_perm;
         }
-
-        // At this point we need to disable VMSA to prevent any
-        // accidental VM entry.
 
         proof_decl! {
             let tracked mut this_vmsa_perm;
@@ -2304,9 +2259,6 @@ pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
         #[verus_spec(with Tracked(&mut this_vmsa_perm))]
         VMSA::disable(vmsa);
 
-        // If r == 0 then we have successfully entered the guest
-        // and now we are back due to a VM exit.
-        //
         // Now we parse the information.
         if let Some(info) = DekoGuestExitInformation::get_guest_exit_information() {
             return info;

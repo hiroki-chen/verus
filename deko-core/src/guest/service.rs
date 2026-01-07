@@ -492,6 +492,8 @@ fn handle_deko_service_vcpu_create(params: &DekoGuestRequestParams) -> DekoGuest
         }
 
         let vmsa = vmsa_mapping.read_ref::<VMSA>();
+        // kinfo!("Guest vCPU create: VMSA read: ", vmsa);
+
         // Now check if the VMSA is valid.
         if vmsa.vmpl != 2 || vmsa.efer & (1 << 12) == 0 || vmsa.sev_features != sev_features {
             kerror!("Guest vCPU create: invalid VMSA parameters");
@@ -548,8 +550,8 @@ fn handle_deko_service_vcpu_create(params: &DekoGuestRequestParams) -> DekoGuest
                         guest_vmsa_ref,
                         __,
                         {
-                            guest_vmsa_ref.caa = Some(pcaa);
-                            guest_vmsa_ref.vmsa = Some(pvmsa);
+                            guest_vmsa_ref.caa.replace(pcaa);
+                            guest_vmsa_ref.vmsa.replace(pvmsa);
                             guest_vmsa_ref.generation = guest_vmsa_ref.generation.wrapping_add(1);
                         }
                     }

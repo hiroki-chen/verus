@@ -1064,12 +1064,12 @@ impl DekoCpuCtx {
     pub fn update_guest_vmsa(
         ptr: DekoPPtr<Self>,
         Tracked(perm): Tracked<DekoCpuCtxPermission>,
-    ) -> (r: Tracked<DekoCpuCtxPermission>)
+    ) -> (r: (bool, Tracked<DekoCpuCtxPermission>))
         requires
             perm.wf_with(ptr),
         ensures
-            r@.wf_with(ptr),
-            r@.ptr_perm.value().doorbell == perm.ptr_perm.value().doorbell,
+            r.1@.wf_with(ptr),
+            r.1@.ptr_perm.value().doorbell == perm.ptr_perm.value().doorbell,
     {
         broadcast use PteFlags::lemma_each_bit_is_valid;
 
@@ -1100,140 +1100,147 @@ impl DekoCpuCtx {
                     guest_vmsa,
                     guest_vmsa_perm,
                     {
-                        if guest_vmsa.generation != guest_vmsa.gen_in_use {
-                            match (guest_vmsa.caa, guest_vmsa.vmsa) {
-                                (Some(caa_paddr), Some(vmsa_paddr)) => {
-                                    let DekoCpuCtx {
-                                        magic,
-                                        cpu_id,
-                                        ghcb,
-                                        tss,
-                                        pgtable,
-                                        ctx_switch_stack,
-                                        ist_stack,
-                                        private_bit,
-                                        shared_bit,
-                                        kernel_mapping,
-                                        vm_region,
-                                        apic,
-                                        run_queue,
-                                        temp_mapping_4k,
-                                        temp_mapping_2m,
-                                        deko_vmsa,
-                                        doorbell,
-                                        nested_irq,
-                                        current_stack,
-                                    } = ptr.take(Tracked(&mut perm.ptr_perm));
+                        // If generation has changed, we need to update the VMSA mapping.
+                        // since the guest/hypervisor may have changed the VMSA physical address.
+                        if guest_vmsa.generation == guest_vmsa.gen_in_use {
+                            if guest_vmsa.vmsa.is_none() {
+                                (false, Tracked(perm))
+                            } else {
+                                (true, Tracked(perm))
+                            }
+                        } else {
+                            let mut ok = true;
+                            // Now we unmap both VMSA and CAA.
+                            let DekoCpuCtx {
+                                    magic,
+                                    cpu_id,
+                                    ghcb,
+                                    tss,
+                                    pgtable,
+                                    ctx_switch_stack,
+                                    ist_stack,
+                                    private_bit,
+                                    shared_bit,
+                                    kernel_mapping,
+                                    vm_region,
+                                    apic,
+                                    run_queue,
+                                    temp_mapping_4k,
+                                    temp_mapping_2m,
+                                    deko_vmsa,
+                                    doorbell,
+                                    nested_irq,
+                                    current_stack,
+                                } = ptr.take(Tracked(&mut perm.ptr_perm));
 
-                                    let tracked DekoCpuCtxPermission {
-                                        mut ptr_perm,
-                                        pgtable_perm,
-                                        ghcb_perm,
-                                        vm_region_perm,
-                                        irq_state_perm,
-                                    } = perm;
+                                let tracked DekoCpuCtxPermission {
+                                    mut ptr_perm,
+                                    pgtable_perm,
+                                    ghcb_perm,
+                                    vm_region_perm,
+                                    irq_state_perm,
+                                } = perm;
 
-                                    let mut vm_region = vm_region.unwrap();
-                                    let tracked mut vm_region_perm = vm_region_perm.tracked_unwrap();
+                                let mut vm_region = vm_region.unwrap();
+                                let tracked mut vm_region_perm = vm_region_perm.tracked_unwrap();
 
-                                    // Whether or not there are existing mappings, we remove them
-                                    // and re-insert the new ones.
-                                    //
-                                    // Missing mappings are fine as we are going to insert new ones anyway.
-                                    #[verus_spec(with Tracked(&mut vm_region_perm) => _)]
-                                    let _ = vm_region.remove(PERCPU_VMSA_BASE);
-                                    #[verus_spec(with Tracked(&mut vm_region_perm) => _)]
-                                    let _ = vm_region.remove(PERCPU_CAA_BASE);
+                                // Whether or not there are existing mappings, we remove them
+                                // and re-insert the new ones.
+                                //
+                                // Missing mappings are fine as we are going to insert new ones anyway.
+                                #[verus_spec(with Tracked(&mut vm_region_perm) => _)]
+                                let _ = vm_region.remove(PERCPU_VMSA_BASE);
+                                #[verus_spec(with Tracked(&mut vm_region_perm) => _)]
+                                let _ = vm_region.remove(PERCPU_CAA_BASE);
 
-                                    let (caa_mapping, vmsa_mapping) = {
-                                        // add these to global invariants.
-                                        assume(caa_paddr@ % PAGE_SIZE as u64 == 0);
-                                        assume(vmsa_paddr@ % PAGE_SIZE as u64 == 0);
-                                        assume(caa_paddr@ + PAGE_SIZE as u64 <= 0x1_0000_0000_0000);
-                                        assume(vmsa_paddr@ + PAGE_SIZE as u64 <= 0x1_0000_0000_0000);
-
-                                        let caa_mapping = make_mapping(VmMapping::PhysMem {
-                                            paddr: caa_paddr,
-                                            size: PAGE_SIZE as _,
-                                        });
-                                        let vmsa_mapping = make_mapping(VmMapping::PhysMem {
-                                            paddr: vmsa_paddr,
-                                            size: PAGE_SIZE as _,
-                                        });
-
-                                        (caa_mapping, vmsa_mapping)
-                                    };
-
+                                if let Some(vmsa_paddr) = guest_vmsa.vmsa {
+                                    assume(vmsa_paddr@ % PAGE_SIZE as u64 == 0);
+                                    assume(vmsa_paddr@ + PAGE_SIZE as u64 <= 0x1_0000_0000_0000);
+                                    let vmsa_mapping = make_mapping(VmMapping::PhysMem {
+                                        paddr: vmsa_paddr,
+                                        size: PAGE_SIZE as _,
+                                    });
 
                                     proof_decl! {
-                                        let tracked mut caa_mapping_perm;
                                         let tracked mut vmsa_mapping_perm;
                                     }
 
-                                    let caa_mapping =
-                                        #[verus_spec(with Ghost(&vm_region) => Tracked(caa_mapping_perm))]
-                                        VirtualMemory::new(create_vaddr_range(PERCPU_CAA_BASE, 1), caa_mapping, PteFlags::nx_kernel());
                                     let vmsa_mapping =
-                                        #[verus_spec(with Ghost(&vm_region) => Tracked(vmsa_mapping_perm))]
-                                        VirtualMemory::new(create_vaddr_range(PERCPU_VMSA_BASE, 1), vmsa_mapping, PteFlags::nx_kernel());
+                                    #[verus_spec(with Ghost(&vm_region) => Tracked(vmsa_mapping_perm))]
+                                    VirtualMemory::new(create_vaddr_range(PERCPU_VMSA_BASE, 1), vmsa_mapping, PteFlags::nx_kernel());
 
                                     kpanic_if!(
                                         core::hint::unlikely(vm_region.areas.len() >= u64::MAX as usize - 2),
                                     );
-
-                                    assume(vm_region.compatible_spec(&caa_mapping) && vm_region.disjoint_blocks(&caa_mapping));
-
-                                    #[verus_spec(with Tracked(&mut vm_region_perm), Tracked(caa_mapping_perm))]
-                                    vm_region.insert_at_vaddr(PERCPU_CAA_BASE, caa_mapping);
-
                                     assume(vm_region.compatible_spec(&vmsa_mapping) && vm_region.disjoint_blocks(&vmsa_mapping));
 
                                     #[verus_spec(with Tracked(&mut vm_region_perm), Tracked(vmsa_mapping_perm))]
                                     vm_region.insert_at_vaddr(PERCPU_VMSA_BASE, vmsa_mapping);
 
-                                    ptr.write(
-                                        Tracked(&mut ptr_perm),
-                                        DekoCpuCtx {
-                                            magic,
-                                            cpu_id,
-                                            ghcb,
-                                            tss,
-                                            pgtable,
-                                            ctx_switch_stack,
-                                            ist_stack,
-                                            private_bit,
-                                            shared_bit,
-                                            kernel_mapping,
-                                            vm_region: Some(vm_region),
-                                            apic,
-                                            run_queue,
-                                            temp_mapping_4k,
-                                            temp_mapping_2m,
-                                            deko_vmsa,
-                                            doorbell,
-                                            nested_irq,
-                                        current_stack,
-                                        },
-                                    );
-
-                                    // Update the generation.
                                     guest_vmsa.gen_in_use = guest_vmsa.generation;
+                                } else {
+                                    ok = false;
+                                }
 
-                                    Tracked(DekoCpuCtxPermission {
+                                if let Some(caa_paddr) = guest_vmsa.caa {
+                                    assume(caa_paddr@ % PAGE_SIZE as u64 == 0);
+                                    assume(caa_paddr@ + PAGE_SIZE as u64 <= 0x1_0000_0000_0000);
+                                    let caa_mapping = make_mapping(VmMapping::PhysMem {
+                                        paddr: caa_paddr,
+                                        size: PAGE_SIZE as _,
+                                    });
+
+                                    proof_decl! {
+                                        let tracked mut caa_mapping_perm;
+                                    }
+
+                                    let caa_mapping =
+                                    #[verus_spec(with Ghost(&vm_region) => Tracked(caa_mapping_perm))]
+                                    VirtualMemory::new(create_vaddr_range(PERCPU_CAA_BASE, 1), caa_mapping, PteFlags::nx_kernel());
+
+                                    kpanic_if!(
+                                        core::hint::unlikely(vm_region.areas.len() >= u64::MAX as usize - 2),
+                                    );
+                                    assume(vm_region.compatible_spec(&caa_mapping) && vm_region.disjoint_blocks(&caa_mapping));
+
+                                    #[verus_spec(with Tracked(&mut vm_region_perm), Tracked(caa_mapping_perm))]
+                                    vm_region.insert_at_vaddr(PERCPU_CAA_BASE, caa_mapping);
+                                }
+
+                                proof {
+                                    perm = DekoCpuCtxPermission {
                                         ptr_perm,
                                         pgtable_perm,
                                         ghcb_perm,
                                         vm_region_perm: Some(vm_region_perm),
                                         irq_state_perm,
-                                    } )
-                                },
-                                _ => {
-                                    Tracked(perm)
-                                },
+                                    };
+                                }
+
+                                ptr.write(Tracked(&mut perm.ptr_perm), DekoCpuCtx {
+                                    magic,
+                                    cpu_id,
+                                    ghcb,
+                                    tss,
+                                    pgtable,
+                                    ctx_switch_stack,
+                                    ist_stack,
+                                    private_bit,
+                                    shared_bit,
+                                    kernel_mapping,
+                                    vm_region: Some(vm_region),
+                                    apic,
+                                    run_queue,
+                                    temp_mapping_4k,
+                                    temp_mapping_2m,
+                                    deko_vmsa,
+                                    doorbell,
+                                    nested_irq,
+                                    current_stack,
+                                });
+
+                                (ok, Tracked(perm))
                             }
-                        } else {
-                            Tracked(perm)
-                        }
                     }
                 }
             }
