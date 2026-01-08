@@ -19,7 +19,7 @@ use crate::mm::vm::TempMapping;
 use crate::mm::zero_page;
 use crate::snp::vmsa::VMSA;
 use crate::snp::{pvalidate, rmpadjust, validate_vaddr_region};
-use crate::{kdebug, kerror, kinfo, kwarn};
+use crate::{kdebug, kerror, kinfo, kunimplemented, kwarn};
 
 verus! {
 
@@ -685,6 +685,24 @@ pub(super) fn handle_guest_exit_deko_service(
             Err(DekoGuestServError::SoftError(DekoGuestServResultCode::UnsupportedProtocol))
         },
     }
+}
+
+#[verus_spec(r =>
+    with
+        Tracked(cpu_perm): Tracked<&mut DekoCpuCtxPermission>,
+    requires
+        old(cpu_perm).wf(),
+        old(cpu_perm).ptr_perm.value().cpu_id == cpu_idx,
+    ensures
+        cpu_perm.wf(),
+        cpu_perm.ptr_perm.value().cpu_id == cpu_idx,
+)]
+pub(super) fn handle_guest_exit_attest_service(
+    req: u32,
+    params: &mut DekoGuestRequestParams,
+    cpu_idx: u64,
+) -> DekoGuestServResult<()> {
+    kunimplemented!("Attestation service is not implemented yet");
 }
 
 } // verus!

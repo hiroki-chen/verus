@@ -36,7 +36,6 @@ pub mod collections;
 pub mod cpu;
 pub mod dbg;
 pub mod elf;
-pub mod fs;
 pub mod fw;
 pub mod guest;
 pub mod hal;

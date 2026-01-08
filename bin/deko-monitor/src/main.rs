@@ -20,7 +20,6 @@ use deko_core::cpu::{
     DekoCpuCtxPermission, PerCpuShared, CPUID_MAX_COUNT, IST_DF, PERCPU_AREAS,
 };
 use deko_core::elf::ElfFile;
-use deko_core::fs::ramfs::init_ramfs;
 use deko_core::fw::{load_acpi_tables, read_acpi_table};
 use deko_core::hal::set_is_stage2;
 use deko_core::logging::print_banner;
