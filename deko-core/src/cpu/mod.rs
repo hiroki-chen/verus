@@ -1167,7 +1167,7 @@ impl DekoCpuCtx {
 
                                     let vmsa_mapping =
                                     #[verus_spec(with Ghost(&vm_region) => Tracked(vmsa_mapping_perm))]
-                                    VirtualMemory::new(create_vaddr_range(PERCPU_VMSA_BASE, 1), vmsa_mapping, PteFlags::nx_kernel());
+                                    VirtualMemory::new(create_vaddr_range(PERCPU_VMSA_BASE, 1), vmsa_mapping, PteFlags::nx_kernel(), "vmsa_mapping");
 
                                     kpanic_if!(
                                         core::hint::unlikely(vm_region.areas.len() >= u64::MAX as usize - 2),
@@ -1196,7 +1196,7 @@ impl DekoCpuCtx {
 
                                     let caa_mapping =
                                     #[verus_spec(with Ghost(&vm_region) => Tracked(caa_mapping_perm))]
-                                    VirtualMemory::new(create_vaddr_range(PERCPU_CAA_BASE, 1), caa_mapping, PteFlags::nx_kernel());
+                                    VirtualMemory::new(create_vaddr_range(PERCPU_CAA_BASE, 1), caa_mapping, PteFlags::nx_kernel(), "caa_mapping");
 
                                     kpanic_if!(
                                         core::hint::unlikely(vm_region.areas.len() >= u64::MAX as usize - 2),
@@ -1593,6 +1593,7 @@ impl DekoCpuCtx {
             VirtAddr(cpu_start.0)..VirtAddr(cpu_start.0 + PAGE_SIZE),
             mapping,
             cpu_self_flags,
+            "vm_block_for_self",
         );
 
         proof {
@@ -1666,6 +1667,7 @@ impl DekoCpuCtx {
             VirtAddr(top_of_the_css_stack.0 - STACK_SIZE)..top_of_the_css_stack,
             cpu_css_stack,
             PteFlags::nx_kernel(),
+            "context_switch_stack",
         );
 
         proof {
@@ -1718,6 +1720,7 @@ impl DekoCpuCtx {
             VirtAddr(top_of_ist_stack.0 - STACK_SIZE)..top_of_ist_stack,
             ist_df_stack,
             PteFlags::nx_kernel(),
+            "ist_df_stack",
         );
         proof {
             assume(vm_block_for_ist_stack.wf());
@@ -1750,9 +1753,7 @@ impl DekoCpuCtx {
             kernel_mapping,
             Some(vm_region),
             Some(top_of_the_css_stack),
-            // Some(cpu_ist_stack),
             None,
-            // None,
             Some(run_queue),
             irq_state,
         );

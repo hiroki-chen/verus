@@ -1,5 +1,10 @@
-.equ  RSP_OFFSET, 0
-.text
+
+.globl switch_debug
+.data
+switch_debug:
+  .quad 0
+
+.pushsection .entry.text, "ax"
 
 .globl context_switch
 
@@ -64,3 +69,5 @@ context_switch:
   popfq
 
   retq
+
+.popsection

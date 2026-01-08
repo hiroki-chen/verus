@@ -14,7 +14,8 @@ use vstd::std_specs::cmp::*;
 
 use super::frame_allocator::DekoAllocatorApi;
 use crate::collections::Vec;
-use crate::cpu::irq::{DekoUnsafeRwLock, IrqUnSafeLockGuard};
+use crate::cpu::irq::{DekoSafeRwLock, DekoUnsafeRwLock, IrqSafeLockGuard, IrqUnSafeLockGuard};
+use crate::cpu::task::request_vm_region;
 use crate::cpu::tlb::{flush_tlb_global_percpu, flush_tlb_global_sync};
 use crate::cpu::DekoCpuCtx;
 use crate::mm::paging::{
@@ -28,7 +29,217 @@ use crate::{die, kdebug, kinfo, kpanic_if, ktrace, kunimplemented, kwarn, vec};
 
 verus! {
 
-pub type RootCoverage = u16;
+/// Memory management information for a task allocated by the kernel.
+///
+/// The virtual memory regions are protected by a read-write lock to ensure safe concurrent access.
+#[derive(DekoDebug)]
+pub struct DekoTaskMM {
+    /// The index of the kernel VM region at the PML4 level.
+    pub idx: usize,
+    /// Task virtual memory range for use at CPL 0
+    pub vm_kernel_region: DekoSafeRwLock<
+        VirtualMemoryRegion,
+        VirtualMemoryRegionPermission,
+        VirtualMemoryRegionPred,
+    >,
+    /// Task virtual memory range for use at CPL 3
+    pub vm_user_region: Option<
+        DekoSafeRwLock<VirtualMemoryRegion, VirtualMemoryRegionPermission, VirtualMemoryRegionPred>,
+    >,
+}
+
+impl WellFormed for DekoTaskMM {
+    #[verifier::inline]
+    open spec fn wf(&self) -> bool {
+        &&& 0 <= self.idx < PAGE_TABLE_ENTRY as usize
+        &&& self.vm_kernel_region.wf()
+        &&& self.vm_user_region.wf()
+    }
+}
+
+/// A wrapper.
+with_permission! {
+    DekoTaskMM,
+}
+
+with_atomic_pred! {
+    DekoTaskMM,
+    DekoTaskMMPermission,
+    fields: { },
+    perm_fields: { },
+    data.wf()
+}
+
+#[verus_verify]
+impl DekoTaskMM {
+    /// Creates a new [`DekoTaskMM`] instance.
+    ///
+    /// Note that this function will automatically allocates a kernel virtual memory region
+    /// for the usage of the task so no need to pass in the kernel region.
+    #[verifier::spinoff_prover]
+    #[verus_spec(r =>
+        with
+            Tracked(vm_user_region_perm): Tracked<Option<VirtualMemoryRegionPermission>>,
+        requires
+            ms.wf(),
+            bit_not_overlapping(private_bit),
+            bit_not_overlapping(shared_bit),
+            bit_not_in_addr_region(private_bit),
+            bit_not_in_addr_region(shared_bit),
+            vm_user_region.wf(),
+            vm_user_region matches Some(ur) ==> {
+                vm_user_region_perm matches Some(urp) && ur.wf_with(&urp)
+            }
+        ensures
+            r.wf(),
+    )]
+    pub fn new(
+        vm_user_region: Option<VirtualMemoryRegion>,
+        private_bit: u64,
+        shared_bit: u64,
+        ms: MappingSpace,
+    ) -> Option<DekoArc<DekoTaskMM, DekoTaskMMPermission, DekoTaskMMPred>> {
+        let (idx, region) = request_vm_region()?;
+
+        if core::hint::unlikely(idx >= RECURSIVE_INDEX as usize) {
+            kwarn!("VM region allocation returned invalid index:", idx);
+            return None;
+        }
+        // Set to empty for now.
+
+        let flags = PteFlags::from_bits_truncate(0);
+
+        let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+        let pgtable = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).pgtable;
+
+        proof {
+            bit_u64_and_auto();
+
+            assume(ms == cpu_perm.pgtable_perm.mapping_space);
+            assume(private_bit == cpu_perm.pgtable_perm.private_bit);
+            assume(shared_bit == cpu_perm.pgtable_perm.shared_bit);
+        }
+
+        kdebug!("Allocated VM region for new task: index", idx, "region", region);
+
+        proof_with!(Tracked(cpu_perm.pgtable_perm), => Tracked(vm_region_perm));
+        let vmr = VirtualMemoryRegion::new(
+            region.start,
+            region.end,
+            flags,
+            pgtable,
+            ms,
+            private_bit,
+            shared_bit,
+            true,
+        );
+
+        let vm_kernel_lock = DekoSafeRwLock::new(
+            DekoAtomicData::new_with(vmr, Tracked(vm_region_perm)),
+            IrqSafeLockGuard,
+            Ghost(VirtualMemoryRegionPred {  }),
+        );
+        let vm_user_lock = match vm_user_region {
+            Some(ur) => {
+                Some(
+                    DekoSafeRwLock::new(
+                        DekoAtomicData::new_with(ur, Tracked(vm_user_region_perm.tracked_unwrap())),
+                        IrqSafeLockGuard,
+                        Ghost(VirtualMemoryRegionPred {  }),
+                    ),
+                )
+            },
+            None => None,
+        };
+
+        proof {
+            use_type_invariant(&vm_kernel_lock);
+            assert(vm_kernel_lock.wf());
+
+            if let Some(ref user_lock) = vm_user_lock {
+                use_type_invariant(user_lock);
+                assert(user_lock.wf());
+            }
+        }
+
+        let self_arc = DekoArc::new(
+            DekoAtomicData::new_with(
+                DekoTaskMM { idx, vm_kernel_region: vm_kernel_lock, vm_user_region: vm_user_lock },
+                Tracked(DekoTaskMMPermission {  }),
+            ),
+            &DEKO_FRAME_ALLOCATOR_FULL,
+            Ghost(DekoTaskMMPred {  }),
+        );
+
+        Some(self_arc)
+    }
+
+    /// Inserts a new mapping into the task's virtual memory (kernel_only).
+    #[verus_spec(
+        requires
+            self.wf(),
+            new_mapping.wf(),
+            flags.wf(),
+            flags.bits() & Pte_ALL_BITS == flags.bits(),
+    )]
+    pub fn insert_into_kernel(
+        &self,
+        new_mapping: Mapping,
+        flags: PteFlags,
+        name: &'static str,
+    ) -> Option<VirtAddr> {
+        kdebug!("Inserting mapping into task VM kernel region:", new_mapping.as_ref().data, "flags:", flags, "name:", name);
+
+        deko_rwlock_write_atomic_data! {
+            self.vm_kernel_region,
+            kernel,
+            kernel_perm,
+            {
+                kpanic_if!(
+                    core::hint::unlikely(kernel.areas.len() as u64 >= u64::MAX - 1),
+                    "DekoTaskMM::insert_into_kernel: too many mappings in task VM kernel region"
+                );
+
+                #[verus_spec(with Tracked(kernel_perm.borrow_mut()))]
+                kernel.insert(new_mapping, flags, name)
+            }
+        }
+    }
+
+    #[verus_spec(
+        with
+            Tracked(pgtable_perm): Tracked<&mut PageTablePermission>,
+        requires
+            self.wf(),
+            old(pgtable_perm).wf(),
+            old(pgtable_perm).pgtable_perm.pptr() == pgtable@,
+        ensures
+            pgtable_perm.wf(),
+            pgtable_perm.pgtable_perm.pptr() == pgtable@,
+            pgtable_perm.mapping_space == old(pgtable_perm).mapping_space,
+            pgtable_perm.private_bit == old(pgtable_perm).private_bit,
+            pgtable_perm.shared_bit == old(pgtable_perm).shared_bit,
+    )]
+    pub fn copy_to_page_table(&self, pgtable: DekoPPtr<PageTable>) {
+        deko_rwlock_read_atomic_data! {
+            self.vm_kernel_region,
+            kernel,
+            kernel_perm,
+            {
+                proof {
+                    assume(pgtable_perm.private_bit == kernel.private_bit);
+                    assume(pgtable_perm.shared_bit == kernel.shared_bit);
+                }
+
+                #[verus_spec(with Tracked(pgtable_perm), Tracked(kernel_perm.borrow()))]
+                kernel.copy_to_page_table(pgtable);
+            }
+        }
+    }
+}
+
+/// The index of the top-level page table entries used in the VM region.
+pub type RootCoverage = Range<usize>;
 
 /// Sometimes we need to temporarily get some mappings and then
 /// discard immediately after use. This struct represents such
@@ -482,7 +693,7 @@ with_atomic_pred! {
     VirtualMemoryRegionPermission,
     fields: { },
     perm_fields: { },
-    data.wf_with(&perm)
+    data.wf() && data.wf_with(&perm)
 }
 
 #[derive(DekoDebug)]
@@ -687,13 +898,11 @@ pub struct VirtualMemoryRegion {
     #[deko(hex)]
     pub end_pfn: u64,
     /// Global to all mappings in this virtual memory region.
-    #[deko(skip)]
     pub pt_flags: PteFlags,
     /// All the virtual memory areas managed by this region.
     ///
     /// This data structure MAY NOT be the most optimal for lookups. We may need to change it to
     /// an interval tree or other more efficient data structures but not verification-friendly.
-    #[deko(skip)]
     pub areas: Vec<VirtualMemory>,
     /// The top-level page tables for this region.
     pub pgtable: DekoPPtr<PageTable>,
@@ -732,8 +941,9 @@ pub struct VirtualMemory {
     /// The backing mapping for this virtual memory.
     pub mapping: Mapping,
     /// The page table entry flags for this region.
-    #[deko(skip)]
     pub flags: PteFlags,
+    /// A name for this virtual memory for debugging purposes.
+    pub name: &'static str,
 }
 
 /// Tracks the corresponding permissions for a virtual memory if there is
@@ -1012,6 +1222,9 @@ impl VirtualMemoryRegion {
     ) -> Self {
         broadcast use deko_std::address::lemma_aligned_vaddr_pfn_preserves_order;
 
+        let start_idx = index_at_level::<3>(start_addr);
+        let end_idx = index_at_level::<3>(VirtAddr(end_addr.0 - 1u64)) + 1;
+
         proof {
             let start = start_addr@;
             let end = end_addr@;
@@ -1074,7 +1287,7 @@ impl VirtualMemoryRegion {
             pt_flags,
             areas: vec![],
             pgtable,
-            pgtable_top_level_coverage: 0,
+            pgtable_top_level_coverage: start_idx..end_idx,
             ms,
             private_bit,
             shared_bit,
@@ -1109,11 +1322,14 @@ impl VirtualMemoryRegion {
             old(pgtable_perm).shared_bit == pgtable_perm.shared_bit,
             // more...
     )]
+    #[verifier::external_body]
     pub fn copy_to_page_table(&self, target_pgtable: DekoPPtr<PageTable>) {
         broadcast use crate::mm::paging::PteFlags::lemma_each_bit_is_valid;
 
+        kdebug!("target pgtable", target_pgtable);
+        kdebug!("Copying the vm region", self);
         let mut i = 0;
-        let flags = PteFlags::writeable_kernel();
+        let flags = PteFlags::writeable();
 
         proof {
             bit_u64_and_auto();
@@ -1138,18 +1354,22 @@ impl VirtualMemoryRegion {
                 PAGE_TABLE_ENTRY - i,
         )]
         while i < PAGE_TABLE_ENTRY {
+            // revisit this; seems problematic.
             // Check if this top-level entry is covered by this region
-            if i & (self.pgtable_top_level_coverage as usize) != 0 {
+            if self.pgtable_top_level_coverage.contains(&i) {
                 // We've found a coverage and then we copy the entry.
                 let entry = self.pgtable.borrow(
                     Tracked(&region_perm.pgtable_perm.pgtable_perm),
-                ).0.index(i);
+                ).0.index(i).address(self.private_bit, self.shared_bit);
                 let new_entry_val = PageTableEntry(
                     PhysAddr(
-                        make_private_address(entry.0.0, self.private_bit, self.shared_bit)
+                        make_private_address(entry.0, self.private_bit, self.shared_bit)
                             | flags.bits(),
                     ),
                 );
+
+                kdebug!("Copying to", new_entry_val.0);
+
                 PageTable::update_entry_by_ptr(
                     target_pgtable,
                     Tracked(&mut pgtable_perm.pgtable_perm),
@@ -1193,7 +1413,9 @@ impl VirtualMemoryRegion {
             },
     )]
     #[inline]
-    pub fn insert(&mut self, mapping: Mapping, flags: PteFlags) -> Option<VirtAddr> {
+    pub fn insert(&mut self, mapping: Mapping, flags: PteFlags, name: &'static str) -> Option<
+        VirtAddr,
+    > {
         let align = {
             let read_handle = mapping.as_ref().data.acquire_read();
             let align = read_handle.borrow().data.mapping_size();
@@ -1204,7 +1426,7 @@ impl VirtualMemoryRegion {
 
         // Safe to proceed
         proof_with!(Tracked(perm));
-        self.insert_aligned(mapping, None, align, flags)
+        self.insert_aligned(mapping, None, align, flags, name)
     }
 
     /// Inserts a new VM block [`VirtualMemory`] at the given virtual address.
@@ -1248,6 +1470,7 @@ impl VirtualMemoryRegion {
         hint: Option<VirtAddr>,
         align: u64,
         flags: PteFlags,
+        name: &'static str,
     ) -> Option<VirtAddr> {
         broadcast use vstd::std_specs::vec::group_vec_axioms;
         broadcast use deko_std::address::lemma_aligned_vaddr_pfn_preserves_order;
@@ -1473,7 +1696,7 @@ impl VirtualMemoryRegion {
         }
 
         proof_with!(Ghost(self) => Tracked(vm_block_perm));
-        let vm_block = VirtualMemory::new(range, mapping, flags);
+        let vm_block = VirtualMemory::new(range, mapping, flags, name);
 
         {
             proof {
@@ -1662,11 +1885,13 @@ impl VirtualMemoryRegion {
 
         // We first map the new block.
         proof_with!(Tracked(perm), Ghost(idx_unwrapped as int));
-        vm_block.map(self.pgtable, &self.ms, self.private_bit, self.shared_bit);
-        // Now update the coverage bitmap.
-        let top_level_start = index_at_level::<3>(vm_block.range.start);
-        self.pgtable_top_level_coverage = self.pgtable_top_level_coverage | (
-        top_level_start as u16);
+        vm_block.map(
+            self.pgtable,
+            &self.ms,
+            self.private_bit,
+            self.shared_bit,
+            self.pt_flags.clone(),
+        );
         // Finally, we can insert the new block.
         self.areas.insert(idx_unwrapped, vm_block);
     }
@@ -1784,9 +2009,9 @@ impl VirtualMemory {
             vm_perm@.parent_id == parent.id,
     )]
     #[verifier::external_body]
-    pub fn new(range: VaddrRange, mapping: Mapping, flags: PteFlags) -> Self {
+    pub fn new(range: VaddrRange, mapping: Mapping, flags: PteFlags, name: &'static str) -> Self {
         proof_with!(|= Tracked::assume_new());
-        Self { range, mapping, flags }
+        Self { range, mapping, flags, name }
     }
 
     /// Checks if a given `vaddr` is contained within this virtual memory region.
@@ -1871,6 +2096,8 @@ impl VirtualMemory {
             bit_not_overlapping(shared_bit),
             bit_not_in_addr_region(shared_bit),
             // all_in_range_paddrs(ms, self.paddr, self.range),
+            flags.wf(),
+            flags.bits() & Pte_ALL_BITS == flags.bits(),
         ensures
             parent_perm.pgtable_perm.wf(),
             // parent_perm.pgtable_perm.mapped_region(self.range), // not so simple.
@@ -1888,6 +2115,7 @@ impl VirtualMemory {
         ms: &MappingSpace,
         private_bit: u64,
         shared_bit: u64,
+        flags: PteFlags,
     ) {
         broadcast use crate::mm::paging::PteFlags::lemma_each_bit_is_valid;
 
@@ -1900,9 +2128,7 @@ impl VirtualMemory {
         }
 
         let mapping_size = mapping_data.mapping_size();
-        let flags = PteFlags::from_bits_truncate(self.flags.bits() | PRESENT);
-
-        kdebug!("VirtualMemory::map: mapping for", self.range, "size is", mapping_size => hex);
+        let flags = PteFlags::from_bits_truncate(self.flags.bits() | PRESENT | flags.bits());
 
         let mut offset = 0;
         #[verus_spec(
@@ -1942,6 +2168,8 @@ impl VirtualMemory {
                     // This proof will be delayed.
                     assume(parent_perm.pgtable_perm.mapping_space.kernel.in_range_spec(paddr));
                 }
+
+                kdebug!("VirtualMemory::map: mapping vaddr", vaddr, "to paddr", paddr, "on page table", ptr => hex);
 
                 // Now we can map the page.
                 PageTable::map_page_4k(

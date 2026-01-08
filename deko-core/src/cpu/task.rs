@@ -38,12 +38,13 @@ use crate::imp::ghcb::{vmpl_switch, GuestHostCommunicationBlock};
 use crate::imp::vmsa::VMSA;
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
 use crate::mm::paging::{
-    bit_not_in_addr_region, bit_not_overlapping, PageTable, PageTablePermission, PteFlags,
+    bit_not_in_addr_region, bit_not_overlapping, Mapping, PageTable, PageTablePermission, PteFlags,
 };
 use crate::mm::stack::DekoKernelStack;
 use crate::mm::vm::{
-    self, VirtualMemory, VirtualMemoryPermission, VirtualMemoryRegion,
-    VirtualMemoryRegionPermission, VirtualMemoryRegionPred, VmMapping, VmMappingPred, VMR_GRANULE,
+    self, make_mapping, DekoTaskMM, DekoTaskMMPermission, DekoTaskMMPred, VirtualMemory,
+    VirtualMemoryPermission, VirtualMemoryRegion, VirtualMemoryRegionPermission,
+    VirtualMemoryRegionPred, VmMapping, VmMappingPred, VMR_GRANULE,
 };
 use crate::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR, DEKO_FRAME_ALLOCATOR_FULL};
 use crate::snp::after_irq_enable;
@@ -68,6 +69,10 @@ extern "C" {
     #[link_name = "DEBUG"]
     #[link_section = ".data"]
     pub static mut debug_hv: bool;
+
+    #[link_name = "switch_debug"]
+    #[link_section = ".data"]
+    static mut switch_debug: bool;
 }
 
 verus! {
@@ -149,61 +154,10 @@ pub struct X86ExceptionContext {
     pub frame: X86InterruptFrame,
 }
 
-/// The memory management information of a task.
-pub struct DekoTaskMM {
-    /// The page table index covered by the MM for quick
-    /// lookups. This index ensures that the top-level
-    /// page table entry is always reserved for the task MM.
-    pub pgtable_index: usize,
-    /// The virtual memory region of the task for kernel level.
-    pub k_vm_region: VirtualMemoryRegion,
-    /// The virtual memory region of the task for user level.
-    pub u_vm_region: Option<VirtualMemoryRegion>,
-}
-
-with_permission! {
-    DekoTaskMM,
-    // pgtable_perm: Tracked<PageTablePermission>, will it own the permission?
-    k_vm_region_perm: Tracked<VirtualMemoryRegionPermission>,
-    u_vm_region_perm: Tracked<Option<VirtualMemoryRegionPermission>>,
-}
-
-with_atomic_pred! {
-    DekoTaskMM,
-    DekoTaskMMPermission,
-    fields: { k_vm_region, u_vm_region, },
-    perm_fields: { k_vm_region_perm, u_vm_region_perm, },
-    k_vm_region.wf_with(&k_vm_region_perm.view())
-        && match (&u_vm_region, u_vm_region_perm.view()) {
-            (Some(vm), Some(vm_perm)) => vm.wf_with(&vm_perm),
-            (None, None) => true,
-            _ => false,
-        }
-}
-
 fn on_task_exit() {
     kinfo!("Task exited");
 
     schedule();
-}
-
-#[verus_verify]
-impl DekoTaskMM {
-    #[verus_spec(r =>
-        with
-            Tracked(u_vm_region_perm): Tracked<Option<VirtualMemoryRegionPermission>>,
-        requires
-            match (&u_vm_region, &u_vm_region_perm) {
-                (Some(vm), Some(vm_perm)) => vm.wf_with(&vm_perm),
-                (None, None) => true,
-                _ => false,
-            },
-    )]
-    pub fn new(u_vm_region: Option<VirtualMemoryRegion>) -> Self {
-        // TODO: We may also need a global bitmap allocator so that
-        // some pages can be reserved for specific purposes only.
-        kunimplemented!()
-    }
 }
 
 pub broadcast axiom fn xsave_area_size_wf()
@@ -326,9 +280,19 @@ impl WellFormed for DekoTaskArgs {
 #[derive(DekoDebug)]
 pub enum DekoTaskMode {
     /// User mode task.
-    User { entry: u64 },
+    User {
+        #[deko(hex)]
+        entry: u64,
+    },
     /// Kernel mode task.
-    Kernel { entry: u64, param: u64, ret: u64 },
+    Kernel {
+        #[deko(hex)]
+        entry: u64,
+        #[deko(hex)]
+        param: u64,
+        #[deko(hex)]
+        ret: u64,
+    },
 }
 
 impl WellFormed for DekoTaskMode {
@@ -879,7 +843,7 @@ pub struct DekoRunnable {
     #[deko(hex)]
     pub xsave_size: usize,
     /// The memory management.
-    pub mm: DekoArc<VirtualMemoryRegion, VirtualMemoryRegionPermission, VirtualMemoryRegionPred>,
+    pub mm: DekoArc<DekoTaskMM, DekoTaskMMPermission, DekoTaskMMPred>,
     /// The state of this task.
     pub state: DekoUnsafeRwLock<DekoRunnableSchedState, (), DekoRunnableSchedStatePred>,
 }
@@ -953,14 +917,14 @@ impl DekoRunnable {
             vm_region.wf_with(vm_region_perm),
             old(vm_region_perm).pgtable_perm.private_bit == vm_region_perm.pgtable_perm.private_bit,
             old(vm_region_perm).pgtable_perm.shared_bit == vm_region_perm.pgtable_perm.shared_bit,
-            r.1.end >= r.1.start,
-            r.0@ + r.1.end < u64::MAX,
+            r.0.end >= r.0.start,
+            r.2.wf(),
     )]
     pub fn alloc_user_stack(
         vm_region: &mut VirtualMemoryRegion,
         entry: u64,
         xsave: DekoPPtr<Array<u8, 4096>>,
-    ) -> (VirtAddr, Range<u64>, u64) {
+    ) -> (Range<u64>, u64, vm::Mapping) {
         kunimplemented!()
     }
 
@@ -1017,8 +981,8 @@ impl DekoRunnable {
             vm_region.wf_with(vm_region_perm),
             old(vm_region_perm).pgtable_perm.private_bit == vm_region_perm.pgtable_perm.private_bit,
             old(vm_region_perm).pgtable_perm.shared_bit == vm_region_perm.pgtable_perm.shared_bit,
-            r.1.end >= r.1.start,
-            r.0@ + r.1.end < u64::MAX,
+            r.0.end >= r.0.start,
+            r.2.wf(),
     )]
     pub fn alloc_kernel_stack<A: DekoFrameAllocator>(
         vm_region: &mut VirtualMemoryRegion,
@@ -1029,7 +993,7 @@ impl DekoRunnable {
         param: u64,
         ret: u64,
         xsave: DekoPPtr<Array<u8, 4096>>,
-    ) -> (VirtAddr, Range<u64>, u64) {
+    ) -> (Range<u64>, u64, vm::Mapping) {
         let mut stack = DekoKernelStack::new_with_size(STACK_SIZE, false);
 
         proof_with!(Tracked(pgtable_perm));
@@ -1070,7 +1034,7 @@ impl DekoRunnable {
 
         // Insert the new stack mapping into the given VM region.
         let vaddr = match #[verus_spec(with Tracked(vm_region_perm))]
-        vm_region.insert(mapping.clone(), PteFlags::nx_kernel()) {
+        vm_region.insert(mapping.clone(), PteFlags::nx_kernel(), "kernel_stack") {
             Some(vaddr) => vaddr,
             None => {
                 kerror!("Failed to insert kernel stack mapping into VM region");
@@ -1101,7 +1065,7 @@ impl DekoRunnable {
         // task with interrupts disabled.
         Self::push_stack_frames(stack_ptr, entry, xsave.addr() as u64, param, ret);
 
-        (vaddr, range, 0x98  /* stack_offset + ctx_size */ )
+        (range, 0x98  /* stack_offset + ctx_size */ , mapping)
     }
 
     /// Creates a new runnable task with the given arguments on the given CPU.
@@ -1123,6 +1087,8 @@ impl DekoRunnable {
             // r@.???
     )]
     pub fn new(cpu: DekoPPtr<DekoCpuCtx>, args: DekoTaskArgs) -> DekoRunnablePtr {
+        kdebug!("Creating new task with args", args);
+
         let cpu_borrowed = cpu.borrow(Tracked(&ctx_perm.ptr_perm));
 
         kpanic_if!(core::hint::unlikely(
@@ -1138,6 +1104,8 @@ impl DekoRunnable {
             shared_bit,
             Ghost(&cpu_borrowed.kernel_mapping_spec()),
         );
+
+        kdebug!("Allocated new page table for task: ", new_pgtable.addr() => hex);
 
         // This is a trick to avoid copying all the shared mappings
         // one by one. We just copy the PTE from the kernel page table
@@ -1201,8 +1169,16 @@ impl DekoRunnable {
             // If so we inherit the parent's memory management.
             Some(ptr) => { ptr.as_ref().data.mm.clone() },
             // If not just create a new one.
-            None => { Self::create_mm(private_bit, shared_bit, kernel_mapping) },
+            None => match DekoTaskMM::new(None, private_bit, shared_bit, kernel_mapping) {
+                Some(mm) => mm,
+                None => {
+                    kerror!("Failed to create memory manager for new task");
+                    die("");
+                },
+            },
         };
+
+        kdebug!("Created memory manager for new task: ", task_mm.as_ref().data);
 
         let tracked DekoCpuCtxPermission {
             ptr_perm,
@@ -1218,7 +1194,7 @@ impl DekoRunnable {
         );
 
         let tracked mut vm_region_perm = vm_region_perm.tracked_unwrap();
-        let (stack, vrange, rsp_offset) = match args.mode {
+        let (vrange, rsp_offset, stack_mapping) = match args.mode {
             DekoTaskMode::Kernel { entry, param, ret } => {
                 proof_with!(Tracked(&mut vm_region_perm), Tracked(&cpu_pgtable_perm) ,Tracked(&mut xsave_perm));
                 Self::alloc_kernel_stack(
@@ -1238,8 +1214,22 @@ impl DekoRunnable {
             },
         };
 
+        let Some(stack) = task_mm.as_ref().data.insert_into_kernel(
+            stack_mapping,
+            PteFlags::nx_kernel(),
+            "task_kernel_stack",
+        ) else {
+            kerror!("Failed to insert task kernel stack into task memory manager");
+            die("");
+        };
+
+        kdebug!("Allocated stack for new task: ", stack);
+
         proof_with!(Tracked(&mut pgtable_perm), Tracked(&vm_region_perm));
         vm_region.copy_to_page_table(new_pgtable);
+
+        proof_with!(Tracked(&mut pgtable_perm));
+        task_mm.as_ref().data.copy_to_page_table(new_pgtable);
 
         let stack_bounds = VirtAddr(stack.0 + vrange.start)..VirtAddr(stack.0 + vrange.end);
 
@@ -1584,6 +1574,7 @@ pub fn schedule_this_task(task: DekoRunnablePtr) {
 }
 
 /// Schedules the next task to run on the current CPU.
+#[verifier::external_body]
 pub fn schedule() {
     let (cpu, Tracked(mut perm)) = DekoCpuCtx::this_cpu();
     let cpu_id = cpu.borrow(Tracked(&perm.ptr_perm)).cpu_id;
@@ -1609,12 +1600,40 @@ pub fn schedule() {
                         __,
                         {
                             let old = state.cpu_index;
+                            state.cpu_index = cpu_id as usize;
 
                             old
                         }
                     };
 
+                    if old_cpu != cpu_id as usize {
+                        kdebug!("Task is migrating from CPU ", old_cpu => dec, " to CPU ", cpu_id => dec);
+
+                        kdebug!("the next task:", next.as_ref().data);
+
+                        // Obtain the handle to the vm region of this cpu.
+                        let vm_region = cpu.borrow(Tracked(&perm.ptr_perm)).vm_region.as_ref();
+                        kpanic_if!(
+                            core::hint::unlikely(vm_region.is_none()),
+                            "No VM region found in CPU when migrating task"
+                        );
+
+                        // Now we also need to copy the page table into the new task.
+                        deko_rwlock_write_atomic_data! {
+                            next.as_ref().data.pgtable,
+                            pgtable,
+                            pgtable_perm,
+                            {
+                                kdebug!("page table is", pgtable.addr() => hex);
+                                #[verus_spec(with Tracked(pgtable_perm.borrow_mut()), Tracked(perm.vm_region_perm.tracked_borrow()))]
+                                vm_region.unwrap().copy_to_page_table(
+                                    pgtable,
+                                );
+                            }
+                        }
+                    }
                     // SSE Save context.
+
                     sse_save_context(cur.as_ref().data.xsave.addr() as u64);
 
                     switch(Some(cur.clone()), next);
@@ -2023,10 +2042,9 @@ pub fn set_cpu_affinity(which: usize) {
         }
     }
 
-    schedule();
+    kdebug!("Set CPU affinity to core ", which, ", scheduling...");
 
-    // After scheduling, the task should be migrated as we
-    // can match `Some` in `after_switch`.
+    schedule();
 }
 
 /// The main entry point for the kernel service loop.
@@ -2115,8 +2133,7 @@ pub fn serv_main(cpu_index: usize) {
             );
 
             kinfo!("Creating service main task for AP core ", i);
-            // Set service main for other APs.
-            // But this task never gets run?????
+
             DekoCpuCtx::start_kernel_task(this_cpu, Tracked(&mut new_perm), serv_task);
 
             kinfo!("Spawned service main on AP core ", i);
@@ -2128,6 +2145,8 @@ pub fn serv_main(cpu_index: usize) {
         // Migrate the task to self.
         set_cpu_affinity(cpu_index);
     }
+
+    kinfo!("Core ", cpu_index, " entering guest execution loop.");
 
     wait_ipi_blocking();  // ensure all cores are synchronized.
 
@@ -2230,7 +2249,7 @@ pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
         no_irq_zone(
             ||
                 {
-                    // flush_tlb_global_sync();
+                    flush_tlb_global_sync();
                     // Also need to update the guest interrupt delivery information here.
                     // TODO: apic controller update.
                     // Need to update the guest APIC status here so no interrupt will

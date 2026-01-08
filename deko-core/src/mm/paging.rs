@@ -432,12 +432,40 @@ deko_bitflags_quick! {
     exec: { PRESENT, GLOBAL, ACCESSED },
     data: { PRESENT, GLOBAL, WRITABLE, NX, ACCESSED, DIRTY},
     data_ro: { PRESENT, GLOBAL, NX, ACCESSED },
-    writeable: { PRESENT, USER, WRITABLE, ACCESSED, DIRTY },
+    writeable: { PRESENT, USER, WRITABLE, ACCESSED },
     writeable_kernel: { PRESENT, WRITABLE, ACCESSED, DIRTY },
     nx_kernel: { PRESENT, WRITABLE, ACCESSED, DIRTY, NX },
     read_only: { PRESENT, USER, ACCESSED },
     kernel_code: { PRESENT, GLOBAL },
     kernel_data: { PRESENT, GLOBAL, WRITABLE },
+}
+
+impl deko_std::fmt::DekoDebug for PteFlags {
+    #[verifier::external_body]
+    fn deko_debug<W: deko_std::fmt::DekoWriter>(&self, writer: &W) {
+        writer.write_str("PteFlags(");
+        let mut first = true;
+        for flag in [PRESENT, WRITABLE, USER, ACCESSED, DIRTY, HUGE, GLOBAL, NX] {
+            if self.contains(flag) {
+                if !first {
+                    writer.write_str(" | ");
+                }
+                match flag {
+                    PRESENT => writer.write_str("PRESENT"),
+                    WRITABLE => writer.write_str("WRITABLE"),
+                    USER => writer.write_str("USER"),
+                    ACCESSED => writer.write_str("ACCESSED"),
+                    DIRTY => writer.write_str("DIRTY"),
+                    HUGE => writer.write_str("HUGE"),
+                    GLOBAL => writer.write_str("GLOBAL"),
+                    NX => writer.write_str("NX"),
+                    _ => (),
+                }
+                first = false;
+            }
+        }
+        writer.write_str(")");
+    }
 }
 
 /// Another wrapper over DekoPPtr for handling page tables.
@@ -1543,14 +1571,13 @@ impl Page {
             let nx = 1u64 << 63;
             let all = p | w | u | a | d | h | g | nx;
 
-            let writeable_bits = p | u | w | a | d;
+            let writeable_bits = p | u | w | a;
             assert(flags.bits() & all == flags.bits()) by {
                 assert(flags.bits() == writeable_bits & all);
 
                 assert((writeable_bits & all) & all == (writeable_bits & all)) by (bit_vector)
                     requires
-                        writeable_bits == (1u64 << 0) | (1u64 << 2) | (1u64 << 1) | (1u64 << 5) | (
-                        1u64 << 6),
+                        writeable_bits == (1u64 << 0) | (1u64 << 2) | (1u64 << 1) | (1u64 << 5),
                         all == (1u64 << 0) | (1u64 << 1) | (1u64 << 2) | (1u64 << 5) | (1u64 << 6)
                             | (1u64 << 7) | (1u64 << 8) | (1u64 << 63),
                 ;
@@ -1564,8 +1591,7 @@ impl Page {
                     assert((p & (writeable_bits & all) != 0) && (h & (writeable_bits & all) == 0))
                         by (bit_vector)
                         requires
-                            writeable_bits == (1u64 << 0) | (1u64 << 2) | (1u64 << 1) | (1u64 << 5)
-                                | (1u64 << 6),
+                            writeable_bits == (1u64 << 0) | (1u64 << 2) | (1u64 << 1) | (1u64 << 5),
                             p == 1u64 << 0,
                             h == 1u64 << 7,
                             all == (1u64 << 0) | (1u64 << 1) | (1u64 << 2) | (1u64 << 5) | (1u64
@@ -2656,6 +2682,7 @@ impl Page {
         let new_pte_value = PageTableEntry(
             PhysAddr(make_private_address(paddr.0, private_bit, shared_bit) | flags.bits() as u64),
         );
+
         let ghost path = PageTablePath::from_vaddr_at_level(vaddr, 0);
         let ghost parent_path = path.drop_last().normalize();
 

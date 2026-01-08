@@ -101,7 +101,6 @@ fn print_byte_hex_padded<W: DekoWriter>(byte: u8, writer: &W) {
     writer.write_char(hex_chars[(byte & 0xF) as usize] as char);
 }
 
-// Specific helpers for common cases with optimized buffer sizes
 #[verifier::external]
 pub(crate) fn print_integer_hex<W: DekoWriter>(num: u64, writer: &W) {
     writer.write_str("0x");
@@ -113,22 +112,16 @@ pub(crate) fn print_integer_hex<W: DekoWriter>(num: u64, writer: &W) {
 
     let mut buf = [0u8; 16];
     let mut n = num;
-    let mut i = 15;
+    let mut i = 16;
 
     while n > 0 {
-        let digit = (n & 0xF) as u8;
-        buf[i] = if digit < 10 {
-            b'0' + digit
-        } else {
-            b'A' + (digit - 10)
-        };
-        n >>= 4;
-        if i == 0 { break; }
         i -= 1;
+        let digit = (n & 0xF) as u8;
+        buf[i] = if digit < 10 { b'0' + digit } else { b'A' + (digit - 10) };
+        n >>= 4;
     }
 
-    // Write non-zero part
-    writer.write_bytes(&buf[i+1..]);
+    writer.write_bytes(&buf[i..]);
 }
 
 /// TODO: DO not call this function in new page tables as this would

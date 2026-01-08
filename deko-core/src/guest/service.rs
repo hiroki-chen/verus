@@ -118,6 +118,10 @@ fn pvalidate_guest_one_page(paddr: PhysAddr) -> DekoGuestServResult<()> {
         (1, PAGE_SIZE)
     };
 
+    // HACK: For now we do not support huge page validation.
+    if huge_page {
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Other(0x6)));
+    }
     if core::hint::unlikely(!huge_page && guest_pa >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE) || (
     huge_page && guest_pa >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE_2M) {
         kerror!("Guest pvalidate: physical address out of range:", guest_pa);
