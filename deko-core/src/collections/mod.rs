@@ -42,8 +42,8 @@ pub fn get_unchecked<T>(v: &[T], index: usize) -> &T {
 ///
 /// Since Verus does not support mutable references to elements in a vector,
 /// we provide this helper function to update an element at a specific index.
-#[verifier::external_body]
 #[inline]
+#[verifier::external_body]
 pub fn update_vec<T>(v: &mut Vec<T>, index: usize, value: T)
     requires
         0 <= index < old(v)@.len(),
@@ -51,6 +51,17 @@ pub fn update_vec<T>(v: &mut Vec<T>, index: usize, value: T)
         v@ =~= old(v)@.update(index as int, value),
 {
     v[index] = value;
+}
+
+#[inline]
+#[verifier(external_body)]
+pub fn update_slice<T, const N: usize>(s: &mut [T; N], index: usize, value: T)
+    requires
+        0 <= index < old(s)@.len(),
+    ensures
+        s@ =~= old(s)@.update(index as int, value),
+{
+    s[index] = value;
 }
 
 } // verus!

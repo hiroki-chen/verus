@@ -536,6 +536,7 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
         None,  // ctx_switch_stack
         None,  // ist_stack
         None,
+        None,
         irq_state,
     );
     bsp_percpu_ptr.write(Tracked(&mut bsp_percpu_perm), bsp_percpu);

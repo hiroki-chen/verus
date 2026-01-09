@@ -36,6 +36,7 @@ use crate::guest::{handle_guest_exit, DekoGuestExitInformation, DekoGuestServErr
 use crate::imp::doorbell::HVDoorbell;
 use crate::imp::ghcb::{vmpl_switch, GuestHostCommunicationBlock};
 use crate::imp::vmsa::VMSA;
+use crate::logging::print_str;
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
 use crate::mm::paging::{
     bit_not_in_addr_region, bit_not_overlapping, Mapping, PageTable, PageTablePermission, PteFlags,
@@ -1159,6 +1160,7 @@ impl DekoRunnable {
             doorbell,
             nested_irq,
             current_stack,
+            guest_apic,
         } = cpu_taken;
         kpanic_if!(core::hint::unlikely(
             vm_region.is_none(),
@@ -1289,6 +1291,7 @@ impl DekoRunnable {
             deko_vmsa,
             doorbell,
             nested_irq,
+            guest_apic,
             current_stack,
         };
         let tracked ctx_perm = DekoCpuCtxPermission {
@@ -2150,6 +2153,8 @@ pub fn serv_main(cpu_index: usize) {
 
     wait_ipi_blocking();  // ensure all cores are synchronized.
 
+    print_str(r"\x1b[2J\x1b[1;1H");
+
     let mut r = 0;
 
     // Try to enter the guest again.
@@ -2237,6 +2242,9 @@ pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
         proof_with!(Tracked(&this_cpu_perm) => Tracked(mut vmsa_perm));
         let vmsa = VMSA::this_vmsa(this_cpu_ptr);
 
+        proof_with!(Tracked(&mut this_cpu_perm));
+        DekoCpuCtx::emulate_apic_guest(this_cpu_ptr);
+
         // This carries the request served by the monitor.
         // So we need to update rax to indicate whether the
         // request has been served successfully.
@@ -2251,7 +2259,6 @@ pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
                 {
                     flush_tlb_global_sync();
                     // Also need to update the guest interrupt delivery information here.
-                    // TODO: apic controller update.
                     // Need to update the guest APIC status here so no interrupt will
                     // be delivered.
                     vmpl_switch(2);

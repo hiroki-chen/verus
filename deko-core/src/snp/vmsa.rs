@@ -349,6 +349,109 @@ impl VMSA {
         }
     }
 
+    #[verifier::external_body]
+    #[verus_spec(r =>
+        with
+            Tracked(ptr_perm): Tracked<&mut DekoPointsTo<Self>>,
+        requires
+            old(ptr_perm).wf(),
+            old(ptr_perm).is_init(),
+            old(ptr_perm).pptr() == ptr@,
+        ensures
+            ptr_perm.wf(),
+            ptr_perm.is_init(),
+            ptr_perm.pptr() == ptr@,
+    )]
+    pub fn check_and_clear_pending_interrupt_event(ptr: DekoPPtr<Self>) -> u8 {
+        unsafe {
+            let struct_ptr = ptr.addr() as *mut Self;
+
+            let event_inj_ptr = core::ptr::addr_of_mut!((*struct_ptr).event_inj);
+            let raw_val = core::ptr::read_unaligned(event_inj_ptr).0;
+            let is_valid = (raw_val & (1 << 31)) != 0;
+            let event_type = (raw_val >> 8) & 0b111;
+            let is_interrupt_type = event_type == 0;
+
+            if event_type == 0  /* is interrupt? */
+             && is_valid {
+                // clear it.
+                core::ptr::write_unaligned(event_inj_ptr, VmsaEventInject(0));
+                // fetch the vector.
+                (raw_val & 0xff as u64) as u8
+            } else {
+                0
+            }
+        }
+    }
+
+    #[verifier::external_body]
+    #[verus_spec(r =>
+        with
+            Tracked(ptr_perm): Tracked<&mut DekoPointsTo<Self>>,
+        requires
+            old(ptr_perm).wf(),
+            old(ptr_perm).is_init(),
+            old(ptr_perm).pptr() == ptr@,
+        ensures
+            ptr_perm.wf(),
+            ptr_perm.is_init(),
+            ptr_perm.pptr() == ptr@,
+    )]
+    pub fn check_and_clear_pending_virtual_interrupt(ptr: DekoPPtr<Self>) -> u8 {
+        unsafe {
+            let struct_ptr = ptr.addr() as *mut Self;
+
+            let vintr_ctrl_ptr = core::ptr::addr_of_mut!((*struct_ptr).vintr_ctrl);
+            let raw_val = core::ptr::read_unaligned(vintr_ctrl_ptr).0;
+
+            let v_irq_mask = 1u64 << 8;
+            if (raw_val & v_irq_mask) != 0 {
+                let new_val = raw_val & !v_irq_mask;
+                core::ptr::write_unaligned(vintr_ctrl_ptr, VIntrCtrl(new_val));
+
+                ((raw_val >> 32) & 0xff) as u8
+            } else {
+                0
+            }
+        }
+    }
+
+    #[verifier::external_body]
+    #[verus_spec(r =>
+        with
+            Tracked(ptr_perm): Tracked<&mut DekoPointsTo<Self>>,
+        requires
+            old(ptr_perm).wf(),
+            old(ptr_perm).is_init(),
+            old(ptr_perm).pptr() == ptr@,
+        ensures
+            ptr_perm.wf(),
+            ptr_perm.is_init(),
+            ptr_perm.pptr() == ptr@,
+    )]
+    pub fn deliver_interrupt_immediately(ptr: DekoPPtr<Self>, irq: u8) -> bool {
+        unsafe {
+            let struct_ptr = ptr.addr() as *mut Self;
+            let event_inj_ptr = core::ptr::addr_of_mut!((*struct_ptr).event_inj);
+
+            let raw_val = core::ptr::read_unaligned(event_inj_ptr).0;
+            let valid = (raw_val & (1 << 31)) != 0;
+
+            if valid {
+                false
+            } else {
+                let mut v = 0;
+                v |= (1u64 << 31);  // valid
+                // set irq.
+                v |= (irq as u64) & 0xff;
+                // set type to interrupt.
+                v |= (VmsaEventType::Interrupt as u64) << 8;
+                core::ptr::write_unaligned(event_inj_ptr, VmsaEventInject(v));
+                true
+            }
+        }
+    }
+
     #[inline(always)]
     #[verifier::external_body]
     #[verus_spec(

@@ -480,9 +480,6 @@ fn deko_main(cpu_index: usize) {
         proof_with!(Tracked(&mut cpu_ctx_perm.pgtable_perm));
         deko_core::imp::prepare_guest_fw(launch_info, &igvm_params, kernel_prange, cpuid_table);
 
-        // Populate the rootfs.
-        init_ramfs(PhysAddr(launch_info.kernel_fs_start)..PhysAddr(launch_info.kernel_fs_end));
-
         // Initialize the guest driver.
         init_snp_guest_driver();
 
@@ -522,10 +519,6 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     deko_core::logging::print_panic_info(info);
 
     dbg::print_stack(3);
-
-    // unsafe {
-    //     core::arch::asm!("ud2");
-    // }
 
     loop {
     }

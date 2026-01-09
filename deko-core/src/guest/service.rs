@@ -54,6 +54,10 @@ pub const DEKO_SERVICE_WITHDRAW_MEMORY: u32 = 0x5;
 
 pub const DEKO_SERVICE_QUERY_PROTOCOL: u32 = 0x6;
 
+pub const DEKO_SERVICE_ATTEST_SERVICES: u32 = 0x0;
+
+pub const DEKO_SERVICE_ATTEST_SINGLE_SERVICE: u32 = 0x1;
+
 /// Reads a reference to type `T` from the given guest virtual address.
 ///
 /// TODO: This function requires more sophisticated safety checks and
@@ -576,6 +580,10 @@ fn handle_deko_service_vcpu_create(params: &DekoGuestRequestParams) -> DekoGuest
 /// and the SVSM. Since the firmware supplied CA for the BSP is likely
 /// to be in reserved memory, switch off that CA to a kernel provided
 /// CA is done using the SVSM core protocol call.
+///
+/// This call is used to request that a new gPA be used for all future
+/// communication with the SVSM. If should replace the affected vCPU's
+/// caa field in its VMSA structure and a new mapping should be created.
 #[verus_spec(r =>
     with
         Tracked(cpu_perm): Tracked<&mut DekoCpuCtxPermission>,
@@ -702,7 +710,20 @@ pub(super) fn handle_guest_exit_attest_service(
     params: &mut DekoGuestRequestParams,
     cpu_idx: u64,
 ) -> DekoGuestServResult<()> {
-    kunimplemented!("Attestation service is not implemented yet");
+    match req {
+        DEKO_SERVICE_ATTEST_SERVICES => {
+            // Handle attestation of all services.
+            kunimplemented!()
+        },
+        DEKO_SERVICE_ATTEST_SINGLE_SERVICE => {
+            // Handle attestation of a single service.
+            kunimplemented!()
+        },
+        _ => {
+            kerror!("Unsupported attestation service request: ", req);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::UnsupportedProtocol));
+        },
+    }
 }
 
 } // verus!

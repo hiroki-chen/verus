@@ -25,7 +25,7 @@ use vstd::invariant;
 use vstd::prelude::*;
 
 use crate::collections::{get_unchecked, update_vec};
-use crate::cpu::apic::X86Apic;
+use crate::cpu::apic::{X86Apic, X86LocalApic, X86LocalApicPred};
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
 use crate::cpu::ipi::{
     add_ipi_available_cpu, CpuIpiArea, CpuIpiAreaPermission, DekoIpIMessage, DekoIpiRequest,
@@ -39,6 +39,7 @@ use crate::cpu::task::{
     cpu_idle_func_ptr, schedule_init, DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred,
     DekoRunnable, DekoRunnablePred, DekoTaskArgs, DEKO_TASK_LIST,
 };
+use crate::guest::CaaArea;
 use crate::imp::ghcb::current_ghcb;
 use crate::imp::RmpFlags;
 use crate::mm::frame_allocator::DekoPageFrameBox;
@@ -54,7 +55,7 @@ use crate::mm::vm::{
 use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR_FULL};
 use crate::snp::doorbell::{HVDoorbell, HvDoorbellPtrPermission, HvDoorbellPtrPred};
 use crate::snp::ghcb::{validate_ghcb, GuestHostCommunicationBlock};
-use crate::snp::vmsa::{VmsaInitialContext, VmsaPage, VmsaPagePermission, VmsaPagePred};
+use crate::snp::vmsa::{VmsaInitialContext, VmsaPage, VmsaPagePermission, VmsaPagePred, VMSA};
 use crate::snp::Rmp_ALL_BITS;
 use crate::{die, kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
 
@@ -571,6 +572,8 @@ pub struct DekoCpuCtx {
     pub vm_region: Option<VirtualMemoryRegion>,
     /// APIC interface for this CPU.
     pub apic: X86Apic,
+    /// Guest APIC interface for this CPU.
+    pub guest_apic: Option<DekoSafeRwLock<X86LocalApic, (), X86LocalApicPred>>,
     /// Runqueue
     pub run_queue: Option<DekoSafeRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred>>,
     /// Temporary mapping for creating temporary mappings to a 4k physical page.
@@ -652,6 +655,7 @@ impl WellFormed for DekoCpuCtxPermission {
         &&& self.ghcb_perm.wf()
         &&& self.ghcb_perm.pptr() == self.ptr_perm.value().ghcb_spec()@
         &&& self.irq_state_perm.wf_with(&self.ptr_perm.value().nested_irq)
+        &&& self.ptr_perm.value().guest_apic.wf()
     }
 }
 
@@ -975,6 +979,7 @@ impl DekoCpuCtx {
         ctx_switch_stack: Option<VirtAddr>,
         ist_stack: Option<DekoIstStack>,
         run_queue: Option<DekoSafeRwLock<DekoRunQueue, DekoRunQueuePermission, DekoRunQueuePred>>,
+        guest_apic: Option<DekoSafeRwLock<X86LocalApic, (), X86LocalApicPred>>,
         irq_state: IrqState,
     ) -> (r: Self)
         requires
@@ -1010,6 +1015,7 @@ impl DekoCpuCtx {
             temp_mapping_2m: VirtualMemoryTemporary::new_zeroed(),
             deko_vmsa: DekoOnceCell::new(Ghost(VmsaPagePred {  })),
             doorbell: None,
+            guest_apic,
             nested_irq: irq_state,
             current_stack: VirtAddr::new(0)..VirtAddr::new(0),  // set to none.
         }
@@ -1130,6 +1136,7 @@ impl DekoCpuCtx {
                                     deko_vmsa,
                                     doorbell,
                                     nested_irq,
+                                    guest_apic,
                                     current_stack,
                                 } = ptr.take(Tracked(&mut perm.ptr_perm));
 
@@ -1237,6 +1244,7 @@ impl DekoCpuCtx {
                                     doorbell,
                                     nested_irq,
                                     current_stack,
+                                    guest_apic,
                                 });
 
                                 (ok, Tracked(perm))
@@ -1744,6 +1752,12 @@ impl DekoCpuCtx {
         );
         let (irq_state, Tracked(irq_state_perm)) = IrqState::new();
 
+        let guest_apic = DekoSafeRwLock::new(
+            DekoAtomicData::new(X86LocalApic::new()),
+            IrqSafeLockGuard {  },
+            Ghost(X86LocalApicPred {  }),
+        );
+
         let mut cpu_ctx = DekoCpuCtx::new(
             init_pgtable,
             ghcb,
@@ -1755,6 +1769,7 @@ impl DekoCpuCtx {
             Some(top_of_the_css_stack),
             None,
             Some(run_queue),
+            Some(guest_apic),
             irq_state,
         );
 
@@ -1952,6 +1967,43 @@ impl DekoCpuCtx {
         ptr.write(Tracked(&mut perm.ptr_perm), cpu);
 
         r
+    }
+
+    /// Emulate APIC accesses from the guest.
+    ///
+    /// Since the hypervisor cannot directly inject interrupts or IPI to the guest,
+    /// we need to emulate the APIC accesses from the guest and update the interrupt
+    /// state accordingly on the calling area page.
+    #[verus_spec(
+        with
+            Tracked(perm): Tracked<&DekoCpuCtxPermission>,
+        requires
+            perm.wf_with(ptr),
+    )]
+    pub fn emulate_apic_guest(ptr: DekoPPtr<Self>) {
+        proof_with!(Tracked(perm) => Tracked(vmsa_perm));
+        let vmsa = VMSA::this_vmsa(ptr);
+
+        proof_with!(Tracked(perm) => Tracked(caa_perm));
+        let caa = CaaArea::this_caa(ptr);
+        let cpu_borrow = ptr.borrow(Tracked(&perm.ptr_perm));
+
+        kpanic_if!(
+            core::hint::unlikely(
+                cpu_borrow.guest_apic.is_none()),
+            "Guest APIC not initialized for CPU",
+            cpu_borrow.cpu_id,
+        );
+
+        deko_rwlock_write_atomic_data! {
+            cpu_borrow.guest_apic.as_ref().unwrap(),
+            apic,
+            __,
+            {
+                #[verus_spec(with Tracked(&mut caa_perm), Tracked(&mut vmsa_perm))]
+                apic.serve_guest(cpu_borrow.cpu_id as usize, caa, vmsa);
+            }
+        }
     }
 
     /// Setup the idle task for this CPU.
