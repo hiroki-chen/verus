@@ -650,7 +650,7 @@ impl Builder {
             cmd.env("LD_LIBRARY_PATH", &new_ld_path);
         }
 
-        cmd.args(["-accel", "kvm", "-cpu", "host"]);
+        cmd.args(["-accel", "kvm", "-cpu", "EPYC-v4"]);
         cmd.arg("-smp").arg(config.smp_cores.to_string());
 
         // Add drives
