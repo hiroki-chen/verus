@@ -440,34 +440,6 @@ deko_bitflags_quick! {
     kernel_data: { PRESENT, GLOBAL, WRITABLE },
 }
 
-impl deko_std::fmt::DekoDebug for PteFlags {
-    #[verifier::external_body]
-    fn deko_debug<W: deko_std::fmt::DekoWriter>(&self, writer: &W) {
-        writer.write_str("PteFlags(");
-        let mut first = true;
-        for flag in [PRESENT, WRITABLE, USER, ACCESSED, DIRTY, HUGE, GLOBAL, NX] {
-            if self.contains(flag) {
-                if !first {
-                    writer.write_str(" | ");
-                }
-                match flag {
-                    PRESENT => writer.write_str("PRESENT"),
-                    WRITABLE => writer.write_str("WRITABLE"),
-                    USER => writer.write_str("USER"),
-                    ACCESSED => writer.write_str("ACCESSED"),
-                    DIRTY => writer.write_str("DIRTY"),
-                    HUGE => writer.write_str("HUGE"),
-                    GLOBAL => writer.write_str("GLOBAL"),
-                    NX => writer.write_str("NX"),
-                    _ => (),
-                }
-                first = false;
-            }
-        }
-        writer.write_str(")");
-    }
-}
-
 /// Another wrapper over DekoPPtr for handling page tables.
 ///
 /// Please be aware this is semantically _different_ from a `DekoPPtr<PageTableEntry>`;

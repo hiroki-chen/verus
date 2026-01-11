@@ -1,23 +1,28 @@
 memory = "64G"
 debug = false
 extra_config = [
+  "-cpu",
+  "EPYC-v5",
   "-d",
   "int,cpu_reset",
   "-D",
   "qemu.log",
   # Using this disk image for launching the Linux guest.
   "-drive",
-  "file=tools/guest_image.qcow2,format=qcow2,snapshot=off,id=disk0,if=none",
-  # SCSI
+  "file=tools/noble-server-cloudimg-amd64.img,format=qcow2,snapshot=off,id=disk0,if=none",
   "-device",
   "virtio-scsi-pci,id=scsi0,disable-legacy=on,iommu_platform=on",
   # Disk device
   "-device",
-  "scsi-hd,drive=disk0,bootindex=0",
+  "scsi-hd,drive=disk0",
   # Network device
-  # "-netdev user,id=vmnic",
-  # "-device",
-  # "e1000,netdev=vmnic,romfile=",
+  "-netdev user,id=vmnic,hostfwd=tcp::10022-:22",
+  "-device",
+  "e1000,netdev=vmnic,romfile=",
+  "-serial",
+  "mon:stdio",
+  "-virtfs",
+  "local,path=/home/haobchen/linux-deko,mount_tag=host_share,security_model=none,id=fs0",
 ]
 # For debugging please reduce cores to catch early logic bugs.
-smp_cores = 2
+smp_cores = 16

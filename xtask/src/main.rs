@@ -650,7 +650,7 @@ impl Builder {
             cmd.env("LD_LIBRARY_PATH", &new_ld_path);
         }
 
-        cmd.args(["-accel", "kvm", "-cpu", "EPYC-v4"]);
+        cmd.args(["-accel", "kvm"]);
         cmd.arg("-smp").arg(config.smp_cores.to_string());
 
         // Add drives
@@ -670,7 +670,7 @@ impl Builder {
         }
 
         // Low-level machine and serial config
-        cmd.args(["-serial", "stdio", "-nodefaults", "-no-reboot"]);
+        cmd.args(["-nodefaults", "-no-reboot"]);
 
         if config.enable_cvm {
             match self.config.target_arch.as_str() {
@@ -1632,7 +1632,9 @@ fn bootstrap_qemu() -> Result<()> {
     cmd.env("LIBRARY_PATH", &library_path);
     cmd.arg(format!("--prefix={}", qemu_install_dir.display()))
         .arg("--target-list=x86_64-softmmu")
-        .arg("--enable-igvm");
+        .arg("--enable-igvm")
+        .arg("--enable-slirp")
+        .arg("--enable-vhost-net");
 
     println!("Running: {:?}", cmd);
     println!("  PKG_CONFIG_PATH: {}", pkgconfig_path);

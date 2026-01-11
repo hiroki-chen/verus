@@ -766,6 +766,8 @@ pub fn setup_apic(ctx: DekoPPtr<DekoCpuCtx>, Tracked(ctx_perm): Tracked<&mut Dek
 }
 
 // verus!
+// FIXME: This macro generated lemmas that might take too long to verify.
+// We temporarily add rlimit(infinity) but need to optimize it later.
 deko_bitflags! {
     pub struct SnpStatus: u64 {
         const SEV = 0;
@@ -780,8 +782,11 @@ deko_bitflags! {
         const BTB_ISOLATION = 9;
         const VMPL_SSS = 10;
         const SECURE_TSC = 11;
+        const VMGEXIT_PARAM = 12;
+        const PMC_VIRT = 13;
+        const IBS_VIRT = 14;
+        const GUEST_MSR_INTERCEPT = 15;
         const VMSA_REG_PROT = 16;
-        const SMT_PROT = 17;
     }
 }
 

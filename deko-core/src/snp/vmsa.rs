@@ -21,6 +21,7 @@ use crate::cpu::regs::{
 use crate::cpu::tlb::flush_tlb_global_percpu;
 use crate::cpu::{DekoCpuCtx, X86Tss};
 use crate::mm::DEKO_FRAME_ALLOCATOR_FULL;
+use crate::policy::DekoMsrInterceptVec0;
 use crate::snp::{
     rmpadjust, DekoCpuCtxPermission, PageTablePermission, RmpFlags, Rmp_ALL_BITS, SnpStatusFlags,
     ALT_INJ, BIT_VMSA, REST_INJ,
@@ -121,6 +122,8 @@ pub struct VmsaEventInject(pub u64);
 #[derive(DekoDebug, Clone, Copy)]
 pub struct VIntrCtrl(pub u64);
 
+/// The Virtual Machine Save Area (VMSA) structure for AMD SEV-SNP.
+/// See https://docs.amd.com/v/u/en-US/24593_3.43
 #[repr(C, packed)]
 #[derive(DekoDebug, Clone, Copy)]
 pub struct VMSA {
@@ -272,8 +275,14 @@ pub struct VMSA {
     pub ibs_dc_linaddr: u64,
     pub bp_ibstgt_rip: u64,
     pub ic_ibs_extd_ctl: u64,
+    /// Support for guest intercept controls.
+    pub intercept_vecs: [u32; 8],
+    /// Support for guest intercept MSR R/W controls.
+    /// Currently the last vector is reserved (INTERCEPT_MSR_VEC3).
+    pub intercept_msr_vecs: [u64; 4],
+    /// AVX512, ZMM, and opmask registers (not used currently).
     #[deko(skip)]
-    pub reserved_7c8: Array<u8, 2104>,
+    pub reserved_7c8: Array<u8, 2040>,
 }
 
 #[derive(DekoDebug)]
@@ -783,6 +792,7 @@ impl VmsaPage {
         this.x87_ftw = 0x5555;
         this.x87_fcw = 0x0040;
         this.sev_features = (SnpStatusFlags::get_status().bits() & !REST_INJ) >> 2;  // make this sev.
+        this.intercept_msr_vecs[0] |= DekoMsrInterceptVec0::LstarWrite as u64;  // enable MSR interception.
 
         this.sev_features
     }

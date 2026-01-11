@@ -18,7 +18,7 @@ use vstd::prelude::*;
 use crate::cpu::task::{DekoRunnableCtx, X86ExceptionContext};
 use crate::cpu::DekoCpuCtx;
 use crate::kinfo;
-use crate::logging::print_str;
+use crate::logging::{print_str, CONSOLE, CONSOLE_LOCK};
 
 verus! {
 
@@ -245,6 +245,9 @@ fn print_stack_frame(frame: StackFrame) {
 pub fn print_stack(skip: usize) {
     let unwinder = StackUnwinder::unwind_this_cpu();
     print_str("---BACKTRACE---:\n");
+
+    let guard = CONSOLE_LOCK.acquire_write();
+
     for frame in unwinder.skip(skip) {
         match frame {
             UnwoundStackFrame::Valid(item) => print_stack_frame(item),
@@ -252,6 +255,8 @@ pub fn print_stack(skip: usize) {
         }
     }
     print_str("---END---\n");
+
+    guard.release_write_no_val();
 }
 
 

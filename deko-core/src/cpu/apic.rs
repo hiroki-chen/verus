@@ -20,7 +20,7 @@ use crate::imp::ghcb::GuestHostCommunicationBlock;
 use crate::imp::vmsa::VMSA;
 use crate::imp::{wrmsr, SnpStatusFlags, REST_INJ};
 use crate::snp::rdmsr;
-use crate::{kdebug, kerror, kpanic_if, kwarn};
+use crate::{kdebug, kerror, kinfo, kpanic_if, kwarn};
 
 verus! {
 
@@ -291,6 +291,38 @@ impl X86LocalApic {
             self.wf(),
     )]
     pub fn consume_host_interrupts(&mut self) {
+        let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+
+        let hv_doorbell = &cpu.borrow(Tracked(&cpu_perm.ptr_perm)).doorbell;
+        kpanic_if!(
+            core::hint::unlikely(hv_doorbell.is_none()),
+            "HV doorbell not initialized when consuming host interrupts",
+        );
+
+        let vmpl_event_mask =
+            deko_rwlock_write_atomic_data! {
+            hv_doorbell.as_ref().unwrap(),
+            hv_doorbell_ptr,
+            hv_doorbell_perm,
+            {
+                let mut hv_doorbell = hv_doorbell_ptr.take(Tracked(&mut hv_doorbell_perm.borrow_mut().ptr_perm));
+
+                let v = hv_doorbell.per_vmpl_events.swap(
+                    Tracked(&mut hv_doorbell_perm.borrow_mut().hv_perm.per_vmpl_events_perm),
+                    0,
+                );
+
+                // Put back the doorbell.
+                hv_doorbell_ptr.write(Tracked(&mut hv_doorbell_perm.borrow_mut().ptr_perm), hv_doorbell);
+
+                v
+            }
+        };
+
+        if vmpl_event_mask & (1 << (2 - 1)) == 0 {
+            return ;
+        }
+        kinfo!("Consuming host interrupts for guest APIC");
     }
 
     /// If any IPI is pending when we process it.

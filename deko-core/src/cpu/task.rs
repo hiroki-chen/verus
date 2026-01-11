@@ -36,7 +36,7 @@ use crate::guest::{handle_guest_exit, DekoGuestExitInformation, DekoGuestServErr
 use crate::imp::doorbell::HVDoorbell;
 use crate::imp::ghcb::{vmpl_switch, GuestHostCommunicationBlock};
 use crate::imp::vmsa::VMSA;
-use crate::logging::print_str;
+use crate::logging::{print_str, CONSOLE_LOCK};
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
 use crate::mm::paging::{
     bit_not_in_addr_region, bit_not_overlapping, Mapping, PageTable, PageTablePermission, PteFlags,
@@ -48,6 +48,7 @@ use crate::mm::vm::{
     VirtualMemoryRegionPred, VmMapping, VmMappingPred, VMR_GRANULE,
 };
 use crate::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR, DEKO_FRAME_ALLOCATOR_FULL};
+use crate::policy::enable_syscall_hook;
 use crate::snp::after_irq_enable;
 use crate::{dbg, die, kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
 
@@ -2153,7 +2154,11 @@ pub fn serv_main(cpu_index: usize) {
 
     wait_ipi_blocking();  // ensure all cores are synchronized.
 
-    print_str(r"\x1b[2J\x1b[1;1H");
+    {
+        let guard = CONSOLE_LOCK.acquire_write();
+        print_str(r"\x1b[2J\x1b[1;1H");
+        guard.release_write_no_val();
+    }
 
     let mut r = 0;
 
@@ -2198,6 +2203,9 @@ pub fn serv_main(cpu_index: usize) {
                         }
                     },
                 }
+            },
+            DekoGuestExitInformation::MsrIntercept { msr, val } => {
+                kunimplemented!("msr interception: todo");
             },
         }
     }
@@ -2253,6 +2261,8 @@ pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
 
         proof_with!(Tracked(&mut vmsa_perm));
         VMSA::enable(vmsa);
+
+        enable_syscall_hook();
 
         no_irq_zone(
             ||

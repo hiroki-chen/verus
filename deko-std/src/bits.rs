@@ -19,8 +19,8 @@ use vstd::prelude::*;
 ///
 /// Please note that the consts defined inside the macro are bit positions
 /// not their actual bit values which are computed as `(1 << position)`.
-#[macro_export]
 #[verusfmt::skip]
+#[macro_export]
 macro_rules! deko_bitflags {
     (
         $(#[$outer:meta])*
@@ -62,11 +62,39 @@ macro_rules! deko_bitflags {
 
         } // verus!
         paste::paste! {
-                                                                                        verus! {
+                                                                                            verus! {
             #[allow(non_upper_case_globals)]
             $vis const [<$name _ALL_BITS>]: $T = $( (1 as $T) << $value )|*;
 
+            impl deko_std::fmt::DekoDebug for [<$name Flags>] {
+                #[verifier::external_body]
+                fn deko_debug<W: deko_std::fmt::DekoWriter>(&self, writer: &W) {
+                    writer.write_str(concat!(stringify!($name)));
+                    writer.write_str(" { ");
+
+                    let mut first = true;
+                    for flag in [$($Flag),*] {
+                        if self.contains(flag) {
+                            if !first {
+                                writer.write_str(" | ");
+                            }
+                            first = false;
+
+                            match flag {
+                                $(
+                                    $Flag => writer.write_str(stringify!($Flag)),
+                                )*
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    writer.write_str(" }");
+                }
+            }
+
             #[verifier::bit_vector]
+            #[verifier::spinoff_prover]
             $vis proof fn [<lemma_ $name _subset_implies_bits>](flag: $T, self_bits: $T)
                 requires
                     flag & ($((1 as $T) << $value)|*) == flag,
@@ -78,6 +106,7 @@ macro_rules! deko_bitflags {
             {}
 
             #[verifier::bit_vector]
+            #[verifier::spinoff_prover]
             $vis proof fn [<lemma_ $name _bit_valid>](v: $T)
                 requires
                     $(
@@ -133,6 +162,8 @@ macro_rules! deko_bitflags {
                 }
 
                 /// Gives the proof that for each $Flag, it is a valid bit.
+                #[verifier::spinoff_prover]
+                #[verifier::rlimit(infinity)]
                 pub broadcast proof fn lemma_each_bit_is_valid()
                     ensures
                         #[trigger]
@@ -186,6 +217,8 @@ macro_rules! deko_bitflags {
                 }
 
                 #[verifier::when_used_as_spec(from_bits_truncate_spec)]
+                #[verifier::spinoff_prover]
+                #[verifier::rlimit(infinity)]
                 pub fn from_bits_truncate(bits: $T) -> (r: [<$name Flags>])
                     ensures
                         r.inv(),
@@ -204,9 +237,10 @@ macro_rules! deko_bitflags {
                     Self::from_bits(flag).subset_of(self@)
                 }
 
-                #[verifier::spinoff_prover]
                 #[inline(always)]
                 #[verifier::when_used_as_spec(contains_spec)]
+                #[verifier::spinoff_prover]
+                #[verifier::rlimit(infinity)]
                 pub fn contains(&self, flag: $T) -> (r: bool)
                     requires
                         self.wf(),
@@ -282,6 +316,8 @@ macro_rules! deko_bitflags {
                 }
 
                 #[inline(always)]
+                #[verifier::spinoff_prover]
+                #[verifier::rlimit(infinity)]
                 pub fn empty() -> (r: Self)
                     ensures
                         r.inv(),
@@ -300,6 +336,7 @@ macro_rules! deko_bitflags {
 
                 #[inline(always)]
                 #[verifier::spinoff_prover]
+                #[verifier::rlimit(infinity)]
                 pub fn all_bits() -> (r: Self)
                     ensures
                         r.inv(),
@@ -333,6 +370,8 @@ macro_rules! deko_bitflags {
 
 
                 #[inline(always)]
+                #[verifier::spinoff_prover]
+                #[verifier::rlimit(infinity)]
                 pub fn remove(&mut self, flag: $T)
                     requires
                         old(self).wf(),
@@ -372,7 +411,7 @@ macro_rules! deko_bitflags {
             }
 
             } // verus!
-                                                                                    } // paste
+                                                                                        } // paste
     };
 }
 

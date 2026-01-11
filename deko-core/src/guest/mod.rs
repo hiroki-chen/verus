@@ -142,6 +142,8 @@ pub enum DekoGuestExitInformation {
     CoreNotCreated,
     /// Indicates that the VMPL switch operation failed.
     VmplSwitchFailed,
+    /// Indicates that this is an MSR intercept exit.
+    MsrIntercept { msr: u32, val: Option<u64> },
 }
 
 impl WellFormed for DekoGuestExitInformation {
@@ -150,6 +152,7 @@ impl WellFormed for DekoGuestExitInformation {
             DekoGuestExitInformation::ServiceRequest { .. } => true,
             DekoGuestExitInformation::CoreNotCreated => true,
             DekoGuestExitInformation::VmplSwitchFailed => true,
+            DekoGuestExitInformation::MsrIntercept { .. } => true,
         }
     }
 }
@@ -170,10 +173,9 @@ impl DekoGuestExitInformation {
 
         if exit_code == 0x403  /* VMGEXIT */
          {
+            // Check if there is a sw_exit request.
             let protocol = (vmsa.rax >> 32) as u32;
             let req = (vmsa.rax & 0xFFFFFFFFu64) as u32;
-            // FIXME: Perhaps there are some packed <-> unpacked issues here.
-            // the bit orders seem reversed.
             let params = DekoGuestRequestParams {
                 sev_features: vmsa.sev_features,
                 rcx: vmsa.rcx,
