@@ -204,8 +204,6 @@ fn pvalidate_guest_one_page(paddr: PhysAddr) -> DekoGuestServResult<()> {
         cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
 )]
 fn handle_deko_service_pvalidate(params: &DekoGuestRequestParams) -> DekoGuestServResult<()> {
-    crate::kdebug!("Handling guest pvalidate request", params);
-
     // During booting the page must not be aligned to PAGE_SIZE
     // but it must uphold the alignment requirement of x64 that
     // physical addresses must be aligned to qword.

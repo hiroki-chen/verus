@@ -24,7 +24,7 @@ use crate::mm::DEKO_FRAME_ALLOCATOR_FULL;
 use crate::policy::DekoMsrInterceptVec0;
 use crate::snp::{
     rmpadjust, DekoCpuCtxPermission, PageTablePermission, RmpFlags, Rmp_ALL_BITS, SnpStatusFlags,
-    ALT_INJ, BIT_VMSA, REST_INJ,
+    ALT_INJ, BIT_VMSA, GUEST_MSR_INTERCEPT, REST_INJ,
 };
 use crate::{die, kdebug, kerror, kinfo, kunimplemented, kwarn};
 
@@ -32,6 +32,9 @@ const _: () = {
     assert!(core::mem::size_of::<VMSASegment>() == 0x10);
     assert!(core::mem::size_of::<VmsaTableRegister>() == 0x10);
     assert!(core::mem::size_of::<VMSA>() == 4096);
+
+    assert!(core::mem::offset_of!(VMSA, intercept_vecs) == 0x900);
+    assert!(core::mem::offset_of!(VMSA, intercept_msr_vecs) == 0x920);
 };
 
 verus! {
@@ -123,7 +126,8 @@ pub struct VmsaEventInject(pub u64);
 pub struct VIntrCtrl(pub u64);
 
 /// The Virtual Machine Save Area (VMSA) structure for AMD SEV-SNP.
-/// See https://docs.amd.com/v/u/en-US/24593_3.43
+/// See https://docs.amd.com/v/u/en-US/24593_3.43 and `struct sev_es_save_area` from
+/// `arch/x86/include/asm/svm.c` in the Linux kernel source.
 #[repr(C, packed)]
 #[derive(DekoDebug, Clone, Copy)]
 pub struct VMSA {
@@ -260,9 +264,13 @@ pub struct VMSA {
     pub x87_ds: u16,
     pub x87_cs: u16,
     pub x87_rip: u64,
+    #[deko(skip)]
     pub fpreg_x87: Array<u8, 80>,
+    #[deko(skip)]
     pub fpreg_xmm: Array<u8, 256>,
+    #[deko(skip)]
     pub fpreg_ymm: Array<u8, 256>,
+    #[deko(skip)]
     pub lbr_stack: Array<u8, 256>,
     pub lbr_select: u64,
     pub ibs_fetch_ctl: u64,
@@ -275,14 +283,19 @@ pub struct VMSA {
     pub ibs_dc_linaddr: u64,
     pub bp_ibstgt_rip: u64,
     pub ic_ibs_extd_ctl: u64,
+    #[deko(skip)]
+    pub _reserved_7c8: Array<u8, 312>,
     /// Support for guest intercept controls.
+    /// When the GuestInterceptCtl bit in SEV_FEATURES is set,
+    /// an instruction, exception or interrupt event will be intecepted
+    /// if the corresponding bit in this field is set.
     pub intercept_vecs: [u32; 8],
     /// Support for guest intercept MSR R/W controls.
     /// Currently the last vector is reserved (INTERCEPT_MSR_VEC3).
     pub intercept_msr_vecs: [u64; 4],
     /// AVX512, ZMM, and opmask registers (not used currently).
     #[deko(skip)]
-    pub reserved_7c8: Array<u8, 2040>,
+    pub reserved_940: Array<u8, 1728>,
 }
 
 #[derive(DekoDebug)]
@@ -792,7 +805,6 @@ impl VmsaPage {
         this.x87_ftw = 0x5555;
         this.x87_fcw = 0x0040;
         this.sev_features = (SnpStatusFlags::get_status().bits() & !REST_INJ) >> 2;  // make this sev.
-        this.intercept_msr_vecs[0] |= DekoMsrInterceptVec0::LstarWrite as u64;  // enable MSR interception.
 
         this.sev_features
     }
@@ -874,9 +886,8 @@ impl VmsaPage {
         this.x87_ftw = 0x5555;
         this.vmpl = 0;
         this.vtom = 0;  // unsupported.
-        this.sev_features = SnpStatusFlags::get_status().bits() >> 2;  // make this sev.
 
-        kdebug!("VMSA", this => hex);
+        this.sev_features = (SnpStatusFlags::get_status().bits() | GUEST_MSR_INTERCEPT) >> 2;  // make this sev.
 
         // Being lazy
         this.sev_features

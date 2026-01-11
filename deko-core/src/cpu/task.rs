@@ -2203,6 +2203,8 @@ pub fn serv_main(cpu_index: usize) {
                         }
                     },
                 }
+
+                kdebug!("handled guest exit.");
             },
             DekoGuestExitInformation::MsrIntercept { msr, val } => {
                 kunimplemented!("msr interception: todo");
@@ -2296,8 +2298,14 @@ pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
         VMSA::disable(vmsa);
 
         // Now we parse the information.
+        kdebug!("Guest VM exit occurred on CPU ", this_cpu_index);
         if let Some(info) = DekoGuestExitInformation::get_guest_exit_information() {
             return info;
+        } else {
+            // let vmsa =  vmsa.borrow(Tracked(&this_vmsa_perm));
+            // kerror!("Failed to get guest exit information on CPU ", this_cpu_index);
+            // kerror!("\tLast VMSA:", vmsa);
+            // die("Unrecognized VMGEXIT.");
         }
     }
 }

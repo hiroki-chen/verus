@@ -12,11 +12,13 @@ use crate::snp::vmsa::VMSA;
 use crate::snp::SnpStatus;
 use crate::{kerror, kinfo};
 
+pub(crate) mod msr;
+
 verus! {
 
 /// See AMD's manual. Table B-5. INTERCEPT_MSR_VEC0 Layout
 #[repr(u32)]
-#[derive(DekoDebug)]
+#[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
 pub enum DekoMsrInterceptVec0 {
     StarRead = 8,
     StarWrite = 9,
@@ -26,7 +28,7 @@ pub enum DekoMsrInterceptVec0 {
     CstarWrite = 13,
 }
 
-#[derive(DekoDebug)]
+#[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
 pub enum DekoMsrIntercept {
     /// Intercept for MSR vector 0.
     InterceptMsrVec0(DekoMsrInterceptVec0),
@@ -51,7 +53,7 @@ impl VMSA {
             vmsa_perm.wf(),
             vmsa_perm.pptr() == ptr@,
     )]
-    pub fn enable_msr_intercept(ptr: DekoPPtr<Self>, which: DekoMsrIntercept) {
+    pub fn enable_msr_intercept(ptr: DekoPPtr<Self>, intercepts: &[DekoMsrIntercept]) {
         if !check_and_enable_msr_intercept_support() {
             kerror!("SEV-SNP Guest MSR Intercept not supported on this platform");
 
@@ -62,24 +64,19 @@ impl VMSA {
 
             let vec_ptrs = core::ptr::addr_of_mut!((*vmsa).intercept_msr_vecs);
 
-            match which {
-                DekoMsrIntercept::InterceptMsrVec0(vec0) => {
-                    let bit = vec0 as u64;
-                    let vec0_ptr = (vec_ptrs as *mut u64).add(0);
-                    let mut current_val = core::ptr::read_unaligned(vec0_ptr);
-                    // current_val |= 1 << bit;
-                    core::ptr::write_unaligned(vec0_ptr, current_val);
-                },
-            }
+            for i in 0..intercepts.len() {
+                let which = intercepts[i];
 
-            let sev_features_ptr = core::ptr::addr_of_mut!((*vmsa).sev_features);
-            let mut sev_features = core::ptr::read_unaligned(sev_features_ptr);
-            // VMSA sev_features bit is shifted by 2 as last 2 bits are ignored in the guest VMSA.
-            //
-            // Disable this temporarily for replacing the guest kernel when Grub is
-            // complaining about invalid SEV features.
-            sev_features |= (GUEST_MSR_INTERCEPT >> 2);
-            core::ptr::write_unaligned(sev_features_ptr, sev_features);
+                match which {
+                    DekoMsrIntercept::InterceptMsrVec0(vec0) => {
+                        let bit = vec0 as u64;
+                        let vec0_ptr = (vec_ptrs as *mut u64).add(0);
+                        let mut current_val = core::ptr::read_unaligned(vec0_ptr);
+                        current_val |= 1 << bit;
+                        core::ptr::write_unaligned(vec0_ptr, current_val);
+                    },
+                }
+            }
         }
     }
 }
@@ -87,6 +84,7 @@ impl VMSA {
 /// Note that the bit `GuestinterceptCtl` may only be used if
 /// "Allowed SEV Features" is enabled and the `Allowed SEV Features Mask`
 /// permits the use of this feature.
+#[inline]
 pub fn check_and_enable_msr_intercept_support() -> bool {
     broadcast use SnpStatusFlags::lemma_each_bit_is_valid;
 
@@ -95,21 +93,8 @@ pub fn check_and_enable_msr_intercept_support() -> bool {
         bit_u64_and_auto();
     }
 
-    // kinfo!("Checking SEV-SNP Guest MSR Intercept support...");
-
-    // let sev_features = SnpStatusFlags::get_status();
-
-    // kinfo!("sev_features:", sev_features);
-    // if !sev_features.contains(GUEST_MSR_INTERCEPT) {
-    //     // enable it.
-    //     let sev_features = sev_features.bits() | GUEST_MSR_INTERCEPT;
-
-    //     write_msr(MSR_SEV_STATUS, sev_features);
-    //     kinfo!("Enabled SEV-SNP Guest MSR Intercept: ", sev_features);
-    // }
-    // kinfo!("SEV-SNP Guest MSR Intercept supported on this platform");
-
-    true
+    let sev_features = SnpStatusFlags::get_status();
+    sev_features.contains(GUEST_MSR_INTERCEPT)
 }
 
 /// The syscall hook function for guest running in the VM.
@@ -132,7 +117,7 @@ pub fn enable_syscall_hook() {
     proof_with!(Tracked(&mut vmsa_perm));
     VMSA::enable_msr_intercept(
         vmsa,
-        DekoMsrIntercept::InterceptMsrVec0(DekoMsrInterceptVec0::LstarWrite),
+        &[], // todo...
     );
 }
 

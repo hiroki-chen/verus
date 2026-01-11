@@ -10,7 +10,7 @@ use vstd::prelude::*;
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission, PERCPU_AREAS};
 use crate::guest::service::handle_guest_exit_deko_service;
 use crate::imp::vmsa::{GuestVMExit, VMSA};
-use crate::{kerror, kinfo, kwarn};
+use crate::{kdebug, kerror, kinfo, kwarn};
 
 pub(crate) mod service;
 
@@ -173,6 +173,10 @@ impl DekoGuestExitInformation {
 
         if exit_code == 0x403  /* VMGEXIT */
          {
+            // We also need to check additional information to distinguish if
+            // this is just an SVSM request or a guest intercept request.
+            // kdebug!("Additional guest exit information check for VMGEXIT.");
+            // kdebug!("\t guest_exitinfo1:", vmsa);
             // Check if there is a sw_exit request.
             let protocol = (vmsa.rax >> 32) as u32;
             let req = (vmsa.rax & 0xFFFFFFFFu64) as u32;
@@ -271,6 +275,8 @@ pub fn handle_guest_exit(
     params: &mut DekoGuestRequestParams,
     cpu_idx: u64,
 ) -> DekoGuestServResult<()> {
+    kdebug!("Handling guest exit request: protocol=", protocol, ", req=", req, ", cpu_idx=", cpu_idx);
+
     match protocol {
         DEKO_GUEST_EXIT_PROTOCOL_DEKO_SERVICE => {
             proof_with!(Tracked(cpu_perm));
@@ -284,7 +290,10 @@ pub fn handle_guest_exit(
             // NO vTPM now.
             Err(DekoGuestServError::SoftError(DekoGuestServResultCode::UnsupportedProtocol))
         },
-        _ => { Err(DekoGuestServError::FatalError) },
+        _ => {
+            kerror!("Unsupported guest exit protocol: ", protocol);
+            Err(DekoGuestServError::FatalError)
+        },
     }
 }
 
