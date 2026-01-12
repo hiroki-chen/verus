@@ -62,6 +62,13 @@ impl VMSA {
         unsafe {
             let vmsa = ptr.addr() as *mut VMSA;
 
+            let vmpl_ptr = core::ptr::addr_of_mut!((*vmsa).vmpl);
+            let current_vmpl = core::ptr::read_unaligned(vmpl_ptr);
+            if current_vmpl != 2 {
+                // VMPL 0 cannot set MSR intercepts.
+                kinfo!("VMPL 0 cannot set MSR intercepts in VMSA");
+                return ;
+            }
             let vec_ptrs = core::ptr::addr_of_mut!((*vmsa).intercept_msr_vecs);
 
             for i in 0..intercepts.len() {
@@ -117,7 +124,8 @@ pub fn enable_syscall_hook() {
     proof_with!(Tracked(&mut vmsa_perm));
     VMSA::enable_msr_intercept(
         vmsa,
-        &[], // todo...
+        &[DekoMsrIntercept::InterceptMsrVec0(DekoMsrInterceptVec0::LstarWrite)],  // todo...
+    // &[]
     );
 }
 

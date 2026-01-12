@@ -101,6 +101,8 @@ pub const DEKO_GUEST_EXIT_PROTOCOL_ATTEST_SERVICE: u32 = 0x1;
 
 pub const DEKO_GUEST_EXIT_PROTOCOL_TPM_SERVICE: u32 = 0x2;
 
+pub const DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE: u32 = 0x4;
+
 #[derive(DekoDebug)]
 pub struct DekoGuestRequestParams {
     #[deko(hex)]
@@ -290,8 +292,16 @@ pub fn handle_guest_exit(
             // NO vTPM now.
             Err(DekoGuestServError::SoftError(DekoGuestServResultCode::UnsupportedProtocol))
         },
+        DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE => {
+            proof_with!(Tracked(cpu_perm));
+            service::handle_guest_exit_extend_service(req, params, cpu_idx)
+        },
         _ => {
-            kerror!("Unsupported guest exit protocol: ", protocol);
+            kerror!("Unsupported guest exit protocol: ");
+            kerror!(" protocol=", protocol);
+            kerror!(" req=", req);
+            kerror!(" params=", params);
+
             Err(DekoGuestServError::FatalError)
         },
     }

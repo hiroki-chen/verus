@@ -879,7 +879,7 @@ impl Builder {
         println!("  Output: {:?}", boot_img_path);
 
         let mut cmd = std::process::Command::new("igvmbuilder");
-        cmd.args(["--sort", "--policy", "0x30000", "--snp"]);
+        cmd.args(["--sort", "--policy", "0x30001", "--snp"]);
         cmd.args(["--firmware", &ovmf_path.display().to_string()]);
         cmd.args(["--stage2", &stage2_path.display().to_string()]);
         cmd.args(["--kernel", &kernel_path.display().to_string()]);

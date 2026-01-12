@@ -58,6 +58,8 @@ pub const DEKO_SERVICE_ATTEST_SERVICES: u32 = 0x0;
 
 pub const DEKO_SERVICE_ATTEST_SINGLE_SERVICE: u32 = 0x1;
 
+pub const DEKO_SERVICE_EXTEND_MSR_INTERCEPT: u32 = 0x0;
+
 /// Reads a reference to type `T` from the given guest virtual address.
 ///
 /// TODO: This function requires more sophisticated safety checks and
@@ -719,6 +721,35 @@ pub(super) fn handle_guest_exit_attest_service(
         },
         _ => {
             kerror!("Unsupported attestation service request: ", req);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::UnsupportedProtocol));
+        },
+    }
+}
+
+#[verus_spec(r =>
+    with
+        Tracked(cpu_perm): Tracked<&mut DekoCpuCtxPermission>,
+    requires
+        old(cpu_perm).wf(),
+        old(cpu_perm).ptr_perm.value().cpu_id == cpu_idx,
+    ensures
+        cpu_perm.wf(),
+        cpu_perm.ptr_perm.value().cpu_id == cpu_idx,
+)]
+pub(super) fn handle_guest_exit_extend_service(
+    req: u32,
+    params: &DekoGuestRequestParams,
+    cpu_idx: u64,
+) -> DekoGuestServResult<()> {
+    match req {
+        DEKO_SERVICE_EXTEND_MSR_INTERCEPT => {
+            kinfo!("MSR interceot:", params);
+
+            kunimplemented!()
+        },
+        _ => {
+            kerror!("Unsupported extend service request: ", req);
+
             return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::UnsupportedProtocol));
         },
     }

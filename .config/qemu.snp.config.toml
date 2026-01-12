@@ -23,6 +23,10 @@ extra_config = [
   "mon:stdio",
   "-virtfs",
   "local,path=/home/haobchen/linux-deko,mount_tag=host_share,security_model=none,id=fs0",
+  "-kernel",
+  "/home/haobchen/linux-deko/arch/x86/boot/bzImage",
+  "-append",
+  "root=/dev/sda1"
 ]
 # For debugging please reduce cores to catch early logic bugs.
 smp_cores = 16
