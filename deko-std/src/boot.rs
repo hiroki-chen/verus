@@ -297,7 +297,7 @@ pub struct IgvmParamPage {
 #[repr(C, align(64))]
 #[derive(DekoDebug)]
 pub struct IgvmMemoryMap {
-    memory_map: Array<IgvmVhsMemoryMapEntry, 0xAA>,
+    pub memory_map: [IgvmVhsMemoryMapEntry; 0xAA],
 }
 
 #[repr(C, packed)]
@@ -583,7 +583,7 @@ impl WellFormed for IgvmVhsMemoryMapEntry {
 
 impl WellFormed for IgvmMemoryMap {
     open spec fn wf(&self) -> bool {
-        true
+        &&& self.memory_map.wf()
     }
 }
 
@@ -624,7 +624,7 @@ impl IgvmParamBlock {
                 self.wf(),
             decreases 0xAA - i,
         {
-            let e = igvm_mmap.memory_map.index(i);
+            let e = &igvm_mmap.memory_map[i];
             if let MemoryMapEntryType::HIDDEN = e.entry_type {
                 let region_size_bytes = e.number_of_pages.try_into().unwrap_or(
                     u32::MAX,
@@ -695,6 +695,7 @@ impl<'a> IgvmParams<'a> {
 impl<'a> WellFormed for IgvmParams<'a> {
     open spec fn wf(&self) -> bool {
         &&& self.igvm_param_block.wf()
+        &&& self.igvm_memory_map.wf()
     }
 }
 

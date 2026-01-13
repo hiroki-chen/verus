@@ -33,7 +33,7 @@ use deko_core::mm::vm::{
     VirtualMemory, VirtualMemoryPermission, VirtualMemoryRegion, VmMapping, VmMappingPred,
     VMR_GRANULE,
 };
-use deko_core::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR_FULL};
+use deko_core::mm::{init_mmap, virt_to_phys, DEKO_FRAME_ALLOCATOR_FULL};
 use deko_core::snp::ghcb::GuestHostCommunicationBlock;
 use deko_core::snp::logging::init_ghcb_logging;
 use deko_core::snp::req::init_snp_guest_driver;
@@ -471,6 +471,8 @@ fn deko_main(cpu_index: usize) {
             kerror!("deko_main: CPUID page not initialized; this is a fatal error");
             early_die();
         };
+
+        init_mmap(&igvm_params);
 
         proof_with!(Tracked(&mut cpu_ctx_perm.pgtable_perm));
         deko_core::fw::invalidate_early_boot_mem(launch_info, &igvm_params);

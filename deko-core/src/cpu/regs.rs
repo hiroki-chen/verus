@@ -19,6 +19,8 @@ pub const DEKO_DS_ATTRIBUTES: u16 = 0xc093;
 
 pub const DEKO_TR_ATTRIBUTES: u16 = 0x89;
 
+pub const MSR_LSTAR: u32 = 0xC0000082;
+
 deko_bitflags! {
     pub struct Cr0: u64 {
         const PE = 0; // Protection Enable

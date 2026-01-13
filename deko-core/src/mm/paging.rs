@@ -1,4 +1,5 @@
 use core::borrow::BorrowMut;
+use core::mem::ManuallyDrop;
 
 use deko_macros::DekoDebug;
 use deko_std::prelude::*;
@@ -12,8 +13,10 @@ use crate::cpu::tlb::{flush_tlb_global_percpu, flush_tlb_global_sync};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::elf::ElfFile;
 use crate::hal::is_stage2;
+use crate::mm::vm::TempMapping;
 use crate::mm::{
-    virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR, DEKO_FRAME_ALLOCATOR_FULL,
+    check_within_guest_mmap, virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR,
+    DEKO_FRAME_ALLOCATOR_FULL,
 };
 use crate::{
     kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn, DekoKernelLaunchInfo, Stage2LaunchInfo,
@@ -1278,7 +1281,7 @@ impl Page {
     }
 
     /// This function lifts a pointer to a page table entry into a page.
-    #[inline]
+    #[verifier::exec_allows_no_decreases_clause]
     pub fn from_entry(
         pte: DekoPPtr<PageTableEntry>,
         Tracked(pte_perm): Tracked<&DekoPointsTo<PageTableEntry>>,
@@ -1304,9 +1307,37 @@ impl Page {
     {
         let val = pte.borrow(Tracked(pte_perm));
         let paddr = val.address(private_bit, shared_bit);
-        let Some(vaddr) = mapping_space.phys_to_virt(paddr) else {
-            kerror!("from_entry: cannot convert paddr", paddr, "to vaddr",);
-            crate::die("");
+        let vaddr = match mapping_space.phys_to_virt(paddr) {
+            Some(vaddr) => vaddr,
+            // The physical address can come from either the kernel space (i.e.,
+            // our own flat mapping), or from the guest mmap space.
+            //
+            // In the latter case we need to create a temporary mapping here
+            // to ensure that we can get a virtual address. Also since the guest
+            // mmap does not overlap with our own kernel mapping, there is no risk of
+            // conflict: the priority of mapping is always given to the kernel mapping.
+            None if check_within_guest_mmap(paddr) => match TempMapping::new(
+                create_paddr_range(paddr, 1),
+            ) {
+                Some(temp_mapping) => {
+                    let addr = temp_mapping.inner.start.clone();
+
+                    // But we need to have a way to reclaim the memory?
+                    // core::mem::forget(temp_mapping);
+                    let _ = ManuallyDrop::new(temp_mapping);
+
+                    addr
+                },
+                None => {
+                    // This indicates serious internal logic error.
+                    kerror!("from_entry: paddr", paddr, "has no virtual mapping???");
+                    crate::die("");
+                },
+            },
+            _ => {
+                kerror!("from_entry: paddr", paddr, "has no virtual mapping");
+                crate::die("");
+            },
         };
 
         DekoPPtr(vstd::simple_pptr::PPtr(vaddr.0 as usize, core::marker::PhantomData))
@@ -1388,6 +1419,7 @@ impl Page {
     ///     _ => unreachable!(), // Never happens due to postcondition
     /// }
     #[verifier::spinoff_prover]
+    #[verifier::exec_allows_no_decreases_clause]
     pub fn allocate_pte_4k<A: DekoFrameAllocator>(
         page: DekoPPtr<Page>,
         Tracked(perm): Tracked<&mut PageTablePermission>,
@@ -1784,6 +1816,7 @@ impl Page {
     }
 
     #[verifier::spinoff_prover]
+    #[verifier::exec_allows_no_decreases_clause]
     pub fn walk_addr_lvl1(
         page: DekoPPtr<Page>,
         Tracked(perm): Tracked<&PageTablePermission>,
@@ -1843,6 +1876,7 @@ impl Page {
     }
 
     #[verifier::spinoff_prover]
+    #[verifier::exec_allows_no_decreases_clause]
     pub fn walk_addr_lvl2(
         page: DekoPPtr<Page>,
         Tracked(perm): Tracked<&PageTablePermission>,
@@ -1902,6 +1936,7 @@ impl Page {
     }
 
     #[verifier::spinoff_prover]
+    #[verifier::exec_allows_no_decreases_clause]
     pub fn walk_addr_lvl3(
         page: DekoPPtr<Page>,
         Tracked(perm): Tracked<&PageTablePermission>,
@@ -2121,6 +2156,7 @@ impl Page {
     /// Walks the page table to find the last valid page table entry for a given virtual address.
     #[inline]
     #[verifier::spinoff_prover]
+    #[verifier::exec_allows_no_decreases_clause]
     pub fn walk(
         page: DekoPPtr<Self>,
         Tracked(perm): Tracked<&PageTablePermission>,
@@ -2381,6 +2417,7 @@ impl Page {
     /// This functions iterates over the virtual address range and maps each page individually.
     /// Note that in the loop we will first check if the page can be 2M mapped.
     #[verifier::spinoff_prover]
+    #[verifier::exec_allows_no_decreases_clause]
     pub fn map_page_multiple(
         page: DekoPPtr<Page>,
         vaddr: VaddrRange,
@@ -2603,6 +2640,7 @@ impl Page {
 
     /// Maps a single 4KB page at the given virtual address to the given physical address
     #[verifier::spinoff_prover]
+    #[verifier::exec_allows_no_decreases_clause]
     pub fn map_page_4k(
         page: DekoPPtr<Page>,
         Tracked(perm): Tracked<&mut PageTablePermission>,

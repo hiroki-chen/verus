@@ -15,6 +15,7 @@ pub mod vm;
 use core::ops::Range;
 
 use deko_std::prelude::*;
+use vstd::invariant;
 use vstd::prelude::*;
 
 use crate::collections::Vec;
@@ -24,39 +25,132 @@ use crate::imp::{page_state_change, PageStateChangeOp};
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
 use crate::mm::paging::{PageTable, PageTablePermission, PteFlags};
 use crate::mm::vm::TempMapping;
-use crate::{kerror, kinfo, vec, DekoKernelLaunchInfo};
+use crate::{kerror, kinfo, kpanic_if, kwarn, vec, DekoKernelLaunchInfo};
 
 verus! {
 
 /// This bookkeeps the global memory maps for physical memory regions, i.e.,
 /// valid memories that can be used system-wide.
 #[doc(hidden)]
-exec static MMAP: DekoSimpleRwLock<Vec<PaddrRange>, IrqUnSafeLockGuard>
+exec static GUEST_MMAP: DekoSimpleOnceCell<Vec<PaddrRange>>
     ensures
-        MMAP.wf(),
+        GUEST_MMAP.wf(),
 {
-    let r = DekoSimpleRwLock::new_simple(vec![], IrqUnSafeLockGuard {  });
-
-    proof {
-        use_type_invariant(&r);
-    }
-
-    r
+    DekoSimpleOnceCell::new(Ghost(()))
 }
 
-/// This function populates [`MMAP`] with the initial memory regions provided
+/// This function populates [`GUEST_MMAP`] with the initial memory regions provided
 /// by the bootloader.
+///
+/// This does not check if the memory is overlapping with the kernel itself.
+#[verifier::spinoff_prover]
 #[verus_spec(
     requires
-        header.wf(),
+        igvm_params.wf(),
 )]
-pub fn init_mmap(header: &DekoKernelLaunchInfo) {
-    let mut write_handle = MMAP.acquire_write();
-    let DekoAtomicData { mut data, perm } = write_handle.get();
+pub fn init_mmap(igvm_params: &IgvmParams<'_>) {
+    if GUEST_MMAP.get().is_some() {
+        // Already initialized.
+        return ;
+    }
+    // Now parse the memory map from the header.
 
-    // TODO: FILL ME.
+    let mut regions = vec![];
+    let mut number_of_entries = 0;
+    let mut next_page_number = 0;
 
-    write_handle.release_write(DekoAtomicData { data, perm });
+    // Count the number of valid memory entries.
+    let mut i = 0;
+    #[verus_spec(
+        invariant
+            0 <= number_of_entries <= i <= 0xAA,
+            igvm_params.wf(),
+        decreases
+            0xAA - i,
+    )]
+    while i < 0xAA {
+        proof {
+            assert(0 <= i < 0xAA);
+        }
+        let entry = &igvm_params.igvm_memory_map.memory_map[i];
+
+        if entry.number_of_pages == 0 {
+            break ;
+        }
+        kpanic_if!(
+            entry.starting_gpa_page_number < next_page_number,
+            "init_mmap: overlapping or unsorted memory map entries"
+        );
+
+        let next_supplied_page_number = entry.starting_gpa_page_number.wrapping_add(
+            entry.number_of_pages,
+        );
+
+        kpanic_if!(
+            next_supplied_page_number < next_page_number,
+            "init_mmap: overlapping memory map entries"
+        );
+        next_page_number = next_supplied_page_number;
+        number_of_entries += 1;
+        i += 1;
+    }
+
+    kinfo!("init_mmap: found", number_of_entries => hex, "memory map entries");
+
+    // Now populate the regions.
+    for i in 0..number_of_entries as usize
+        invariant
+            0 <= i <= number_of_entries <= 0xAA,
+            igvm_params.wf(),
+            regions@.len() <= i as int,
+    {
+        proof {
+            assert(0 <= i < 0xAA);
+        }
+        let entry = &igvm_params.igvm_memory_map.memory_map[i];
+
+        if matches!(entry.entry_type, MemoryMapEntryType::MEMORY) {
+            let starting_page = entry.starting_gpa_page_number as u64;
+            let number_of_pages = entry.number_of_pages as u64;
+
+            regions.push(
+                PhysAddr(starting_page.wrapping_mul(PAGE_SIZE))..PhysAddr(
+                    ((starting_page.wrapping_add(number_of_pages)).wrapping_mul(PAGE_SIZE)),
+                ),
+            );
+        }
+    }
+
+    kinfo!("Guest memory regions:");
+    for i in 0..regions.len() {
+        let region = &regions[i];
+        kinfo!("  Region", i => dec, ":", region.start.0 => hex, "-", region.end.0 => hex);
+    }
+
+    GUEST_MMAP.init(regions);
+}
+
+/// Checks if the given physical address is within any of the guest memory regions.
+///
+/// This sanity check is important when checking if the guest provides us with the
+/// valid physical addresses for various operations (like page validations).
+pub fn check_within_guest_mmap(paddr: PhysAddr) -> bool {
+    match GUEST_MMAP.get() {
+        Some(regions) => {
+            for i in 0..regions.len() {
+                let region = &regions[i];
+                if region.start.0 <= paddr.0 && paddr.0 < region.end.0 {
+                    return true;
+                }
+            }
+
+            false
+        },
+        None => {
+            kwarn!("check_within_guest_mmap: `GUEST_MMAP` not initialized");
+            false
+        },
+    }
 }
 
 /// This slightly differs from [`init_mmap`] as this will also inserts mappings

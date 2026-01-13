@@ -1,6 +1,7 @@
 use core::ops::Index;
 
 use deko_macros::{with_atomic_pred, DekoDebug};
+use deko_std::address::{create_paddr_range, PhysAddr};
 use deko_std::array::Array;
 use deko_std::bits::bit_u32_and_auto;
 use deko_std::boot::IgvmParams;
@@ -20,6 +21,8 @@ use crate::cpu::regs::{
 };
 use crate::cpu::tlb::flush_tlb_global_percpu;
 use crate::cpu::{DekoCpuCtx, X86Tss};
+use crate::mm::paging::PageTable;
+use crate::mm::vm::TempMapping;
 use crate::mm::DEKO_FRAME_ALLOCATOR_FULL;
 use crate::policy::DekoMsrInterceptVec0;
 use crate::snp::{

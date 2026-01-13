@@ -5,18 +5,26 @@ use deko_std::address::{create_paddr_range, PhysAddr, VirtAddr};
 use deko_std::bits::{bit_u32_and_auto, bit_u64_and_auto};
 use deko_std::mem::{PAGE_SIZE, PAGE_SIZE_2M};
 use deko_std::misc::early_dbg;
+use deko_std::prelude::VADDR_UPPER_MASK;
+use deko_std::ptr::DekoPPtr;
 use deko_std::wf::WellFormed;
 use deko_std::{deko_rwlock_read_atomic_data, deko_rwlock_write_atomic_data, trace_enable};
 use vstd::prelude::*;
 
+use crate::cpu::regs::MSR_LSTAR;
 use crate::cpu::tlb::{flush_tlb_global_percpu, flush_tlb_global_sync};
-use crate::cpu::{DekoCpuCtxPermission, PERCPU_AREAS};
+use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission, PERCPU_AREAS};
 use crate::guest::{
-    DekoGuestRequestParams, DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode,
+    guest_page_table, DekoGuestRequestParams, DekoGuestServError, DekoGuestServResult,
+    DekoGuestServResultCode,
 };
 use crate::imp::RmpFlags;
+use crate::mm::paging::{
+    self, make_shared_address, strip_confidentiality_bits, PageTable, PageTableEntry, PageTablePath,
+};
 use crate::mm::vm::TempMapping;
-use crate::mm::zero_page;
+use crate::mm::{check_within_guest_mmap, zero_page};
+use crate::policy::{self, install_hook};
 use crate::snp::vmsa::VMSA;
 use crate::snp::{pvalidate, rmpadjust, validate_vaddr_region};
 use crate::{kdebug, kerror, kinfo, kunimplemented, kwarn};
@@ -649,6 +657,115 @@ fn handle_deko_service_remap_ca(
     Ok(())
 }
 
+#[verus_spec(r =>
+
+)]
+fn handle_deko_service_lstar_intercept(
+    params: &mut DekoGuestRequestParams,
+    is_write: bool,
+    guest_cr3: u64,
+) -> DekoGuestServResult<()> {
+    if is_write {
+        if core::hint::unlikely(params.rdx > u32::MAX as u64) {
+            kerror!("MSR intercept: invalid LSTAR address:", params.rdx);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        }
+        let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+        let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+        let guest_cr3 = strip_confidentiality_bits(guest_cr3, cpu_borrow.private_bit);
+
+        // First we need to perform a sanity check to ensure that
+        // the guest CR3 is valid within the guest mmap.
+        if !check_within_guest_mmap(PhysAddr(guest_cr3)) {
+            kerror!("MSR intercept: guest CR3 NOT within guest mmap:", guest_cr3);
+            kerror!("MSR intercept: cannot handle LSTAR MSR intercept without valid guest CR3");
+            kerror!("MSR intercept: this is a serious security issue; aborting");
+
+            return Err(DekoGuestServError::FatalError);
+        }
+        // Some alignment and range checks.
+
+        if core::hint::unlikely(guest_cr3 % PAGE_SIZE != 0) {
+            kerror!("MSR intercept: unaligned guest CR3:", guest_cr3);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        }
+        if core::hint::unlikely(guest_cr3 >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE) {
+            kerror!("MSR intercept: guest CR3 out of range:", guest_cr3);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        }
+        let addr = params.rdx << 32 | (params.r9 & 0xffff_ffff);
+
+        // The address must be canonical on the high side.
+        if core::hint::unlikely(addr < VADDR_UPPER_MASK) {
+            kerror!("MSR intercept: invalid LSTAR address:", addr);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        }
+        proof_with!(Tracked(&cpu_perm) => Tracked(guest_pgtable_perm));
+        let res = super::guest_page_table(guest_cr3);
+
+        if res.is_none() {
+            kerror!("MSR intercept: failed to obtain guest page table for CR3:", guest_cr3 => hex);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy));
+        }
+        let (guest_pgtable, _mapping) = res.unwrap();
+
+        kinfo!("MSR intercept: guest is writing LSTAR to address:", addr => hex);
+        kinfo!("MSR intercept: guest CR3 is:", guest_cr3 => hex);
+
+        let syscall_enter_addr = VirtAddr(addr);
+        let r = #[verus_spec(with Tracked(guest_pgtable_perm.tracked_borrow()))]
+        policy::install_hook(
+            guest_pgtable,
+            syscall_enter_addr,
+            cpu_borrow.private_bit,
+            cpu_borrow.shared_bit,
+            cpu_borrow.kernel_mapping,
+        );
+
+        if !r {
+            kerror!("MSR intercept: failed to install LSTAR hook at address:", addr => hex);
+            return Err(DekoGuestServError::FatalError);
+        }
+    }
+    Ok(())
+}
+
+#[verus_spec(r =>
+    with
+        Tracked(cpu_perm): Tracked<&mut DekoCpuCtxPermission>,
+    requires
+        old(cpu_perm).wf(),
+        old(params).additional_data is Some,
+    ensures
+        cpu_perm.wf(),
+        cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
+)]
+fn handle_deko_service_msr_intercepts(params: &mut DekoGuestRequestParams) -> DekoGuestServResult<
+    (),
+> {
+    let is_write = params.r8 != 0;
+
+    if (params.rcx >= u32::MAX as u64) {
+        kerror!("MSR intercept: invalid MSR index:", params.rcx);
+
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    // params.rcx == MSR_INDEX.
+
+    match (params.rcx as u32) {
+        MSR_LSTAR => {
+            let cr3 = params.additional_data.unwrap().guest_cr3;
+
+            handle_deko_service_lstar_intercept(params, is_write, cr3)
+        },
+        msr => {
+            kerror!("MSR intercept: unsupported MSR index:", msr);
+
+            Err(DekoGuestServError::SoftError(DekoGuestServResultCode::UnsupportedProtocol))
+        },
+    }
+}
+
 /// Subroutine for handling DEKO service requests from the guest.
 ///
 /// Note during process handling there would be lock held so obtaining
@@ -732,20 +849,22 @@ pub(super) fn handle_guest_exit_attest_service(
     requires
         old(cpu_perm).wf(),
         old(cpu_perm).ptr_perm.value().cpu_id == cpu_idx,
+        old(params).additional_data is Some,
     ensures
         cpu_perm.wf(),
         cpu_perm.ptr_perm.value().cpu_id == cpu_idx,
 )]
 pub(super) fn handle_guest_exit_extend_service(
     req: u32,
-    params: &DekoGuestRequestParams,
+    params: &mut DekoGuestRequestParams,
     cpu_idx: u64,
 ) -> DekoGuestServResult<()> {
     match req {
         DEKO_SERVICE_EXTEND_MSR_INTERCEPT => {
-            kinfo!("MSR interceot:", params);
+            kinfo!("MSR intercept:", params);
 
-            kunimplemented!()
+            proof_with!(Tracked(cpu_perm));
+            handle_deko_service_msr_intercepts(params)
         },
         _ => {
             kerror!("Unsupported extend service request: ", req);

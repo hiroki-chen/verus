@@ -1,6 +1,6 @@
 use deko_macros::DekoDebug;
-use deko_std::address::PhysAddr;
-use deko_std::mem::PERCPU_CAA_BASE;
+use deko_std::address::{create_paddr_range, PhysAddr};
+use deko_std::mem::{PAGE_SIZE, PERCPU_CAA_BASE};
 use deko_std::prelude::DekoPointsTo;
 use deko_std::ptr::DekoPPtr;
 use deko_std::wf::WellFormed;
@@ -10,6 +10,8 @@ use vstd::prelude::*;
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission, PERCPU_AREAS};
 use crate::guest::service::handle_guest_exit_deko_service;
 use crate::imp::vmsa::{GuestVMExit, VMSA};
+use crate::mm::paging::{PageTable, PageTablePermission};
+use crate::mm::vm::TempMapping;
 use crate::{kdebug, kerror, kinfo, kwarn};
 
 pub(crate) mod service;
@@ -103,7 +105,15 @@ pub const DEKO_GUEST_EXIT_PROTOCOL_TPM_SERVICE: u32 = 0x2;
 
 pub const DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE: u32 = 0x4;
 
-#[derive(DekoDebug)]
+/// Additional data provided with a guest request.
+#[derive(DekoDebug, Clone, Copy)]
+pub struct DekoGuestRequestAdditionalData {
+    #[deko(hex)]
+    pub guest_cr3: u64,
+}
+
+/// Parameters associated with a guest service request.
+#[derive(DekoDebug, Clone, Copy)]
 pub struct DekoGuestRequestParams {
     #[deko(hex)]
     pub sev_features: u64,
@@ -112,7 +122,11 @@ pub struct DekoGuestRequestParams {
     #[deko(hex)]
     pub rdx: u64,
     #[deko(hex)]
+    pub r9: u64,
+    #[deko(hex)]
     pub r8: u64,
+    #[deko(hex)]
+    pub additional_data: Option<DekoGuestRequestAdditionalData>,
 }
 
 /// Represents the reason for a guest VM exit event intercepted by the VMPL0 monitor.
@@ -144,49 +158,53 @@ pub enum DekoGuestExitInformation {
     CoreNotCreated,
     /// Indicates that the VMPL switch operation failed.
     VmplSwitchFailed,
-    /// Indicates that this is an MSR intercept exit.
-    MsrIntercept { msr: u32, val: Option<u64> },
 }
 
 impl WellFormed for DekoGuestExitInformation {
     open spec fn wf(&self) -> bool {
         match self {
-            DekoGuestExitInformation::ServiceRequest { .. } => true,
+            DekoGuestExitInformation::ServiceRequest { protocol, req, params } => match *protocol {
+                DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE => params.additional_data is Some,
+                _ => true,
+            },
             DekoGuestExitInformation::CoreNotCreated => true,
             DekoGuestExitInformation::VmplSwitchFailed => true,
-            DekoGuestExitInformation::MsrIntercept { .. } => true,
         }
     }
 }
 
 #[verus_verify]
 impl DekoGuestExitInformation {
-    #[verus_spec(
+    #[verus_spec(r =>
         with
             Tracked(vmsa_perm): Tracked<&DekoPointsTo<VMSA>>,
         requires
             vmsa_perm.wf(),
             vmsa_perm.is_init(),
             vmsa_perm.pptr() == vmsa@,
+        ensures
+            r.wf(),
     )]
     fn try_parse_vmsa(vmsa: DekoPPtr<VMSA>) -> Option<Self> {
         let vmsa = vmsa.borrow(Tracked(vmsa_perm));
         let exit_code = vmsa.guest_exit_code.0;
 
-        if exit_code == 0x403  /* VMGEXIT */
-         {
-            // We also need to check additional information to distinguish if
-            // this is just an SVSM request or a guest intercept request.
-            // kdebug!("Additional guest exit information check for VMGEXIT.");
-            // kdebug!("\t guest_exitinfo1:", vmsa);
-            // Check if there is a sw_exit request.
+        if exit_code == 0x403 {
             let protocol = (vmsa.rax >> 32) as u32;
             let req = (vmsa.rax & 0xFFFFFFFFu64) as u32;
+            let ai = if protocol == DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE {
+                Some(DekoGuestRequestAdditionalData { guest_cr3: vmsa.cr3 })
+            } else {
+                None
+            };
+
             let params = DekoGuestRequestParams {
                 sev_features: vmsa.sev_features,
                 rcx: vmsa.rcx,
                 rdx: vmsa.rdx,
+                r9: vmsa.r9,
                 r8: vmsa.r8,
+                additional_data: ai,
             };
 
             Some(DekoGuestExitInformation::ServiceRequest { protocol, req, params })
@@ -198,7 +216,10 @@ impl DekoGuestExitInformation {
 
     }
 
-    #[verus_spec()]
+    #[verus_spec(r =>
+        ensures
+            r.wf(),
+    )]
     pub fn get_guest_exit_information() -> Option<Self> {
         let (this_cpu, Tracked(this_cpu_perm)) = DekoCpuCtx::this_cpu();
         let cpu_index = this_cpu.borrow(Tracked(&this_cpu_perm.ptr_perm)).cpu_id;
@@ -267,6 +288,7 @@ impl DekoGuestExitInformation {
     requires
         old(cpu_perm).wf(),
         old(cpu_perm).ptr_perm.value().cpu_id == cpu_idx,
+        protocol == DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE ==> old(params).additional_data is Some,
     ensures
         cpu_perm.wf(),
         cpu_perm.ptr_perm.value().cpu_id == cpu_idx,
@@ -303,6 +325,57 @@ pub fn handle_guest_exit(
             kerror!(" params=", params);
 
             Err(DekoGuestServError::FatalError)
+        },
+    }
+}
+
+/// Returns a handle to the guest page table from the VMSA.
+///
+/// Since we create the virtual pointer out from the physical address
+/// stored in the VMSA, we need to create a temporary mapping to access it.
+/// This function thus also returns a backing [`TempMapping`] that holds
+/// the mapping alive to prevent dropping it too early.
+#[verifier::external_body]
+#[verus_spec(r =>
+    with
+        Tracked(cpu_perm): Tracked<&DekoCpuCtxPermission>,
+        -> g_pgtable_perm: Tracked<Option<PageTablePermission>>,
+    ensures
+        r matches Some((ptr, mapping)) ==> {
+            &&& g_pgtable_perm@ matches Some(g_pgtable_perm) && {
+                &&& g_pgtable_perm.wf()
+                &&& g_pgtable_perm.pgtable_perm.pptr() == ptr@
+                &&& g_pgtable_perm.private_bit == cpu_perm.ptr_perm.value().private_bit
+                &&& g_pgtable_perm.shared_bit == cpu_perm.ptr_perm.value().shared_bit
+                &&& g_pgtable_perm.mapping_space == cpu_perm.ptr_perm.value().kernel_mapping
+            }
+        },
+)]
+pub fn guest_page_table(cr3: u64) -> Option<(DekoPPtr<PageTable>, TempMapping)> {
+    if core::hint::unlikely(cr3 >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE) {
+        return {
+            proof_with!(|= Tracked(None::<PageTablePermission>));
+            None
+        };
+    }
+    match TempMapping::new(create_paddr_range(PhysAddr(cr3), 1)) {
+        Some(tm) => {
+            proof_with!(|= Tracked::assume_new());
+            Some(
+                (
+                    DekoPPtr(
+                        vstd::simple_pptr::PPtr(
+                            tm.inner.start.0 as usize,
+                            core::marker::PhantomData,
+                        ),
+                    ),
+                    tm,
+                ),
+            )
+        },
+        None => {
+            proof_with!(|= Tracked(None::<PageTablePermission>));
+            None
         },
     }
 }

@@ -346,6 +346,7 @@ impl TempMapping {
                 &&& (tm.inner.end@ - tm.inner.start@) == (prange.end@ - prange.start@)
             }
     )]
+    #[verifier::exec_allows_no_decreases_clause]
     fn new_4k(prange: PaddrRange) -> Option<Self> {
         let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
         let max_nr_pages = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).temp_mapping_4k().nr_pages;
@@ -512,6 +513,7 @@ impl TempMapping {
                 &&& (tm.inner.end@ - tm.inner.start@) == (prange.end@ - prange.start@)
             }
     )]
+    #[verifier::exec_allows_no_decreases_clause]
     pub fn new(prange: PaddrRange) -> Option<Self> {
         // Check if that page has been aligned to 2MB boundaries;
         // if so we can create a 2M mapping.

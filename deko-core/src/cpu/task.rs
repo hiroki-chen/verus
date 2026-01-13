@@ -2206,9 +2206,6 @@ pub fn serv_main(cpu_index: usize) {
 
                 kdebug!("handled guest exit.");
             },
-            DekoGuestExitInformation::MsrIntercept { msr, val } => {
-                kunimplemented!("msr interception: todo");
-            },
         }
     }
 }
@@ -2229,7 +2226,9 @@ func_ptr!(serv_main);
 /// This function never returns as the control flow must be implicitly transferred
 /// to the guest context and it can request anything via VM exits.
 #[verifier::exec_allows_no_decreases_clause]
-#[verus_spec(
+#[verus_spec(r =>
+    ensures
+        r.wf(),
 )]
 pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
     let (this_cpu_ptr, Tracked(this_cpu_perm)) = DekoCpuCtx::this_cpu();

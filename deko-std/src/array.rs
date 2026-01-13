@@ -56,6 +56,7 @@ impl<T: WellFormed, const N: usize> Array<T, N> {
     pub fn len(&self) -> (res: usize)
         ensures
             self.spec_len() == res,
+            res == self@.len(),
     {
         N
     }
@@ -87,7 +88,7 @@ impl<T: WellFormed, const N: usize> Array<T, N> {
     #[inline(always)]
     pub fn index(&self, i: usize) -> (t: &T)
         requires
-            0 <= (i as int) < self@.len(),
+            i < self@.len() as usize,
             self.wf(),
         ensures
             *t == self@.index(i as int),
@@ -191,7 +192,7 @@ impl<T: WellFormed + Copy, const N: usize> Array<T, N> {
 impl<T: WellFormed, const N: usize> View for Array<T, N> {
     type V = Seq<T>;
 
-    closed spec fn view(&self) -> Self::V {
+    open spec fn view(&self) -> Self::V {
         Seq::new(self.spec_len() as nat, |i| self.idx(i))
     }
 }
