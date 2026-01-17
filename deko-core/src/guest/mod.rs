@@ -255,10 +255,12 @@ impl DekoGuestExitInformation {
 
                 let v = caa.take(Tracked(&mut caa_perm));
 
-                if v.call_pending != 1 {
-                    // No call pending.
-                    return None;
-                }
+                // FIXME: If call_pending != 1, we might still need to
+                // process it in case we are within the syscall path.
+                // if v.call_pending != 1 {
+                //     // No call pending.
+                //     return None;
+                // }
                 caa.write(
                     Tracked(&mut caa_perm),
                     CaaArea {
@@ -324,7 +326,7 @@ pub fn handle_guest_exit(
             kerror!(" req=", req);
             kerror!(" params=", params);
 
-            Err(DekoGuestServError::FatalError)
+            Err(DekoGuestServError::SoftError(DekoGuestServResultCode::UnsupportedProtocol))
         },
     }
 }

@@ -25,6 +25,7 @@ use crate::{kerror, kinfo, kpanic_if};
 
 pub(crate) mod guest_paging;
 pub(crate) mod msr;
+pub(crate) mod syscall;
 
 core::arch::global_asm!(include_str!("trampoline.S"), options(att_syntax));
 
@@ -35,6 +36,29 @@ extern "C" {
 }
 
 verus! {
+
+#[repr(C, align(8))]
+#[derive(DekoDebug, Clone, Copy)]
+pub struct DekoSyscallBody {
+    #[deko(hex)]
+    pub rax: u64,  // Syscall number
+    #[deko(hex)]
+    pub rdi: u64,  // Arg 1
+    #[deko(hex)]
+    pub rsi: u64,  // Arg 2
+    #[deko(hex)]
+    pub rdx: u64,  // Arg 3
+    #[deko(hex)]
+    pub r10: u64,  // Arg 4
+    #[deko(hex)]
+    pub r8: u64,  // Arg 5
+    #[deko(hex)]
+    pub r9: u64,  // Arg 6
+    #[deko(hex)]
+    pub rcx: u64,  // Return Address
+    #[deko(hex)]
+    pub r11: u64,  // RFLAG
+}
 
 pub const GUEST_TRAMPOLINE_PML4_HOLE: usize = 500;
 
@@ -460,34 +484,31 @@ unsafe fn patch_trampoline(
             PAGE_SIZE,
         );
     }
-    let mut tss_offset = None;
-    let mut stack_offset = None;
-
-    // Scan the source code to find the patterns.
-    for i in 0..100usize {
-        if &source_code[i..i + 4] == &[0x65, 0x48, 0x89, 0x25] {
-            let tss = u32::from_le_bytes(
-                [source_code[i + 4], source_code[i + 5], source_code[i + 6], source_code[i + 7]],
-            );
-            kinfo!("Found TSS pattern at offset", i, "with value", tss => hex);
-            tss_offset = Some(i + 4);
-        } else if &source_code[i..i + 4] == &[0x65, 0x48, 0x8b, 0x25] {
-            let stack = u32::from_le_bytes(
-                [source_code[i + 4], source_code[i + 5], source_code[i + 6], source_code[i + 7]],
-            );
-            kinfo!("Found STACK pattern at offset", i, "with value", stack => hex);
-            stack_offset = Some(i + 4);
-        }
-    }
-
-    let (tss_offset, stack_offset) = match (tss_offset, stack_offset) {
-        (Some(tss), Some(stack)) => (tss as u32, stack as u32),
-        _ => {
-            kerror!("Failed to find both TSS and STACK patterns");
-
-            return false;
-        },
-    };
+    // let mut tss_offset = None;
+    // let mut stack_offset = None;
+    // // Scan the source code to find the patterns.
+    // for i in 0..100usize {
+    //     if &source_code[i..i + 4] == &[0x65, 0x48, 0x89, 0x25] {
+    //         let tss = u32::from_le_bytes(
+    //             [source_code[i + 4], source_code[i + 5], source_code[i + 6], source_code[i + 7]],
+    //         );
+    //         kinfo!("Found TSS pattern at offset", i, "with value", tss => hex);
+    //         tss_offset = Some(i + 4);
+    //     } else if &source_code[i..i + 4] == &[0x65, 0x48, 0x8b, 0x25] {
+    //         let stack = u32::from_le_bytes(
+    //             [source_code[i + 4], source_code[i + 5], source_code[i + 6], source_code[i + 7]],
+    //         );
+    //         kinfo!("Found STACK pattern at offset", i, "with value", stack => hex);
+    //         stack_offset = Some(i + 4);
+    //     }
+    // }
+    // let (tss_offset, stack_offset) = match (tss_offset, stack_offset) {
+    //     (Some(tss), Some(stack)) => (tss as u32, stack as u32),
+    //     _ => {
+    //         kerror!("Failed to find both TSS and STACK patterns");
+    //         return false;
+    //     },
+    // };
 
     update_syscall_entry(syscall_enter_addr.0 as u64);
 
@@ -497,23 +518,23 @@ unsafe fn patch_trampoline(
         trampoline_size,
     );
 
-    let code: &mut [u8] = core::slice::from_raw_parts_mut(
-        g_trampoline.inner.start.0 as *mut u8,
-        trampoline_size as usize,
-    );
+    // let code: &mut [u8] = core::slice::from_raw_parts_mut(
+    //     g_trampoline.inner.start.0 as *mut u8,
+    //     trampoline_size as usize,
+    // );
 
-    // Sliding window to find and patch the patterns.
-    for i in 0..(trampoline_size - 0x4) {
-        if &code[i..i + 4] == TSS_PAT {
-            code[i..i + 4].copy_from_slice(
-                &source_code[tss_offset as usize..tss_offset as usize + 4],
-            );
-        } else if &code[i..i + 4] == STACK_PAT {
-            code[i..i + 4].copy_from_slice(
-                &source_code[stack_offset as usize..stack_offset as usize + 4],
-            );
-        }
-    }
+    // // Sliding window to find and patch the patterns.
+    // for i in 0..(trampoline_size - 0x4) {
+    //     if &code[i..i + 4] == TSS_PAT {
+    //         code[i..i + 4].copy_from_slice(
+    //             &source_code[tss_offset as usize..tss_offset as usize + 4],
+    //         );
+    //     } else if &code[i..i + 4] == STACK_PAT {
+    //         code[i..i + 4].copy_from_slice(
+    //             &source_code[stack_offset as usize..stack_offset as usize + 4],
+    //         );
+    //     }
+    // }
 
     true
 }

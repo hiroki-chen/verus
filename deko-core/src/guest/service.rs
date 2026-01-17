@@ -1,14 +1,17 @@
 use core::sync::atomic::AtomicBool;
 
-use deko_macros::DekoDebug;
+use deko_macros::{with_atomic_pred, DekoDebug};
 use deko_std::address::{create_paddr_range, PhysAddr, VirtAddr};
 use deko_std::bits::{bit_u32_and_auto, bit_u64_and_auto};
 use deko_std::mem::{PAGE_SIZE, PAGE_SIZE_2M};
 use deko_std::misc::early_dbg;
 use deko_std::prelude::VADDR_UPPER_MASK;
 use deko_std::ptr::DekoPPtr;
+use deko_std::sync::{DekoAtomicData, DekoOnceCell, DekoSimpleOnceCell};
 use deko_std::wf::WellFormed;
-use deko_std::{deko_rwlock_read_atomic_data, deko_rwlock_write_atomic_data, trace_enable};
+use deko_std::{
+    deko_rwlock_read_atomic_data, deko_rwlock_write_atomic_data, trace_enable, TrivialPredicate,
+};
 use vstd::prelude::*;
 
 use crate::cpu::regs::MSR_LSTAR;
@@ -24,10 +27,11 @@ use crate::mm::paging::{
 };
 use crate::mm::vm::TempMapping;
 use crate::mm::{check_within_guest_mmap, zero_page};
-use crate::policy::{self, install_hook};
+use crate::policy::syscall::analysis_syscall;
+use crate::policy::{self, install_hook, DekoSyscallBody};
 use crate::snp::vmsa::VMSA;
 use crate::snp::{pvalidate, rmpadjust, validate_vaddr_region};
-use crate::{kdebug, kerror, kinfo, kunimplemented, kwarn};
+use crate::{kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
 
 const _: () = assert!(core::mem::size_of::<DekoGuestLstarWriteReq>() == 0x20);
 
@@ -87,6 +91,23 @@ pub const DEKO_SERVICE_ATTEST_SERVICES: u32 = 0x0;
 pub const DEKO_SERVICE_ATTEST_SINGLE_SERVICE: u32 = 0x1;
 
 pub const DEKO_SERVICE_EXTEND_MSR_INTERCEPT: u32 = 0x0;
+
+pub const DEKO_SERVICE_EXTEND_SYSCALL_ANALYSIS: u32 = 0x1;
+
+with_atomic_pred! {
+    PhysAddr,
+    (),
+    fields: {},
+    perm_fields: {},
+    data.view() % PAGE_SIZE == 0 && data.view() < 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE
+}
+
+exec static TRAMPOLINE_PA: DekoOnceCell<PhysAddr, (), PhysAddrPred>
+    ensures
+        TRAMPOLINE_PA.wf(),
+{
+    DekoOnceCell::new(Ghost(PhysAddrPred {  }))
+}
 
 /// Reads a reference to type `T` from the given guest virtual address.
 ///
@@ -732,6 +753,14 @@ fn handle_deko_service_lstar_intercept(
         let mut req = req.clone();
         let syscall_enter_addr = req.syscall_enter_addr.0;
 
+        if req.trampoline_gpa.0 % PAGE_SIZE as u64 != 0 {
+            kerror!("MSR intercept: invalid trampoline gpa:", req.trampoline_gpa => hex);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        }
+        if req.trampoline_gpa.0 >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE {
+            kerror!("MSR intercept: trampoline gpa out of range:", req.trampoline_gpa => hex);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        }
         if core::hint::unlikely(syscall_enter_addr < VADDR_UPPER_MASK) {
             kerror!("MSR intercept: invalid syscall enter address:", syscall_enter_addr => hex);
             return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
@@ -789,8 +818,58 @@ fn handle_deko_service_lstar_intercept(
         }
         req.ok = 1;
         lstar_req_mapping.write_ref_at::<DekoGuestLstarWriteReq>(offset as usize, &req);
+
+        if TRAMPOLINE_PA.get().is_none() {
+            TRAMPOLINE_PA.init(DekoAtomicData::new(req.trampoline_gpa));
+        }
     }
     Ok(())
+}
+
+#[verus_spec(r =>
+    with
+        Tracked(cpu_perm): Tracked<&mut DekoCpuCtxPermission>,
+    requires
+        old(cpu_perm).wf(),
+        old(params).additional_data is Some,
+    ensures
+        cpu_perm.wf(),
+        cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
+)]
+fn handle_deko_serivce_syscall_analysis(params: &mut DekoGuestRequestParams) -> DekoGuestServResult<
+    (),
+> {
+    let guest_syscall_vaddr = params.rdx;
+    // For simplicity, we assume that the syscall body is just placed in
+    // the trampoline page (i.e., data + text are mixed).
+
+    let trampoline_pa = match TRAMPOLINE_PA.get() {
+        Some(pa) => pa.data,
+        None => {
+            kerror!("Syscall analysis: trampoline PA is not initialized");
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy));
+        },
+    };
+
+    let offset = guest_syscall_vaddr % PAGE_SIZE as u64;
+
+    let temp_mapping = match TempMapping::new(create_paddr_range(trampoline_pa, 1)) {
+        Some(m) => m,
+        None => {
+            kerror!("Syscall analysis: failed to create temporary mapping for trampoline at:", trampoline_pa);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy));
+        },
+    };
+
+    if core::hint::unlikely(
+        core::mem::size_of::<DekoSyscallBody>() as u64 > PAGE_SIZE as u64 - offset,
+    ) {
+        kerror!("Syscall analysis: syscall body exceeds page boundary:", VirtAddr(guest_syscall_vaddr));
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    let syscall_body = temp_mapping.read_ref_at::<DekoSyscallBody>(offset as usize).clone();
+
+    analysis_syscall(syscall_body)
 }
 
 #[verus_spec(r =>
@@ -922,14 +1001,16 @@ pub(super) fn handle_guest_exit_extend_service(
     params: &mut DekoGuestRequestParams,
     cpu_idx: u64,
 ) -> DekoGuestServResult<()> {
-    kinfo!("Extend service request:", params);
-
     match req {
         DEKO_SERVICE_EXTEND_MSR_INTERCEPT => {
             kinfo!("MSR intercept:", params);
 
             proof_with!(Tracked(cpu_perm));
             handle_deko_service_msr_intercepts(params)
+        },
+        DEKO_SERVICE_EXTEND_SYSCALL_ANALYSIS => {
+            proof_with!(Tracked(cpu_perm));
+            handle_deko_serivce_syscall_analysis(params)
         },
         _ => {
             kerror!("Unsupported extend service request: ", req);
