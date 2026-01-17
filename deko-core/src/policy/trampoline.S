@@ -14,10 +14,11 @@ deko_trampoline_start:
   // Guest is executing at VMPL > 0!!!!!!
   swapgs
 
-  // to be patched.
-  .byte 0x65, 0x48, 0x89, 0x25, 0x11, 0x11, 0x11, 0x11
-  .byte 0x65, 0x48, 0x8b, 0x25, 0x22, 0x22, 0x22, 0x22
-
+  // Save USER RSP
+  movq    %rsp, user_stack(%rip)
+  // Swap to our own stack.
+  leaq    deko_stack_top(%rip), %rsp
+  andq    $-16, %rsp
   // Save registers that we will clobber
   pushq   %rax
   pushq   %rdx
@@ -43,8 +44,8 @@ deko_trampoline_start:
   popq   %rcx
   popq   %rdx
   popq   %rax
-  // To be patched.
-  .byte  0x65, 0x48, 0x8b, 0x25, 0x11, 0x11, 0x11, 0x11
+
+  movq   user_stack(%rip), %rsp
   swapgs
 
   // Continue execution at the original syscall entry point
@@ -54,3 +55,10 @@ deko_trampoline_start:
 deko_trampoline_data_entry:
   .quad 0x0    // Placeholder for original syscall entry pointer
 deko_trampoline_end:
+
+deko_stack_bottom:
+  .fill 0x1000, 1, 0x0
+deko_stack_top:
+
+user_stack:
+  .quad 0x0    // Placeholder for user RSP storage
