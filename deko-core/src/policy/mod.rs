@@ -10,18 +10,20 @@ use deko_std::wf::WellFormed;
 use vstd::prelude::*;
 
 use crate::cpu::DekoCpuCtx;
-use crate::imp::{SnpStatusFlags, GUEST_MSR_INTERCEPT, MSR_SEV_STATUS};
+use crate::guest::service::DekoGuestLstarWriteReq;
+use crate::imp::{RmpFlags, SnpStatusFlags, GUEST_MSR_INTERCEPT, MSR_SEV_STATUS};
 use crate::mm::frame_allocator::DekoPageFrameBox;
 use crate::mm::paging::{
-    self, index_at_level, PageTable, PageTableEntry, PageTablePath, PageTablePermission,
-    RECURSIVE_INDEX,
+    self, bit_not_in_addr_region, bit_not_overlapping, index_at_level, index_at_level_spec,
+    PageTable, PageTableEntry, PageTablePath, PageTablePermission, PteFlags, RECURSIVE_INDEX,
 };
 use crate::mm::vm::TempMapping;
-use crate::mm::{virt_to_phys_checked, DEKO_FRAME_ALLOCATOR_FULL};
+use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR_FULL};
 use crate::snp::vmsa::VMSA;
 use crate::snp::SnpStatus;
 use crate::{kerror, kinfo, kpanic_if};
 
+pub(crate) mod guest_paging;
 pub(crate) mod msr;
 
 core::arch::global_asm!(include_str!("trampoline.S"), options(att_syntax));
@@ -33,6 +35,26 @@ extern "C" {
 }
 
 verus! {
+
+pub const GUEST_TRAMPOLINE_PML4_HOLE: usize = 500;
+
+pub const GUEST_TRAMPOLINE_MAGIC: &'static [u8; 15] = &[
+    0x54u8,
+    0x52,
+    0x41,
+    0x4d,
+    0x50,
+    0x4f,
+    0x4c,
+    0x49,
+    0x4e,
+    0x45,
+    0x5f,
+    0x49,
+    0x4e,
+    0x49,
+    0x54,
+];
 
 func_ptr!(deko_trampoline_start);
 
@@ -154,8 +176,7 @@ pub fn enable_syscall_hook() {
     proof_with!(Tracked(&mut vmsa_perm));
     VMSA::enable_msr_intercept(
         vmsa,
-        &[DekoMsrIntercept::InterceptMsrVec0(DekoMsrInterceptVec0::LstarWrite)],  // todo...
-    // &[]
+        &[DekoMsrIntercept::InterceptMsrVec0(DekoMsrInterceptVec0::LstarWrite)],
     );
 }
 
@@ -169,16 +190,20 @@ pub fn enable_syscall_hook() {
 /// `WRMSR` interception.
 #[verus_spec(
     with
-        Tracked(g_pgtable_perm): Tracked<&PageTablePermission>,
+        Tracked(g_pgtable_perm): Tracked<&mut PageTablePermission>,
     requires
         syscall_enter_addr.wf(),
         syscall_enter_addr@ >= VADDR_UPPER_MASK,
-        g_pgtable_perm.wf(),
-        g_pgtable_perm.pgtable_perm.pptr() == guest_pgtable@,
-        private_bit == g_pgtable_perm.private_bit,
-        shared_bit == g_pgtable_perm.shared_bit,
-        ms == g_pgtable_perm.mapping_space,
+        old(g_pgtable_perm).wf(),
+        old(g_pgtable_perm).pgtable_perm.pptr() == guest_pgtable@,
+        private_bit == old(g_pgtable_perm).private_bit,
+        shared_bit == old(g_pgtable_perm).shared_bit,
+        ms == old(g_pgtable_perm).mapping_space,
         ms.wf(),
+        bit_not_overlapping(private_bit),
+        bit_not_overlapping(shared_bit),
+        bit_not_in_addr_region(private_bit),
+        bit_not_in_addr_region(shared_bit),
 )]
 pub fn install_hook(
     guest_pgtable: DekoPPtr<PageTable>,
@@ -186,12 +211,18 @@ pub fn install_hook(
     private_bit: u64,
     shared_bit: u64,
     ms: MappingSpace,
+    req: &DekoGuestLstarWriteReq,
 ) -> bool {
     broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
     broadcast use PageTablePath::lemma_path_take_fact;
     broadcast use PageTablePath::lemma_drop_last;
     // Check if this is really mapped.
 
+    if req.trampoline_gva.0 < VADDR_UPPER_MASK || req.trampoline_gpa.0 % PAGE_SIZE != 0 {
+        // Guest trampoline virtual address must be in the higher half
+        // of the address space.
+        return false;
+    }
     if index_at_level::<3>(syscall_enter_addr) == RECURSIVE_INDEX as usize {
         // Any addresses starting with the recursive index are invalid
         // as they are either used for page table self-referencing or
@@ -226,19 +257,141 @@ pub fn install_hook(
                 idx,
             ).address(private_bit, shared_bit);
 
-            // Here we request the guest to allocate a PML4 entry for us
-            // to inject the trampoline code.
-            //
-            // Safety: We have already verified that the guest page table
-            //         maps the syscall entry address.
-            unsafe {
-                patch_trampoline(syscall_enter_addr, syscall_enter_paddr);
-            }
+            #[verus_spec(with Tracked(g_pgtable_perm))]
+            let trampoline_g_vaddr = map_to_guest(
+                guest_pgtable,
+                req.trampoline_gva,
+                req.trampoline_gpa,
+                syscall_enter_addr,
+                syscall_enter_paddr,
+                private_bit,
+                shared_bit,
+                ms,
+            );
+
+            finish_install_hook(req.trampoline_gva);
 
             true
         },
         _ => false,
     }
+}
+
+#[verus_spec()]
+fn finish_install_hook(addr: VirtAddr) {
+    let (this_cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+
+    proof_with!(Tracked(&cpu_perm) => Tracked(mut vmsa_perm));
+    let vmsa = VMSA::this_vmsa(this_cpu);
+
+    // Now we write the LSTAR MSR to point to our trampoline code.
+    proof_with!(Tracked(&mut vmsa_perm));
+    VMSA::set_lstar(vmsa, addr.0)
+}
+
+/// Map the trampoline code into the guest page table.
+#[verifier::spinoff_prover]
+#[verus_spec(r =>
+    with
+        Tracked(g_pgtable_perm): Tracked<&mut PageTablePermission>,
+    requires
+        trampoline_vaddr.wf(),
+        old(g_pgtable_perm).wf(),
+        old(g_pgtable_perm).pgtable_perm.pptr() == guest_pgtable@,
+        private_bit == old(g_pgtable_perm).private_bit,
+        shared_bit == old(g_pgtable_perm).shared_bit,
+        ms == old(g_pgtable_perm).mapping_space,
+        ms.wf(),
+        bit_not_overlapping(private_bit),
+        bit_not_overlapping(shared_bit),
+        bit_not_in_addr_region(private_bit),
+        bit_not_in_addr_region(shared_bit),
+        trampoline_paddr@ % PAGE_SIZE == 0,
+    // ensures
+    //     r.wf(),
+    //     g_pgtable_perm.mapped(r),
+)]
+#[verifier::external_body]
+fn map_to_guest(
+    guest_pgtable: DekoPPtr<PageTable>,
+    trampoline_vaddr: VirtAddr,
+    trampoline_paddr: PhysAddr,
+    syscall_enter_addr: VirtAddr,
+    syscall_enter_paddr: PhysAddr,
+    private_bit: u64,
+    shared_bit: u64,
+    ms: MappingSpace,
+) -> VirtAddr {
+    broadcast use PteFlags::lemma_each_bit_is_valid;
+    broadcast use RmpFlags::lemma_each_bit_is_valid;
+
+    let pml4_index = index_at_level::<3>(trampoline_vaddr);
+    kpanic_if!(
+        pml4_index == RECURSIVE_INDEX as usize,
+        "Trampoline virtual address uses recursive index in PML4",
+    );
+
+    kpanic_if!(
+        core::hint::unlikely(trampoline_paddr.0 >= 0x000f_ffff_ffff_f000),
+        "Trampoline physical address exceeds canonical address space",
+    );
+
+    let mapping = PageTable::walk(
+        guest_pgtable,
+        Tracked(g_pgtable_perm),
+        trampoline_vaddr,
+        &ms,
+        private_bit,
+        shared_bit,
+    );
+
+    let paging::Mapping::Level1(ptr, idx) = mapping else {
+        kerror!("Trampoline virtual address is not mapped in guest page table");
+        return trampoline_vaddr;
+    };
+
+    // We need to check if the page is really "that" page.
+    let ghost path = PageTablePath::from_vaddr_at_level(trampoline_vaddr, 1).normalize();
+    proof {
+        reveal_with_fuel(PageTablePath::remove_recursive_prefix, 10);
+        assert(path.wf());
+    }
+    let tracked g_trampoline_perm = &g_pgtable_perm.storage.tracked_borrow(path).this_page_perm;
+    let entry = ptr.borrow(Tracked(g_trampoline_perm)).0.index(idx);
+
+    kinfo!("index is :", idx);
+
+    let paddr = entry.address(private_bit, shared_bit);
+    kpanic_if!(
+        paddr != trampoline_paddr,
+        "Trampoline virtual address does not map to expected physical address in guest page table",
+    );
+
+    let Some(guest_trampoline_frame) = TempMapping::new(
+        create_paddr_range(trampoline_paddr, 1),
+    ) else {
+        kerror!("Failed to create temporary mapping for trampoline page frame");
+        return trampoline_vaddr;
+    };
+
+    // Now we check the content the trampoline code.
+    let magic = guest_trampoline_frame.read_ref::<[u8; 15]>();
+    if magic != GUEST_TRAMPOLINE_MAGIC {
+        kerror!("Trampoline code magic does not match expected value", magic, GUEST_TRAMPOLINE_MAGIC);
+        return trampoline_vaddr;
+    }
+    // Here we request the guest to allocate a PML4 entry for us
+    // to inject the trampoline code.
+    //
+    // Safety: We have already verified that the guest page table
+    //         maps the syscall entry address.
+
+    if !unsafe { patch_trampoline(syscall_enter_addr, syscall_enter_paddr, trampoline_paddr) } {
+        kerror!("Failed to patch trampoline code");
+
+        return trampoline_vaddr;
+    }
+    trampoline_vaddr
 }
 
 /// Patch the incomplete trampoline code with the real entry point
@@ -252,22 +405,32 @@ pub fn install_hook(
 ///
 /// ↑ can be added into the spec.
 #[verifier::external_body]
-#[verus_spec(
+#[verus_spec(r =>
     requires
         syscall_enter_addr.wf(),
         syscall_enter_addr@ >= VADDR_UPPER_MASK,
 )]
-unsafe fn patch_trampoline(syscall_enter_addr: VirtAddr, syscall_enter_paddr: PhysAddr) {
+unsafe fn patch_trampoline(
+    syscall_enter_addr: VirtAddr,
+    syscall_enter_paddr: PhysAddr,
+    g_trampoline_paddr: PhysAddr,
+) -> bool {
     const TSS_PAT: &'static [u8; 4] = &0x1111_1111u32.to_le_bytes();
     const STACK_PAT: &'static [u8; 4] = &0x2222_2222u32.to_le_bytes();
 
-    kinfo!("Patching syscall trampoline at guest virtual address:", syscall_enter_addr);
-    kinfo!("Corresponding physical address:", syscall_enter_paddr);
+    kinfo!("Patching trampoline code @", g_trampoline_paddr);
 
-    // Create a temporary mapping for the Linux syscall code.
+    // Create two temporary mappings one for the syscall entry code
+    // and one for the trampoline code prepared by the guest.
     let Some(temp_mapping) = TempMapping::new(create_paddr_range(syscall_enter_paddr, 1)) else {
-        kerror!("Failed to create temporary mapping for syscall trampoline patching");
-        return ;
+        return false;
+    };
+
+    // Create a temporary mapping for the trampoline code.
+    let Some(g_trampoline) = TempMapping::new(create_paddr_range(g_trampoline_paddr, 1)) else {
+        kerror!("Failed to create temporary mapping for trampoline code");
+
+        return false;
     };
 
     let offset = syscall_enter_addr.0 & (PAGE_SIZE - 1);
@@ -279,7 +442,6 @@ unsafe fn patch_trampoline(syscall_enter_addr: VirtAddr, syscall_enter_paddr: Ph
         (temp_mapping.inner.start.0 as *const u8).add(offset as usize),
         code_size as usize,
     );
-    kinfo!("Source:", source_code);
 
     kpanic_if!(
         !source_code.starts_with(&[0x0f, 0x01, 0xf8]),
@@ -302,7 +464,7 @@ unsafe fn patch_trampoline(syscall_enter_addr: VirtAddr, syscall_enter_paddr: Ph
     let mut stack_offset = None;
 
     // Scan the source code to find the patterns.
-    for i in 0..100 {
+    for i in 0..100usize {
         if &source_code[i..i + 4] == &[0x65, 0x48, 0x89, 0x25] {
             let tss = u32::from_le_bytes(
                 [source_code[i + 4], source_code[i + 5], source_code[i + 6], source_code[i + 7]],
@@ -318,49 +480,42 @@ unsafe fn patch_trampoline(syscall_enter_addr: VirtAddr, syscall_enter_paddr: Ph
         }
     }
 
-    if tss_offset.is_none() || stack_offset.is_none() {
-        kerror!("Failed to find pattern in the syscall source code");
-        return ;
-    }
-    // Request one page for the trampoline buffer to store the
-    // trampoline code and we will then make the change.
-    //
-    // Afterwards the buffer will be populated.
+    let (tss_offset, stack_offset) = match (tss_offset, stack_offset) {
+        (Some(tss), Some(stack)) => (tss as u32, stack as u32),
+        _ => {
+            kerror!("Failed to find both TSS and STACK patterns");
 
-    let (trampoline_buf, _) = DekoPageFrameBox::<[u8; 0x1000]>::new_zeroed_in(
-        &DEKO_FRAME_ALLOCATOR_FULL,
-    );
+            return false;
+        },
+    };
+
+    update_syscall_entry(syscall_enter_addr.0 as u64);
 
     core::ptr::copy_nonoverlapping(
         trampoline_start as *const u8,
-        trampoline_buf.addr() as *mut u8,
+        g_trampoline.inner.start.0 as *mut u8,
         trampoline_size,
     );
 
-    deko_trampoline_data_entry = syscall_enter_addr.0 as u64;
-
-    let code = core::slice::from_raw_parts_mut(
-        trampoline_buf.addr() as *mut u8,
+    let code: &mut [u8] = core::slice::from_raw_parts_mut(
+        g_trampoline.inner.start.0 as *mut u8,
         trampoline_size as usize,
     );
 
-    kinfo!("Original trampoline code:", code);
+    // Sliding window to find and patch the patterns.
+    for i in 0..(trampoline_size - 0x4) {
+        if &code[i..i + 4] == TSS_PAT {
+            code[i..i + 4].copy_from_slice(
+                &source_code[tss_offset as usize..tss_offset as usize + 4],
+            );
+        } else if &code[i..i + 4] == STACK_PAT {
+            code[i..i + 4].copy_from_slice(
+                &source_code[stack_offset as usize..stack_offset as usize + 4],
+            );
+        }
+    }
 
-    // // Sliding window to find and patch the patterns.
-    // for i in 0..(trampoline_size - 0x4) {
-    //     if &code[i..i+4] == TSS_PAT {
-    //         kinfo!("Patching TSS pattern at offset", i);
-    //         code[i..i+4].copy_from_slice(&tss_offset.unwrap().to_le_bytes());
-
-    //     } else if &code[i..i+4] == STACK_PAT {
-    //         kinfo!("Patching STACK pattern at offset", i);
-
-    //         code[i..i+4].copy_from_slice(&stack_offset.unwrap().to_le_bytes());
-    //     }
-    // }
-
-    // kinfo!("Patched trampoline code:", code);
-
+    true
 }
 
 } // verus!

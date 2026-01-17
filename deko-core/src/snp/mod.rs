@@ -43,7 +43,10 @@ pub mod vmsa;
 extern "C" {
     /// A global flag to indicate whether the AP has been started.
     static mut ap_flag: AtomicU32;
+
     #[link_name = "snp_idle_halt"]
+    #[allow(improper_ctypes)]
+    #[allow(improtper_ctypes_definitions)]
     fn __snp_idle_halt(doorbell: *const doorbell::HVDoorbell);
 }
 
@@ -106,6 +109,10 @@ deko_bitflags! {
     }
 }
 
+impl Copy for RmpFlags {
+
+}
+
 deko_bitflags_quick! {
     Rmp,
     vmpl0: { 0 },
@@ -115,6 +122,7 @@ deko_bitflags_quick! {
     vmsa: { BIT_VMSA, READ },
     rwx: { READ, WRITE, X_USER, X_SUPER },
     rwx_guest_vmpl2: { VMPL_HIGH, READ, WRITE, X_USER, X_SUPER },
+    rx_guest_vmpl2: { VMPL_HIGH, READ, X_USER, X_SUPER },
 }
 
 pub const VMPCK_SIZE: usize = 32;

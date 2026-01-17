@@ -13,6 +13,7 @@ use crate::cpu::tlb::{flush_tlb_global_percpu, flush_tlb_global_sync};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::elf::ElfFile;
 use crate::hal::is_stage2;
+use crate::imp::{rmpadjust, RmpFlags};
 use crate::mm::vm::TempMapping;
 use crate::mm::{
     check_within_guest_mmap, virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR,
@@ -1076,6 +1077,7 @@ impl Page {
     #[verifier::external_body]
     pub fn alloc_new<A: DekoFrameAllocator>(
         ms: &MappingSpace,
+        rmp_flags: Option<RmpFlags>,
         private_bit: u64,
         shared_bit: u64,
         allocator: &A,
@@ -1083,6 +1085,7 @@ impl Page {
         requires
             ms.wf(),
             allocator.wf(),
+            rmp_flags.wf(),
         ensures
             r.0.addr() % PAGE_SIZE as usize == 0,
             r.2@ % PAGE_SIZE == 0,
@@ -1108,6 +1111,17 @@ impl Page {
             Tracked::assume_new(),
         );
 
+        // If we have a RMP flag, set it now.
+        if let Some(flags) = rmp_flags {
+            let vaddr = VirtAddr(ptr as u64);
+
+            if rmpadjust(vaddr, PAGE_SIZE, flags, Tracked::assume_new()) != 0 {
+                // We can use the print the diagnostic information as
+                // this time everything has been set up.
+                kerror!("Page::alloc_new: rmpadjust failed for vaddr", vaddr,);
+                crate::die("");
+            }
+        }
         let pptr = DekoPPtr(vstd::simple_pptr::PPtr(ptr as usize, core::marker::PhantomData));
 
         (pptr, Tracked::assume_new(), paddr)
@@ -1420,11 +1434,12 @@ impl Page {
     /// }
     #[verifier::spinoff_prover]
     #[verifier::exec_allows_no_decreases_clause]
-    pub fn allocate_pte_4k<A: DekoFrameAllocator>(
+    fn allocate_pte_4k<A: DekoFrameAllocator>(
         page: DekoPPtr<Page>,
         Tracked(perm): Tracked<&mut PageTablePermission>,
         vaddr: VirtAddr,
         ms: &MappingSpace,
+        rmp_flags: Option<RmpFlags>,
         private_bit: u64,
         shared_bit: u64,
         allocator: &A,
@@ -1432,6 +1447,7 @@ impl Page {
         requires
             old(perm).allocate_pte_4k_requires(page, vaddr, ms, private_bit, shared_bit),
             allocator.wf(),
+            rmp_flags.wf(),
         ensures
             old(perm).allocate_pte_4k_ensures(vaddr, private_bit, shared_bit, r, perm),
     {
@@ -1451,6 +1467,7 @@ impl Page {
                 Tracked(perm),
                 vaddr,
                 ms,
+                rmp_flags,
                 private_bit,
                 shared_bit,
                 false,
@@ -1461,6 +1478,7 @@ impl Page {
                 Tracked(perm),
                 vaddr,
                 ms,
+                rmp_flags,
                 private_bit,
                 shared_bit,
                 false,
@@ -1471,6 +1489,7 @@ impl Page {
                 Tracked(perm),
                 vaddr,
                 ms,
+                rmp_flags,
                 private_bit,
                 shared_bit,
                 false,
@@ -1492,6 +1511,7 @@ impl Page {
         Tracked(perm): Tracked<&mut PageTablePermission>,
         vaddr: VirtAddr,
         ms: &MappingSpace,
+        rmp_flags: Option<RmpFlags>,
         private_bit: u64,
         shared_bit: u64,
         huge: bool,
@@ -1500,6 +1520,7 @@ impl Page {
         requires
             old(perm).allocate_pte_lvl3_requires(mapping, vaddr, ms, private_bit, shared_bit, huge),
             allocator.wf(),
+            rmp_flags.wf(),
         ensures
             old(perm).allocate_pte_lvl3_ensures(vaddr, private_bit, shared_bit, huge, r, perm),
     {
@@ -1544,6 +1565,7 @@ impl Page {
         // Now we allocate a new page and start to insert it.
         let (new_page, Tracked(new_page_perm), paddr) = Page::alloc_new(
             ms,
+            rmp_flags,
             private_bit,
             shared_bit,
             allocator,
@@ -1642,6 +1664,7 @@ impl Page {
             Tracked(perm),
             vaddr,
             ms,
+            rmp_flags,
             private_bit,
             shared_bit,
             huge,
@@ -1656,6 +1679,7 @@ impl Page {
         Tracked(perm): Tracked<&mut PageTablePermission>,
         vaddr: VirtAddr,
         ms: &MappingSpace,
+        rmp_flags: Option<RmpFlags>,
         private_bit: u64,
         shared_bit: u64,
         huge: bool,
@@ -1664,6 +1688,7 @@ impl Page {
         requires
             old(perm).allocate_pte_lvl2_requires(mapping, vaddr, ms, private_bit, shared_bit, huge),
             allocator.wf(),
+            rmp_flags.wf(),
         ensures
             old(perm).allocate_pte_lvl2_ensures(vaddr, private_bit, shared_bit, huge, r, perm),
     {
@@ -1695,6 +1720,7 @@ impl Page {
 
         let (new_page, Tracked(new_page_perm), paddr) = Page::alloc_new(
             ms,
+            rmp_flags,
             private_bit,
             shared_bit,
             allocator,
@@ -1723,6 +1749,7 @@ impl Page {
             Tracked(perm),
             vaddr,
             ms,
+            rmp_flags,
             private_bit,
             shared_bit,
             huge,
@@ -1737,6 +1764,7 @@ impl Page {
         Tracked(perm): Tracked<&mut PageTablePermission>,
         vaddr: VirtAddr,
         ms: &MappingSpace,
+        rmp_flags: Option<RmpFlags>,
         private_bit: u64,
         shared_bit: u64,
         huge: bool,
@@ -1745,6 +1773,7 @@ impl Page {
         requires
             old(perm).allocate_pte_lvl1_requires(mapping, vaddr, ms, private_bit, shared_bit, huge),
             allocator.wf(),
+            rmp_flags.wf(),
         ensures
             old(perm).allocate_pte_lvl1_ensures(vaddr, private_bit, shared_bit, huge, r, perm),
     {
@@ -1776,6 +1805,7 @@ impl Page {
         // Now we allocate a new page and start to insert it.
         let (new_page, Tracked(new_page_perm), paddr) = Page::alloc_new(
             ms,
+            rmp_flags,
             private_bit,
             shared_bit,
             allocator,
@@ -2214,9 +2244,9 @@ impl Page {
         let addr_2m = entry.borrow(Tracked(entry_perm)).address(private_bit, shared_bit);
         let mut flags = PteFlags::from_bits_truncate(entry.borrow(Tracked(entry_perm)).0.0);
         let (new_page, Tracked(new_page_perm), paddr) = if is_stage2() {
-            Page::alloc_new(ms, private_bit, shared_bit, &DEKO_FRAME_ALLOCATOR)
+            Page::alloc_new(ms, None, private_bit, shared_bit, &DEKO_FRAME_ALLOCATOR)
         } else {
-            Page::alloc_new(ms, private_bit, shared_bit, &DEKO_FRAME_ALLOCATOR_FULL)
+            Page::alloc_new(ms, None, private_bit, shared_bit, &DEKO_FRAME_ALLOCATOR_FULL)
         };
         flags.remove(HUGE);
 
@@ -2638,10 +2668,9 @@ impl Page {
         }
     }
 
-    /// Maps a single 4KB page at the given virtual address to the given physical address
     #[verifier::spinoff_prover]
     #[verifier::exec_allows_no_decreases_clause]
-    pub fn map_page_4k(
+    fn do_map_page_4k(
         page: DekoPPtr<Page>,
         Tracked(perm): Tracked<&mut PageTablePermission>,
         vaddr: VirtAddr,
@@ -2649,11 +2678,13 @@ impl Page {
         /* Tracked(mapped_page_perm): Tracked<PagePermission> */
         ms: &MappingSpace,
         flags: PteFlags,
+        rmp_flags: Option<RmpFlags>,
         private_bit: u64,
         shared_bit: u64,
     )
         requires
             old(perm).map_page_4k_requires(page, vaddr, paddr, ms, flags, private_bit, shared_bit),
+            rmp_flags.wf(),
         ensures
             old(perm).map_page_4k_ensures(vaddr, paddr, flags, private_bit, shared_bit, perm),
     {
@@ -2668,6 +2699,7 @@ impl Page {
                 Tracked(perm),
                 vaddr,
                 ms,
+                rmp_flags,
                 private_bit,
                 shared_bit,
                 &DEKO_FRAME_ALLOCATOR,
@@ -2678,6 +2710,7 @@ impl Page {
                 Tracked(perm),
                 vaddr,
                 ms,
+                rmp_flags,
                 private_bit,
                 shared_bit,
                 &DEKO_FRAME_ALLOCATOR_FULL,
@@ -2768,6 +2801,74 @@ impl Page {
             )@);
 
         }
+    }
+
+    /// Maps a single 4KB page at the given virtual address to the given physical address.
+    ///
+    /// This function requires us to manipulate the guest (VMPL > 0)'s page tables.
+    #[inline]
+    pub fn map_page_4k_guest(
+        page: DekoPPtr<Page>,
+        Tracked(perm): Tracked<&mut PageTablePermission>,
+        vaddr: VirtAddr,
+        paddr: PhysAddr,  // <- this implicitly creates a "permission" out of nowhere. Is that okay?
+        /* Tracked(mapped_page_perm): Tracked<PagePermission> */
+        ms: &MappingSpace,
+        flags: PteFlags,
+        rmp_flags: RmpFlags,
+        private_bit: u64,
+        shared_bit: u64,
+    )
+        requires
+            old(perm).map_page_4k_requires(page, vaddr, paddr, ms, flags, private_bit, shared_bit),
+            rmp_flags.wf(),
+        ensures
+            old(perm).map_page_4k_ensures(vaddr, paddr, flags, private_bit, shared_bit, perm),
+    {
+        Self::do_map_page_4k(
+            page,
+            Tracked(perm),
+            vaddr,
+            paddr,
+            ms,
+            flags,
+            Some(rmp_flags),
+            private_bit,
+            shared_bit,
+        );
+    }
+
+    /// Maps a single 4KB page at the given virtual address to the given physical address
+    #[inline]
+    #[verifier::spinoff_prover]
+    #[verifier::exec_allows_no_decreases_clause]
+    pub fn map_page_4k(
+        page: DekoPPtr<Page>,
+        Tracked(perm): Tracked<&mut PageTablePermission>,
+        vaddr: VirtAddr,
+        paddr: PhysAddr,  // <- this implicitly creates a "permission" out of nowhere. Is that okay?
+        /* Tracked(mapped_page_perm): Tracked<PagePermission> */
+        ms: &MappingSpace,
+        flags: PteFlags,
+        private_bit: u64,
+        shared_bit: u64,
+    )
+        requires
+            old(perm).map_page_4k_requires(page, vaddr, paddr, ms, flags, private_bit, shared_bit),
+        ensures
+            old(perm).map_page_4k_ensures(vaddr, paddr, flags, private_bit, shared_bit, perm),
+    {
+        Self::do_map_page_4k(
+            page,
+            Tracked(perm),
+            vaddr,
+            paddr,
+            ms,
+            flags,
+            None,
+            private_bit,
+            shared_bit,
+        );
     }
 }
 

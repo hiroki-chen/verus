@@ -686,8 +686,7 @@ impl Builder {
 
         if !config.extra_config.is_empty() {
             for extra in &config.extra_config {
-                let parts: Vec<&str> = extra.split_whitespace().collect();
-                cmd.args(&parts);
+                cmd.arg(extra);
             }
         }
 

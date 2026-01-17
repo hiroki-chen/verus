@@ -307,6 +307,11 @@ cargo run --bin xtask -- bootstrap-verus
 # ... repeat other bootstrap commands
 ```
 
+## Preparing the guest image
+
+You can build the kernel using the same configuration when you build the host kernel. Afterwards please
+pull a cloud image (say Ubuntu) in qcow2 format and unpack our out-of-the-tree kernel into the image.
+
 ## Next Steps
 
 After completing this preparation:

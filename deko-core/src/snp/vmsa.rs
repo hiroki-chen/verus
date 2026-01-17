@@ -487,6 +487,39 @@ impl VMSA {
             old(ptr_perm).is_init(),
             old(ptr_perm).pptr() == ptr@,
         ensures
+            ptr_perm.value().lstar == lstar,
+            ptr_perm.wf(),
+            ptr_perm.is_init(),
+            ptr_perm.pptr() == ptr@,
+    )]
+    pub fn set_lstar(ptr: DekoPPtr<Self>, lstar: u64) {
+        unsafe {
+            // 1. Get the raw pointer to the struct.
+            // DO NOT convert this to &mut Self.
+            let struct_ptr = ptr.addr() as *mut Self;
+
+            // 2. Calculate the pointer to the 'lstar' field specifically.
+            // 'addr_of_mut!' computes the offset without creating an intermediate reference
+            // to the struct, avoiding issues with unaligned/packed data or MMIO restrictions.
+            let lstar_field_ptr = core::ptr::addr_of_mut!((*struct_ptr).lstar);
+
+            // 3. Use a Volatile Write.
+            // This guarantees the compiler emits a store instruction, does not optimize it away,
+            // and does not try to use 'memcpy' or wide registers.
+            core::ptr::write_unaligned(lstar_field_ptr, lstar);
+        }
+    }
+
+    #[inline(always)]
+    #[verifier::external_body]
+    #[verus_spec(
+        with
+            Tracked(ptr_perm): Tracked<&mut DekoPointsTo<Self>>,
+        requires
+            old(ptr_perm).wf(),
+            old(ptr_perm).is_init(),
+            old(ptr_perm).pptr() == ptr@,
+        ensures
             ptr_perm.value().rax == value,
             ptr_perm.wf(),
             ptr_perm.is_init(),

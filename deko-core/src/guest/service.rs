@@ -15,7 +15,7 @@ use crate::cpu::regs::MSR_LSTAR;
 use crate::cpu::tlb::{flush_tlb_global_percpu, flush_tlb_global_sync};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission, PERCPU_AREAS};
 use crate::guest::{
-    guest_page_table, DekoGuestRequestParams, DekoGuestServError, DekoGuestServResult,
+    self, guest_page_table, DekoGuestRequestParams, DekoGuestServError, DekoGuestServResult,
     DekoGuestServResultCode,
 };
 use crate::imp::RmpFlags;
@@ -29,11 +29,15 @@ use crate::snp::vmsa::VMSA;
 use crate::snp::{pvalidate, rmpadjust, validate_vaddr_region};
 use crate::{kdebug, kerror, kinfo, kunimplemented, kwarn};
 
+const _: () = assert!(core::mem::size_of::<DekoGuestLstarWriteReq>() == 0x20);
+
 verus! {
 
 exec static RMP_GUARD: AtomicBool = AtomicBool::new(false);
 
 global layout DekoGuestPValidateReq is size == 8;
+
+global layout DekoGuestLstarWriteReq is size == 32;
 
 /// Represents a request structure for page validation operations.
 ///
@@ -46,6 +50,22 @@ pub(super) struct DekoGuestPValidateReq {
     pub next: u16,
     #[deko(skip)]
     pub _reserved: u32,
+}
+
+/// Represents a request structure for LSTAR MSR write operations.
+/// The guest must place this request at the given physical address
+/// before invoking the LSTAR write service.
+#[repr(C, align(8))]
+#[derive(Copy, Clone, DekoDebug)]
+pub struct DekoGuestLstarWriteReq {
+    /// The guest virtual address of the syscall entry point.
+    pub syscall_enter_addr: VirtAddr,
+    /// The guest allocated virtual address of the trampoline area.
+    pub trampoline_gva: VirtAddr,
+    /// The physical address of the trampoline code.
+    pub trampoline_gpa: PhysAddr,
+    /// Being returned.
+    pub ok: u64,
 }
 
 pub const DEKO_SERVICE_REMAP_CA: u32 = 0x0;
@@ -151,7 +171,7 @@ fn pvalidate_guest_one_page(paddr: PhysAddr) -> DekoGuestServResult<()> {
 
     // Need to first check if the physical address is
     // within the expected guest physical regions.
-    if false {
+    if core::hint::unlikely(!check_within_guest_mmap(PhysAddr(guest_pa))) {
         kerror!("Guest pvalidate: invalid physical address:", guest_pa);
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
@@ -370,8 +390,8 @@ pub fn handle_deko_service_vcpu_destroy(params: &DekoGuestRequestParams) -> Deko
         kerror!("Guest vCPU destroy: unaligned vmsa page: vmsa=", vmsa);
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
     }
-    if false {  /* Check if this address falls within the guest physical address regions. */
-        // Placeholder for now.
+    if core::hint::unlikely(!check_within_guest_mmap(PhysAddr(vmsa))) {
+        // Check if this address falls within the guest physical address regions.
         kerror!("Guest vCPU destroy: invalid vmsa page: vmsa=", vmsa);
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
     }
@@ -444,8 +464,7 @@ fn handle_deko_service_vcpu_create(params: &DekoGuestRequestParams) -> DekoGuest
         kerror!("Guest vCPU create: unaligned vmsa or caa page: vmsa=", vmsa_page, " caa=", caa_page);
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
     }
-    if false {  /* Check if this address falls within the guest physical address regions. */
-        // Placeholder for now.
+    if core::hint::unlikely(!check_within_guest_mmap(PhysAddr(vmsa_page))) {
         kerror!("Guest vCPU create: invalid vmsa or caa page: vmsa=", vmsa_page, " caa=", caa_page);
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
     }
@@ -613,8 +632,7 @@ fn handle_deko_service_remap_ca(
         kerror!("Guest remap CA: unaligned CA page: ca_pa=", ca_pa);
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
     }
-    if false {  /* Check if this address falls within the guest physical address regions. */
-        // Placeholder for now.
+    if core::hint::unlikely(!check_within_guest_mmap(PhysAddr(ca_pa))) {
         kerror!("Guest remap CA: invalid CA page: ca_pa=", ca_pa);
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
     }
@@ -657,6 +675,12 @@ fn handle_deko_service_remap_ca(
     Ok(())
 }
 
+/// Handles lstar interception.
+///
+/// RCX => MSR index (MSR_LSTAR)
+/// RDX => Is write?
+/// R9  => paddr of the request struct.
+///
 #[verus_spec(r =>
 
 )]
@@ -666,10 +690,54 @@ fn handle_deko_service_lstar_intercept(
     guest_cr3: u64,
 ) -> DekoGuestServResult<()> {
     if is_write {
-        if core::hint::unlikely(params.rdx > u32::MAX as u64) {
-            kerror!("MSR intercept: invalid LSTAR address:", params.rdx);
+        // Fetch the request struct.
+        let aligned_req = params.r9 & !(PAGE_SIZE as u64 - 1);
+        let offset = params.r9 % PAGE_SIZE as u64;
+
+        proof {
+            let n = params.r9;
+
+            assert(aligned_req % PAGE_SIZE == 0) by (bit_vector)
+                requires
+                    aligned_req == (n & !((PAGE_SIZE as u64 - 1) as u64)),
+                    PAGE_SIZE == 0x1000,
+            ;
+        }
+
+        if core::hint::unlikely(!check_within_guest_mmap(PhysAddr(aligned_req))) {
+            kerror!("MSR intercept: LSTAR request struct NOT within guest mmap:", PhysAddr(params.r9));
             return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
         }
+        if core::hint::unlikely(aligned_req >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE) {
+            kerror!("MSR intercept: LSTAR request struct out of range:", PhysAddr(params.r9));
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        }
+        let lstar_req_mapping = match TempMapping::new(
+            create_paddr_range(PhysAddr(aligned_req), 1),
+        ) {
+            Some(m) => m,
+            None => {
+                kerror!("MSR intercept: failed to create temporary mapping for LSTAR request struct at:", PhysAddr(params.r9));
+                return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy));
+            },
+        };
+
+        if core::hint::unlikely(
+            offset + core::mem::size_of::<DekoGuestLstarWriteReq>() as u64 > PAGE_SIZE as u64,
+        ) {
+            kerror!("MSR intercept: LSTAR request struct exceeds page boundary:", PhysAddr(params.r9));
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        }
+        let req = lstar_req_mapping.read_ref_at::<DekoGuestLstarWriteReq>(offset as usize);
+        let mut req = req.clone();
+        let syscall_enter_addr = req.syscall_enter_addr.0;
+
+        if core::hint::unlikely(syscall_enter_addr < VADDR_UPPER_MASK) {
+            kerror!("MSR intercept: invalid syscall enter address:", syscall_enter_addr => hex);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        }
+        kinfo!("request is:", req);
+
         let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
         let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
         let guest_cr3 = strip_confidentiality_bits(guest_cr3, cpu_borrow.private_bit);
@@ -693,39 +761,34 @@ fn handle_deko_service_lstar_intercept(
             kerror!("MSR intercept: guest CR3 out of range:", guest_cr3);
             return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
         }
-        let addr = params.rdx << 32 | (params.r9 & 0xffff_ffff);
-
-        // The address must be canonical on the high side.
-        if core::hint::unlikely(addr < VADDR_UPPER_MASK) {
-            kerror!("MSR intercept: invalid LSTAR address:", addr);
-            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-        }
         proof_with!(Tracked(&cpu_perm) => Tracked(guest_pgtable_perm));
         let res = super::guest_page_table(guest_cr3);
-
         if res.is_none() {
             kerror!("MSR intercept: failed to obtain guest page table for CR3:", guest_cr3 => hex);
             return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy));
         }
         let (guest_pgtable, _mapping) = res.unwrap();
 
-        kinfo!("MSR intercept: guest is writing LSTAR to address:", addr => hex);
+        // kinfo!("MSR intercept: guest is writing LSTAR to address:", syscall_enter_addr => hex);
         kinfo!("MSR intercept: guest CR3 is:", guest_cr3 => hex);
 
-        let syscall_enter_addr = VirtAddr(addr);
-        let r = #[verus_spec(with Tracked(guest_pgtable_perm.tracked_borrow()))]
+        let syscall_enter_addr = VirtAddr(syscall_enter_addr);
+        let tracked mut guest_pgtable_perm = guest_pgtable_perm.tracked_take();
+        let r = #[verus_spec(with Tracked(&mut guest_pgtable_perm))]
         policy::install_hook(
             guest_pgtable,
             syscall_enter_addr,
             cpu_borrow.private_bit,
             cpu_borrow.shared_bit,
             cpu_borrow.kernel_mapping,
+            &req,
         );
 
         if !r {
-            kerror!("MSR intercept: failed to install LSTAR hook at address:", addr => hex);
             return Err(DekoGuestServError::FatalError);
         }
+        req.ok = 1;
+        lstar_req_mapping.write_ref_at::<DekoGuestLstarWriteReq>(offset as usize, &req);
     }
     Ok(())
 }
@@ -743,7 +806,7 @@ fn handle_deko_service_lstar_intercept(
 fn handle_deko_service_msr_intercepts(params: &mut DekoGuestRequestParams) -> DekoGuestServResult<
     (),
 > {
-    let is_write = params.r8 != 0;
+    let is_write = params.rdx != 0;
 
     if (params.rcx >= u32::MAX as u64) {
         kerror!("MSR intercept: invalid MSR index:", params.rcx);
@@ -859,6 +922,8 @@ pub(super) fn handle_guest_exit_extend_service(
     params: &mut DekoGuestRequestParams,
     cpu_idx: u64,
 ) -> DekoGuestServResult<()> {
+    kinfo!("Extend service request:", params);
+
     match req {
         DEKO_SERVICE_EXTEND_MSR_INTERCEPT => {
             kinfo!("MSR intercept:", params);

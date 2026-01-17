@@ -574,6 +574,50 @@ impl TempMapping {
         unsafe { &*ptr }
     }
 
+    #[inline]
+    #[verifier::external_body]
+    #[verus_spec(
+        requires
+            self.wf(),
+            self.inner.end@ - self.inner.start@ >= offset as u64 + core::mem::size_of::<T>() as u64,
+    )]
+    pub fn read_ref_at<T: Sized>(&self, offset: usize) -> &T {
+        let ptr = (self.inner.start.0 + offset as u64) as *const T;
+
+        // SAFETY: This operation is safe because `self` guarantees that the
+        // temporary mapping is valid for at least `size_of::<T>()` bytes.
+        // Additionally, the lifetime of the returned reference is tied to
+        // `self`, ensuring that the mapping remains valid while the reference
+        // is in use.
+        //
+        // Also this mapping is created on the current CPU context, so
+        // no page fault will occur when accessing this mapping.
+        unsafe { &*ptr }
+    }
+
+    #[inline]
+    #[verifier::external_body]
+    #[verus_spec(
+        requires
+            self.wf(),
+            self.inner.end@ - self.inner.start@ >= offset as u64 + core::mem::size_of::<T>() as u64,
+    )]
+    pub fn write_ref_at<T: Sized>(&self, offset: usize, value: &T) {
+        let ptr = (self.inner.start.0 + offset as u64) as *mut T;
+
+        // SAFETY: This operation is safe because `self` guarantees that the
+        // temporary mapping is valid for at least `size_of::<T>()` bytes.
+        // Additionally, the lifetime of the returned reference is tied to
+        // `self`, ensuring that the mapping remains valid while the reference
+        // is in use.
+        //
+        // Also this mapping is created on the current CPU context, so
+        // no page fault will occur when accessing this mapping.
+        unsafe {
+            core::ptr::copy_nonoverlapping(value as *const T, ptr, 1);
+        }
+    }
+
     /// Try to read a copied value of type `T` from the temporary mapping.
     #[inline]
     #[verus_spec(
