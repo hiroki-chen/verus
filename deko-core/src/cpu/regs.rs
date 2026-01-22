@@ -376,4 +376,51 @@ pub fn sse_save_context(addr: u64) {
     }
 }
 
+#[verus_spec(r =>
+    // with Tracked(cpu_core): Tracked<&mut DekoCpuCore>,
+    // requires
+    // ensures
+)]
+#[verifier::external_body]
+#[inline]
+pub fn disable_smap() {
+    unsafe {
+        core::arch::asm!(
+            "clac",
+            options(att_syntax, nomem, nostack),
+        );
+    }
+}
+
+#[verus_spec(r =>
+    // with Tracked(cpu_core): Tracked<&mut DekoCpuCore>,
+    // requires
+    // ensures
+)]
+#[verifier::external_body]
+#[inline]
+pub fn enable_smap() {
+    unsafe {
+        core::arch::asm!(
+            "stac",
+            options(att_syntax, nomem, nostack),
+        );
+    }
+}
+
+/// Executes the given closure `f` with SMAP disabled.
+#[verus_spec(r =>
+    // with Tracked(cpu_core): Tracked<&mut DekoCpuCore>,
+    requires
+        f.requires(()),
+    // ensures
+)]
+pub fn no_smap_zone<T, F: FnOnce() -> T>(f: F) -> T {
+    disable_smap();
+    let t = f();
+    enable_smap();
+
+    t
+}
+
 } // verus!

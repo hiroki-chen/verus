@@ -9,6 +9,16 @@ use crate::WellFormed;
 
 verus! {
 
+pub assume_specification[ core::str::from_utf8 ](_0: &[u8]) -> core::result::Result<
+    &str,
+    core::str::Utf8Error,
+>
+;
+
+#[verifier::external_type_specification]
+#[verifier::external_body]
+pub struct ExUtf8Error(core::str::Utf8Error);
+
 impl<V: WellFormed, const N: usize> WellFormed for [V; N] {
     open spec fn wf(&self) -> bool {
         slice_wf(self@)

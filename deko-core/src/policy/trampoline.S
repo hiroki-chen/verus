@@ -19,6 +19,16 @@
 .global deko_trampoline_data_entry
 
 deko_trampoline_start:
+  // ============================================================================
+  // 0. Filter out meaningless syscalls early
+  // ============================================================================
+  cmpq   $511, %rax
+  ja     continue_analysis
+
+  btq    %rax, filter_bitmap(%rip)
+  jc     back_to_linux
+
+continue_analysis:
   // --------------------------------------------------------------------------
   // 1. Syscall Entry Prelude
   // --------------------------------------------------------------------------
@@ -161,6 +171,7 @@ do_vmm_call:
   // as it was when 'syscall' triggered.
   swapgs
 
+back_to_linux:
   // --------------------------------------------------------------------------
   // 9. Handover to Linux Kernel
   // --------------------------------------------------------------------------
@@ -168,6 +179,8 @@ do_vmm_call:
   // The C setup code must populate 'deko_trampoline_data_entry' with the
   // address of the real 'entry_SYSCALL_64'.
   jmp     *deko_trampoline_data_entry(%rip)
+
+  // TODO: Here we need to have a way to catch sysret.
 
 // ============================================================================
 // Data & Stack Section
@@ -186,6 +199,23 @@ user_stack:
   .quad 0x0    // [Runtime Storage] We save the user's RSP here temporarily.
 deko_syscall_body:
   .fill 0x50, 1, 0x0 
+.align 64
+// Bitmap to filter syscalls (0-255) that do not need analysis.
+filter_bitmap:
+  // [0-63]: getpid(39) -> 1 | 2 | (1<<39)
+  .quad 0x0000008000000000
+  // [64-127]: 
+  .quad 0x0000594000000001
+  // [128-191]: empty
+  .quad 0x0400000000000000
+  // [192-255]: clock_gettime(228) -> 1 << (228-192)
+  .quad 0x0000031004000400
+  // [256-319]: 
+  .quad 0x400000080200C040
+  .quad 0x0000000000001000
+
+  .quad 0x0
+  .quad 0x0
 
 .align 16
 deko_stack_bottom:

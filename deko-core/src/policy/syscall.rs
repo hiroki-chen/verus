@@ -3,8 +3,9 @@
 use vstd::prelude::*;
 
 use crate::guest::{DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode};
-use crate::ktrace;
+use crate::policy::userapp::copy_from_guest_user;
 use crate::policy::DekoSyscallBody;
+use crate::{kinfo, ktrace};
 
 verus! {
 
@@ -1193,15 +1194,44 @@ pub const SYS_cachestat: u64 = 0x1c3;
 
 pub const SYS_fchmodat2: u64 = 0x1c4;
 
+#[verus_spec(
+
+)]
 pub fn analysis_syscall(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()> {
     if core::hint::unlikely(syscall_body.rax as usize >= SYS_CALL_NAME.len()) {
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
-    ktrace!("analyzing syscall", SYS_CALL_NAME[syscall_body.rax as usize]);
+    crate::kdebug!("analyzing syscall", SYS_CALL_NAME[syscall_body.rax as usize]);
 
     match syscall_body.rax {
+        SYS_execve => do_sys_execve(syscall_body),
         _ => Ok(()),
     }
+}
+
+/// Implementation of the execve syscall.
+#[verus_spec()]
+fn do_sys_execve(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()> {
+    // For now, we just log the execve syscall.
+    // In the future, we may want to do more analysis here.
+    kinfo!(
+        "execve called with filename", syscall_body.rdi=>hex,
+        "argv", syscall_body.rsi=>hex,
+        "envp", syscall_body.rdx=>hex
+    );
+
+    if core::hint::unlikely(syscall_body.rdi >= 0x8000_0000_0000 - 128 || syscall_body.rdi == 0) {
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    let filename = copy_from_guest_user(syscall_body.rdi, 128)?;
+
+    if let Ok(f) = core::str::from_utf8(&filename) {
+        kinfo!("execve filename", f);
+    } else {
+        kinfo!("execve filename (non-utf8)", filename=>hex);
+    }
+
+    Ok(())
 }
 
 } // verus!

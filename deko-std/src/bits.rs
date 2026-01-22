@@ -181,7 +181,7 @@ macro_rules! deko_bitflags {
                             all_bits == ($( ((1 as $T) << $value) )|*);
 
                     // Apply commutativity.
-                    [<bit_ $T _and_auto>]();
+                    $crate::bits::[<bit_ $T _and_auto>]();
                 }
 
                 pub open spec fn from_bits(bits: $T) -> Set<$name> {
@@ -269,7 +269,7 @@ macro_rules! deko_bitflags {
                                 assert(flag & self.bits == flag);
                                 assert(s.bit() & flag != 0);
 
-                                [<lemma_ $T _subset>](flag, self.bits, s.bit());
+                                $crate::bits::[<lemma_ $T _subset>](flag, self.bits, s.bit());
                             }
                         }
 
@@ -290,11 +290,11 @@ macro_rules! deko_bitflags {
                                 if flag & ((1 as $T) << $value) != 0 {
                                     assert(other.contains($name::$Flag)) by {
                                         // Apply commutativity of `&` to isolate the bit.
-                                        [<bit_ $T _and_auto>]();
+                                        $crate::bits::[<bit_ $T _and_auto>]();
                                     }
                                     assert(self@.contains($name::$Flag));
                                     assert(self.bits & ((1 as $T) << $value) != 0) by {
-                                        [<bit_ $T _and_auto>]();
+                                        $crate::bits::[<bit_ $T _and_auto>]();
                                     }
                                 }
                             )*
@@ -325,7 +325,7 @@ macro_rules! deko_bitflags {
                 {
                     proof {
                         assert forall|flag: $name| (#[trigger] flag.bit() & 0) == 0 by {
-                            [<bit_ $T _and_auto>]();
+                            $crate::bits::[<bit_ $T _and_auto>]();
                         }
                         // Necessary
                         assert(vstd::set::Set::empty() =~= Self::from_bits(0));
@@ -361,7 +361,7 @@ macro_rules! deko_bitflags {
                         });
 
                         assert forall|flag: $name| (#[trigger] flag.bit() & all_bits) != 0 by {
-                            [<bit_ $T _and_auto>]();
+                            $crate::bits::[<bit_ $T _and_auto>]();
                         }
                     }
 

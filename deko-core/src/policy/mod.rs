@@ -7,6 +7,7 @@ use deko_std::prelude::{
 };
 use deko_std::ptr::DekoPPtr;
 use deko_std::wf::WellFormed;
+use deko_std::with_permission;
 use vstd::prelude::*;
 
 use crate::cpu::DekoCpuCtx;
@@ -24,8 +25,10 @@ use crate::snp::SnpStatus;
 use crate::{kerror, kinfo, kpanic_if};
 
 pub(crate) mod guest_paging;
+pub(crate) mod labels;
 pub(crate) mod msr;
 pub(crate) mod syscall;
+pub(crate) mod userapp;
 
 core::arch::global_asm!(include_str!("trampoline.S"), options(att_syntax));
 
@@ -36,6 +39,23 @@ extern "C" {
 }
 
 verus! {
+
+/// The policy engine is responsible for enforcing security policies.
+#[derive(DekoDebug)]
+pub struct DekoPolicyEngine {}
+
+/// A policy domain represents a security boundary within which certain
+/// policies are enforced.
+///
+/// You can think of a policy domain as a sandboxed environment where
+/// specific security rules and restrictions apply to the code and data
+/// operating within that domain.
+#[derive(DekoDebug)]
+pub struct DekoPolicyDomain {}
+
+with_permission!(
+    DekoPolicyDomain,
+);
 
 #[repr(C, align(8))]
 #[derive(DekoDebug, Clone, Copy)]
