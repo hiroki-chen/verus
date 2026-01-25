@@ -7,5 +7,6 @@
   ],
   "files.watcherExclude": {
     "**/target": true
-  }
+  },
+  "codeQL.cli.executablePath": "/home/haobchen/.local/codeql/codeql",
 }

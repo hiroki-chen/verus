@@ -8,6 +8,12 @@ import cpp
 import semmle.code.cpp.dataflow.new.DataFlow
 import semmle.code.cpp.dataflow.new.TaintTracking
 
+
+// Configuration for the sink-source slicing code
+//
+// Rule:
+//
+// Find any potential function that might be a source of sensitive data,
 module DekoIFCConfig implements DataFlow::ConfigSig {
   predicate isSource(DataFlow::Node source) {
     exists(FunctionCall call |

@@ -392,6 +392,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "deko-ifc"
+version = "0.1.0"
+dependencies = [
+ "deko-core",
+ "deko-std",
+ "verus_builtin",
+ "verus_builtin_macros",
+ "vstd",
+]
+
+[[package]]
 name = "deko-logging"
 version = "0.1.0"
 dependencies = [

@@ -2,6 +2,7 @@ use deko_macros::DekoDebug;
 use deko_std::address::{create_paddr_range, VirtAddr};
 use deko_std::bits::{bit_u32_and_auto, bit_u64_and_auto};
 use deko_std::cpu::write_msr;
+use deko_std::mem::PAGE_SIZE_2M;
 use deko_std::prelude::{
     func_ptr, DekoPointsTo, MappingSpace, PhysAddr, PAGE_SIZE, VADDR_UPPER_MASK,
 };
@@ -12,6 +13,7 @@ use vstd::prelude::*;
 
 use crate::cpu::DekoCpuCtx;
 use crate::guest::service::DekoGuestLstarWriteReq;
+use crate::guest::{DekoGuestServError, DekoGuestServResult};
 use crate::imp::{RmpFlags, SnpStatusFlags, GUEST_MSR_INTERCEPT, MSR_SEV_STATUS};
 use crate::mm::frame_allocator::DekoPageFrameBox;
 use crate::mm::paging::{
@@ -80,6 +82,12 @@ pub struct DekoSyscallBody {
     pub r11: u64,  // RFLAG
 }
 
+impl WellFormed for DekoSyscallBody {
+    open spec fn wf(&self) -> bool {
+        true
+    }
+}
+
 pub const GUEST_TRAMPOLINE_PML4_HOLE: usize = 500;
 
 pub const GUEST_TRAMPOLINE_MAGIC: &'static [u8; 15] = &[
@@ -128,6 +136,11 @@ pub enum DekoMsrInterceptVec0 {
 pub enum DekoMsrIntercept {
     /// Intercept for MSR vector 0.
     InterceptMsrVec0(DekoMsrInterceptVec0),
+}
+
+#[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
+pub enum DekoExpIntercept {
+    aaaaa,
 }
 
 #[verus_verify]
@@ -331,6 +344,53 @@ fn finish_install_hook(addr: VirtAddr) {
     // Now we write the LSTAR MSR to point to our trampoline code.
     proof_with!(Tracked(&mut vmsa_perm));
     VMSA::set_lstar(vmsa, addr.0)
+}
+
+/// Injects the payload of the IFC policy engine into the guest memory.
+#[verus_spec(r =>
+    requires
+        trampoline_gva.wf(),
+        trampoline_gva@ % PAGE_SIZE == 0,
+)]
+pub(crate) fn inject_ifc_policy_engine(
+    trampoline_gva: VirtAddr,
+    blob_gpa: PhysAddr,
+    payload: &[u8],
+) -> DekoGuestServResult<()> {
+    let size_64m = 64 * 1024 * 1024;
+
+    if core::hint::unlikely(
+        size_64m < payload.len() || payload.len() == 0 || trampoline_gva.0 >= u64::MAX
+            - size_64m as u64,
+    ) {
+        return Err(DekoGuestServError::FatalError);
+    }
+    if core::hint::unlikely(blob_gpa.0 % PAGE_SIZE_2M != 0) {
+        kerror!("IFC policy engine blob GPA is not page-aligned", blob_gpa => hex);
+        return Err(DekoGuestServError::FatalError);
+    }
+    if core::hint::unlikely(blob_gpa.0 >= 0x0000_FFFF_FFFF_F000u64 - size_64m as u64) {
+        kerror!("IFC policy engine blob GPA exceeds canonical address space", blob_gpa => hex);
+        return Err(DekoGuestServError::FatalError);
+    }
+    // Now we need to copy all the bytes to that area.
+
+    let ifc_start_va = VirtAddr(trampoline_gva.0 + PAGE_SIZE_2M);
+    let len = payload.len() as u64 / PAGE_SIZE + 1;
+    kinfo!(
+        "Injecting IFC policy engine of size",
+        payload.len(),
+        "bytes into guest at",
+        ifc_start_va => hex);
+
+    let Some(temp_mapping) = TempMapping::new(create_paddr_range(blob_gpa, len as usize)) else {
+        kerror!("Failed to create temporary mapping for IFC policy engine blob");
+        return Err(DekoGuestServError::FatalError);
+    };
+
+    temp_mapping.copy_bytes_from(payload);
+
+    Ok(())
 }
 
 /// Map the trampoline code into the guest page table.

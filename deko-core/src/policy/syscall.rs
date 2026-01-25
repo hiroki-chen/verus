@@ -5,7 +5,7 @@ use vstd::prelude::*;
 use crate::guest::{DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode};
 use crate::policy::userapp::copy_from_guest_user;
 use crate::policy::DekoSyscallBody;
-use crate::{kinfo, ktrace};
+use crate::{die, kerror, kinfo, ktrace};
 
 verus! {
 
@@ -1205,12 +1205,28 @@ pub fn analysis_syscall(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()
 
     match syscall_body.rax {
         SYS_execve => do_sys_execve(syscall_body),
+        // In June 2023, Google's security team reported that 60% of the exploits submitted
+        // to their bug bounty program in 2022 were exploits of io_uring vulnerabilities.
+        //
+        // As a result, io_uring was disabled for apps in Android, and disabled entirely in
+        // ChromeOS as well as Google servers. Docker also consequently disabled io_uring
+        // from their default seccomp profile.
+        SYS_io_uring_setup | SYS_io_uring_register | SYS_io_uring_enter => {
+            kerror!("For safety reasons this syscall is forbidden: ", SYS_CALL_NAME[syscall_body.rax as usize]);
+
+            die("");
+        },
         _ => Ok(()),
     }
 }
 
-/// Implementation of the execve syscall.
-#[verus_spec()]
+/// This should be intercepted at the VMPL0 level.
+///
+/// A typical trigger of this function goes from the docker runtime calling `execve`
+/// in the guest, which traps to the trampoline, which then calls this function.
+#[verus_spec(r =>
+    requires
+)]
 fn do_sys_execve(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()> {
     // For now, we just log the execve syscall.
     // In the future, we may want to do more analysis here.

@@ -19,7 +19,7 @@ use crate::cpu::tlb::{flush_tlb_global_percpu, flush_tlb_global_sync};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission, PERCPU_AREAS};
 use crate::guest::{
     self, guest_page_table, DekoGuestRequestParams, DekoGuestServError, DekoGuestServResult,
-    DekoGuestServResultCode,
+    DekoGuestServResultCode, DEKO_POLICY_ENGINE_BLOB,
 };
 use crate::imp::RmpFlags;
 use crate::mm::paging::{
@@ -28,12 +28,12 @@ use crate::mm::paging::{
 use crate::mm::vm::TempMapping;
 use crate::mm::{check_within_guest_mmap, zero_page};
 use crate::policy::syscall::analysis_syscall;
-use crate::policy::{self, install_hook, DekoSyscallBody};
+use crate::policy::{self, inject_ifc_policy_engine, install_hook, DekoSyscallBody};
 use crate::snp::vmsa::VMSA;
 use crate::snp::{pvalidate, rmpadjust, validate_vaddr_region};
 use crate::{kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
 
-const _: () = assert!(core::mem::size_of::<DekoGuestLstarWriteReq>() == 0x20);
+const _: () = assert!(core::mem::size_of::<DekoGuestLstarWriteReq>() == 0x28);
 
 verus! {
 
@@ -41,7 +41,7 @@ exec static RMP_GUARD: AtomicBool = AtomicBool::new(false);
 
 global layout DekoGuestPValidateReq is size == 8;
 
-global layout DekoGuestLstarWriteReq is size == 32;
+global layout DekoGuestLstarWriteReq is size == 0x28;
 
 /// Represents a request structure for page validation operations.
 ///
@@ -68,6 +68,8 @@ pub struct DekoGuestLstarWriteReq {
     pub trampoline_gva: VirtAddr,
     /// The physical address of the trampoline code.
     pub trampoline_gpa: PhysAddr,
+    /// The physical address of the IFC policy engine blob.
+    pub blob_gpa: PhysAddr,
     /// Being returned.
     pub ok: u64,
 }
@@ -813,6 +815,17 @@ fn handle_deko_service_lstar_intercept(
             &req,
         );
 
+        if let Some(blob) = DEKO_POLICY_ENGINE_BLOB.get() {
+            if req.trampoline_gva.0 % PAGE_SIZE as u64 != 0 {
+                kerror!("MSR intercept: invalid trampoline gva for policy engine injection:", req.trampoline_gva => hex);
+                return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+            }
+            if req.trampoline_gva.0 <= VADDR_UPPER_MASK {
+                kerror!("MSR intercept: trampoline gva for policy engine injection not in kernel space:", req.trampoline_gva => hex);
+                return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+            }
+            inject_ifc_policy_engine(req.trampoline_gva, req.blob_gpa, blob)?;
+        }
         if !r {
             return Err(DekoGuestServError::FatalError);
         }

@@ -3,8 +3,9 @@ use deko_std::address::{create_paddr_range, PhysAddr};
 use deko_std::mem::{PAGE_SIZE, PERCPU_CAA_BASE};
 use deko_std::prelude::DekoPointsTo;
 use deko_std::ptr::DekoPPtr;
+use deko_std::sync::DekoSimpleOnceCell;
 use deko_std::wf::WellFormed;
-use deko_std::{deko_rwlock_read_atomic_data, trace_is_enabled};
+use deko_std::{deko_rwlock_read_atomic_data, trace_is_enabled, TrivialPredicate};
 use vstd::prelude::*;
 
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission, PERCPU_AREAS};
@@ -17,6 +18,13 @@ use crate::{kdebug, kerror, kinfo, kwarn};
 pub(crate) mod service;
 
 verus! {
+
+pub exec static DEKO_POLICY_ENGINE_BLOB: DekoSimpleOnceCell<&'static [u8]>
+    ensures
+        DEKO_POLICY_ENGINE_BLOB.wf(),
+{
+    DekoSimpleOnceCell::new(Ghost(()))
+}
 
 #[repr(C, packed)]
 #[derive(DekoDebug, Clone, Copy)]

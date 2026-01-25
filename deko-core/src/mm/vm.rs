@@ -550,6 +550,19 @@ impl TempMapping {
         }
     }
 
+    #[inline]
+    #[verifier::external_body]
+    #[verus_spec(
+        requires
+            self.wf(),
+            src.len() as u64 <= self.inner.end@ - self.inner.start@,
+    )]
+    pub fn copy_bytes_from(&self, src: &[u8]) {
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr(), self.inner.start.0 as *mut u8, src.len());
+        }
+    }
+
     /// Try to read a reference of type `T` from the temporary mapping.
     ///
     /// Note that there would no semantic checks for now (can be added later; though).

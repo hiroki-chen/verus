@@ -21,6 +21,7 @@ use deko_core::cpu::{
 };
 use deko_core::elf::ElfFile;
 use deko_core::fw::{load_acpi_tables, read_acpi_table};
+use deko_core::guest::DEKO_POLICY_ENGINE_BLOB;
 use deko_core::hal::set_is_stage2;
 use deko_core::logging::print_banner;
 use deko_core::mm::frame_allocator::DekoAllocatorApi;
@@ -45,6 +46,9 @@ use deko_std::prelude::*;
 use vstd::prelude::*;
 
 core::arch::global_asm!(include_str!("../monitor.S"), options(att_syntax));
+
+const POLICY_BLOB: &'static [u8] =
+    include_bytes!("../../../target/x86_64-snp-deko/debug/deko-ifc.bin");
 
 verus! {
 
@@ -487,6 +491,8 @@ fn deko_main(cpu_index: usize) {
 
         deko_core::imp::launch_fw(&igvm_params);
 
+        init_blob();
+
         proof_with!(Tracked(cpu_ctx_perm) => Tracked(mut new_perm));
         let serv_task = DekoRunnable::new(
             this_cpu,
@@ -524,6 +530,12 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
     loop {
     }
+}
+
+#[verifier::external_body]
+#[inline(always)]
+fn init_blob() {
+    DEKO_POLICY_ENGINE_BLOB.init(POLICY_BLOB);
 }
 
 } // verus!

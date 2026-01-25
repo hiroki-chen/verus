@@ -21,6 +21,15 @@ deko_bitflags! {
 
 verus! {
 
+// #[verifier::external_body]
+// #[verifier::external_type_specification]
+// pub struct ExUuid(pub Uuid);
+// /// Generate a simple 4-byte UUID for assigning ids to user applications.
+// #[inline(always)]
+// #[verifier::external_body]
+// pub fn generate_uuid() -> Uuid {
+//     uuid::Uuid::new_v4()
+// }
 /// A regular file opened by a shadowed user application.
 #[derive(DekoDebug)]
 pub struct DekoUserFile {

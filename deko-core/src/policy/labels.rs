@@ -3,6 +3,7 @@ use vstd::prelude::*;
 
 verus! {
 
+#[derive(DekoDebug)]
 pub struct DekoLabelId {
     pub id: u32,
 }
