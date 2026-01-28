@@ -416,7 +416,7 @@ impl<'a> ElfFile<'a> {
                     && vaddr@ % PAGE_SIZE == 0 && load_virt_end@ % PAGE_SIZE == 0 && base@ < vaddr@ < load_virt_end@ < u64::MAX);
             }
 
-            assume(ctx_perm == old(ctx_perm));  // FIX IT LATER.
+            assume(*ctx_perm == *old(ctx_perm));  // FIX IT LATER.
 
         }
 

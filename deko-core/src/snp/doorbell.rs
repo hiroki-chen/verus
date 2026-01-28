@@ -62,7 +62,6 @@ use crate::{die, kdebug, kerror, kinfo, kpanic_if, kwarn};
 
 extern "C" {
     // exclusive.
-    #[link_section = ".data"]
     pub static mut HV_DOORBELL_ADDR: usize;
 }
 

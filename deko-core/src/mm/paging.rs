@@ -4144,6 +4144,8 @@ impl PageTablePermission {
             let pte_lvl2 = self.get_pte(pte_path, 2);
             let pde_lvl1 = self.get_pte(pde_path, 1);
 
+            assert(pte_path.take(2).normalize() == path![a]);
+
             assert(pte_lvl2 == self.storage[path![a]].pte_perm);
             assert(pde_lvl1 == self.storage[path![a]].pte_perm);
             assert(pte_lvl2.is_present_pte_spec());

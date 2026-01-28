@@ -46,7 +46,7 @@ extern "C" {
 
     #[link_name = "snp_idle_halt"]
     #[allow(improper_ctypes)]
-    #[allow(improtper_ctypes_definitions)]
+    #[allow(improper_ctypes_definitions)]
     fn __snp_idle_halt(doorbell: *const doorbell::HVDoorbell);
 }
 
@@ -496,7 +496,7 @@ pub fn init_platform_end(
         old(ctx_perm).pgtable_perm.wf(),
         old(ctx_perm).ptr_perm.wf(),
     ensures
-        ctx_perm == old(ctx_perm),  /* fix later. */
+        *ctx_perm == *old(ctx_perm),  /* fix later. */
 {
     let debug_console_port = igvm_params.debug_serial_port as u16;
     crate::snp::logging::init_ghcb_logging(debug_console_port);
@@ -680,7 +680,7 @@ pub fn pvalidate(
         old(pgtable_perm).wf(),
         old(pgtable_perm).mapped(VirtAddr(vaddr)),
     ensures
-        old(pgtable_perm) == pgtable_perm,
+        *old(pgtable_perm) == *pgtable_perm,
 {
     let ret: u64;
     let rcx = if psize == PAGE_SIZE {
@@ -728,7 +728,7 @@ pub fn rmpadjust(
         flags.bits() & Rmp_ALL_BITS == flags.bits(),
         psize == PAGE_SIZE || psize == PAGE_SIZE_2M,
     ensures
-        old(pgtable_perm) == pgtable_perm,
+        *old(pgtable_perm) == *pgtable_perm,
 {
     let ret: u64;
 

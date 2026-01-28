@@ -33,7 +33,6 @@ use crate::snp::{
 use crate::{bits, kdebug, kerror, kinfo, kpanic_if, kunimplemented};
 
 extern "C" {
-    #[link_section = ".text"]
     #[allow(improper_ctypes)]
     #[allow(improper_ctypes_definitions)]
     fn switch_to_vmpl_unsafe(hv_doorbell: *const doorbell::HVDoorbell, target_vmpl: u32) -> bool;

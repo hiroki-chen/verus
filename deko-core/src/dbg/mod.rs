@@ -237,7 +237,7 @@ fn print_stack_frame(frame: StackFrame) {
         msg.push_str(if annotated { "#" } else { " #" });
     }
 
-    msg.push_str("\n");
+    let _ = msg.push_str("\n");
     print_str(msg.as_str());
 }
 

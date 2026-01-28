@@ -103,12 +103,6 @@ pub open spec fn binary_search_spec<'a, T: 'a>(
     }
 }
 
-pub assume_specification<T>[ <[T]>::first ](s: &[T]) -> (r: Option<&T>)
-    ensures
-        s.len() == 0 ==> r == Option::<&T>::None,
-        s.len() > 0 ==> r == Option::Some(&s@[0]),
-;
-
 /// Returns the index of the partition point according to the given predicate
 /// (the index of the first element of the second partition).
 ///

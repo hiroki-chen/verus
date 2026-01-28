@@ -69,11 +69,9 @@ extern "C" {
     /// When it set to true then the panic handler will be invoked, which then
     /// dumps all the registers and halts the CPU.
     #[link_name = "DEBUG"]
-    #[link_section = ".data"]
     pub static mut debug_hv: bool;
 
     #[link_name = "switch_debug"]
-    #[link_section = ".data"]
     static mut switch_debug: bool;
 }
 
@@ -187,10 +185,10 @@ pub(crate) fn generate_id() -> u64 {
     id
 }
 
-/// The predicate for the global run queue that:
-///
-/// - Ensures the run queue is well-formed.
-/// - Ensures its associated permission type is well-formed with respect to the run queue.
+// The predicate for the global run queue that:
+//
+// - Ensures the run queue is well-formed.
+// - Ensures its associated permission type is well-formed with respect to the run queue.
 with_atomic_pred! {
     DekoRunQueue,
     DekoRunQueuePermission,
