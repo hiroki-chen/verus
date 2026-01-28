@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet as Set, VecDeque};
 
 use anyhow::{Context, Result};
 use cargo_metadata::{Metadata, MetadataCommand, Package, PackageId};
@@ -41,7 +41,7 @@ pub struct MetadataIndex<'a> {
 pub struct MetadataIndexEntry<'a> {
     package: &'a Package,
     verus_metadata: VerusMetadata,
-    deps: BTreeMap<&'a str, &'a cargo_metadata::NodeDep>,
+    deps: BTreeMap<&'a PackageId, &'a cargo_metadata::NodeDep>,
 }
 
 impl<'a> MetadataIndex<'a> {
@@ -51,7 +51,7 @@ impl<'a> MetadataIndex<'a> {
         for node in &metadata.resolve.as_ref().unwrap().nodes {
             let mut deps = BTreeMap::new();
             for dep in &node.deps {
-                assert!(deps.insert(dep.name.as_str(), dep).is_none());
+                assert!(deps.insert(&dep.pkg, dep).is_none());
             }
             assert!(deps_by_package.insert(&node.id, deps).is_none());
         }
@@ -78,8 +78,20 @@ impl<'a> MetadataIndex<'a> {
         self.entries.get(id).unwrap()
     }
 
-    pub fn entries(&self) -> impl Iterator<Item = &MetadataIndexEntry<'a>> {
-        self.entries.values()
+    pub fn get_transitive_closure(&self, roots: Set<PackageId>) -> Set<PackageId> {
+        // Breadth-first traversal to collect transitive deps of `roots`
+        let mut visited = roots;
+        let mut queue = VecDeque::from_iter(visited.iter().cloned());
+        while let Some(id) = queue.pop_front() {
+            let entry = self.get(&id);
+            for dep in entry.deps.values() {
+                if !visited.contains(&dep.pkg) {
+                    visited.insert(dep.pkg.clone());
+                    queue.push_back(dep.pkg.clone());
+                }
+            }
+        }
+        visited
     }
 }
 
@@ -115,4 +127,34 @@ pub fn fetch_metadata(metadata_args: &[String]) -> Result<Metadata> {
     cmd.other_options(metadata_args.to_owned());
     let metadata = cmd.exec()?;
     Ok(metadata)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::{MockDep, MockPackage, MockWorkspace};
+
+    #[test]
+    fn metadata_index_duplicate_dep_names() {
+        let workspace = MockWorkspace::new()
+            .members([
+                MockPackage::new("serde-core").version("1.0.0").lib(),
+                MockPackage::new("serde").version("1.0.0").lib(),
+                MockPackage::new("consumer")
+                    .lib()
+                    .deps([MockDep::registry("serde-core", "1.0.0").alias("serde")])
+                    .target_deps(
+                        "cfg(any())",
+                        [MockDep::registry("serde", "1.0.0").alias("serde")],
+                    ),
+            ])
+            .materialize();
+
+        let manifest_path: String =
+            workspace.path().join("Cargo.toml").to_string_lossy().to_string();
+
+        let metadata = fetch_metadata(&["--manifest-path".to_string(), manifest_path]).unwrap();
+
+        let _index = MetadataIndex::new(&metadata).unwrap();
+    }
 }

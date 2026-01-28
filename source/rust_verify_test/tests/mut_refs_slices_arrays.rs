@@ -880,18 +880,20 @@ test_verify_one_file_with_options! {
     #[test] control_flow_ordering3 ["new-mut-ref"] => verus_code! {
         use vstd::prelude::*;
 
+        // Assignments and primtive-compound-assignments are evaluated RHS first!
+
         fn test() {
             let mut x: [[u64; 2]; 2] = [[0, 1], [2, 3]];
             let mut a = 0;
             x[0][a] = ({ a = a + 1; 5 });
-            assert(x[0][0] == 5 && x[0][1] == 1 && x[1][0] == 2 && x[1][1] == 3);
+            assert(x[0][0] == 0 && x[0][1] == 5 && x[1][0] == 2 && x[1][1] == 3);
         }
 
         fn fails() {
             let mut x: [[u64; 2]; 2] = [[0, 1], [2, 3]];
             let mut a = 0;
             x[0][a] = ({ a = a + 1; 5 });
-            assert(x[0][0] == 5 && x[0][1] == 1 && x[1][0] == 2 && x[1][1] == 3);
+            assert(x[0][0] == 0 && x[0][1] == 5 && x[1][0] == 2 && x[1][1] == 3);
             assert(false); // FAILS
         }
 
@@ -899,15 +901,120 @@ test_verify_one_file_with_options! {
             let mut x: [[u64; 2]; 2] = [[0, 1], [2, 3]];
             let mut a = 0;
             x[0][a] += ({ a = a + 1; 5 });
-            assert(x[0][0] == 5 && x[0][1] == 1 && x[1][0] == 2 && x[1][1] == 3);
+            assert(x[0][0] == 0 && x[0][1] == 6 && x[1][0] == 2 && x[1][1] == 3);
         }
 
         fn fails_assign_op() {
             let mut x: [[u64; 2]; 2] = [[0, 1], [2, 3]];
             let mut a = 0;
             x[0][a] += ({ a = a + 1; 5 });
-            assert(x[0][0] == 5 && x[0][1] == 1 && x[1][0] == 2 && x[1][1] == 3);
+            assert(x[0][0] == 0 && x[0][1] == 6 && x[1][0] == 2 && x[1][1] == 3);
             assert(false); // FAILS
+        }
+    } => Err(err) => assert_fails(err, 2)
+}
+
+test_verify_one_file_with_options! {
+    #[test] control_flow_ordering4 ["new-mut-ref"] => verus_code! {
+        use vstd::prelude::*;
+
+        fn test() {
+            let mut x: [[u64; 2]; 2] = [[0, 1], [2, 3]];
+            let mut a = 10;
+            x[0][({ a = 11; 0 })] = a;
+            assert(x[0][0] == 10 && x[0][1] == 1 && x[1][0] == 2 && x[1][1] == 3);
+        }
+
+        fn fails() {
+            let mut x: [[u64; 2]; 2] = [[0, 1], [2, 3]];
+            let mut a = 10;
+            x[0][({ a = 11; 0 })] = a;
+            assert(x[0][0] == 10 && x[0][1] == 1 && x[1][0] == 2 && x[1][1] == 3);
+            assert(false); // FAILS
+        }
+
+        fn test_assign_op() {
+            let mut x: [[u64; 2]; 2] = [[0, 1], [2, 3]];
+            let mut a = 10;
+            x[0][({ a = 11; 0 })] += a;
+            assert(x[0][0] == 10 && x[0][1] == 1 && x[1][0] == 2 && x[1][1] == 3);
+        }
+
+        fn fails_assign_op() {
+            let mut x: [[u64; 2]; 2] = [[0, 1], [2, 3]];
+            let mut a = 10;
+            x[0][({ a = 11; 0 })] += a;
+            assert(x[0][0] == 10 && x[0][1] == 1 && x[1][0] == 2 && x[1][1] == 3);
+            assert(false); // FAILS
+        }
+    } => Err(err) => assert_fails(err, 2)
+}
+
+test_verify_one_file_with_options! {
+    #[test] control_flow_ordering5 ["new-mut-ref"] => verus_code! {
+        #[allow(unreachable_code)]
+        #[verifier::exec_allows_no_decreases_clause]
+        fn test() {
+            let mut x: [[u64; 2]; 2] = [[0, 1], [2, 3]];
+            x[0][({
+                loop { }
+                0
+            })] = ({
+                5
+            });
+            assert(false);
+        }
+
+        #[allow(unreachable_code)]
+        #[verifier::exec_allows_no_decreases_clause]
+        fn test2() {
+            let mut x: [[u64; 2]; 2] = [[0, 1], [2, 3]];
+            x[0][({
+                0
+            })] = ({
+                loop { }
+                5
+            });
+            assert(false);
+        }
+
+        #[allow(unreachable_code)]
+        #[verifier::exec_allows_no_decreases_clause]
+        fn test3() {
+            let mut x: [[u64; 2]; 2] = [[0, 1], [2, 3]];
+            x[0][({
+                assert(false);
+                0
+            })] = ({
+                loop { }
+                5
+            });
+        }
+
+        #[allow(unreachable_code)]
+        #[verifier::exec_allows_no_decreases_clause]
+        fn test4() {
+            let mut x: [[u64; 2]; 2] = [[0, 1], [2, 3]];
+            x[0][({
+                assert(false); // FAILS
+                loop { }
+                0
+            })] = ({
+                5
+            });
+        }
+
+        #[allow(unreachable_code)]
+        #[verifier::exec_allows_no_decreases_clause]
+        fn test5() {
+            let mut x: [[u64; 2]; 2] = [[0, 1], [2, 3]];
+            x[0][({
+                loop { }
+                0
+            })] = ({
+                assert(false); // FAILS
+                5
+            });
         }
     } => Err(err) => assert_fails(err, 2)
 }
@@ -924,6 +1031,138 @@ test_verify_one_file_with_options! {
             *z = 5;
         }
     } => Err(err) => assert_fails(err, 1)
+}
+
+test_verify_one_file_with_options! {
+    #[test] control_flow_ordering_rhs_first_resolution_inf ["new-mut-ref"] => verus_code! {
+        use vstd::prelude::*;
+
+        fn test() {
+            let mut y = 100;
+            let y_ref = &mut y;
+
+            let mut x: [[u64; 2]; 2] = [[0, 1], [2, 3]];
+            x[0][({
+                assert(has_resolved(y_ref));
+                0
+            })] = ({
+                *y_ref = 101;
+                5
+            });
+            assert(y == 101);
+        }
+
+        fn test2() {
+            let mut y = 100;
+            let y_ref = &mut y;
+
+            let mut x: [[u64; 2]; 2] = [[0, 1], [2, 3]];
+            x[0][({
+                *y_ref = 101;
+                0
+            })] = ({
+                assert(has_resolved(y_ref)); // FAILS
+                5
+            });
+        }
+
+        fn test3() {
+            let mut y = 100;
+            let y_ref = &mut y;
+
+            let mut x: [[u64; 2]; 2] = [[0, 1], [2, 3]];
+            x[0][({
+                *y_ref = 101;
+                0
+            })] = ({
+                *y_ref = 102;
+                5
+            });
+            assert(y == 101);
+        }
+
+        fn fails3() {
+            let mut y = 100;
+            let y_ref = &mut y;
+
+            let mut x: [[u64; 2]; 2] = [[0, 1], [2, 3]];
+            x[0][({
+                *y_ref = 101;
+                0
+            })] = ({
+                *y_ref = 102;
+                5
+            });
+            assert(y == 101);
+            assert(false); // FAILS
+        }
+    } => Err(err) => assert_fails(err, 2)
+}
+
+test_verify_one_file_with_options! {
+    #[test] control_flow_ordering_rhs_first_resolution_inf_compound ["new-mut-ref"] => verus_code! {
+        use vstd::prelude::*;
+
+        fn test() {
+            let mut y = 100;
+            let y_ref = &mut y;
+
+            let mut x: [[u64; 2]; 2] = [[0, 1], [2, 3]];
+            x[0][({
+                assert(has_resolved(y_ref));
+                0
+            })] += ({
+                *y_ref = 101;
+                5
+            });
+            assert(y == 101);
+        }
+
+        fn test2() {
+            let mut y = 100;
+            let y_ref = &mut y;
+
+            let mut x: [[u64; 2]; 2] = [[0, 1], [2, 3]];
+            x[0][({
+                *y_ref = 101;
+                0
+            })] += ({
+                assert(has_resolved(y_ref)); // FAILS
+                5
+            });
+        }
+
+        fn test3() {
+            let mut y = 100;
+            let y_ref = &mut y;
+
+            let mut x: [[u64; 2]; 2] = [[0, 1], [2, 3]];
+            x[0][({
+                *y_ref = 101;
+                0
+            })] += ({
+                *y_ref = 102;
+                5
+            });
+            assert(y == 101);
+        }
+
+        fn fails3() {
+            let mut y = 100;
+            let y_ref = &mut y;
+
+            let mut x: [[u64; 2]; 2] = [[0, 1], [2, 3]];
+            x[0][({
+                *y_ref = 101;
+                0
+            })] += ({
+                *y_ref = 102;
+                5
+            });
+            assert(y == 101);
+            assert(false); // FAILS
+        }
+    } => Err(err) => assert_fails(err, 2)
 }
 
 test_verify_one_file_with_options! {
@@ -952,7 +1191,7 @@ test_verify_one_file_with_options! {
 
             assert(a == 10);
             assert(b == 11);
-            //assert(c == 12); // TODO(new_mut_ref)
+            assert(c == 12);
             assert(d == 13);
         }
     } => Ok(())
@@ -989,8 +1228,336 @@ test_verify_one_file_with_options! {
 
             assert(a == 10);
             assert(b == 11);
-            //assert(c == 12); // TODO(new_mut_ref)
+            assert(c == 12);
             assert(d == 13);
         }
     } => Ok(())
+}
+
+test_verify_one_file_with_options! {
+    #[test] slices_lib_first_last_mut ["new-mut-ref"] => verus_code! {
+        use vstd::prelude::*;
+
+        fn test_emp() {
+            let v: Vec<u64> = vec![];
+            let f = v.first();
+            assert(f === None);
+            let l = v.last();
+            assert(l === None);
+        }
+
+        fn test_non_emp() {
+            let v = vec![1, 2, 3];
+            let f = v.first();
+            assert(f === Some(&1));
+            let l = v.last();
+            assert(l === Some(&3));
+        }
+
+        fn test_emp_first_mut() {
+            let mut v: Vec<u64> = vec![];
+            let f = v.as_mut_slice().first_mut();
+            assert(f === None);
+            assert(v@ === seq![]);
+        }
+
+        fn test_emp_last_mut() {
+            let mut v: Vec<u64> = vec![];
+            let f = v.as_mut_slice().last_mut();
+            assert(f === None);
+            assert(v@ === seq![]);
+        }
+
+        fn test_non_emp_first_mut() {
+            let mut v: Vec<u64> = vec![1, 2, 3];
+            let f = v.as_mut_slice().first_mut();
+            assert(f.is_some());
+            let m = f.unwrap();
+            assert(*m == 1);
+            *m = 10;
+            assert(v@ === seq![10, 2, 3]);
+        }
+
+        fn test_non_emp_last_mut() {
+            let mut v: Vec<u64> = vec![1, 2, 3];
+            let f = v.as_mut_slice().last_mut();
+            assert(f.is_some());
+            let m = f.unwrap();
+            assert(*m == 3);
+            *m = 10;
+            assert(v@ === seq![1, 2, 10]);
+        }
+
+        fn fail_emp() {
+            let v: Vec<u64> = vec![];
+            let f = v.first();
+            assert(f === None);
+            let l = v.last();
+            assert(l === None);
+            assert(false); // FAILS
+        }
+
+        fn fail_non_emp() {
+            let v = vec![1, 2, 3];
+            let f = v.first();
+            assert(f === Some(&1));
+            let l = v.last();
+            assert(l === Some(&3));
+            assert(false); // FAILS
+        }
+
+        fn fail_emp_first_mut() {
+            let mut v: Vec<u64> = vec![];
+            let f = v.as_mut_slice().first_mut();
+            assert(f === None);
+            assert(v@ === seq![]);
+            assert(false); // FAILS
+        }
+
+        fn fail_emp_last_mut() {
+            let mut v: Vec<u64> = vec![];
+            let f = v.as_mut_slice().last_mut();
+            assert(f === None);
+            assert(v@ === seq![]);
+            assert(false); // FAILS
+        }
+
+        fn fail_non_emp_first_mut() {
+            let mut v: Vec<u64> = vec![1, 2, 3];
+            let f = v.as_mut_slice().first_mut();
+            assert(f.is_some());
+            let m = f.unwrap();
+            assert(*m == 1);
+            *m = 10;
+            assert(v@ === seq![10, 2, 3]);
+            assert(false); // FAILS
+        }
+
+        fn fail_non_emp_last_mut() {
+            let mut v: Vec<u64> = vec![1, 2, 3];
+            let f = v.as_mut_slice().last_mut();
+            assert(f.is_some());
+            let m = f.unwrap();
+            assert(*m == 3);
+            *m = 10;
+            assert(v@ === seq![1, 2, 10]);
+            assert(false); // FAILS
+        }
+    } => Err(err) => assert_fails(err, 6)
+}
+
+test_verify_one_file_with_options! {
+    #[test] slices_lib_split_at ["new-mut-ref"] => verus_code! {
+        use vstd::prelude::*;
+
+        fn test_split_at() {
+            let v: Vec<u64> = vec![1, 2, 3];
+            let (a, b) = v.split_at(2);
+            assert(a@ === seq![1, 2]);
+            assert(b@ === seq![3]);
+        }
+
+        fn test_split_at_end() {
+            let v: Vec<u64> = vec![1, 2, 3];
+            let (a, b) = v.split_at(3);
+            assert(a@ === seq![1, 2, 3]);
+            assert(b@ === seq![]);
+        }
+
+        fn test_split_at_out_of_bounds() {
+            let v: Vec<u64> = vec![1, 2, 3];
+            let (a, b) = v.split_at(4); // FAILS
+        }
+
+        fn test_split_at_mut() {
+            let mut v: Vec<u64> = vec![1, 2, 3];
+            let (a, b) = v.as_mut_slice().split_at_mut(2);
+            assert(a@ === seq![1, 2]);
+            assert(b@ === seq![3]);
+            a[1] = 20;
+            b[0] = 30;
+            assert(v@ === seq![1, 20, 30]);
+        }
+
+        fn test_split_at_mut_end() {
+            let mut v: Vec<u64> = vec![1, 2, 3];
+            let (a, b) = v.as_mut_slice().split_at_mut(3);
+            assert(a@ === seq![1, 2, 3]);
+            assert(b@ === seq![]);
+            a[1] = 20;
+            assert(v@ === seq![1, 20, 3]);
+        }
+
+        fn test_split_at_mut_out_of_bounds() {
+            let v: Vec<u64> = vec![1, 2, 3];
+            let (a, b) = v.split_at(4); // FAILS
+        }
+
+        fn fail_split_at() {
+            let v: Vec<u64> = vec![1, 2, 3];
+            let (a, b) = v.split_at(2);
+            assert(a@ === seq![1, 2]);
+            assert(b@ === seq![3]);
+            assert(false); // FAILS
+        }
+
+        fn fail_split_at_end() {
+            let v: Vec<u64> = vec![1, 2, 3];
+            let (a, b) = v.split_at(3);
+            assert(a@ === seq![1, 2, 3]);
+            assert(b@ === seq![]);
+            assert(false); // FAILS
+        }
+
+        fn fail_split_at_mut() {
+            let mut v: Vec<u64> = vec![1, 2, 3];
+            let (a, b) = v.as_mut_slice().split_at_mut(2);
+            assert(a@ === seq![1, 2]);
+            assert(b@ === seq![3]);
+            a[1] = 20;
+            b[0] = 30;
+            assert(v@ === seq![1, 20, 30]);
+            assert(false); // FAILS
+        }
+
+        fn fail_split_at_mut_end() {
+            let mut v: Vec<u64> = vec![1, 2, 3];
+            let (a, b) = v.as_mut_slice().split_at_mut(3);
+            assert(a@ === seq![1, 2, 3]);
+            assert(b@ === seq![]);
+            a[1] = 20;
+            assert(v@ === seq![1, 20, 3]);
+            assert(false); // FAILS
+        }
+    } => Err(err) => assert_fails(err, 6)
+}
+
+test_verify_one_file_with_options! {
+    #[test] slices_assign_resolving_basic ["new-mut-ref"] => verus_code! {
+        use vstd::prelude::*;
+
+        spec fn id<A>(a: A) -> A { a }
+
+        fn test_slice0(x: Box<[&mut u64]>)
+            requires x.len() > 0
+        {
+            let mut x = x;
+            let mut a = 5;
+
+            // In principle this is fine, but the current alg won't put it this early
+            // for index places.
+            assert(has_resolved(x[0])); // FAILS
+
+            x[0] = &mut a;
+        }
+
+        fn test_slice1(x: Box<[&mut u64]>)
+            requires x.len() > 0
+        {
+            let mut x = x;
+            let mut a = 5;
+            let ghost g = id(x[0]);
+            x[0] = &mut a;
+            assert(has_resolved(g));
+        }
+
+        fn test_slice2(x: Box<[[&mut u64; 2]]>)
+            requires x.len() > 0
+        {
+            let mut x = x;
+            let mut a = 5;
+            let ghost g = id(x[0][1]);
+            x[0][1] = &mut a;
+            assert(has_resolved(g));
+        }
+
+        fn test_slice_field(x: Box<[(&mut u64, &mut u64)]>)
+            requires x.len() > 0
+        {
+            let mut x = x;
+            let mut a = 5;
+            let ghost g = id(x[0].1);
+            x[0].1 = &mut a;
+            assert(has_resolved(g));
+        }
+
+        fn test_slice_field_fails(x: Box<[(&mut u64, &mut u64)]>)
+            requires x.len() > 0
+        {
+            let mut x = x;
+            let mut a = 5;
+            let ghost g = id(x[0].0);
+            x[0].1 = &mut a;
+            assert(has_resolved(g)); // FAILS
+        }
+
+        fn test_slice_field_fails2(x: Box<[(&mut u64, &mut u64)]>)
+            requires x.len() > 0
+        {
+            let mut x = x;
+            let mut a = 5;
+            let ghost g = id(x[0]);
+            x[0].1 = &mut a;
+            assert(has_resolved(g)); // FAILS
+        }
+
+        fn test_slice_field_fails3(x: Box<[(&mut u64, &mut u64)]>)
+            requires x.len() > 0
+        {
+            let mut x = x;
+            let mut a = 5;
+            let ghost g = id(x);
+            x[0].1 = &mut a;
+            assert(has_resolved(g)); // FAILS
+        }
+    } => Err(err) => assert_fails(err, 4)
+}
+
+test_verify_one_file_with_options! {
+    #[test] new_mut_ref ["new-mut-ref"] => verus_code! {
+        use vstd::prelude::*;
+
+        fn consume<A>(a: A) { }
+
+        fn test(a: &mut [u64]) {
+            // TODO(new_mut_ref): export an axiom so this succeeds
+            // (note: this might be tricky to do in a sound way, since the AIR encoding
+            // lets you assign anything to current?)
+            assert(a@.len() == fin(a)@.len()); // FAILS
+            consume(a);
+        }
+
+        fn test2(a: &mut Box<[u64]>) {
+            // This one must fail, though:
+            assert(a@.len() == fin(a)@.len()); // FAILS
+            consume(a);
+        }
+    } => Err(err) => assert_fails(err, 2)
+}
+
+test_verify_one_file_with_options! {
+    #[test] mut_ref_unsizing_coercion ["new-mut-ref"] => verus_code! {
+        use vstd::prelude::*;
+
+        fn test() {
+            let mut a: [u64; 3] = [0, 1, 2];
+            let a_ref: &mut [u64; 3] = &mut a;
+            let a_ref2: &mut [u64] = a_ref;
+
+            a_ref2[1] = 19;
+
+            assert(a@ === seq![0, 19, 2]);
+        }
+
+        fn fails() {
+            let mut a: [u64; 3] = [0, 1, 2];
+            let a_ref: &mut [u64; 3] = &mut a;
+            let a_ref2: &mut [u64] = a_ref;
+
+            a_ref2[1] = 19;
+
+            assert(a@ === seq![0, 19, 2]);
+            assert(false); // FAILS
+        }
+    } => Err(err) => assert_fails(err, 1)
 }

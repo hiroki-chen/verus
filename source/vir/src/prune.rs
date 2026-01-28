@@ -506,8 +506,7 @@ fn traverse_reachable(ctxt: &Ctxt, state: &mut State) {
                     ExprX::ArrayLiteral(..) if ctxt.assert_by_compute => {
                         reach_seq_funs(ctxt, state);
                     }
-                    ExprX::UnaryOpr(UnaryOpr::HasResolved(typ), _)
-                    | ExprX::AssumeResolved(_, typ) => {
+                    ExprX::UnaryOpr(UnaryOpr::HasResolved(typ), _) => {
                         if let Some(res) = &mut state.resolve_typs {
                             res.visit_type(typ);
                         }
@@ -549,7 +548,7 @@ fn traverse_reachable(ctxt: &Ctxt, state: &mut State) {
             .unwrap();
             let methods = reached_methods(
                 ctxt,
-                state.reached_types.iter().chain(vec![ReachedType::None].iter()).map(|t| (t, &f)),
+                state.reached_types.iter().chain([ReachedType::None].iter()).map(|t| (t, &f)),
             );
             reach_methods(ctxt, state, methods);
             continue;
@@ -624,7 +623,7 @@ fn traverse_reachable(ctxt: &Ctxt, state: &mut State) {
         }
         if let Some(a) = state.worklist_assoc_type_decls.pop() {
             let typs: Vec<ReachedType> =
-                state.reached_types.iter().chain(vec![ReachedType::None].iter()).cloned().collect();
+                state.reached_types.iter().chain([ReachedType::None].iter()).cloned().collect();
             for t in typs {
                 reach_assoc_type_impl(ctxt, state, &(t.clone(), a.clone()));
             }

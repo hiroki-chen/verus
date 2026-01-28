@@ -340,10 +340,16 @@ pub enum TriggerAnnotation {
 pub enum ModeCoercion {
     /// Mutable borrows (Ghost::borrow_mut and Tracked::borrow_mut) are treated specially by
     /// the mode checker when checking assignments.
+    /// (Only used outside new-mut-ref)
     BorrowMut,
-    /// All other cases are treated uniformly by the mode checker based on their op/from/to-mode.
-    /// (This includes Ghost::borrow, Tracked::get, etc.)
-    Other,
+    /// This operation behaves like a datatype constructor with a mode annotation
+    /// `from_mode` on its field.
+    /// (e.g., Tracked(...) is proof -> exec, Ghost(...) is spec -> exec.
+    /// Like with ordinary constructors, the input can be spec and if so, the whole thing is spec.
+    Constructor,
+    /// This behaves like a field-getter,
+    /// returning the contents of the Tracked or Ghost value.
+    Field,
 }
 
 /// Primitive 0-argument operations
@@ -392,6 +398,8 @@ pub enum UnaryOp {
     },
     /// Convert integer type to real type (SMT to_real operation)
     IntToReal,
+    /// Convert real type to integer type (SMT to_int operation, works like floor function)
+    RealToInt,
     /// Return raw bits of a float as an int
     FloatToBits,
     /// Operations that coerce from/to verus_builtin::Ghost or verus_builtin::Tracked
@@ -433,9 +441,22 @@ pub enum UnaryOp {
     /// May need coercion after casting a type argument
     CastToInteger,
     MutRefCurrent,
-    MutRefFuture,
+    MutRefFuture(MutRefFutureSourceName),
+    /// The `final` keyword. `*final(e)` should be replaced with `mut_ref_future(e)`
+    /// and `final` on its own is unsupported.
+    MutRefFinal,
+
     /// Length of an array or slice
     Length(ArrayKind),
+}
+
+/// Which builtin source name does this come from
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, ToDebugSNode)]
+pub enum MutRefFutureSourceName {
+    /// This comes from a direct use of the `mut_ref_future` built-in
+    MutRefFuture,
+    /// Simplified from `*final(e)`
+    Final,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord, ToDebugSNode)]
@@ -753,7 +774,9 @@ pub struct PatternBinding {
     pub name: VarIdent,
     pub by_ref: ByRef,
     pub typ: Typ,
-    pub mutable: bool,
+    /// Marked mutable at the source level? Use None for variables introduced in lowering passes.
+    /// TODO: This field can probably be removed.
+    pub user_mut: Option<bool>,
     /// True if the type of this variable is copy.
     /// This is used by resolution analysis; it is meaningless post-simplification.
     pub copy: bool,
@@ -982,7 +1005,8 @@ pub enum ExprX {
     Binary(BinaryOp, Expr, Expr),
     /// Special binary operation
     BinaryOpr(BinaryOpr, Expr, Expr),
-    /// Primitive multi-operand operation
+    /// Primitive multi-operand operation.
+    /// No short-circuiting: all expressions are evaluated unconditionally, and in order.
     Multi(MultiOp, Exprs),
     /// Quantifier (forall/exists), binding the variables in Binders, with body Expr
     Quant(Quant, VarBinders<Typ>, Expr),
@@ -1011,12 +1035,23 @@ pub enum ExprX {
     /// Manually supply triggers for body of quantifier
     WithTriggers { triggers: Arc<Vec<Exprs>>, body: Expr },
     /// Assign to local variable
-    /// init_not_mut = true ==> a delayed initialization of a non-mutable variable
     /// the lhs is assumed to be a memory location, thus it's not wrapped in Loc
+    ///
     /// Not used when new-mut-refs is enabled.
-    Assign { init_not_mut: bool, lhs: Expr, rhs: Expr, op: Option<BinaryOp> },
+    Assign { lhs: Expr, rhs: Expr, op: Option<BinaryOp> },
+    /// Assign to the given place.
+    ///
+    /// If `resolve` is set, then we also emit
+    /// `assume(has_resolved(place))` immediately before the mutation.
+    /// This flag may be set by resolution analysis.
+    ///
+    /// Note that the right-hand-side is evaluated BEFORE the left-hand-side (place).
+    /// See: [https://doc.rust-lang.org/reference/expressions/operator-expr.html#r-expr.assign.evaluation-order]
+    /// (Also note that this does not apply to overloaded compound assignment, which should
+    /// lower to a Call node instead.)
+    ///
     /// Used only when new-mut-refs is enabled.
-    AssignToPlace { place: Place, rhs: Expr, op: Option<BinaryOp> },
+    AssignToPlace { place: Place, rhs: Expr, op: Option<BinaryOp>, resolve: Option<Typ> },
     /// Reveal definition of an opaque function with some integer fuel amount
     Fuel(Fun, u32, bool),
     /// Reveal a string
@@ -1043,6 +1078,7 @@ pub enum ExprX {
     /// Loop (either "while", cond = Some(...), or "loop", cond = None), with invariants
     Loop {
         loop_isolation: bool,
+        allow_complex_invariants: bool,
         is_for_loop: bool,
         label: Option<String>,
         cond: Option<Expr>,
@@ -1085,11 +1121,6 @@ pub enum ExprX {
     ///
     /// Used only when new-mut-refs is enabled.
     TwoPhaseBorrowMut(Place),
-    /// Equivalent to `Assume(HasResolved(e))`. These are inserted by the resolution analysis
-    /// (resolution_inference.rs)
-    /// Used only when new-mut-refs is enabled.
-    /// TODO(new_mut_ref): this might be unused now; can be deleted
-    AssumeResolved(Expr, Typ),
     /// Indicates a move or a copy from the given place.
     /// These over-approximate the actual set of copies/moves.
     /// (That is, many reads marked Move or Copy should really be marked Spec).
@@ -1128,6 +1159,8 @@ pub enum ReadKind {
     Unused,
     /// Spec snapshot. (Not a move.)
     Spec,
+    /// Prophetic spec snapshot. (Not a move.)
+    SpecAfterBorrow,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToDebugSNode, Clone, Copy)]
@@ -1197,7 +1230,9 @@ pub struct ParamX {
     pub name: VarIdent,
     pub typ: Typ,
     pub mode: Mode,
-    /// An &mut parameter
+    /// Marked 'mut' at the source level?
+    pub user_mut: bool,
+    /// An &mut parameter (only used outside new-mut-ref)
     pub is_mut: bool,
     /// If the parameter uses a Ghost(x) or Tracked(x) pattern to unwrap the value, this is
     /// the mode of the resulting unwrapped x variable (Spec for Ghost(x), Proof for Tracked(x)).
