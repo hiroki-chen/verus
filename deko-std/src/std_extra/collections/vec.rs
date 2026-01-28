@@ -12,4 +12,9 @@ impl<T: WellFormed, A: core::alloc::Allocator> WellFormed for alloc::vec::Vec<T,
     }
 }
 
+pub assume_specification<T, A>[ alloc::vec::Vec::<T, A>::as_mut_ptr ](
+    v: &mut alloc::vec::Vec<T, A>,
+) -> *mut T where A: core::alloc::Allocator
+;
+
 } // verus!

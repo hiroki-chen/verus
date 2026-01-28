@@ -10,6 +10,7 @@ verus_builtin_macros = { workspace = true }
 
 deko-core = { workspace = true, features = ["alloc", "global_alloc_api"] }
 deko-std = { workspace = true, features = ["alloc"] }
+paste = "1.0.15"
 
 [package.metadata.verus]
 verify = true

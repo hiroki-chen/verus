@@ -17,7 +17,26 @@ pub assume_specification[ core::str::from_utf8 ](_0: &[u8]) -> core::result::Res
 
 #[verifier::external_type_specification]
 #[verifier::external_body]
+pub struct ExCStr(pub core::ffi::CStr);
+
+pub assume_specification[ core::ffi::CStr::to_str ](_0: &core::ffi::CStr) -> core::result::Result<
+    &str,
+    core::str::Utf8Error,
+>
+;
+
+pub assume_specification[ core::ffi::CStr::from_bytes_until_nul ](
+    _0: &[u8],
+) -> core::result::Result<&core::ffi::CStr, core::ffi::FromBytesUntilNulError>
+;
+
+#[verifier::external_type_specification]
+#[verifier::external_body]
 pub struct ExUtf8Error(core::str::Utf8Error);
+
+#[verifier::external_type_specification]
+#[verifier::external_body]
+pub struct ExFromBytesUntilNulError(core::ffi::FromBytesUntilNulError);
 
 impl<V: WellFormed, const N: usize> WellFormed for [V; N] {
     open spec fn wf(&self) -> bool {
@@ -78,6 +97,12 @@ pub open spec fn binary_search_spec<'a, T: 'a>(
         },
     }
 }
+
+pub assume_specification<T>[ <[T]>::first ](s: &[T]) -> (r: Option<&T>)
+    ensures
+        s.len() == 0 ==> r == Option::<&T>::None,
+        s.len() > 0 ==> r == Option::Some(&s@[0]),
+;
 
 /// Returns the index of the partition point according to the given predicate
 /// (the index of the first element of the second partition).

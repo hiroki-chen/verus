@@ -60,6 +60,15 @@ pub enum PageStateChangeOp {
     Unsmash,
 }
 
+// Currently VMPL3 is not used.
+pub const VMPL_GUEST_KERNEL: u32 = 0x2;
+
+pub const VMPL_GUEST_SECURE_APP: u32 = 0x1;
+
+pub const VMPL_GUEST_DEKO_MONITOR: u32 = 0x0;
+
+pub const VMPL_GUEST_IFC_POLICY_ENGINE: u32 = VMPL_GUEST_SECURE_APP;
+
 /// Illegal input parameters
 pub(crate) const PVALIDATE_FAIL_INPUT: u64 = 0x1;
 
@@ -113,6 +122,7 @@ impl Copy for RmpFlags {
 
 }
 
+// VMPL3 is currently not used.
 deko_bitflags_quick! {
     Rmp,
     vmpl0: { 0 },
@@ -121,6 +131,8 @@ deko_bitflags_quick! {
     vmpl3: { VMPL_LOW, VMPL_HIGH },
     vmsa: { BIT_VMSA, READ },
     rwx: { READ, WRITE, X_USER, X_SUPER },
+    rwx_guest_vmpl1: { VMPL_LOW, READ, WRITE, X_USER, X_SUPER },
+    rx_guest_vmpl1: { VMPL_LOW, READ, X_USER, X_SUPER },
     rwx_guest_vmpl2: { VMPL_HIGH, READ, WRITE, X_USER, X_SUPER },
     rx_guest_vmpl2: { VMPL_HIGH, READ, X_USER, X_SUPER },
 }

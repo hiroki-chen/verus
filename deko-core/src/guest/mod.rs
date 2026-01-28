@@ -339,55 +339,25 @@ pub fn handle_guest_exit(
     }
 }
 
-/// Returns a handle to the guest page table from the VMSA.
-///
-/// Since we create the virtual pointer out from the physical address
-/// stored in the VMSA, we need to create a temporary mapping to access it.
-/// This function thus also returns a backing [`TempMapping`] that holds
-/// the mapping alive to prevent dropping it too early.
-#[verifier::external_body]
+/// Temporarily maps the guest's page table into the monitor's address space
+/// so that we can walk the guest page tables.
+#[inline]
 #[verus_spec(r =>
-    with
-        Tracked(cpu_perm): Tracked<&DekoCpuCtxPermission>,
-        -> g_pgtable_perm: Tracked<Option<PageTablePermission>>,
     ensures
-        r matches Some((ptr, mapping)) ==> {
-            &&& g_pgtable_perm@ matches Some(g_pgtable_perm) && {
-                &&& g_pgtable_perm.wf()
-                &&& g_pgtable_perm.pgtable_perm.pptr() == ptr@
-                &&& g_pgtable_perm.private_bit == cpu_perm.ptr_perm.value().private_bit
-                &&& g_pgtable_perm.shared_bit == cpu_perm.ptr_perm.value().shared_bit
-                &&& g_pgtable_perm.mapping_space == cpu_perm.ptr_perm.value().kernel_mapping
-            }
-        },
+        r matches Ok(tm) ==> {
+            &&& tm.wf()
+            &&& tm.inner.end@ - tm.inner.start@ == PAGE_SIZE
+        }
 )]
-pub fn guest_page_table(cr3: u64) -> Option<(DekoPPtr<PageTable>, TempMapping)> {
-    if core::hint::unlikely(cr3 >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE) {
-        return {
-            proof_with!(|= Tracked(None::<PageTablePermission>));
-            None
-        };
+pub fn guest_page_table(cr3: u64) -> DekoGuestServResult<TempMapping> {
+    if core::hint::unlikely(cr3 >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE || cr3 % PAGE_SIZE != 0) {
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
-    match TempMapping::new(create_paddr_range(PhysAddr(cr3), 1)) {
-        Some(tm) => {
-            proof_with!(|= Tracked::assume_new());
-            Some(
-                (
-                    DekoPPtr(
-                        vstd::simple_pptr::PPtr(
-                            tm.inner.start.0 as usize,
-                            core::marker::PhantomData,
-                        ),
-                    ),
-                    tm,
-                ),
-            )
-        },
-        None => {
-            proof_with!(|= Tracked(None::<PageTablePermission>));
-            None
-        },
-    }
+    Ok(
+        TempMapping::new(create_paddr_range(PhysAddr(cr3), 1)).ok_or(
+            DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr),
+        )?,
+    )
 }
 
 } // verus!

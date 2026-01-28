@@ -121,6 +121,9 @@ prepare_syscall_body:
   movq     0(%rsp), %r11          // Original RFLAGS
   movq     %r11, 0x40(%rdx)        // Return
 
+  movq     %cr3, %rax
+  movq     %rax, 0x48(%rdx)        // Current CR3
+
 do_vmm_call:
   // Now prepare the SVSM call parameters.
   movabsq $0x400000001, %rax

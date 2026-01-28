@@ -30,10 +30,12 @@ compile_error!("Cannot be compiled against non x86_64 architecture!");
 #[cfg(all(feature = "tdx", feature = "snp"))]
 compile_error!("Cannot enable both TDX and SEV features at the same time!");
 
+pub mod attestation;
 pub mod boot;
 #[cfg(feature = "alloc")]
 pub mod collections;
 pub mod cpu;
+pub mod crypto;
 pub mod dbg;
 pub mod elf;
 pub mod fw;

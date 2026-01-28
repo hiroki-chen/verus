@@ -277,6 +277,7 @@ impl WellFormed for VirtualMemoryTemporary {
 /// This implements [`Drop`] to automatically unmap the mapping
 /// when it goes out of scope.
 #[must_use = "Temporary mappings must be used or they will be droppped immediately."]
+#[derive(DekoDebug)]
 pub struct TempMapping {
     pub inner: VaddrRange,
 }

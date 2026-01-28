@@ -46,6 +46,28 @@ pub fn pretty_pf_errno(errno: u64) {
     }
 }
 
+/// Called from VMPL1 -> VMPL1 exception handler for page faults.
+#[verifier::external_body]
+#[no_mangle]
+#[verus_spec(
+)]
+unsafe extern "C" fn deko_ifc_handler_page_fault(ctx: &mut X86ExceptionContext) {
+    // handle this.
+    // need to sanitize and forward to the guest OS for
+    // the guest to handle page faults.
+}
+
+/// Called from VMPL1 -> VMPL1 exception handler for NMI.
+#[verifier::external_body]
+#[no_mangle]
+#[verus_spec(
+
+)]
+unsafe extern "C" fn deko_ifc_handler_nmi(ctx: &mut X86ExceptionContext) {
+    // Option 1: Forward to the guest OS NMI handler? or we just ignore it here.
+    // Option 2: commit suicide.
+}
+
 #[verifier::external_body]
 #[no_mangle]
 #[verus_spec(

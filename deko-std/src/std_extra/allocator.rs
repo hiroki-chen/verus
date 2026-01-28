@@ -14,9 +14,8 @@ verus! {
 /// [`core::alloc::Allocator`].
 ///
 /// For further usages readers may refer to [`super::collections::hashmap`].
-#[verifier::external_body]
 #[verifier::reject_recursive_types(A)]
-pub struct AllocatorWrapper<A: core::alloc::Allocator>(A);
+pub struct AllocatorWrapper<A: core::alloc::Allocator>(pub A);
 
 #[verifier::external]
 unsafe impl<A: core::alloc::Allocator> allocator_api2::alloc::Allocator for AllocatorWrapper<A> {

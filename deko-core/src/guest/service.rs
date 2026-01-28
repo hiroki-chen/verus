@@ -27,13 +27,14 @@ use crate::mm::paging::{
 };
 use crate::mm::vm::TempMapping;
 use crate::mm::{check_within_guest_mmap, zero_page};
+use crate::policy::guest_paging::{GuestPageOffsetBase, GUEST_PAGE_OFFSET_BASE};
 use crate::policy::syscall::analysis_syscall;
 use crate::policy::{self, inject_ifc_policy_engine, install_hook, DekoSyscallBody};
 use crate::snp::vmsa::VMSA;
 use crate::snp::{pvalidate, rmpadjust, validate_vaddr_region};
 use crate::{kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
 
-const _: () = assert!(core::mem::size_of::<DekoGuestLstarWriteReq>() == 0x28);
+const _: () = assert!(core::mem::size_of::<DekoGuestLstarWriteReq>() == 0x30);
 
 verus! {
 
@@ -41,7 +42,7 @@ exec static RMP_GUARD: AtomicBool = AtomicBool::new(false);
 
 global layout DekoGuestPValidateReq is size == 8;
 
-global layout DekoGuestLstarWriteReq is size == 0x28;
+global layout DekoGuestLstarWriteReq is size == 0x30;
 
 /// Represents a request structure for page validation operations.
 ///
@@ -70,6 +71,8 @@ pub struct DekoGuestLstarWriteReq {
     pub trampoline_gpa: PhysAddr,
     /// The physical address of the IFC policy engine blob.
     pub blob_gpa: PhysAddr,
+    /// Guest  page offset base.
+    pub page_offset_base: VirtAddr,
     /// Being returned.
     pub ok: u64,
 }
@@ -755,6 +758,11 @@ fn handle_deko_service_lstar_intercept(
         let mut req = req.clone();
         let syscall_enter_addr = req.syscall_enter_addr.0;
 
+        if req.page_offset_base.0 % PAGE_SIZE as u64 != 0 || req.page_offset_base.0
+            < VADDR_UPPER_MASK {
+            kerror!("MSR intercept: invalid page offset base:", req.page_offset_base => hex);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        }
         if req.trampoline_gpa.0 % PAGE_SIZE as u64 != 0 {
             kerror!("MSR intercept: invalid trampoline gpa:", req.trampoline_gpa => hex);
             return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
@@ -768,6 +776,10 @@ fn handle_deko_service_lstar_intercept(
             return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
         }
         kinfo!("request is:", req);
+
+        GUEST_PAGE_OFFSET_BASE.init(
+            DekoAtomicData::new(GuestPageOffsetBase(req.page_offset_base.0)),
+        );
 
         let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
         let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
@@ -792,28 +804,18 @@ fn handle_deko_service_lstar_intercept(
             kerror!("MSR intercept: guest CR3 out of range:", guest_cr3);
             return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
         }
-        proof_with!(Tracked(&cpu_perm) => Tracked(guest_pgtable_perm));
-        let res = super::guest_page_table(guest_cr3);
-        if res.is_none() {
-            kerror!("MSR intercept: failed to obtain guest page table for CR3:", guest_cr3 => hex);
-            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy));
-        }
-        let (guest_pgtable, _mapping) = res.unwrap();
-
+        let guest_pgtable = guest_page_table(guest_cr3)?;
         // kinfo!("MSR intercept: guest is writing LSTAR to address:", syscall_enter_addr => hex);
         kinfo!("MSR intercept: guest CR3 is:", guest_cr3 => hex);
 
         let syscall_enter_addr = VirtAddr(syscall_enter_addr);
-        let tracked mut guest_pgtable_perm = guest_pgtable_perm.tracked_take();
-        let r = #[verus_spec(with Tracked(&mut guest_pgtable_perm))]
         policy::install_hook(
             guest_pgtable,
             syscall_enter_addr,
             cpu_borrow.private_bit,
             cpu_borrow.shared_bit,
-            cpu_borrow.kernel_mapping,
             &req,
-        );
+        )?;
 
         if let Some(blob) = DEKO_POLICY_ENGINE_BLOB.get() {
             if req.trampoline_gva.0 % PAGE_SIZE as u64 != 0 {
@@ -825,9 +827,7 @@ fn handle_deko_service_lstar_intercept(
                 return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
             }
             inject_ifc_policy_engine(req.trampoline_gva, req.blob_gpa, blob)?;
-        }
-        if !r {
-            return Err(DekoGuestServError::FatalError);
+
         }
         req.ok = 1;
         lstar_req_mapping.write_ref_at::<DekoGuestLstarWriteReq>(offset as usize, &req);
@@ -1016,7 +1016,7 @@ pub(super) fn handle_guest_exit_extend_service(
 ) -> DekoGuestServResult<()> {
     match req {
         DEKO_SERVICE_EXTEND_MSR_INTERCEPT => {
-            kinfo!("MSR intercept:", params);
+            kdebug!("MSR intercept:", params);
 
             proof_with!(Tracked(cpu_perm));
             handle_deko_service_msr_intercepts(params)

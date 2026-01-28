@@ -6,7 +6,7 @@ use deko_std::array::Array;
 use deko_std::bits::bit_u32_and_auto;
 use deko_std::boot::IgvmParams;
 use deko_std::mem::{PAGE_SIZE, PAGE_SIZE_2M, PERCPU_VMSA_BASE};
-use deko_std::prelude::VirtAddr;
+use deko_std::prelude::{VirtAddr, VADDR_UPPER_MASK};
 use deko_std::ptr::{addr_of_ref, DekoPPtr, DekoPointsTo};
 use deko_std::sync::DekoAtomicData;
 use deko_std::wf::WellFormed;
@@ -541,6 +541,47 @@ impl VMSA {
             // and does not try to use 'memcpy' or wide registers.
             core::ptr::write_unaligned(rax_field_ptr, value);
         }
+    }
+
+    /// Prepares the VMSA for a new user application by initializing
+    /// necessary fields.
+    ///
+    /// This function overwrites the system call handler for the new application.
+    /// Note that this function requires that the `vmpl2_vmsa` runs currently at
+    /// CPL3 so that we will not accidentally set up a VMSA that cannot be
+    /// entered due to privilege level issues.
+    #[inline(always)]
+    #[verifier::external_body]
+    #[verus_spec(
+        with
+            Tracked(ptr_perm): Tracked<&mut DekoPointsTo<Self>>,
+            Tracked(vmpl2_vmsa_perm): Tracked<&DekoPointsTo<Self>>,
+        requires
+            old(ptr_perm).wf(),
+            old(ptr_perm).is_init(),
+            old(ptr_perm).pptr() == ptr@,
+            vmpl2_vmsa_perm.wf(),
+            vmpl2_vmsa_perm.is_init(),
+            vmpl2_vmsa_perm.pptr() == vmpl2_vmsa@,
+            deko_ifc_handler@ >= VADDR_UPPER_MASK,
+            deko_ifc_handler@ % PAGE_SIZE_2M == 0,
+        ensures
+            ptr_perm.wf(),
+            ptr_perm.is_init(),
+            ptr_perm.pptr() == ptr@,
+    )]
+    pub fn prepare_application_vmsa(
+        ptr: DekoPPtr<Self>,
+        vmpl2_vmsa: DekoPPtr<Self>,
+        deko_ifc_handler: VirtAddr,
+    ) {
+        // Initializes all fields from the VMPL2 VMSA template.
+        unsafe {
+            core::ptr::copy(vmpl2_vmsa.addr() as *const Self, ptr.addr() as *mut Self, 1);
+        }
+
+        // We first overwrite the LSTAR field to point to the application syscall handler.
+        Self::set_lstar(ptr, deko_ifc_handler.0 as u64);
     }
 
     /// Disables the VMSA by clearing the SVME bit in the EFER register.

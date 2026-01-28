@@ -2217,6 +2217,29 @@ unsafe extern "C" fn ap_start() -> ! {
 
 func_ptr!(ap_start);
 
+#[inline(always)]
+#[verifier::external_body]
+pub fn rdrand64_step() -> [u8; 8] {
+    let mut val: u64;
+    let mut success = 0u8;
+
+    loop {
+        unsafe {
+            core::arch::asm!(
+                "rdrand {0}",
+                "setc {1}",
+                out(reg) val,
+                out(reg_byte) success,
+                options(nomem, nostack),
+            );
+        }
+
+        if success == 1 {
+            return val.to_le_bytes();
+        }
+    }
+}
+
 } // verus!
 #[macro_export]
 macro_rules! check_shared_cpu_idx {

@@ -46,6 +46,11 @@ extern "C" {
     fn int80_handler();
     fn irq_int_inj_handler();
     fn irq_ipi_handler();
+
+    fn deko_ifc_idt_handler_nmi();
+    fn deko_ifc_idt_handler_page_fault();
+    fn deko_ifc_idt_handler_default();
+    fn deko_ifc_irq_reflection();
 }
 
 func_ptr!(de_handler);
@@ -74,6 +79,11 @@ func_ptr!(sx_handler);
 func_ptr!(int80_handler);
 func_ptr!(irq_int_inj_handler);
 func_ptr!(irq_ipi_handler);
+
+func_ptr!(deko_ifc_idt_handler_nmi);
+func_ptr!(deko_ifc_idt_handler_page_fault);
+func_ptr!(deko_ifc_idt_handler_default);
+func_ptr!(deko_ifc_irq_reflection);
 
 /// The global interrupt descriptor table (IDT).
 ///
