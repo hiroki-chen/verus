@@ -5,10 +5,10 @@ use deko_std::prelude::{PhysAddr, VirtAddr};
 use vstd::prelude::*;
 
 use crate::guest::{DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode};
-use crate::policy::userapp::copy_from_user;
+use crate::policy::userapp::{copy_from_user, is_docker_request, IS_DOCKER_RUNNING};
 // use crate::policy::userapp::copy_from_guest_user;
 use crate::policy::DekoSyscallBody;
-use crate::{die, kdebug, kerror, kinfo, ktrace, vec};
+use crate::{die, kdebug, kerror, kinfo, ktrace, kwarn, vec};
 
 verus! {
 
@@ -1198,7 +1198,7 @@ pub const SYS_cachestat: u64 = 0x1c3;
 pub const SYS_fchmodat2: u64 = 0x1c4;
 
 #[verus_spec(
-
+    requires
 )]
 pub fn analysis_syscall(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()> {
     if core::hint::unlikely(syscall_body.rax as usize >= SYS_CALL_NAME.len()) {
@@ -1231,8 +1231,6 @@ pub fn analysis_syscall(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()
     requires
 )]
 fn do_sys_execve(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()> {
-    // For now, we just log the execve syscall.
-    // In the future, we may want to do more analysis here.
     kdebug!(
         "execve called with filename", syscall_body.rdi=>hex,
         "argv", syscall_body.rsi=>hex,
@@ -1255,12 +1253,28 @@ fn do_sys_execve(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()> {
 
     if let Ok(f) = core::ffi::CStr::from_bytes_until_nul(&filename) {
         if let Ok(fname_str) = f.to_str() {
-            kinfo!("execve filename", fname_str);
+            // Now check if this is `runc`/`docker` execve request.
+            //
+            // If so, we need to start our monitoring here.
+            // We just simply assume that the guest should provide
+            // us with a "canonical" docker path for us as
+            // passing a, e.g., soft-links, is not re-cognized
+            // by us and we will NOT generate the measurement
+            // accordingly, which leads to sensitive data not
+            // being sent from the user to the container.
+            if is_docker_request(fname_str) {
+                IS_DOCKER_RUNNING.init(());
+
+                kinfo!("Docker is running", fname_str);
+            } else {
+                kinfo!("Non-docker execve filename", fname_str, ", ignore");
+            }
         } else {
-            kinfo!("execve filename (invalid utf8)");
+            // This is rare but possible.
+            kwarn!("execve filename (invalid utf8)", &filename);
         }
     } else {
-        kinfo!("execve filename (non-utf8)");
+        kwarn!("execve filename (non-utf8)");
     }
 
     Ok(())

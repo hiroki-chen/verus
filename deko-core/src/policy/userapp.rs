@@ -5,6 +5,7 @@ use deko_std::prelude::collections::hashmap::HashMap;
 use deko_std::prelude::{VirtAddr, PAGE_SIZE};
 use deko_std::std_extra::allocator::AllocatorWrapper;
 use deko_std::std_extra::num::isize_abs;
+use deko_std::sync::DekoSimpleOnceCell;
 use deko_std::wf::WellFormed;
 use vstd::prelude::*;
 
@@ -17,7 +18,7 @@ use crate::guest::{DekoGuestServError, DekoGuestServResult, DekoGuestServResultC
 use crate::mm::frame_allocator::DekoAllocatorApi;
 use crate::mm::paging::{bit_not_in_addr_region, strip_confidentiality_bits, PageTable};
 use crate::mm::vm::TempMapping;
-use crate::{kdebug, kinfo, vec};
+use crate::{kdebug, kerror, kinfo, vec};
 
 deko_bitflags! {
     pub struct DekoFile: u32 {
@@ -28,6 +29,29 @@ deko_bitflags! {
 }
 
 verus! {
+
+pub exec static IS_DOCKER_RUNNING: DekoSimpleOnceCell<()>
+    ensures
+        IS_DOCKER_RUNNING.wf(),
+{
+    DekoSimpleOnceCell::new(Ghost(()))
+}
+
+pub const RUNC_NAME: &'static str = "runc";
+
+pub const CONTAINERD_NAME: &'static str = "containerd";
+
+pub const CONTAINERD_SHIM_NAME: &'static str = "containerd-shim";
+
+pub const DOCKER_OVERLAY: &'static str = "overlay";
+
+/// Checks whether the given file path is associated with Docker or container runtimes.
+#[inline]
+pub fn is_docker_request(path: &str) -> bool {
+    path.contains(RUNC_NAME) || path.contains(CONTAINERD_NAME) || path.contains(
+        CONTAINERD_SHIM_NAME,
+    )
+}
 
 /// A regular file opened by a shadowed user application.
 #[derive(DekoDebug)]
@@ -156,17 +180,8 @@ pub(crate) fn copy_from_user(
     buf: *mut u8,
     len: usize,
 ) -> DekoGuestServResult<usize> {
-    let offset = from.0 & 0xfff;
-    proof {
-        let from = from.0;
-
-        assert(offset <= PAGE_SIZE) by (bit_vector)
-            requires
-                offset == from & 0xfff,
-        ;
-        PAGE_SIZE == 0x1000;
-    }
-
+    let offset_4k = from.0 & 0xfff;
+    let offset_2m = from.0 & 0x1fffff;
     let from = VirtAddr(from.0 & (!0xfff));
 
     let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
@@ -197,10 +212,24 @@ pub(crate) fn copy_from_user(
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
     let final_mapping = mapping.final_mapping().unwrap();
+    let offset = if mapping.lvl == 0 {
+        offset_4k
+    } else {
+        offset_2m
+    };
+
+    let addr = final_mapping.inner.start.0.wrapping_add(offset);
+
+    // Pre-filter the length to avoid overflow.
+    //
+    // The guest will always prepare the argument in a way such that it will
+    // never cross the mapping boundary (i.e., page boundary).
+    let len = len.min(final_mapping.inner.end.0.wrapping_sub(addr) as usize);
 
     // SAFETY: We have established a temporary mapping to the user application's
     // memory space; so we can safely read from it.
-    unsafe { copy_from_user_same_vmpl((final_mapping.inner.start.0 + offset), buf, len) }
+    unsafe { copy_from_user_same_vmpl((final_mapping.inner.start.0.wrapping_add(offset)), buf, len)
+    }
 }
 
 /// Different from [`copy_from_user`], this function lives within the same VMPL and

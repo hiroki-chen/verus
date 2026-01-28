@@ -74,6 +74,8 @@ pub fn guest_phys_to_virt(phys_addr: PhysAddr) -> Option<VirtAddr> {
 
 #[derive(DekoDebug)]
 pub struct GuestMapping {
+    /// The level of the page table where the mapping was found.
+    pub lvl: usize,
     /// Temporary mappings used for guest page table walks.
     /// Should be dropped when done.
     ///
@@ -234,10 +236,16 @@ impl PageTable {
             // If we reached a huge page here we still need to return a mapping.
             Ok(
                 GuestMapping {
+                    lvl: 3,
                     temp_mappings: {
-                        proof_with!(Tracked(&entry_perm));
-                        let mapping = Page::from_guest_entry(entry, private_bit, shared_bit)?;
-                        vec![mapping]
+                        if PageTableEntry::is_huge_pte(entry, Tracked(&entry_perm))
+                            && PageTableEntry::is_present_pte(entry, Tracked(&entry_perm)) {
+                            proof_with!(Tracked(&entry_perm));
+                            let mapping = Page::from_guest_entry(entry, private_bit, shared_bit)?;
+                            vec![mapping]
+                        } else {
+                            vec![]
+                        }
                     },
                 },
             )
@@ -286,10 +294,16 @@ impl PageTable {
             // If we reached a huge page here we still need to return a mapping.
             Ok(
                 GuestMapping {
+                    lvl: 2,
                     temp_mappings: {
-                        proof_with!(Tracked(&entry_perm));
-                        let mapping = Page::from_guest_entry(entry, private_bit, shared_bit)?;
-                        vec![mapping]
+                        if PageTableEntry::is_huge_pte(entry, Tracked(&entry_perm))
+                            && PageTableEntry::is_present_pte(entry, Tracked(&entry_perm)) {
+                            proof_with!(Tracked(&entry_perm));
+                            let mapping = Page::from_guest_entry(entry, private_bit, shared_bit)?;
+                            vec![mapping]
+                        } else {
+                            vec![]
+                        }
                     },
                 },
             )
@@ -339,10 +353,16 @@ impl PageTable {
             // If we reached a huge page here we still need to return a mapping.
             Ok(
                 GuestMapping {
+                    lvl: 1,
                     temp_mappings: {
-                        proof_with!(Tracked(&entry_perm));
-                        let mapping = Page::from_guest_entry(entry, private_bit, shared_bit)?;
-                        vec![mapping]
+                        if PageTableEntry::is_huge_pte(entry, Tracked(&entry_perm))
+                            && PageTableEntry::is_present_pte(entry, Tracked(&entry_perm)) {
+                            proof_with!(Tracked(&entry_perm));
+                            let mapping = Page::from_guest_entry(entry, private_bit, shared_bit)?;
+                            vec![mapping]
+                        } else {
+                            vec![]
+                        }
                     },
                 },
             )
@@ -367,7 +387,7 @@ impl PageTable {
             g_page_table.inner.end@ - g_page_table.inner.start@ == PAGE_SIZE,
         ensures
             r matches Ok(gm) ==> {
-                &&& gm.temp_mappings@.len() == 1
+                &&& gm.temp_mappings@.len() <= 1
                 &&& gm.wf()
             }
     )]
@@ -389,10 +409,21 @@ impl PageTable {
         }
 
         let (entry, Tracked(entry_perm)) = this_page_table.0.index_as_ptr(idx);
-        proof_with!(Tracked(&entry_perm));
-        let mapping = Page::from_guest_entry(entry, private_bit, shared_bit)?;
 
-        Ok(GuestMapping { temp_mappings: vec![mapping] })
+        Ok(
+            GuestMapping {
+                lvl: 0,
+                temp_mappings: {
+                    if PageTableEntry::is_present_pte(entry, Tracked(&entry_perm)) {
+                        proof_with!(Tracked(&entry_perm));
+                        let mapping = Page::from_guest_entry(entry, private_bit, shared_bit)?;
+                        vec![mapping]
+                    } else {
+                        vec![]
+                    }
+                },
+            },
+        )
     }
 }
 
