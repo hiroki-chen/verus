@@ -1204,10 +1204,9 @@ pub fn analysis_syscall(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()
     if core::hint::unlikely(syscall_body.rax as usize >= SYS_CALL_NAME.len()) {
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
-    crate::kdebug!("analyzing syscall", SYS_CALL_NAME[syscall_body.rax as usize]);
-
     match syscall_body.rax {
         SYS_execve => do_sys_execve(syscall_body),
+        SYS_execveat => do_sys_execveat(syscall_body),
         // In June 2023, Google's security team reported that 60% of the exploits submitted
         // to their bug bounty program in 2022 were exploits of io_uring vulnerabilities.
         //
@@ -1221,6 +1220,27 @@ pub fn analysis_syscall(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()
         },
         _ => Ok(()),
     }
+}
+
+/// Unlike [`do_sys_execve`] which takes path to the binary, this system call
+/// is used to execute a binary relative to a directory file descriptor. This
+/// is used to mitigate the risk of CVE-2019-5736-like attacks.
+#[verus_spec(r =>
+    requires
+)]
+fn do_sys_execveat(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()> {
+    let fd = syscall_body.rdi;
+    let pathname_ptr = syscall_body.rsi;
+
+    if core::hint::unlikely(
+        pathname_ptr >= 0x8000_0000_0000 - 128 || pathname_ptr == 0 || syscall_body.cr3 % PAGE_SIZE
+            != 0 || syscall_body.cr3 >= 0x000f_ffff_ffff_f000u64 - PAGE_SIZE,
+    ) {
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    kinfo!("testtest");
+
+    analyze_execve(PhysAddr(syscall_body.cr3), VirtAddr(pathname_ptr), Some(fd))
 }
 
 /// This should be intercepted at the VMPL0 level.
@@ -1243,10 +1263,24 @@ fn do_sys_execve(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()> {
     ) {
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
+    analyze_execve(PhysAddr(syscall_body.cr3), VirtAddr(syscall_body.rdi), None)
+}
+
+#[verus_spec(r =>
+    requires
+        guest_cr3@ % PAGE_SIZE == 0,
+        guest_cr3@ + PAGE_SIZE < 0x000f_ffff_ffff_f000u64,
+        path@ + 128 < 0x8000_0000_0000,
+        path@ != 0,
+)]
+fn analyze_execve(guest_cr3: PhysAddr, path: VirtAddr, fd: Option<u64>) -> Result<
+    (),
+    DekoGuestServError,
+> {
     let mut filename = vec![0u8;128];
     copy_from_user(
-        PhysAddr(syscall_body.cr3),
-        VirtAddr(syscall_body.rdi),
+        guest_cr3,
+        path,
         filename.as_mut_ptr(),  // because we cannot unsize slice due to verus limitations.
         128,
     )?;

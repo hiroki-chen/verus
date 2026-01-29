@@ -116,8 +116,6 @@ pub fn init_hv_doorbell(
     unsafe {
         HV_DOORBELL_ADDR =
         addr_of!((*(ptr.addr() as *const DekoAtomicData<DekoPPtr<HVDoorbell>, HvDoorbellPtrPermission>)).data) as usize;
-
-        kinfo!("Initialized HV_DOORBELL_ADDR to", HV_DOORBELL_ADDR => hex);
     }
 }
 

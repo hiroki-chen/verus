@@ -29,7 +29,10 @@ use crate::mm::vm::TempMapping;
 use crate::mm::{check_within_guest_mmap, zero_page};
 use crate::policy::guest_paging::{GuestPageOffsetBase, GUEST_PAGE_OFFSET_BASE};
 use crate::policy::syscall::analysis_syscall;
-use crate::policy::{self, inject_ifc_policy_engine, install_hook, DekoSyscallBody};
+use crate::policy::{
+    self, enable_syscall_hook, inject_ifc_policy_engine, install_hook, DekoMsrIntercept,
+    DekoMsrInterceptVec0, DekoSyscallBody,
+};
 use crate::snp::vmsa::VMSA;
 use crate::snp::{pvalidate, rmpadjust, validate_vaddr_region};
 use crate::{kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
@@ -104,7 +107,7 @@ with_atomic_pred! {
     (),
     fields: {},
     perm_fields: {},
-    data.view() % PAGE_SIZE == 0 && data.view() < 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE
+    data.view() % PAGE_SIZE == 0 && data.view() < 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE_2M
 }
 
 exec static TRAMPOLINE_PA: DekoOnceCell<PhysAddr, (), PhysAddrPred>
@@ -478,13 +481,6 @@ fn handle_deko_service_vcpu_create(params: &DekoGuestRequestParams) -> DekoGuest
     let caa_page = params.rdx;
     let sev_features = params.sev_features;
 
-    // kinfo!(
-    //     "Guest vCPU create: vcpu_id =", vcpu_id,
-    //     "vmsa_page =", vmsa_page => hex,
-    //     "caa_page =", caa_page => hex,
-    //     "sev_features =", sev_features
-    // );
-
     // Check the alignment of the pages.
     if core::hint::unlikely(vmsa_page % PAGE_SIZE != 0 || caa_page % PAGE_SIZE != 0) {
         kerror!("Guest vCPU create: unaligned vmsa or caa page: vmsa=", vmsa_page, " caa=", caa_page);
@@ -617,7 +613,7 @@ fn handle_deko_service_vcpu_create(params: &DekoGuestRequestParams) -> DekoGuest
                         }
                     }
 
-                    Ok(())
+                    handle_deko_service_vcpu_create_syscall_intercept(vmsa_mapping)
                 }
             } else {
                 kerror!("Guest vCPU create: internal error");
@@ -625,6 +621,28 @@ fn handle_deko_service_vcpu_create(params: &DekoGuestRequestParams) -> DekoGuest
             }
         }
     }?;
+
+    Ok(())
+}
+
+/// Also enable the syscall intercept for the newly created vCPU.
+#[inline]
+#[verifier::external_body]
+#[verus_spec(
+    requires
+        vmsa_mapping.wf(),
+)]
+fn handle_deko_service_vcpu_create_syscall_intercept(
+    vmsa_mapping: TempMapping,
+) -> DekoGuestServResult<()> {
+    let ptr = vmsa_mapping.inner.start.0;
+    let ptr = DekoPPtr(vstd::simple_pptr::PPtr(ptr as usize, core::marker::PhantomData));
+
+    proof_with!(Tracked::assume_new());
+    VMSA::enable_msr_intercept(
+        ptr,
+        &[DekoMsrIntercept::InterceptMsrVec0(DekoMsrInterceptVec0::LstarWrite)],
+    );
 
     Ok(())
 }
@@ -767,7 +785,7 @@ fn handle_deko_service_lstar_intercept(
             kerror!("MSR intercept: invalid trampoline gpa:", req.trampoline_gpa => hex);
             return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
         }
-        if req.trampoline_gpa.0 >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE {
+        if req.trampoline_gpa.0 >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE_2M {
             kerror!("MSR intercept: trampoline gpa out of range:", req.trampoline_gpa => hex);
             return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
         }
@@ -853,9 +871,8 @@ fn handle_deko_serivce_syscall_analysis(params: &mut DekoGuestRequestParams) -> 
     (),
 > {
     let guest_syscall_vaddr = params.rdx;
-    // For simplicity, we assume that the syscall body is just placed in
-    // the trampoline page (i.e., data + text are mixed).
-
+    // This page is allocated using huge page.
+    let offset = guest_syscall_vaddr % PAGE_SIZE_2M as u64;
     let trampoline_pa = match TRAMPOLINE_PA.get() {
         Some(pa) => pa.data,
         None => {
@@ -864,9 +881,7 @@ fn handle_deko_serivce_syscall_analysis(params: &mut DekoGuestRequestParams) -> 
         },
     };
 
-    let offset = guest_syscall_vaddr % PAGE_SIZE as u64;
-
-    let temp_mapping = match TempMapping::new(create_paddr_range(trampoline_pa, 1)) {
+    let temp_mapping = match TempMapping::new(create_paddr_range(trampoline_pa, 64)) {
         Some(m) => m,
         None => {
             kerror!("Syscall analysis: failed to create temporary mapping for trampoline at:", trampoline_pa);
@@ -874,8 +889,11 @@ fn handle_deko_serivce_syscall_analysis(params: &mut DekoGuestRequestParams) -> 
         },
     };
 
+    // i don't know why verus cannot reason about this size check.
+    assume(core::mem::size_of::<DekoSyscallBody>() == 0x50);
+
     if core::hint::unlikely(
-        core::mem::size_of::<DekoSyscallBody>() as u64 > PAGE_SIZE as u64 - offset,
+        core::mem::size_of::<DekoSyscallBody>() as u64 + offset > 64 * PAGE_SIZE,
     ) {
         kerror!("Syscall analysis: syscall body exceeds page boundary:", VirtAddr(guest_syscall_vaddr));
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));

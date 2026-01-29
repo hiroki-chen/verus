@@ -13,6 +13,11 @@
 //     (likely allocated via memblock or vmalloc) and mapped to a new virtual address.
 // ============================================================================
 
+.equ MAX_CPUS,             128
+.equ PER_CPU_STACK_SIZE,   0x100
+.equ SYSCALL_BODY_SIZE,    0x50
+.equ USER_STACK_SAVE_SIZE, 0x8
+
 .section .data
 .global deko_trampoline_start
 .global deko_trampoline_end
@@ -26,31 +31,49 @@ deko_trampoline_start:
   ja     continue_analysis
 
   btq    %rax, filter_bitmap(%rip)
-  jc     back_to_linux
+  jnc    back_to_linux
 
 continue_analysis:
-  // --------------------------------------------------------------------------
-  // 1. Syscall Entry Prelude
-  // --------------------------------------------------------------------------
-  // The 'syscall' instruction disables interrupts and switches to Ring 0, but
-  // it leaves the GS base pointing to User GS. We must switch to Kernel GS
-  // immediately to access per-cpu data (even if we don't fully use it yet).
-  swapgs
+get_cpu_id:
+  stac
 
-  // --------------------------------------------------------------------------
-  // 2. Stack Switching (Critical for Safety)
-  // --------------------------------------------------------------------------
-  // We cannot trust the user's stack (RSP) for sensitive operations, and we
-  // cannot yet use the standard Linux kernel stack because we haven't jumped
-  // to the main kernel entry point yet.
+  pushq  %r15
+  pushq  %r14
+  pushq  %r13
+  pushq  %r12
+  pushq  %rcx
+  pushq  %rdx
+  pushq  %rax
 
+  rdtscp
+
+  movq   %rcx, %r15
+
+  popq   %rax
+  popq   %rdx
+  popq   %rcx
+
+  clac
+
+prepare_syscall:
+
+  // Calculate the offset to the per-CPU storage areas.
+  // Each CPU has its own dedicated stack and syscall body area.
+  movq    %r15, %r14
+  shlq    $3, %r14                     // Multiply by 8 (size of each entry)
+  leaq    user_stack(%rip), %r13
+  addq    %r14, %r13                   // r13 = &deko_stack
   // Save the User RSP to our local storage using RIP-relative addressing.
   // This allows us to restore it later before handing control back to Linux.
-  movq    %rsp, user_stack(%rip)
+  movq    %rsp, (%r13)            // Save User RSP
 
+  movq    %r15, %r14
+  imulq   $PER_CPU_STACK_SIZE, %r14    // Offset = CPU_ID * PER_CPU_STACK_SIZE
+  leaq    deko_stack_bottom(%rip), %r13
+  addq    %r14, %r13                   // r13 = &deko_stack[CPU_ID]
+  addq    $PER_CPU_STACK_SIZE, %r13   // Point to top of stack
   // Switch RSP to our temporary private stack located within this page.
-  // 'leaq' calculates the absolute address of 'deko_stack_top' at runtime.
-  leaq    deko_stack_top(%rip), %rsp
+  movq    %r13, %rsp
 
   // Align the stack to 16 bytes.
   // The x86-64 System V ABI requires the stack to be 16-byte aligned before
@@ -96,9 +119,12 @@ prepare_syscall_body:
   xorq     %rdx, %rdx  // Clear RDX for use as pointer
   // Clear the syscall body area first (optional, for safety).
   leaq     deko_syscall_body(%rip), %rdx  // Pointer to syscall body
+  movq     %r15, %r14
+  imulq    $SYSCALL_BODY_SIZE, %r14          // Offset = CPU_ID * SYSCALL_BODY_SIZE
+  addq     %r14, %rdx                        // rdx = &deko_syscall_body[CPU_ID]
   movq     %rdx, %rdi
   movq     $0x0, %rax
-  movq     $0x50, %rcx               // Size of syscall body (80 bytes)
+  movq     $SYSCALL_BODY_SIZE, %rcx               // Size of syscall body (80 bytes)
   rep stosb
 
   movq     24(%rsp), %rax                 // Syscall number
@@ -165,14 +191,20 @@ do_vmm_call:
   popq     %rax
   popq     %rdi
 
-  // Restore the User Stack Pointer from our local storage.
-  movq     user_stack(%rip), %rsp
+  // Restore the original User RSP from our local storage.
+  movq    %r15, %r14
+  shlq    $3, %r14                     // Multiply by 8 (size
+  leaq    user_stack(%rip), %r13
+  addq    %r14, %r13                   // r13 = &user_stack
 
-  // Restore the GS base to User GS.
-  // We do this because the Linux kernel entry point (stored in deko_trampoline_data_entry)
-  // expects to start with SWAPGS immediately. We must put the state back exactly
-  // as it was when 'syscall' triggered.
-  swapgs
+  movq    (%r13), %rsp         // Restore User RSP
+
+  stac
+  popq    %r12
+  popq    %r13
+  popq    %r14
+  popq    %r15
+  clac
 
 back_to_linux:
   // --------------------------------------------------------------------------
@@ -195,36 +227,50 @@ back_to_linux:
 deko_trampoline_data_entry:
   .quad 0x0    // [Runtime Patch] C code writes the original LSTAR address here.
 
+.align 64
+// Bitmap to filter syscalls (0-255) that do not need analysis.
+filter_bitmap:
+  // [0-63]: execve (59) -> 0x0800000000000000
+  .quad 0x0800000000000000
+  
+  // [64-127]:  0
+  .quad 0x0000000000000000
+  
+  // [128-191]:  0
+  .quad 0x0000000000000000
+  
+  // [192-255]:  0
+  .quad 0x0000000000000000
+  
+  // [256-319]:  0
+  .quad 0x0000000000000000
+  
+  // [320-383]:  execveat (322) -> Bit 2 -> 0x4
+  .quad 0x0000000000000004
+
+  // [384-447]:  0
+  .quad 0x0000000000000000
+
+  // [448-511]:  0
+  .quad 0x0000000000000000
+
+  .quad 0x0
+  .quad 0x0
+
 deko_trampoline_end:
 
 .align 8
 user_stack:
-  .quad 0x0    // [Runtime Storage] We save the user's RSP here temporarily.
+  .fill MAX_CPUS * USER_STACK_SAVE_SIZE, 1, 0x0
+  // [Runtime Storage] We save the user's RSP here temporarily.
 deko_syscall_body:
-  .fill 0x50, 1, 0x0 
-.align 64
-// Bitmap to filter syscalls (0-255) that do not need analysis.
-filter_bitmap:
-  // [0-63]: getpid(39) -> 1 | 2 | (1<<39)
-  .quad 0x0000008000000000
-  // [64-127]: 
-  .quad 0x0000594000000001
-  // [128-191]: empty
-  .quad 0x0400000000000000
-  // [192-255]: clock_gettime(228) -> 1 << (228-192)
-  .quad 0x0000031004000400
-  // [256-319]: 
-  .quad 0x400000080200C040
-  .quad 0x0000000000001000
-
-  .quad 0x0
-  .quad 0x0
+  .fill MAX_CPUS * SYSCALL_BODY_SIZE, 1, 0x0 
 
 .align 16
 deko_stack_bottom:
   // Reserve 4KB (0x1000 bytes) for our temporary stack.
   // The stack grows downwards (from High address to Low address).
-  .fill 0x1000, 1, 0x0
+  .fill MAX_CPUS * PER_CPU_STACK_SIZE, 1, 0x0
 
 deko_stack_top:
   // The RSP will point here initially.

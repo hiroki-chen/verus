@@ -32,7 +32,8 @@ test-collections = "xtest collections"
 # TODO: Fork another version. This will download unncessary git submodules recursively.
 install-igvmbuilder = "install --git https://github.com/coconut-svsm/svsm.git igvmbuilder"
 
-bootstrap-verus = "xtask bootstrap-verus"
+# For some reason the latest version does not work well on our end.
+bootstrap-verus = "xtask bootstrap-verus --commit b5f006ea513babdb608ae4d6db646d2fd5e75fc9"
 bootstrap-qemu = "xtask bootstrap-qemu"
 bootstrap-ovmf = "xtask bootstrap-ovmf"
 

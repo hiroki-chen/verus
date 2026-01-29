@@ -42,6 +42,8 @@ extern "C" {
 
 verus! {
 
+global layout DekoSyscallBody is size == 0x50;
+
 /// The policy engine is responsible for enforcing security policies.
 #[derive(DekoDebug)]
 pub struct DekoPolicyEngine {}
@@ -283,31 +285,38 @@ pub fn install_hook(
     shared_bit: u64,
     req: &DekoGuestLstarWriteReq,
 ) -> DekoGuestServResult<()> {
-    if req.trampoline_gva.0 < VADDR_UPPER_MASK || req.trampoline_gpa.0 % PAGE_SIZE != 0
-        || req.trampoline_gpa.0 >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE_2M {
-        // Guest trampoline virtual address must be in the higher half
-        // of the address space.
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-    }
-    let g_trampoline_mapping = PageTable::walk_lvl3_guest(
-        &guest_pgtable,
-        req.trampoline_gva,
-        private_bit,
-        shared_bit,
-    )?;
+    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    let id = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).cpu_id;
 
-    if g_trampoline_mapping.temp_mappings.len() <= 1 || g_trampoline_mapping.temp_mappings.len()
-        > 3 {
-        // We need at least two levels of page table mappings.
-        // LEVEL1 => HUGE and LEVEL0 => NORMAL
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    if id == 0 {
+        if req.trampoline_gva.0 < VADDR_UPPER_MASK || req.trampoline_gpa.0 % PAGE_SIZE != 0
+            || req.trampoline_gpa.0 >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE_2M {
+            // Guest trampoline virtual address must be in the higher half
+            // of the address space.
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        }
+        let g_trampoline_mapping = PageTable::walk_lvl3_guest(
+            &guest_pgtable,
+            req.trampoline_gva,
+            private_bit,
+            shared_bit,
+        )?;
+
+        if g_trampoline_mapping.temp_mappings.len() <= 1 || g_trampoline_mapping.temp_mappings.len()
+            > 3 {
+            // We need at least two levels of page table mappings.
+            // LEVEL1 => HUGE and LEVEL0 => NORMAL
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        }
+        let guest_trampoline_frame = g_trampoline_mapping.final_mapping().unwrap();
+        move_to_guest(guest_trampoline_frame, syscall_enter_addr)?;
+
+        // And then we lock down the guest syscall entry page
+        g_trampoline_mapping.lock_translation_path()?;
     }
-    let guest_trampoline_frame = g_trampoline_mapping.final_mapping().unwrap();
-    move_to_guest(guest_trampoline_frame, syscall_enter_addr)?;
     finish_install_hook(req.trampoline_gva);
 
-    // And then we lock down the guest syscall entry page
-    g_trampoline_mapping.lock_translation_path()
+    Ok(())
 }
 
 #[verus_spec()]
