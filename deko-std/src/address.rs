@@ -975,7 +975,7 @@ impl WellFormed for VirtAddr {
 /// // Direct construction
 /// let paddr2 = PhysAddr(0x1234_5678_9ABC_DEF0);
 /// ```
-#[derive(Eq, Clone, Copy, Debug, Default, DekoDebug)]
+#[derive(Eq, Clone, Copy, Debug, Default, DekoDebug, Hash)]
 #[repr(transparent)]
 pub struct PhysAddr(
     #[deko(hex)]

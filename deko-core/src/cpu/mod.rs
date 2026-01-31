@@ -1380,7 +1380,8 @@ impl DekoCpuCtx {
             die("VMSA physical address translation failed");
         };
 
-        // This is problematic; we cannot have a fallback here.
+        let paddr = PhysAddr(paddr.0.wrapping_add(vmsa.idx as u64 * PAGE_SIZE));
+
         let Some(cr3) = virt_to_phys_checked(
             private_bit,
             shared_bit,
@@ -1398,6 +1399,8 @@ impl DekoCpuCtx {
             cr3.0,
             &cpu_borrow.tss,
         );
+
+        kinfo!("Populating the VMSA from initial context");
 
         #[verus_spec(with Tracked(&mut vmsa_perm))]
         let sev_features = vmsa.init_from(&init_ctx);
@@ -2097,6 +2100,8 @@ pub fn start_application_processor(which: &PerCpuShared) {
     assume(pgtable_perm.wf());  // prove this later.
 
     // Allocate context for this cpu.
+    kinfo!("Setting up CPU context for AP: ", which.apic_id);
+
     proof_with!(Tracked(pgtable_perm) => Tracked(mut cpu_perm));
     let cpu_ctx = DekoCpuCtx::setup_cpu(
         init_pgtable,
@@ -2107,12 +2112,14 @@ pub fn start_application_processor(which: &PerCpuShared) {
         &DEKO_FRAME_ALLOCATOR_FULL,
     );
 
-    // Move below code into `crate::imp``.
+    kinfo!("Allocating VMSA for AP: ", which.apic_id);
     let (vmsa, sev_features) = DekoCpuCtx::allocate_deko_vmsa(
         cpu_ctx,
         Tracked(&mut cpu_perm),
         cpu_entry,
     );
+
+    kinfo!("VMSA allocated at physical address: ", vmsa => hex);
 
     // Now invoke the ap creation routine.
     let (ghcb, Tracked(ghcb_perm)) = current_ghcb();
@@ -2122,6 +2129,7 @@ pub fn start_application_processor(which: &PerCpuShared) {
     kdebug!("  vmsa: ", vmsa);
     kdebug!("  sev_features: ", sev_features);
 
+    kinfo!("Invoking AP creation for AP: ", which.apic_id);
     GuestHostCommunicationBlock::ap_create(
         ghcb,
         Tracked(ghcb_perm),

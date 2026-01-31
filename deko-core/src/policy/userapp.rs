@@ -1,19 +1,21 @@
 use deko_macros::DekoDebug;
 use deko_std::address::{create_paddr_range, PhysAddr, VaddrRange};
-use deko_std::deko_bitflags;
 use deko_std::prelude::collections::hashmap::HashMap;
 use deko_std::prelude::{VirtAddr, PAGE_SIZE};
 use deko_std::std_extra::allocator::AllocatorWrapper;
 use deko_std::std_extra::num::isize_abs;
-use deko_std::sync::DekoSimpleOnceCell;
+use deko_std::sync::{DekoAtomicData, DekoSimpleOnceCell, DekoSimpleRwLock};
 use deko_std::wf::WellFormed;
+use deko_std::{deko_bitflags, TrivialPredicate};
 use vstd::prelude::*;
 
 use crate::collections::Vec;
+use crate::cpu::irq::IrqSafeLockGuard;
 use crate::cpu::regs::no_smap_zone;
-use crate::cpu::task::generate_id;
+use crate::cpu::task::{generate_id, DekoRunnableState};
 use crate::cpu::DekoCpuCtx;
 use crate::crypto::aes::aes_gcm_256_key_gen;
+use crate::guest::service::DekoNewAppReq;
 use crate::guest::{DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode};
 use crate::mm::frame_allocator::DekoAllocatorApi;
 use crate::mm::paging::{bit_not_in_addr_region, strip_confidentiality_bits, PageTable};
@@ -29,6 +31,35 @@ deko_bitflags! {
 }
 
 verus! {
+
+pub exec static HOST_MNT_NS_ID: DekoSimpleOnceCell<u64>
+    ensures
+        HOST_MNT_NS_ID.wf(),
+{
+    DekoSimpleOnceCell::new(Ghost(()))
+}
+
+/// Tracks all currently running container runtimes inside the guest VM.
+/// The identifiers are the physical addresses of their main thread's CR3.
+pub exec static RUNNING_CONTAINER_RUNTIME: DekoSimpleRwLock<
+    Option<HashMap<PhysAddr, (), DekoAllocatorApi>>,
+    IrqSafeLockGuard,
+>
+    ensures
+        RUNNING_CONTAINER_RUNTIME.wf(),
+{
+    let r = DekoSimpleRwLock::new(
+        DekoAtomicData::new(None),
+        IrqSafeLockGuard {  },
+        Ghost(TrivialPredicate::new()),
+    );
+
+    proof {
+        use_type_invariant(&r);
+    }
+
+    r
+}
 
 pub exec static IS_DOCKER_RUNNING: DekoSimpleOnceCell<()>
     ensures
@@ -93,10 +124,43 @@ impl WellFormed for DekoUserAppResource {
     }
 }
 
-/// A shadowed user application running inside the guest VM.
+/// A shadowed user application (mimicking task_struct) running inside the guest VM.
+///
+/// This structure bridges the gap between hardware reality (CR3) and
+/// Linux logical abstraction (PID, Comm, Namespaces).
+#[derive(DekoDebug)]
 pub struct DekoUserApp {
+    /// The Page Table Base Address (CR3).
+    /// In a non-KPTI environment, this is the ultimate, spoof-proof identifier
+    /// for the memory context of this application.
+    /// Maps to: CPU register CR3 / task_struct->mm->pgd
+    pub cr3: PhysAddr,
+    /// The Process ID seen by the Guest Kernel.
+    /// Essential for correlating with sys_wait4, logs, and user tools.
+    /// Maps to: task_struct->pid
+    pub pid: u32,
+    /// The Thread Group ID.
+    /// Essential for handling `sys_exit_group` (kill all threads).
+    /// If tgid == pid, this is the main thread.
+    /// Maps to: task_struct->tgid
+    pub tgid: u32,
+    /// The Parent's PID.
+    /// Used to reconstruct the process tree.
+    /// E.g., Identify if this process was spawned by `runc` or `containerd`.
+    /// Maps to: task_struct->real_parent->pid
+    pub parent_pid: u32,
+    /// Container ID / Namespace Hash.
+    /// If you track namespaces, this identifies the "Sandbox".
+    /// 0 usually means Host Namespace.
+    /// Maps to: Hash of (task_struct->nsproxy->mnt_ns)
+    pub container_id: u64,
+    /// User ID (Effective UID).
+    /// Used for basic privilege checks (is this root?).
+    /// Maps to: task_struct->cred->euid
+    pub uid: u32,
     /// The unique identifier for this user application.
     pub id: u64,
+    // Deko Security Extensions ( Your Custom Fields )
     /// Opened resources associated with this user application.
     ///
     /// These are typically file descriptors mapped to files or sockets.
@@ -127,28 +191,26 @@ impl WellFormed for DekoUserApp {
 
 #[verus_verify]
 impl DekoUserApp {
-    /// Creates a new [`DekoUserApp`] with a unique id, an empty set of opened files,
-    /// and a randomly generated AES-GCM-256 key.
-    #[verus_spec(r =>
-        ensures
-            r.wf(),
-    )]
-    pub fn new() -> Self {
-        let id = generate_id();
-
-        Self {
-            id,
-            opened_files: HashMap::new_in(AllocatorWrapper(DekoAllocatorApi {  })),
-            key: {
-                let mut key = [0u8;32];
-                aes_gcm_256_key_gen(&mut key);
-                key
-            },
-            occupied_regions: vec![],
-            measurement: [0u8;48],
-        }
-    }
-
+    // /// Creates a new [`DekoUserApp`] with a unique id, an empty set of opened files,
+    // /// and a randomly generated AES-GCM-256 key.
+    // #[verus_spec(r =>
+    //     ensures
+    //         r.wf(),
+    // )]
+    // pub fn new() -> Self {
+    //     let id = generate_id();
+    //     Self {
+    //         id,
+    //         opened_files: HashMap::new_in(AllocatorWrapper(DekoAllocatorApi {  })),
+    //         key: {
+    //             let mut key = [0u8;32];
+    //             aes_gcm_256_key_gen(&mut key);
+    //             key
+    //         },
+    //         occupied_regions: vec![],
+    //         measurement: [0u8;48],
+    //     }
+    // }
     /// Adds this memory region to the list of occupied regions
     /// and updates the measurement of the user application.
     #[verus_spec(
@@ -256,6 +318,50 @@ unsafe fn copy_from_user_same_vmpl(addr: u64, buf: *mut u8, len: usize) -> DekoG
     );
 
     Ok(len)
+}
+
+/// Registers a new shadowed user application inside the guest VM.
+///
+/// The user applications can be either the container runtimes (e.g., runc, containerd)
+/// or the actual containerized applications (e.g., nginx, redis). They are differentiated
+/// via their namespace ids.
+#[verus_spec(r =>
+    requires
+)]
+pub fn register_user_app(req: &DekoNewAppReq) -> DekoGuestServResult<()> {
+    let comm = core::ffi::CStr::from_bytes_until_nul(&req.comm).map_err(
+        |_e| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam),
+    )?.to_str().map_err(|_e| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))?;
+
+    // When pid == 1 then the `systemd` process is being created.
+    if req.pid == 1 {
+        if <str as PartialEq<str>>::ne(comm, "init") && <str as PartialEq<str>>::ne(
+            comm,
+            "systemd",
+        ) {
+            kerror!(
+                "[Init] Unexpected PID 1 process name:",
+                &req.comm,
+            );
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        }
+        kinfo!("[Init] Detected /sbin/init (PID 1). Setting Host Namespace Baseline:", req.mnt_ns_id=>hex);
+
+        HOST_MNT_NS_ID.init(req.mnt_ns_id);
+    } else {
+        let host_ns = HOST_MNT_NS_ID.get().ok_or(DekoGuestServError::FatalError)?;
+
+        if req.mnt_ns_id == *host_ns {
+            // We are still in the host side; just check if this is a container runtime.
+            if is_docker_request(comm) {
+                kinfo!("[Registry] Detected Container Runtime:", comm, "PID:", req.pid);
+            }
+        }
+        // TODO: Create new application and stores it in the global registry.
+
+    }
+
+    Ok(())
 }
 
 } // verus!

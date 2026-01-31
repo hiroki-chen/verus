@@ -913,15 +913,12 @@ impl VmsaPage {
         // the pointer is valid and properly aligned because we deref it
         // from a valid DekoPPtr.
         let this = unsafe {
-            let ptr = self.page.borrow(Tracked(&perm.ptr_perm)).as_ptr().wrapping_add(
-                self.idx * PAGE_SIZE as usize,
-            ) as *mut VMSA;
+            let array_ptr = self.page.borrow(Tracked(&perm.ptr_perm)).as_ptr() as *mut VMSA;
+            let target_ptr = array_ptr.add(self.idx);
 
-            kdebug!("write bytes vmsa");
+            core::ptr::write_bytes(target_ptr as *mut u8, 0, core::mem::size_of::<VMSA>());
 
-            core::ptr::write_bytes(ptr as *mut u8, 0, core::mem::size_of::<VMSA>());
-
-            &mut *ptr
+            &mut *target_ptr
         };
 
         this.es = ctx.es;

@@ -212,7 +212,7 @@ pub exec static DEKO_TASK_LIST: DekoUnsafeRwLock<
 };
 
 #[repr(u64)]
-#[derive(DekoDebug, Clone, Copy)]
+#[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
 pub enum DekoRunnableState {
     RUNNING = 0,
     BLOCKED = 1,

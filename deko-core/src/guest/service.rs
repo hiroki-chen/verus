@@ -29,6 +29,7 @@ use crate::mm::vm::TempMapping;
 use crate::mm::{check_within_guest_mmap, zero_page};
 use crate::policy::guest_paging::{GuestPageOffsetBase, GUEST_PAGE_OFFSET_BASE};
 use crate::policy::syscall::analysis_syscall;
+use crate::policy::userapp::register_user_app;
 use crate::policy::{
     self, enable_syscall_hook, inject_ifc_policy_engine, install_hook, DekoMsrIntercept,
     DekoMsrInterceptVec0, DekoSyscallBody,
@@ -46,6 +47,8 @@ exec static RMP_GUARD: AtomicBool = AtomicBool::new(false);
 global layout DekoGuestPValidateReq is size == 8;
 
 global layout DekoGuestLstarWriteReq is size == 0x30;
+
+global layout DekoNewAppReq is size == 0x28;
 
 /// Represents a request structure for page validation operations.
 ///
@@ -80,6 +83,28 @@ pub struct DekoGuestLstarWriteReq {
     pub ok: u64,
 }
 
+#[repr(C, align(8))]
+#[derive(Copy, Clone, DekoDebug)]
+pub struct DekoNewAppReq {
+    /// Process ID (current->pid)
+    pub pid: u32,
+    /// Thread Group ID (current->tgid).
+    /// Used to identify the main thread.
+    pub tgid: u32,
+    /// Parent PID (current->real_parent->pid).
+    /// Essential for building the process tree.
+    pub ppid: u32,
+    /// User ID (current_cred()->uid).
+    /// Used for privilege checks (root vs non-root).
+    pub uid: u32,
+    /// Pointer or ID of the Mount Namespace.
+    /// (u64)current->nsproxy->mnt_ns
+    /// If two processes share this, they are in the same container filesystem view.
+    pub mnt_ns_id: u64,
+    /// Command excluding the path.
+    pub comm: [u8; 16],
+}
+
 pub const DEKO_SERVICE_REMAP_CA: u32 = 0x0;
 
 pub const DEKO_SERVICE_PVALIDATE: u32 = 0x1;
@@ -101,6 +126,8 @@ pub const DEKO_SERVICE_ATTEST_SINGLE_SERVICE: u32 = 0x1;
 pub const DEKO_SERVICE_EXTEND_MSR_INTERCEPT: u32 = 0x0;
 
 pub const DEKO_SERVICE_EXTEND_SYSCALL_ANALYSIS: u32 = 0x1;
+
+pub const DEKO_SERVICE_EXTEND_REPORT_APP: u32 = 0x2;
 
 with_atomic_pred! {
     PhysAddr,
@@ -905,6 +932,56 @@ fn handle_deko_serivce_syscall_analysis(params: &mut DekoGuestRequestParams) -> 
         cpu_perm.wf(),
         cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
 )]
+fn handle_deko_service_report_app(params: &mut DekoGuestRequestParams) -> DekoGuestServResult<()> {
+    let req_body = params.r9;
+
+    // Check if the request body is valid.
+    if core::hint::unlikely(!check_within_guest_mmap(PhysAddr(req_body))) {
+        kerror!("Report app: request body NOT within guest mmap:", PhysAddr(req_body));
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    let offset = req_body % PAGE_SIZE as u64;
+    let req_body = req_body & !0xfff;
+
+    if core::hint::unlikely(
+        req_body >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE || offset + core::mem::size_of::<
+            DekoNewAppReq,
+        >() as u64 > PAGE_SIZE as u64,
+    ) {
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    proof {
+        let n = params.r9;
+
+        assert(req_body % PAGE_SIZE == 0) by (bit_vector)
+            requires
+                req_body == (n & !((PAGE_SIZE as u64 - 1) as u64)),
+                PAGE_SIZE == 0x1000,
+        ;
+    }
+
+    let req_mapping = match TempMapping::new(create_paddr_range(PhysAddr(req_body), 1)) {
+        Some(m) => m,
+        None => {
+            kerror!("Report app: failed to create temporary mapping for request body at:", PhysAddr(req_body));
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy));
+        },
+    };
+
+    let req = req_mapping.read_ref_at::<DekoNewAppReq>(offset as usize);
+    register_user_app(req)
+}
+
+#[verus_spec(r =>
+    with
+        Tracked(cpu_perm): Tracked<&mut DekoCpuCtxPermission>,
+    requires
+        old(cpu_perm).wf(),
+        old(params).additional_data is Some,
+    ensures
+        cpu_perm.wf(),
+        cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
+)]
 fn handle_deko_service_msr_intercepts(params: &mut DekoGuestRequestParams) -> DekoGuestServResult<
     (),
 > {
@@ -1034,6 +1111,10 @@ pub(super) fn handle_guest_exit_extend_service(
         DEKO_SERVICE_EXTEND_SYSCALL_ANALYSIS => {
             proof_with!(Tracked(cpu_perm));
             handle_deko_serivce_syscall_analysis(params)
+        },
+        DEKO_SERVICE_EXTEND_REPORT_APP => {
+            proof_with!(Tracked(cpu_perm));
+            handle_deko_service_report_app(params)
         },
         _ => {
             kerror!("Unsupported extend service request: ", req);

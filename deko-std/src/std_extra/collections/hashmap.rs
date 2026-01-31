@@ -8,6 +8,7 @@ use vstd::map::Map;
 use vstd::prelude::*;
 
 use crate::std_extra::allocator::AllocatorWrapper;
+use crate::wf::WellFormed;
 use crate::DekoDebug;
 
 verus! {
@@ -39,6 +40,12 @@ type HashMapInner<K, V, A> = hashbrown::HashMap<K, V, DefaultHashBuilder, Alloca
 #[verifier::reject_recursive_types(V)]
 #[verifier::reject_recursive_types(A)]
 pub struct HashMap<K, V, A: core::alloc::Allocator>(HashMapInner<K, V, A>);
+
+impl<K: WellFormed, V: WellFormed, A: core::alloc::Allocator> WellFormed for HashMap<K, V, A> {
+    open spec fn wf(&self) -> bool {
+        forall|k: K, v: V| #[trigger] self@.kv_pairs().contains((k, v)) ==> k.wf() && v.wf()
+    }
+}
 
 impl<K: DekoDebug, V: DekoDebug, A: core::alloc::Allocator> DekoDebug for HashMap<K, V, A> where
     K: DekoDebug,
@@ -107,6 +114,16 @@ impl<K: Eq + Hash, V, A: core::alloc::Allocator> HashMap<K, V, A> {
     )]
     pub fn remove(&mut self, key: &K) -> Option<V> {
         self.0.remove(key)
+    }
+
+    #[inline]
+    #[verifier::external_body]
+    #[verus_spec(r =>
+        ensures
+            r == self@.contains_key(*key),
+    )]
+    pub fn contains_key(&self, key: &K) -> bool {
+        self.0.contains_key(key)
     }
 
     #[inline]

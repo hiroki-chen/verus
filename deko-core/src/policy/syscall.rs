@@ -1,11 +1,17 @@
 #![allow(non_upper_case_globals)]
 
+use deko_std::deko_rwlock_write_atomic_data;
 use deko_std::mem::PAGE_SIZE;
+use deko_std::prelude::collections::hashmap::HashMap;
 use deko_std::prelude::{PhysAddr, VirtAddr};
+use deko_std::std_extra::allocator::AllocatorWrapper;
 use vstd::prelude::*;
 
 use crate::guest::{DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode};
-use crate::policy::userapp::{copy_from_user, is_docker_request, IS_DOCKER_RUNNING};
+use crate::mm::frame_allocator::DekoAllocatorApi;
+use crate::policy::userapp::{
+    copy_from_user, is_docker_request, IS_DOCKER_RUNNING, RUNNING_CONTAINER_RUNTIME,
+};
 // use crate::policy::userapp::copy_from_guest_user;
 use crate::policy::DekoSyscallBody;
 use crate::{die, kdebug, kerror, kinfo, ktrace, kwarn, vec};
@@ -1205,9 +1211,11 @@ pub fn analysis_syscall(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
     match syscall_body.rax {
+        /* Will containers themselves execute these system calls? */
         SYS_execve => do_sys_execve(syscall_body),
         SYS_execveat => do_sys_execveat(syscall_body),
         SYS_pivot_root => do_pivot_root(syscall_body),
+        SYS_exit_group => exit_group(syscall_body),
         // In June 2023, Google's security team reported that 60% of the exploits submitted
         // to their bug bounty program in 2022 were exploits of io_uring vulnerabilities.
         //
@@ -1223,10 +1231,78 @@ pub fn analysis_syscall(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()
     }
 }
 
+#[verus_spec(r =>
+    requires
+)]
+fn exit_group(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()> {
+    let exit_code = syscall_body.rdi;
+
+    if exit_code > 255 {
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    let cr3 = PhysAddr(syscall_body.cr3);
+    // Search for the process in the process table; if found,
+    // delete it (or marking as "exit pending".)
+    deko_rwlock_write_atomic_data! {
+        RUNNING_CONTAINER_RUNTIME,
+        crt,
+        __,
+        {
+            // if let Some(mut crt) = crt {
+
+            // }
+        }
+    }
+
+    Ok(())
+}
+
+/// Called by the docker runtime to change the root filesystem of a container.
+///
+/// Typically the mount process goes like this:
+///
+/// - `chdir(rootfs)`
+/// - `pivot_root(".", ".")`
+/// - `umount(".", MNT_DETACH)`
+#[verus_spec(r =>
+    requires
+)]
 fn do_pivot_root(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()> {
+    let new_root = syscall_body.rdi;
+    let put_old = syscall_body.rsi;
+
+    if core::hint::unlikely(
+        new_root >= 0x8000_0000_0000 - 128 || new_root == 0 || put_old >= 0x8000_0000_0000 - 128
+            || put_old == 0 || syscall_body.cr3 % PAGE_SIZE != 0 || syscall_body.cr3
+            >= 0x000f_ffff_ffff_f000u64 - PAGE_SIZE,
+    ) {
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    let mut new_root_buf = vec![0u8;128];
+    let mut put_old_buf = vec![0u8;128];
+    copy_from_user(
+        PhysAddr(syscall_body.cr3),
+        VirtAddr(new_root),
+        new_root_buf.as_mut_ptr(),  // because we cannot unsize slice due to verus limitations.
+        128,
+    )?;
+    copy_from_user(
+        PhysAddr(syscall_body.cr3),
+        VirtAddr(put_old),
+        put_old_buf.as_mut_ptr(),  // because we cannot unsize slice due to verus limitations.
+        128,
+    )?;
+
+    let new_root = core::ffi::CStr::from_bytes_until_nul(&new_root_buf).map_err(
+        |_e| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam),
+    )?.to_str().map_err(|_e| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))?;
+    let put_old = core::ffi::CStr::from_bytes_until_nul(&put_old_buf).map_err(
+        |_e| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam),
+    )?.to_str().map_err(|_e| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))?;
+
     kinfo!(
-        "pivot_root called with new_root", syscall_body.rdi=>hex,
-        "put_old", syscall_body.rsi=>hex,
+        "pivot_root called with new_root=", new_root,
+        ", put_old=", put_old
     );
 
     Ok(())
@@ -1248,8 +1324,6 @@ fn do_sys_execveat(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()> {
     ) {
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
-    kinfo!("testtest");
-
     analyze_execve(PhysAddr(syscall_body.cr3), VirtAddr(pathname_ptr), Some(fd))
 }
 
@@ -1297,22 +1371,7 @@ fn analyze_execve(guest_cr3: PhysAddr, path: VirtAddr, fd: Option<u64>) -> Resul
 
     if let Ok(f) = core::ffi::CStr::from_bytes_until_nul(&filename) {
         if let Ok(fname_str) = f.to_str() {
-            // Now check if this is `runc`/`docker` execve request.
-            //
-            // If so, we need to start our monitoring here.
-            // We just simply assume that the guest should provide
-            // us with a "canonical" docker path for us as
-            // passing a, e.g., soft-links, is not re-cognized
-            // by us and we will NOT generate the measurement
-            // accordingly, which leads to sensitive data not
-            // being sent from the user to the container.
-            if is_docker_request(fname_str) {
-                IS_DOCKER_RUNNING.init(());
-
-                kinfo!("Docker is running", fname_str);
-            } else {
-                kdebug!("Non-docker execve filename", fname_str, ", ignore");
-            }
+            kinfo!("The container is trying to execve filename=", fname_str);
         } else {
             // This is rare but possible.
             kwarn!("execve filename (invalid utf8)", &filename);

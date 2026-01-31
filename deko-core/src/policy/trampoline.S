@@ -11,6 +11,8 @@
 //   - Position Independent Code (PIC): We must use RIP-relative addressing for all
 //     memory accesses because this code will be copied to an arbitrary physical page
 //     (likely allocated via memblock or vmalloc) and mapped to a new virtual address.
+//
+// SERVES THE CONTAINER!!!
 // ============================================================================
 
 .equ PER_CPU_STACK_SIZE,   0x100
@@ -216,7 +218,9 @@ deko_syscall_body:
 
 .align 16
 deko_stack_bottom:
-  // Reserve 4KB (0x1000 bytes) for our temporary stack.
+  // This is the temporary stack for the trampoline code.
+  // Once we jump into the IFC engine, the stack will be
+  // replaced by its own.
   // The stack grows downwards (from High address to Low address).
   .fill PER_CPU_STACK_SIZE, 1, 0x0
 

@@ -261,6 +261,12 @@ pub fn enable_syscall_hook() {
 
 /// Installs the syscall hook and locks down the guest entry page.
 ///
+/// The hooks contains two parts:
+///
+/// - The tarmpoline code for us to jump into the IFC engine's entry code.
+///   Each core owns one page for it.
+/// - The IFC policy engine itself.
+///
 /// **Note**: The caller must provide the valid guest page table mapping for the syscall entry.
 ///
 /// This operation enforces RMP permission restrictions (typically RX) on the syscall entry
@@ -285,8 +291,6 @@ pub fn install_hook(
     shared_bit: u64,
     req: &DekoGuestLstarWriteReq,
 ) -> DekoGuestServResult<()> {
-    kinfo!("Installing syscall hook at guest address", req.trampoline_gva => hex);
-
     if req.trampoline_gva.0 < VADDR_UPPER_MASK || req.trampoline_gpa.0 % PAGE_SIZE != 0
         || req.trampoline_gpa.0 >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE_2M {
         // Guest trampoline virtual address must be in the higher half
@@ -311,9 +315,7 @@ pub fn install_hook(
 
     // And then we lock down the guest syscall entry page
     g_trampoline_mapping.lock_translation_path()?;
-    kinfo!("Setting guest LSTAR MSR to trampoline address", req.trampoline_gva);
-
-    finish_install_hook(req.trampoline_gva);
+    finish_install_hook(syscall_enter_addr);
 
     Ok(())
 }
@@ -325,7 +327,6 @@ fn finish_install_hook(addr: VirtAddr) {
     proof_with!(Tracked(&cpu_perm) => Tracked(mut vmsa_perm));
     let vmsa = VMSA::this_vmsa(this_cpu);
 
-    // Now we write the LSTAR MSR to point to our trampoline code.
     proof_with!(Tracked(&mut vmsa_perm));
     VMSA::set_lstar(vmsa, addr.0)
 }
