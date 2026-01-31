@@ -13,7 +13,6 @@
 //     (likely allocated via memblock or vmalloc) and mapped to a new virtual address.
 // ============================================================================
 
-.equ MAX_CPUS,             128
 .equ PER_CPU_STACK_SIZE,   0x100
 .equ SYSCALL_BODY_SIZE,    0x50
 .equ USER_STACK_SAVE_SIZE, 0x8
@@ -34,46 +33,12 @@ deko_trampoline_start:
   jnc    back_to_linux
 
 continue_analysis:
-get_cpu_id:
-  stac
-
-  pushq  %r15
-  pushq  %r14
-  pushq  %r13
-  pushq  %r12
-  pushq  %rcx
-  pushq  %rdx
-  pushq  %rax
-
-  rdtscp
-
-  movq   %rcx, %r15
-
-  popq   %rax
-  popq   %rdx
-  popq   %rcx
-
-  clac
 
 prepare_syscall:
-
-  // Calculate the offset to the per-CPU storage areas.
-  // Each CPU has its own dedicated stack and syscall body area.
-  movq    %r15, %r14
-  shlq    $3, %r14                     // Multiply by 8 (size of each entry)
-  leaq    user_stack(%rip), %r13
-  addq    %r14, %r13                   // r13 = &deko_stack
-  // Save the User RSP to our local storage using RIP-relative addressing.
-  // This allows us to restore it later before handing control back to Linux.
-  movq    %rsp, (%r13)            // Save User RSP
-
-  movq    %r15, %r14
-  imulq   $PER_CPU_STACK_SIZE, %r14    // Offset = CPU_ID * PER_CPU_STACK_SIZE
-  leaq    deko_stack_bottom(%rip), %r13
-  addq    %r14, %r13                   // r13 = &deko_stack[CPU_ID]
-  addq    $PER_CPU_STACK_SIZE, %r13   // Point to top of stack
-  // Switch RSP to our temporary private stack located within this page.
-  movq    %r13, %rsp
+  movq    %rsp, scratch_rsp(%rip)   // Save User RSP
+  // switch to our temporary stack.
+  // --------------------------------------------------------------------------
+  leaq    deko_stack_top(%rip), %rsp
 
   // Align the stack to 16 bytes.
   // The x86-64 System V ABI requires the stack to be 16-byte aligned before
@@ -119,9 +84,6 @@ prepare_syscall_body:
   xorq     %rdx, %rdx  // Clear RDX for use as pointer
   // Clear the syscall body area first (optional, for safety).
   leaq     deko_syscall_body(%rip), %rdx  // Pointer to syscall body
-  movq     %r15, %r14
-  imulq    $SYSCALL_BODY_SIZE, %r14          // Offset = CPU_ID * SYSCALL_BODY_SIZE
-  addq     %r14, %rdx                        // rdx = &deko_syscall_body[CPU_ID]
   movq     %rdx, %rdi
   movq     $0x0, %rax
   movq     $SYSCALL_BODY_SIZE, %rcx               // Size of syscall body (80 bytes)
@@ -191,20 +153,8 @@ do_vmm_call:
   popq     %rax
   popq     %rdi
 
-  // Restore the original User RSP from our local storage.
-  movq    %r15, %r14
-  shlq    $3, %r14                     // Multiply by 8 (size
-  leaq    user_stack(%rip), %r13
-  addq    %r14, %r13                   // r13 = &user_stack
-
-  movq    (%r13), %rsp         // Restore User RSP
-
-  stac
-  popq    %r12
-  popq    %r13
-  popq    %r14
-  popq    %r15
-  clac
+  // Restore User RSP from our saved location.
+  movq    scratch_rsp(%rip), %rsp
 
 back_to_linux:
   // --------------------------------------------------------------------------
@@ -230,14 +180,14 @@ deko_trampoline_data_entry:
 .align 64
 // Bitmap to filter syscalls (0-255) that do not need analysis.
 filter_bitmap:
-  // [0-63]: execve (59) -> 0x0800000000000000
-  .quad 0x0800000000000000
-  
+  // [0-63]: clone(56) | vfork(58) | execve(59)
+  .quad 0x0D00000000000000
+
   // [64-127]:  0
   .quad 0x0000000000000000
   
-  // [128-191]:  0
-  .quad 0x0000000000000000
+  // [128-191]:  pivot_root(155)
+  .quad 0x0000000008000000
   
   // [192-255]:  0
   .quad 0x0000000000000000
@@ -257,21 +207,20 @@ filter_bitmap:
   .quad 0x0
   .quad 0x0
 
-deko_trampoline_end:
-
 .align 8
-user_stack:
-  .fill MAX_CPUS * USER_STACK_SAVE_SIZE, 1, 0x0
   // [Runtime Storage] We save the user's RSP here temporarily.
+scratch_rsp:
+  .fill USER_STACK_SAVE_SIZE, 1, 0x0
 deko_syscall_body:
-  .fill MAX_CPUS * SYSCALL_BODY_SIZE, 1, 0x0 
+  .fill SYSCALL_BODY_SIZE, 1, 0x0 
 
 .align 16
 deko_stack_bottom:
   // Reserve 4KB (0x1000 bytes) for our temporary stack.
   // The stack grows downwards (from High address to Low address).
-  .fill MAX_CPUS * PER_CPU_STACK_SIZE, 1, 0x0
+  .fill PER_CPU_STACK_SIZE, 1, 0x0
 
 deko_stack_top:
   // The RSP will point here initially.
   // When we PUSH, RSP decrements towards 'deko_stack_bottom'.
+deko_trampoline_end:

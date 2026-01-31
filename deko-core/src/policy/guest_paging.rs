@@ -13,7 +13,7 @@ use crate::imp::{RmpFlags, Rmp_ALL_BITS};
 use crate::mm::check_within_guest_mmap;
 use crate::mm::paging::{
     self, index_at_level, page_size_is_4kb, Page, PageTable, PageTableEntry, PageTablePath,
-    PageTablePermission,
+    PageTablePermission, PteFlags, HUGE,
 };
 use crate::mm::vm::TempMapping;
 use crate::policy::RECURSIVE_INDEX;
@@ -93,7 +93,7 @@ impl WellFormed for GuestMapping {
         &&& forall|i: int|
             #![trigger self.temp_mappings@[i]]
             0 <= i < self.temp_mappings@.len() ==> {
-                self.temp_mappings@[i].inner.end@ - self.temp_mappings@[i].inner.start@ == PAGE_SIZE
+                self.temp_mappings@[i].inner.end@ - self.temp_mappings@[i].inner.start@ >= PAGE_SIZE
             }
     }
 }
@@ -206,7 +206,7 @@ impl PageTable {
     #[verus_spec(r =>
         requires
             g_page_table.wf(),
-            g_page_table.inner.end@ - g_page_table.inner.start@ == PAGE_SIZE,
+            g_page_table.inner.end@ - g_page_table.inner.start@ >= PAGE_SIZE,
         ensures
             r matches Ok(gm) ==> {
                 &&& gm.temp_mappings@.len() <= 4
@@ -266,7 +266,7 @@ impl PageTable {
     #[verus_spec(r =>
         requires
             g_page_table.wf(),
-            g_page_table.inner.end@ - g_page_table.inner.start@ == PAGE_SIZE,
+            g_page_table.inner.end@ - g_page_table.inner.start@ >= PAGE_SIZE,
         ensures
             r matches Ok(gm) ==> {
                 &&& gm.temp_mappings@.len() <= 3
@@ -324,7 +324,7 @@ impl PageTable {
     #[verus_spec(r =>
         requires
             g_page_table.wf(),
-            g_page_table.inner.end@ - g_page_table.inner.start@ == PAGE_SIZE,
+            g_page_table.inner.end@ - g_page_table.inner.start@ >= PAGE_SIZE,
         ensures
             r matches Ok(gm) ==> {
                 &&& gm.temp_mappings@.len() <= 2
@@ -384,7 +384,7 @@ impl PageTable {
     #[verus_spec(r =>
         requires
             g_page_table.wf(),
-            g_page_table.inner.end@ - g_page_table.inner.start@ == PAGE_SIZE,
+            g_page_table.inner.end@ - g_page_table.inner.start@ >= PAGE_SIZE,
         ensures
             r matches Ok(gm) ==> {
                 &&& gm.temp_mappings@.len() <= 1

@@ -793,11 +793,7 @@ fn handle_deko_service_lstar_intercept(
             kerror!("MSR intercept: invalid syscall enter address:", syscall_enter_addr => hex);
             return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
         }
-        kinfo!("request is:", req);
-
-        GUEST_PAGE_OFFSET_BASE.init(
-            DekoAtomicData::new(GuestPageOffsetBase(req.page_offset_base.0)),
-        );
+        kinfo!("Request:", req);
 
         let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
         let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
@@ -823,9 +819,6 @@ fn handle_deko_service_lstar_intercept(
             return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
         }
         let guest_pgtable = guest_page_table(guest_cr3)?;
-        // kinfo!("MSR intercept: guest is writing LSTAR to address:", syscall_enter_addr => hex);
-        kinfo!("MSR intercept: guest CR3 is:", guest_cr3 => hex);
-
         let syscall_enter_addr = VirtAddr(syscall_enter_addr);
         policy::install_hook(
             guest_pgtable,
@@ -845,7 +838,6 @@ fn handle_deko_service_lstar_intercept(
                 return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
             }
             inject_ifc_policy_engine(req.trampoline_gva, req.blob_gpa, blob)?;
-
         }
         req.ok = 1;
         lstar_req_mapping.write_ref_at::<DekoGuestLstarWriteReq>(offset as usize, &req);

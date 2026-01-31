@@ -1207,6 +1207,7 @@ pub fn analysis_syscall(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()
     match syscall_body.rax {
         SYS_execve => do_sys_execve(syscall_body),
         SYS_execveat => do_sys_execveat(syscall_body),
+        SYS_pivot_root => do_pivot_root(syscall_body),
         // In June 2023, Google's security team reported that 60% of the exploits submitted
         // to their bug bounty program in 2022 were exploits of io_uring vulnerabilities.
         //
@@ -1220,6 +1221,15 @@ pub fn analysis_syscall(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()
         },
         _ => Ok(()),
     }
+}
+
+fn do_pivot_root(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()> {
+    kinfo!(
+        "pivot_root called with new_root", syscall_body.rdi=>hex,
+        "put_old", syscall_body.rsi=>hex,
+    );
+
+    Ok(())
 }
 
 /// Unlike [`do_sys_execve`] which takes path to the binary, this system call
@@ -1301,7 +1311,7 @@ fn analyze_execve(guest_cr3: PhysAddr, path: VirtAddr, fd: Option<u64>) -> Resul
 
                 kinfo!("Docker is running", fname_str);
             } else {
-                kinfo!("Non-docker execve filename", fname_str, ", ignore");
+                kdebug!("Non-docker execve filename", fname_str, ", ignore");
             }
         } else {
             // This is rare but possible.
