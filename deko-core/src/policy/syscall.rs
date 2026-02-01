@@ -9,9 +9,7 @@ use vstd::prelude::*;
 
 use crate::guest::{DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode};
 use crate::mm::frame_allocator::DekoAllocatorApi;
-use crate::policy::userapp::{
-    copy_from_user, is_docker_request, IS_DOCKER_RUNNING, RUNNING_CONTAINER_RUNTIME,
-};
+use crate::policy::userapp::{copy_from_user, is_docker_request, IS_DOCKER_RUNNING};
 // use crate::policy::userapp::copy_from_guest_user;
 use crate::policy::DekoSyscallBody;
 use crate::{die, kdebug, kerror, kinfo, ktrace, kwarn, vec};
@@ -1243,16 +1241,6 @@ fn exit_group(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()> {
     let cr3 = PhysAddr(syscall_body.cr3);
     // Search for the process in the process table; if found,
     // delete it (or marking as "exit pending".)
-    deko_rwlock_write_atomic_data! {
-        RUNNING_CONTAINER_RUNTIME,
-        crt,
-        __,
-        {
-            // if let Some(mut crt) = crt {
-
-            // }
-        }
-    }
 
     Ok(())
 }

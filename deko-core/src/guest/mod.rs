@@ -217,7 +217,8 @@ impl DekoGuestExitInformation {
 
             Some(DekoGuestExitInformation::ServiceRequest { protocol, req, params })
         } else {
-            kerror!("Unsupported guest exit code: ", exit_code);
+            // Sometimes we would have `SVM_EXIT_INTR` here?
+            kerror!("Unsupported guest exit code: ", exit_code=>hex);
 
             None
         }

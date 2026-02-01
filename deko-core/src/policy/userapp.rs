@@ -4,9 +4,13 @@ use deko_std::prelude::collections::hashmap::HashMap;
 use deko_std::prelude::{VirtAddr, PAGE_SIZE};
 use deko_std::std_extra::allocator::AllocatorWrapper;
 use deko_std::std_extra::num::isize_abs;
-use deko_std::sync::{DekoAtomicData, DekoSimpleOnceCell, DekoSimpleRwLock};
+use deko_std::sync::{
+    DekoAtomicData, DekoRwLock, DekoSimpleOnceCell, DekoSimpleRwLock, RwLockPredicate,
+};
 use deko_std::wf::WellFormed;
-use deko_std::{deko_bitflags, TrivialPredicate};
+use deko_std::{
+    deko_bitflags, deko_rwlock_read_atomic_data, deko_rwlock_write_atomic_data, TrivialPredicate,
+};
 use vstd::prelude::*;
 
 use crate::collections::Vec;
@@ -17,10 +21,11 @@ use crate::cpu::DekoCpuCtx;
 use crate::crypto::aes::aes_gcm_256_key_gen;
 use crate::guest::service::DekoNewAppReq;
 use crate::guest::{DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode};
+use crate::mm::check_within_guest_mmap;
 use crate::mm::frame_allocator::DekoAllocatorApi;
 use crate::mm::paging::{bit_not_in_addr_region, strip_confidentiality_bits, PageTable};
 use crate::mm::vm::TempMapping;
-use crate::{kdebug, kerror, kinfo, vec};
+use crate::{kdebug, kerror, kinfo, kwarn, vec};
 
 deko_bitflags! {
     pub struct DekoFile: u32 {
@@ -32,26 +37,90 @@ deko_bitflags! {
 
 verus! {
 
-pub exec static HOST_MNT_NS_ID: DekoSimpleOnceCell<u64>
+pub exec static HOST_MNT_NS_ID: DekoSimpleRwLock<u64, IrqSafeLockGuard>
     ensures
         HOST_MNT_NS_ID.wf(),
 {
-    DekoSimpleOnceCell::new(Ghost(()))
-}
-
-/// Tracks all currently running container runtimes inside the guest VM.
-/// The identifiers are the physical addresses of their main thread's CR3.
-pub exec static RUNNING_CONTAINER_RUNTIME: DekoSimpleRwLock<
-    Option<HashMap<PhysAddr, (), DekoAllocatorApi>>,
-    IrqSafeLockGuard,
->
-    ensures
-        RUNNING_CONTAINER_RUNTIME.wf(),
-{
     let r = DekoSimpleRwLock::new(
-        DekoAtomicData::new(None),
+        DekoAtomicData::new(0),
         IrqSafeLockGuard {  },
         Ghost(TrivialPredicate::new()),
+    );
+
+    proof {
+        use_type_invariant(&r);
+    }
+
+    r
+}
+
+pub type AppId = PhysAddr;
+
+pub type DekoProcessMap = HashMap<AppId, DekoUserApp, DekoAllocatorApi>;
+
+pub type DekoShimSet = HashMap<u32, (), DekoAllocatorApi>;
+
+pub struct DekoShadowAppListPred;
+
+pub struct DekoShimSetPred;
+
+impl<P> RwLockPredicate<DekoAtomicData<Option<DekoProcessMap>, P>> for DekoShadowAppListPred {
+    open spec fn inv(self, data: DekoAtomicData<Option<DekoProcessMap>, P>) -> bool {
+        match data.data {
+            Some(app_map) => app_map.wf(),
+            None => true,
+        }
+    }
+}
+
+impl<P> RwLockPredicate<DekoAtomicData<Option<DekoShimSet>, P>> for DekoShimSetPred {
+    open spec fn inv(self, data: DekoAtomicData<Option<DekoShimSet>, P>) -> bool {
+        match data.data {
+            Some(shim_set) => shim_set.wf(),
+            None => true,
+        }
+    }
+}
+
+/// Tracks all currently running processes inside the guest VM that are spawned
+/// by the container runtimes (e.g., runc, containerd) or are containerized applications.
+///
+/// The identifiers are the physical addresses of their main thread's CR3.
+pub exec static DEKO_SHADOW_APP_LIST: DekoRwLock<
+    Option<DekoProcessMap>,
+    (),
+    IrqSafeLockGuard,
+    DekoShadowAppListPred,
+>
+    ensures
+        DEKO_SHADOW_APP_LIST.wf(),
+{
+    let r = DekoRwLock::new(
+        DekoAtomicData::new(None),
+        IrqSafeLockGuard {  },
+        Ghost(DekoShadowAppListPred {  }),
+    );
+
+    proof {
+        use_type_invariant(&r);
+    }
+
+    r
+}
+
+pub exec static DEKO_SHIM_SET: DekoRwLock<
+    Option<DekoShimSet>,
+    (),
+    IrqSafeLockGuard,
+    DekoShimSetPred,
+>
+    ensures
+        DEKO_SHIM_SET.wf(),
+{
+    let r = DekoRwLock::new(
+        DekoAtomicData::new(None),
+        IrqSafeLockGuard {  },
+        Ghost(DekoShimSetPred {  }),
     );
 
     proof {
@@ -82,6 +151,71 @@ pub fn is_docker_request(path: &str) -> bool {
     path.contains(RUNC_NAME) || path.contains(CONTAINERD_NAME) || path.contains(
         CONTAINERD_SHIM_NAME,
     )
+}
+
+/// Checks whether the given parent PID belongs to a shim process.
+pub fn lookup_parent_is_shim(ppid: u32) -> bool {
+    deko_rwlock_read_atomic_data!(
+        DEKO_SHIM_SET,
+        shim_set,
+        __,
+        {
+            match shim_set {
+                Some(shim_set) => shim_set.contains_key(&ppid),
+                None => false,
+            }
+        }
+    )
+}
+
+/// Adds the given parent PID to the shim set.
+pub fn add_to_shim_set(ppid: u32) {
+    deko_rwlock_write_atomic_data!(
+        DEKO_SHIM_SET,
+        shim_set,
+        __,
+        {
+            let mut new_shim_set = match shim_set {
+                Some(set) => set,
+                None => DekoShimSet::new_in(AllocatorWrapper(DekoAllocatorApi {  })),
+            };
+
+            new_shim_set.insert(ppid, ());
+
+            shim_set = Some(new_shim_set);
+        }
+    )
+}
+
+pub fn remove_from_shim_set(ppid: u32) {
+    deko_rwlock_write_atomic_data!(
+        DEKO_SHIM_SET,
+        shim_set,
+        __,
+        {
+            if let Some(mut set) = shim_set {
+                set.remove(&ppid);
+                shim_set = Some(set);
+            }
+        }
+    )
+}
+
+pub fn get_host_ns_id() -> DekoGuestServResult<u64> {
+    let host_ns_id =
+        deko_rwlock_read_atomic_data!(
+        HOST_MNT_NS_ID,
+        host_ns_lock,
+        __,
+        {
+            *host_ns_lock
+        }
+    );
+
+    if host_ns_id == 0 {
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy));
+    }
+    Ok(host_ns_id)
 }
 
 /// A regular file opened by a shadowed user application.
@@ -124,6 +258,32 @@ impl WellFormed for DekoUserAppResource {
     }
 }
 
+/// The type of the shadowed user application.
+#[derive(DekoDebug)]
+pub struct DekoUserAppExt {
+    /// Opened resources associated with this user application.
+    ///
+    /// These are typically file descriptors mapped to files or sockets.
+    pub opened_files: HashMap<u64, DekoUserAppResource, DekoAllocatorApi>,
+    /// The AES-GCM-256 key used for transparently encrypting/decrypting
+    /// this user application's data if (label  ̸⊆ label_public).
+    pub key: [u8; 32],
+    /// Occupied memory regions by this user application.
+    pub occupied_regions: Vec<VaddrRange>,
+    /// Sha3-384 measurement of the user application's binary.
+    pub measurement: [u8; 48],
+}
+
+impl WellFormed for DekoUserAppExt {
+    open spec fn wf(&self) -> bool {
+        &&& forall|fd: u64|
+            #![trigger self.opened_files@[fd]]
+            self.opened_files@.contains_key(fd) ==> self.opened_files@[fd].wf()
+        &&& self.occupied_regions.wf()
+        &&& self.measurement.len() == 48
+    }
+}
+
 /// A shadowed user application (mimicking task_struct) running inside the guest VM.
 ///
 /// This structure bridges the gap between hardware reality (CR3) and
@@ -153,64 +313,57 @@ pub struct DekoUserApp {
     /// If you track namespaces, this identifies the "Sandbox".
     /// 0 usually means Host Namespace.
     /// Maps to: Hash of (task_struct->nsproxy->mnt_ns)
+    #[deko(hex)]
     pub container_id: u64,
     /// User ID (Effective UID).
     /// Used for basic privilege checks (is this root?).
     /// Maps to: task_struct->cred->euid
     pub uid: u32,
-    /// The unique identifier for this user application.
-    pub id: u64,
-    // Deko Security Extensions ( Your Custom Fields )
-    /// Opened resources associated with this user application.
-    ///
-    /// These are typically file descriptors mapped to files or sockets.
-    pub opened_files: HashMap<u64, DekoUserAppResource, DekoAllocatorApi>,
-    /// The AES-GCM-256 key used for transparently encrypting/decrypting
-    /// this user application's data if (label  ̸⊆ label_public).
-    pub key: [u8; 32],
-    /// Occupied memory regions by this user application.
-    pub occupied_regions: Vec<VaddrRange>,
-    /// Sha3-384 measurement of the user application's binary.
-    pub measurement: [u8; 48],
+    // Deko Security Extensions.
+    pub ext: DekoUserAppExt,
 }
 
 impl WellFormed for DekoUserApp {
+    #[verifier::inline]
     open spec fn wf(&self) -> bool {
-        &&& forall|fd: u64|
-            #![trigger self.opened_files@[fd]]
-            self.opened_files@.contains_key(fd) ==> self.opened_files@[fd].wf()
-        &&& forall|i: int|
-            #![trigger self.occupied_regions@[i]]
-            0 <= i && i < self.occupied_regions.len() as int ==> {
-                &&& self.occupied_regions@[i].wf()
-                // must be on the user side.
-                &&& self.occupied_regions@[i].end@ <= 0x8000_0000_0000
-            }
+        &&& self.cr3.wf()
+        &&& self.ext.wf()
     }
 }
 
 #[verus_verify]
 impl DekoUserApp {
-    // /// Creates a new [`DekoUserApp`] with a unique id, an empty set of opened files,
-    // /// and a randomly generated AES-GCM-256 key.
-    // #[verus_spec(r =>
-    //     ensures
-    //         r.wf(),
-    // )]
-    // pub fn new() -> Self {
-    //     let id = generate_id();
-    //     Self {
-    //         id,
-    //         opened_files: HashMap::new_in(AllocatorWrapper(DekoAllocatorApi {  })),
-    //         key: {
-    //             let mut key = [0u8;32];
-    //             aes_gcm_256_key_gen(&mut key);
-    //             key
-    //         },
-    //         occupied_regions: vec![],
-    //         measurement: [0u8;48],
-    //     }
-    // }
+    /// Creates a new [`DekoUserApp`] with a unique id, an empty set of opened files,
+    /// and a randomly generated AES-GCM-256 key.
+    #[verus_spec(r =>
+        requires
+            app_req.wf(),
+            guest_cr3.wf(),
+            guest_cr3@ % PAGE_SIZE == 0,
+        ensures
+            r.wf(),
+    )]
+    pub fn new(app_req: &DekoNewAppReq, guest_cr3: PhysAddr) -> Self {
+        Self {
+            pid: app_req.pid,
+            tgid: app_req.tgid,
+            parent_pid: app_req.ppid,
+            uid: app_req.uid,
+            container_id: app_req.mnt_ns_id,
+            cr3: guest_cr3,
+            ext: DekoUserAppExt {
+                opened_files: HashMap::new_in(AllocatorWrapper(DekoAllocatorApi {  })),
+                key: {
+                    let mut key = [0u8;32];
+                    aes_gcm_256_key_gen(&mut key);
+                    key
+                },
+                occupied_regions: vec![],
+                measurement: [0u8;48],
+            },
+        }
+    }
+
     /// Adds this memory region to the list of occupied regions
     /// and updates the measurement of the user application.
     #[verus_spec(
@@ -327,40 +480,164 @@ unsafe fn copy_from_user_same_vmpl(addr: u64, buf: *mut u8, len: usize) -> DekoG
 /// via their namespace ids.
 #[verus_spec(r =>
     requires
+        guest_cr3.wf(),
 )]
-pub fn register_user_app(req: &DekoNewAppReq) -> DekoGuestServResult<()> {
+pub fn register_user_app(
+    req: &DekoNewAppReq,
+    guest_cr3: PhysAddr,
+    is_creation: bool,
+) -> DekoGuestServResult<()> {
+    // Check if the cr3 is valid in the current context.
+    if core::hint::unlikely(!check_within_guest_mmap(guest_cr3) || guest_cr3.0 % PAGE_SIZE != 0) {
+        kerror!("register_user_app: invalid guest CR3", guest_cr3);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
     let comm = core::ffi::CStr::from_bytes_until_nul(&req.comm).map_err(
         |_e| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam),
     )?.to_str().map_err(|_e| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))?;
 
-    // When pid == 1 then the `systemd` process is being created.
+    if is_creation {
+        do_reigster_user_app(req, comm, guest_cr3)
+    } else {
+        do_unregister_user_app(req, comm, guest_cr3)
+    }
+}
+
+#[verus_spec(r =>
+    requires
+        guest_cr3.wf(),
+        guest_cr3@ % PAGE_SIZE == 0,
+)]
+fn do_reigster_user_app(
+    req: &DekoNewAppReq,
+    comm: &str,
+    guest_cr3: PhysAddr,
+) -> DekoGuestServResult<()> {
     if req.pid == 1 {
-        if <str as PartialEq<str>>::ne(comm, "init") && <str as PartialEq<str>>::ne(
-            comm,
-            "systemd",
-        ) {
-            kerror!(
+        if comm.eq("/sbin/init") || comm.eq("systemd") {
+            kwarn!(
                 "[Init] Unexpected PID 1 process name:",
                 &req.comm,
             );
-            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
         }
         kinfo!("[Init] Detected /sbin/init (PID 1). Setting Host Namespace Baseline:", req.mnt_ns_id=>hex);
 
-        HOST_MNT_NS_ID.init(req.mnt_ns_id);
+        // Might be called multiple times.
+        deko_rwlock_write_atomic_data!(
+            HOST_MNT_NS_ID,
+            host_ns_lock,
+            __,
+            {
+                host_ns_lock = req.mnt_ns_id;
+            }
+        )
     } else {
-        let host_ns = HOST_MNT_NS_ID.get().ok_or(DekoGuestServError::FatalError)?;
+        // We are still in the host side; just check if this is a container runtime.
+        if is_docker_request(comm) {
+            add_to_shim_set(req.pid);
 
-        if req.mnt_ns_id == *host_ns {
-            // We are still in the host side; just check if this is a container runtime.
-            if is_docker_request(comm) {
-                kinfo!("[Registry] Detected Container Runtime:", comm, "PID:", req.pid);
+            return Ok(());
+        }
+        let is_docker_app = lookup_parent_is_shim(req.ppid);
+        if is_docker_app {
+            let host_nid = get_host_ns_id()?;
+            if req.mnt_ns_id == host_nid {
+                // This app is in the host namespace; ignore it.
+                return Ok(());
+            }
+            kinfo!("do_register_user_app: registering app", comm);
+            let user_app = DekoUserApp::new(req, guest_cr3);
+
+            deko_rwlock_write_atomic_data! {
+                DEKO_SHADOW_APP_LIST,
+                app_list,
+                __,
+                {
+                    let mut napp_list = match app_list {
+                        Some(mut ap) => ap,
+                        None => DekoProcessMap::new_in(AllocatorWrapper(DekoAllocatorApi {  })),
+                    };
+                    let ghost old_napp_list = napp_list@;
+
+                    napp_list.insert(guest_cr3, user_app);
+
+                    proof {
+                        assert(napp_list@ =~= old_napp_list.insert(guest_cr3, user_app));
+                        assert(napp_list.wf()) by {
+                            assert forall |k: AppId, v: DekoUserApp|
+                                #[trigger] napp_list@.kv_pairs().contains((k, v)) implies k.wf() && v.wf() by {
+                                    if old_napp_list.contains_key(k) {
+                                        if k == guest_cr3 {
+                                            broadcast use vstd::map::axiom_map_insert_same;
+                                            assert(napp_list@[k] == user_app);
+                                        } else {
+                                            broadcast use vstd::map::axiom_map_insert_different;
+
+                                            assert(old_napp_list.kv_pairs().contains((k, v)));
+                                        }
+                                    }
+                                }
+                        }
+                    }
+
+                    app_list = Some(napp_list);
+                }
             }
         }
-        // TODO: Create new application and stores it in the global registry.
-
     }
 
+    Ok(())
+}
+
+fn do_unregister_user_app(
+    req: &DekoNewAppReq,
+    comm: &str,
+    guest_cr3: PhysAddr,
+) -> DekoGuestServResult<()> {
+    if req.pid == 1 {
+        // Ignore /sbin/init exit: this means the guest is shutting down.
+        return Ok(());
+    }
+    // We are still in the host side; just check if this is a container runtime.
+
+    if is_docker_request(comm) {
+        remove_from_shim_set(req.pid);
+
+        return Ok(());
+    }
+    let is_docker_app = lookup_parent_is_shim(req.ppid);
+    if is_docker_app {
+        kinfo!("do_unregister_user_app: unregistering app", comm);
+
+        deko_rwlock_write_atomic_data! {
+        DEKO_SHADOW_APP_LIST,
+        app_list,
+        __,
+        {
+            let mut napp_list = match app_list {
+                Some(mut ap) => ap,
+                None => {
+                    kinfo!("do_unregister_user_app: no apps registered");
+                    HashMap::new_in(AllocatorWrapper(DekoAllocatorApi {  }))
+                },
+            };
+            let ghost old_napp_list = napp_list@;
+            napp_list.remove(&guest_cr3);
+            proof {
+                assert(napp_list@ =~= old_napp_list.remove(guest_cr3));
+                assert(napp_list.wf()) by {
+                    assert forall |k: AppId, v: DekoUserApp|
+                        #[trigger] napp_list@.kv_pairs().contains((k, v)) implies k.wf() && v.wf() by {
+                            if napp_list@.contains_key(k) {
+                                assert(old_napp_list.kv_pairs().contains((k, v)));
+                            }
+                        }
+                }
+            }
+            app_list = Some(napp_list);
+        }
+    }
+    }
     Ok(())
 }
 

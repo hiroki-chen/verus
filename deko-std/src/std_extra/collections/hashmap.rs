@@ -99,7 +99,6 @@ impl<K: Eq + Hash, V, A: core::alloc::Allocator> HashMap<K, V, A> {
             } else {
                 None
             },
-
     )]
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         self.0.insert(key, value)

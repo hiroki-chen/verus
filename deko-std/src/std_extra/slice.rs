@@ -20,6 +20,11 @@ pub assume_specification<P>[ str::contains ](_0: &str, _1: P) -> bool where
 
 ;
 
+pub assume_specification<P>[ str::starts_with ](_0: &str, _1: P) -> bool where
+    P: core::str::pattern::Pattern,
+
+;
+
 #[verifier::external_type_specification]
 #[verifier::external_body]
 pub struct ExCStr(pub core::ffi::CStr);

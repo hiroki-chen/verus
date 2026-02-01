@@ -105,6 +105,12 @@ pub struct DekoNewAppReq {
     pub comm: [u8; 16],
 }
 
+impl WellFormed for DekoNewAppReq {
+    open spec fn wf(&self) -> bool {
+        true
+    }
+}
+
 pub const DEKO_SERVICE_REMAP_CA: u32 = 0x0;
 
 pub const DEKO_SERVICE_PVALIDATE: u32 = 0x1;
@@ -933,7 +939,11 @@ fn handle_deko_serivce_syscall_analysis(params: &mut DekoGuestRequestParams) -> 
         cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
 )]
 fn handle_deko_service_report_app(params: &mut DekoGuestRequestParams) -> DekoGuestServResult<()> {
+    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+    let private_bit = cpu_borrow.private_bit;
     let req_body = params.r9;
+    let is_creation = params.r8 != 0;
 
     // Check if the request body is valid.
     if core::hint::unlikely(!check_within_guest_mmap(PhysAddr(req_body))) {
@@ -969,7 +979,12 @@ fn handle_deko_service_report_app(params: &mut DekoGuestRequestParams) -> DekoGu
     };
 
     let req = req_mapping.read_ref_at::<DekoNewAppReq>(offset as usize);
-    register_user_app(req)
+    let guest_cr3 = strip_confidentiality_bits(
+        params.additional_data.unwrap().guest_cr3,
+        private_bit,
+    );
+
+    register_user_app(req, PhysAddr(guest_cr3), is_creation)
 }
 
 #[verus_spec(r =>
