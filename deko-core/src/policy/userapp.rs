@@ -1,7 +1,7 @@
 use deko_macros::DekoDebug;
 use deko_std::address::{create_paddr_range, PhysAddr, VaddrRange};
 use deko_std::prelude::collections::hashmap::HashMap;
-use deko_std::prelude::{VirtAddr, PAGE_SIZE};
+use deko_std::prelude::{VirtAddr, PAGE_SIZE, VADDR_LOWER_MASK};
 use deko_std::std_extra::allocator::AllocatorWrapper;
 use deko_std::std_extra::num::isize_abs;
 use deko_std::sync::{
@@ -13,7 +13,7 @@ use deko_std::{
 };
 use vstd::prelude::*;
 
-use crate::collections::Vec;
+use crate::collections::{update_vec, Vec};
 use crate::cpu::irq::IrqSafeLockGuard;
 use crate::cpu::regs::no_smap_zone;
 use crate::cpu::task::{generate_id, DekoRunnableState};
@@ -279,8 +279,15 @@ impl WellFormed for DekoUserAppExt {
         &&& forall|fd: u64|
             #![trigger self.opened_files@[fd]]
             self.opened_files@.contains_key(fd) ==> self.opened_files@[fd].wf()
-        &&& self.occupied_regions.wf()
-        &&& self.measurement.len() == 48
+        &&& forall|i: int|
+            #![trigger self.occupied_regions@[i]]
+            0 <= i < self.occupied_regions.len() ==> {
+                &&& self.occupied_regions@[i].wf()
+                &&& self.occupied_regions@[i].start@ % PAGE_SIZE == 0
+                &&& self.occupied_regions@[i].end@
+                    <= 0x8000_0000_0000  // Linux user-space limit
+
+            }&&& self.measurement.len() == 48
     }
 }
 
@@ -326,6 +333,8 @@ pub struct DekoUserApp {
 impl WellFormed for DekoUserApp {
     #[verifier::inline]
     open spec fn wf(&self) -> bool {
+        &&& self.cr3@ % PAGE_SIZE == 0
+        &&& self.cr3@ + PAGE_SIZE < 0x000f_ffff_ffff_f000u64
         &&& self.cr3.wf()
         &&& self.ext.wf()
     }
@@ -340,11 +349,22 @@ impl DekoUserApp {
             app_req.wf(),
             guest_cr3.wf(),
             guest_cr3@ % PAGE_SIZE == 0,
+            guest_cr3@ + PAGE_SIZE < 0x000f_ffff_ffff_f000u64,
+            app_req.start_code@ > 0,
+            app_req.start_code@ % PAGE_SIZE == 0,
+            app_req.start_code@ < app_req.end_code@,
+            app_req.end_code@ <= VADDR_LOWER_MASK, // Linux user-space limit
         ensures
-            r.wf(),
+            r matches Ok(r) ==> r.wf(),
     )]
-    pub fn new(app_req: &DekoNewAppReq, guest_cr3: PhysAddr) -> Self {
-        Self {
+    pub fn new(app_req: &DekoNewAppReq, guest_cr3: PhysAddr) -> DekoGuestServResult<Self> {
+        let start_code = VirtAddr(app_req.start_code);
+        let end_code = VirtAddr(app_req.end_code);
+        let range = start_code..end_code;
+
+        kinfo!("New app range is", range=>hex);
+
+        let mut r = Self {
             pid: app_req.pid,
             tgid: app_req.tgid,
             parent_pid: app_req.ppid,
@@ -361,19 +381,100 @@ impl DekoUserApp {
                 occupied_regions: vec![],
                 measurement: [0u8;48],
             },
-        }
+        };
+
+        r.add_and_measure(range)?;
+
+        Ok(r)
     }
 
     /// Adds this memory region to the list of occupied regions
     /// and updates the measurement of the user application.
-    #[verus_spec(
+    #[verus_spec(r =>
         requires
             old(self).wf(),
             region.wf(),
+            region.start@ > 0,
+            region.start@ % PAGE_SIZE == 0,
+            region.end@ <= VADDR_LOWER_MASK, // Linux user-space limit
         ensures
-            // r.wf(),
+            self.wf(),
     )]
-    pub fn add_and_measure(&mut self, region: VaddrRange) {
+    pub fn add_and_measure(&mut self, region: VaddrRange) -> DekoGuestServResult<()> {
+        let len = (region.end.0 - region.start.0 + PAGE_SIZE - 1) / PAGE_SIZE;
+        let mut i = 0;
+        let mut buf = vec![0u8; (PAGE_SIZE + 48) as usize];
+
+        // Copy the hash to the buffer first.
+        for j in 0..48
+            invariant
+                buf@.len() == (PAGE_SIZE + 48) as int,
+                self.ext.measurement@.len() == 48,
+                self.wf(),
+        {
+            update_vec(&mut buf, j, self.ext.measurement[j]);
+        }
+
+        #[verus_spec(
+            invariant
+                i <= len,
+                buf@.len() == (PAGE_SIZE + 48) as int,
+                len == (region.end@ - region.start@ + PAGE_SIZE - 1) / PAGE_SIZE as int,
+                region.start@ > 0,
+                region.end@ <= VADDR_LOWER_MASK,
+                region.start@ % PAGE_SIZE == 0,
+                PAGE_SIZE == 0x1000,
+                VADDR_LOWER_MASK == 0x0000_7FFF_FFFF_FFFF,
+                self.wf(),
+            decreases
+                len - i,
+        )]
+        while i < len {
+            let cur = VirtAddr(region.start.0 + i * PAGE_SIZE);
+            let remaining_bytes = region.end.0 - cur.0;
+            let bytes_to_read = PAGE_SIZE.min(remaining_bytes) as usize;
+            unsafe {
+                copy_from_user(self.cr3, cur, buf.as_mut_ptr().add(48), bytes_to_read)?;
+            }
+
+            kdebug!("Reading page", cur=>hex, bytes_to_read=>hex);
+            kdebug!("Content is:", buf);
+
+            if bytes_to_read < PAGE_SIZE as usize {
+                for k in bytes_to_read..(PAGE_SIZE as usize)
+                    invariant
+                        buf@.len() == (PAGE_SIZE + 48) as int,
+                {
+                    update_vec(&mut buf, 48 + k, 0);
+                }
+            }
+            // Then we measure this page.
+            //
+            // This is a demo for now so the order does not matter and we
+            // only care about the potential performance implications.
+            //
+            // For production-ready systems, we should consider using a Merkle tree
+            // or other authenticated data structures to efficiently and securely
+            // manage the measurements.
+
+            let hash = crate::crypto::hash::sha3_384_hash(&buf);
+            for j in 0..48
+                invariant
+                    buf@.len() == (PAGE_SIZE + 48) as int,
+                    hash@.len() == 48,
+                    self.wf(),
+            {
+                let b = hash[j];
+                update_vec(&mut buf, j, b);
+                self.ext.measurement[j] = b;
+            }
+
+            kdebug!("Measured page", cur=>hex, hash);
+
+            i += 1;
+        }
+
+        Ok(())
     }
 }
 
@@ -503,6 +604,19 @@ pub fn register_user_app(
     }
 }
 
+#[inline]
+#[verus_spec(r =>
+    ensures
+        r == (req.start_code > 0 &&
+            req.start_code % PAGE_SIZE == 0 &&
+            req.start_code < req.end_code &&
+            req.end_code <= VADDR_LOWER_MASK),
+)]
+fn check_user_vrange(req: &DekoNewAppReq) -> bool {
+    req.start_code > 0 && req.start_code % PAGE_SIZE == 0 && req.start_code < req.end_code
+        && req.end_code <= VADDR_LOWER_MASK
+}
+
 #[verus_spec(r =>
     requires
         guest_cr3.wf(),
@@ -513,6 +627,11 @@ fn do_reigster_user_app(
     comm: &str,
     guest_cr3: PhysAddr,
 ) -> DekoGuestServResult<()> {
+    if core::hint::unlikely(
+        guest_cr3.0 % PAGE_SIZE != 0 || guest_cr3.0 >= 0x000f_ffff_ffff_f000u64 - PAGE_SIZE,
+    ) {
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
     if req.pid == 1 {
         if comm.eq("/sbin/init") || comm.eq("systemd") {
             kwarn!(
@@ -545,8 +664,12 @@ fn do_reigster_user_app(
                 // This app is in the host namespace; ignore it.
                 return Ok(());
             }
+            if core::hint::unlikely(!check_user_vrange(req)) {
+                kerror!("do_register_user_app: invalid user vaddr range", comm, req.start_code=>hex, req.end_code=>hex);
+                return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+            }
             kinfo!("do_register_user_app: registering app", comm);
-            let user_app = DekoUserApp::new(req, guest_cr3);
+            let user_app = DekoUserApp::new(req, guest_cr3)?;
 
             deko_rwlock_write_atomic_data! {
                 DEKO_SHADOW_APP_LIST,

@@ -9,5 +9,6 @@ pub mod hint;
 pub mod mem;
 pub mod num;
 pub mod option;
+pub mod ptr;
 pub mod result;
 pub mod slice;

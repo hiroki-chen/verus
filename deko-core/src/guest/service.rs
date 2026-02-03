@@ -38,7 +38,10 @@ use crate::snp::vmsa::VMSA;
 use crate::snp::{pvalidate, rmpadjust, validate_vaddr_region};
 use crate::{kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
 
-const _: () = assert!(core::mem::size_of::<DekoGuestLstarWriteReq>() == 0x30);
+const _: () = {
+    assert!(core::mem::size_of::<DekoGuestLstarWriteReq>() == 0x30);
+    assert!(core::mem::size_of::<DekoNewAppReq>() == 0x38);
+};
 
 verus! {
 
@@ -48,7 +51,7 @@ global layout DekoGuestPValidateReq is size == 8;
 
 global layout DekoGuestLstarWriteReq is size == 0x30;
 
-global layout DekoNewAppReq is size == 0x28;
+global layout DekoNewAppReq is size == 0x38;
 
 /// Represents a request structure for page validation operations.
 ///
@@ -101,6 +104,10 @@ pub struct DekoNewAppReq {
     /// (u64)current->nsproxy->mnt_ns
     /// If two processes share this, they are in the same container filesystem view.
     pub mnt_ns_id: u64,
+    /// The start code virtual address of the new application.
+    pub start_code: u64,
+    /// The end code virtual address of the new application.
+    pub end_code: u64,
     /// Command excluding the path.
     pub comm: [u8; 16],
 }
