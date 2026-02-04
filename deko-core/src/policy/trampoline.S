@@ -23,6 +23,7 @@
 .global deko_trampoline_start
 .global deko_trampoline_end
 .global deko_trampoline_data_entry
+.global deko_ifc_engine_entry
 
 deko_trampoline_start:
   // ============================================================================
@@ -35,7 +36,7 @@ deko_trampoline_start:
   jnc    back_to_linux
 
 continue_analysis:
-
+  swapgs
 prepare_syscall:
   movq    %rsp, scratch_rsp(%rip)   // Save User RSP
   // switch to our temporary stack.
@@ -59,79 +60,47 @@ prepare_syscall:
   pushq   %rcx  // [RSP+8]  Original RIP (Return Address)
   pushq   %r11  // [RSP+0]  Original RFLAGS
 
-do_write_ghcb:
-  // --------------------------------------------------------------------------
-  // 4. Setup GHCB (Guest-Hypervisor Communication Block) Protocol
-  // --------------------------------------------------------------------------
-  // We are preparing to exit the guest context to talk to the higher privilege level (VMPL 0).
-
-  // RAX = 0x16: The protocol ID for "VMPL_RUN" or your specific Deko service call.
-  movl    $0x16, %eax
-
-  // RDX = 0: Target VMPL level (VMPL 0).
-  xorl    %edx, %edx
-
-  // RCX = 0xC0010130: MSR_AMD64_SEV_ES_GHCB.
-  // We write to this MSR to register the GHCB address or protocol info.
-  movl    $0xc0010130, %ecx
-
-  // --------------------------------------------------------------------------
-  // 5. Execute VMGEXIT (VMMCALL)
-  // --------------------------------------------------------------------------
-  // Write the request to the MSR.
-  wrmsr
-
 prepare_syscall_body:
   // Prepare the syscall body.
-  xorq     %rdx, %rdx  // Clear RDX for use as pointer
+  xorq     %rdi, %rdi  // Clear rdi for use as pointer
   // Clear the syscall body area first (optional, for safety).
-  leaq     deko_syscall_body(%rip), %rdx  // Pointer to syscall body
-  movq     %rdx, %rdi
+  leaq     deko_syscall_body(%rip), %rdi  // Pointer to syscall body
   movq     $0x0, %rax
   movq     $SYSCALL_BODY_SIZE, %rcx               // Size of syscall body (80 bytes)
   rep stosb
 
   movq     24(%rsp), %rax                 // Syscall number
-  movq     %rax, 0x0(%rdx)                // Syscall number in body
+  movq     %rax, 0x0(%rdi)                // Syscall number in body
 
-  movq     32(%rsp), %rdi          // Arg 1
-  movq     %rdi, 0x8(%rdx)         // Arg 1 in body
-  movq     %rsi, 0x10(%rdx)        // Arg 2
+  movq     32(%rsp), %rax          // Arg 1
+  movq     %rax, 0x8(%rdi)         // Arg 1 in body
+  movq     %rsi, 0x10(%rdi)        // Arg 2
 
   movq     16(%rsp), %rax          // Arg 3
-  movq     %rax, 0x18(%rdx)        // Arg 3 in body
+  movq     %rax, 0x18(%rdi)        // Arg 3 in body
 
-  movq     %r10, 0x20(%rdx)        // Arg 4
-  movq     %r8, 0x28(%rdx)         // Arg 5
-  movq     %r9, 0x30(%rdx)         // Arg 6
+  movq     %r10, 0x20(%rdi)        // Arg 4
+  movq     %r8, 0x28(%rdi)         // Arg 5
+  movq     %r9, 0x30(%rdi)         // Arg 6
 
-  movq     8(%rsp), %rcx          // Original RIP
-  movq     %rcx, 0x38(%rdx)        // Return RIP in body
+  movq     8(%rsp), %rax          // Original RIP
+  movq     %rax, 0x38(%rdi)        // Return RIP in body
 
   movq     0(%rsp), %r11          // Original RFLAGS
-  movq     %r11, 0x40(%rdx)        // Return
+  movq     %r11, 0x40(%rdi)        // Return
 
   movq     %cr3, %rax
-  movq     %rax, 0x48(%rdx)        // Current CR3
+  movq     %rax, 0x48(%rdi)        // Current CR3
 
-do_vmm_call:
-  // Now prepare the SVSM call parameters.
-  movabsq $0x400000001, %rax
-  // Trigger the VMEXIT. The hypervisor (or VMPL 0 handler) will intercept this.
-  rep; vmmcall
-  // Read back the result from the MSR (optional, depending on protocol).
-  cmpq    $0, %rax
-  jne 	  1f
+call_ifc:
+  movq    deko_ifc_engine_entry(%rip), %rax
+  testq   %rax, %rax
+  je      1f                     // If IFC engine address is NULL, error out.
+  
+  callq   *%rax                   // Call IFC engine
 
-  movl    $0xc0010130, %ecx
-  rdmsr
-
-  // --------------------------------------------------------------------------
-  // 6. Check Result
-  // --------------------------------------------------------------------------
-  // Compare the returned value in RAX with expected success code (0x17).
-  cmpq     $0x17, %rax
-  je       2f
+  testq   %rax, %rax
+  je      2f
 
   // --------------------------------------------------------------------------
   // 7. Error Handling
@@ -158,6 +127,7 @@ do_vmm_call:
   // Restore User RSP from our saved location.
   movq    scratch_rsp(%rip), %rsp
 
+  swapgs
 back_to_linux:
   // --------------------------------------------------------------------------
   // 9. Handover to Linux Kernel
@@ -167,7 +137,7 @@ back_to_linux:
   // address of the real 'entry_SYSCALL_64'.
   jmp     *deko_trampoline_data_entry(%rip)
 
-  // TODO: Here we need to have a way to catch sysret.
+  // TODO: Here we MAY need a way to catch sysret.
 
 // ============================================================================
 // Data & Stack Section
@@ -178,18 +148,20 @@ back_to_linux:
 .align 8
 deko_trampoline_data_entry:
   .quad 0x0    // [Runtime Patch] C code writes the original LSTAR address here.
+deko_ifc_engine_entry:
+  .quad 0x0    // [Runtime Patch] C code writes the IFC engine entry address here.
 
 .align 64
 // Bitmap to filter syscalls (0-255) that do not need analysis.
 filter_bitmap:
-  // [0-63]: clone(56) | vfork(58) | execve(59)
-  .quad 0x0D00000000000000
+  // [0-63]:    0
+  .quad 0x0000000000000200
 
   // [64-127]:  0
   .quad 0x0000000000000000
-  
-  // [128-191]:  pivot_root(155)
-  .quad 0x0000000008000000
+
+  // [128-191]: 
+  .quad 0x0000000000000000
   
   // [192-255]:  0
   .quad 0x0000000000000000
@@ -197,8 +169,8 @@ filter_bitmap:
   // [256-319]:  0
   .quad 0x0000000000000000
   
-  // [320-383]:  execveat (322) -> Bit 2 -> 0x4
-  .quad 0x0000000000000004
+  // [320-383]:  0
+  .quad 0x0000000000000000
 
   // [384-447]:  0
   .quad 0x0000000000000000
@@ -227,4 +199,29 @@ deko_stack_bottom:
 deko_stack_top:
   // The RSP will point here initially.
   // When we PUSH, RSP decrements towards 'deko_stack_bottom'.
+
+// this is called by the guest kernel on execve to call the monitor
+// to launch a new privileged process.
+.global deko_sysret_trampoline
+deko_sysret_trampoline:
+  // rcx => return RIP
+  // r11 => return cookies.
+  // movl $0x16, %eax        // VMPL_SWITCH request
+  // movl $0xC0010130, %ecx
+  // xorl %edx, %edx        // vmpl 0
+  // wrmsr
+
+  // movabsq $0x400000002, %rax // protocol
+
+  // rep; vmmcall
+
+  // do a naked vmmcall and let kvm handle the rest
+  // wrmsr is not allowed in guest mode.
+  vmmcall
+
+  // if we return here, just exit the guest.
+
+  movq $60, %rax
+  syscall
+
 deko_trampoline_end:

@@ -1,7 +1,7 @@
 ENTRY(_start)
 
 SECTIONS {
-  . = 0xFFFFE90000200000;
+  . = 0xFFFFE90000200000; /* Base address = trampoline_va + PMD_SIZE */
 
   .text : {
     *(.text.entry)

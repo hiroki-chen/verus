@@ -1201,6 +1201,9 @@ pub const SYS_cachestat: u64 = 0x1c3;
 
 pub const SYS_fchmodat2: u64 = 0x1c4;
 
+/// The entry point for analyzing syscalls for security purposes.
+///
+/// This function should be called by the IFC engine!
 #[verus_spec(
     requires
 )]
@@ -1209,11 +1212,6 @@ pub fn analysis_syscall(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
     match syscall_body.rax {
-        /* Will containers themselves execute these system calls? */
-        SYS_execve => do_sys_execve(syscall_body),
-        SYS_execveat => do_sys_execveat(syscall_body),
-        SYS_pivot_root => do_pivot_root(syscall_body),
-        SYS_exit_group => exit_group(syscall_body),
         // In June 2023, Google's security team reported that 60% of the exploits submitted
         // to their bug bounty program in 2022 were exploits of io_uring vulnerabilities.
         //
@@ -1229,146 +1227,131 @@ pub fn analysis_syscall(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()
     }
 }
 
-#[verus_spec(r =>
-    requires
-)]
-fn exit_group(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()> {
-    let exit_code = syscall_body.rdi;
-
-    if exit_code > 255 {
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-    }
-    let cr3 = PhysAddr(syscall_body.cr3);
-    // Search for the process in the process table; if found,
-    // delete it (or marking as "exit pending".)
-
-    Ok(())
-}
-
-/// Called by the docker runtime to change the root filesystem of a container.
-///
-/// Typically the mount process goes like this:
-///
-/// - `chdir(rootfs)`
-/// - `pivot_root(".", ".")`
-/// - `umount(".", MNT_DETACH)`
-#[verus_spec(r =>
-    requires
-)]
-fn do_pivot_root(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()> {
-    let new_root = syscall_body.rdi;
-    let put_old = syscall_body.rsi;
-
-    if core::hint::unlikely(
-        new_root >= 0x8000_0000_0000 - 128 || new_root == 0 || put_old >= 0x8000_0000_0000 - 128
-            || put_old == 0 || syscall_body.cr3 % PAGE_SIZE != 0 || syscall_body.cr3
-            >= 0x000f_ffff_ffff_f000u64 - PAGE_SIZE,
-    ) {
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-    }
-    let mut new_root_buf = vec![0u8;128];
-    let mut put_old_buf = vec![0u8;128];
-    copy_from_user(
-        PhysAddr(syscall_body.cr3),
-        VirtAddr(new_root),
-        new_root_buf.as_mut_ptr(),  // because we cannot unsize slice due to verus limitations.
-        128,
-    )?;
-    copy_from_user(
-        PhysAddr(syscall_body.cr3),
-        VirtAddr(put_old),
-        put_old_buf.as_mut_ptr(),  // because we cannot unsize slice due to verus limitations.
-        128,
-    )?;
-
-    let new_root = core::ffi::CStr::from_bytes_until_nul(&new_root_buf).map_err(
-        |_e| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam),
-    )?.to_str().map_err(|_e| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))?;
-    let put_old = core::ffi::CStr::from_bytes_until_nul(&put_old_buf).map_err(
-        |_e| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam),
-    )?.to_str().map_err(|_e| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))?;
-
-    kinfo!(
-        "pivot_root called with new_root=", new_root,
-        ", put_old=", put_old
-    );
-
-    Ok(())
-}
-
-/// Unlike [`do_sys_execve`] which takes path to the binary, this system call
-/// is used to execute a binary relative to a directory file descriptor. This
-/// is used to mitigate the risk of CVE-2019-5736-like attacks.
-#[verus_spec(r =>
-    requires
-)]
-fn do_sys_execveat(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()> {
-    let fd = syscall_body.rdi;
-    let pathname_ptr = syscall_body.rsi;
-
-    if core::hint::unlikely(
-        pathname_ptr >= 0x8000_0000_0000 - 128 || pathname_ptr == 0 || syscall_body.cr3 % PAGE_SIZE
-            != 0 || syscall_body.cr3 >= 0x000f_ffff_ffff_f000u64 - PAGE_SIZE,
-    ) {
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-    }
-    analyze_execve(PhysAddr(syscall_body.cr3), VirtAddr(pathname_ptr), Some(fd))
-}
-
-/// This should be intercepted at the VMPL0 level.
-///
-/// A typical trigger of this function goes from the docker runtime calling `execve`
-/// in the guest, which traps to the trampoline, which then calls this function.
-#[verus_spec(r =>
-    requires
-)]
-fn do_sys_execve(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()> {
-    kdebug!(
-        "execve called with filename", syscall_body.rdi=>hex,
-        "argv", syscall_body.rsi=>hex,
-        "envp", syscall_body.rdx=>hex
-    );
-
-    if core::hint::unlikely(
-        syscall_body.rdi >= 0x8000_0000_0000 - 128 || syscall_body.rdi == 0 || syscall_body.cr3
-            % PAGE_SIZE != 0 || syscall_body.cr3 >= 0x000f_ffff_ffff_f000u64 - PAGE_SIZE,
-    ) {
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-    }
-    analyze_execve(PhysAddr(syscall_body.cr3), VirtAddr(syscall_body.rdi), None)
-}
-
-#[verus_spec(r =>
-    requires
-        guest_cr3@ % PAGE_SIZE == 0,
-        guest_cr3@ + PAGE_SIZE < 0x000f_ffff_ffff_f000u64,
-        path@ + 128 < 0x8000_0000_0000,
-        path@ != 0,
-)]
-fn analyze_execve(guest_cr3: PhysAddr, path: VirtAddr, fd: Option<u64>) -> Result<
-    (),
-    DekoGuestServError,
-> {
-    let mut filename = vec![0u8;128];
-    copy_from_user(
-        guest_cr3,
-        path,
-        filename.as_mut_ptr(),  // because we cannot unsize slice due to verus limitations.
-        128,
-    )?;
-
-    if let Ok(f) = core::ffi::CStr::from_bytes_until_nul(&filename) {
-        if let Ok(fname_str) = f.to_str() {
-            kinfo!("The container is trying to execve filename=", fname_str);
-        } else {
-            // This is rare but possible.
-            kwarn!("execve filename (invalid utf8)", &filename);
-        }
-    } else {
-        kwarn!("execve filename (non-utf8)");
-    }
-
-    Ok(())
-}
-
+// #[verus_spec(r =>
+//     requires
+// )]
+// fn exit_group(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()> {
+//     let exit_code = syscall_body.rdi;
+//     if exit_code > 255 {
+//         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+//     }
+//     let cr3 = PhysAddr(syscall_body.cr3);
+//     // Search for the process in the process table; if found,
+//     // delete it (or marking as "exit pending".)
+//     Ok(())
+// }
+// /// Called by the docker runtime to change the root filesystem of a container.
+// ///
+// /// Typically the mount process goes like this:
+// ///
+// /// - `chdir(rootfs)`
+// /// - `pivot_root(".", ".")`
+// /// - `umount(".", MNT_DETACH)`
+// #[verus_spec(r =>
+//     requires
+// )]
+// fn do_pivot_root(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()> {
+//     let new_root = syscall_body.rdi;
+//     let put_old = syscall_body.rsi;
+//     if core::hint::unlikely(
+//         new_root >= 0x8000_0000_0000 - 128 || new_root == 0 || put_old >= 0x8000_0000_0000 - 128
+//             || put_old == 0 || syscall_body.cr3 % PAGE_SIZE != 0 || syscall_body.cr3
+//             >= 0x000f_ffff_ffff_f000u64 - PAGE_SIZE,
+//     ) {
+//         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+//     }
+//     let mut new_root_buf = vec![0u8;128];
+//     let mut put_old_buf = vec![0u8;128];
+//     copy_from_user(
+//         PhysAddr(syscall_body.cr3),
+//         VirtAddr(new_root),
+//         new_root_buf.as_mut_ptr(),  // because we cannot unsize slice due to verus limitations.
+//         128,
+//     )?;
+//     copy_from_user(
+//         PhysAddr(syscall_body.cr3),
+//         VirtAddr(put_old),
+//         put_old_buf.as_mut_ptr(),  // because we cannot unsize slice due to verus limitations.
+//         128,
+//     )?;
+//     let new_root = core::ffi::CStr::from_bytes_until_nul(&new_root_buf).map_err(
+//         |_e| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam),
+//     )?.to_str().map_err(|_e| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))?;
+//     let put_old = core::ffi::CStr::from_bytes_until_nul(&put_old_buf).map_err(
+//         |_e| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam),
+//     )?.to_str().map_err(|_e| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))?;
+//     kinfo!(
+//         "pivot_root called with new_root=", new_root,
+//         ", put_old=", put_old
+//     );
+//     Ok(())
+// }
+// /// Unlike [`do_sys_execve`] which takes path to the binary, this system call
+// /// is used to execute a binary relative to a directory file descriptor. This
+// /// is used to mitigate the risk of CVE-2019-5736-like attacks.
+// #[verus_spec(r =>
+//     requires
+// )]
+// fn do_sys_execveat(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()> {
+//     let fd = syscall_body.rdi;
+//     let pathname_ptr = syscall_body.rsi;
+//     if core::hint::unlikely(
+//         pathname_ptr >= 0x8000_0000_0000 - 128 || pathname_ptr == 0 || syscall_body.cr3 % PAGE_SIZE
+//             != 0 || syscall_body.cr3 >= 0x000f_ffff_ffff_f000u64 - PAGE_SIZE,
+//     ) {
+//         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+//     }
+//     analyze_execve(PhysAddr(syscall_body.cr3), VirtAddr(pathname_ptr), Some(fd))
+// }
+// /// This should be intercepted at the VMPL0 level.
+// ///
+// /// A typical trigger of this function goes from the docker runtime calling `execve`
+// /// in the guest, which traps to the trampoline, which then calls this function.
+// #[verus_spec(r =>
+//     requires
+// )]
+// fn do_sys_execve(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()> {
+//     kdebug!(
+//         "execve called with filename", syscall_body.rdi=>hex,
+//         "argv", syscall_body.rsi=>hex,
+//         "envp", syscall_body.rdx=>hex
+//     );
+//     if core::hint::unlikely(
+//         syscall_body.rdi >= 0x8000_0000_0000 - 128 || syscall_body.rdi == 0 || syscall_body.cr3
+//             % PAGE_SIZE != 0 || syscall_body.cr3 >= 0x000f_ffff_ffff_f000u64 - PAGE_SIZE,
+//     ) {
+//         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+//     }
+//     analyze_execve(PhysAddr(syscall_body.cr3), VirtAddr(syscall_body.rdi), None)
+// }
+// #[verus_spec(r =>
+//     requires
+//         guest_cr3@ % PAGE_SIZE == 0,
+//         guest_cr3@ + PAGE_SIZE < 0x000f_ffff_ffff_f000u64,
+//         path@ + 128 < 0x8000_0000_0000,
+//         path@ != 0,
+// )]
+// fn analyze_execve(guest_cr3: PhysAddr, path: VirtAddr, fd: Option<u64>) -> Result<
+//     (),
+//     DekoGuestServError,
+// > {
+//     let mut filename = vec![0u8;128];
+//     copy_from_user(
+//         guest_cr3,
+//         path,
+//         filename.as_mut_ptr(),  // because we cannot unsize slice due to verus limitations.
+//         128,
+//     )?;
+//     if let Ok(f) = core::ffi::CStr::from_bytes_until_nul(&filename) {
+//         if let Ok(fname_str) = f.to_str() {
+//             kinfo!("The container is trying to execve filename=", fname_str);
+//         } else {
+//             // This is rare but possible.
+//             kwarn!("execve filename (invalid utf8)", &filename);
+//         }
+//     } else {
+//         kwarn!("execve filename (non-utf8)");
+//     }
+//     Ok(())
+// }
 } // verus!

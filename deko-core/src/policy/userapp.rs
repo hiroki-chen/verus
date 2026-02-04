@@ -385,6 +385,8 @@ impl DekoUserApp {
 
         r.add_and_measure(range)?;
 
+        kinfo!("measurement is", r.ext.measurement);
+
         Ok(r)
     }
 
@@ -472,6 +474,72 @@ impl DekoUserApp {
             kdebug!("Measured page", cur=>hex, hash);
 
             i += 1;
+        }
+
+        Ok(())
+    }
+
+    /// Lifts the VMPL of the application's memory space to VMPL1.
+    ///
+    /// The default VMPL is the same as the guest kernel (VMPL2) but whenever there is
+    /// a sensitive operation that receives the user's sensitive data (e.g., read from
+    /// an encrypted socket), we need to lift the VMPL to VMPL1 to prevent the untrusted
+    /// kernel from snooping on the data.
+    ///
+    /// This function does the thing by walking the page tables and updating the VMPL bits
+    /// such that VMPL2 no longer has the read/write/execution permissions.
+    #[verus_spec(r =>
+        requires
+            self.wf(),
+    )]
+    pub fn lift_vmpl(&self) -> DekoGuestServResult<()> {
+        let cr3 = TempMapping::new(create_paddr_range(self.cr3, 1)).ok_or(
+            DekoGuestServError::SoftError(DekoGuestServResultCode::Busy),
+        )?;
+        let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+        let private_bit = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).private_bit;
+        let shared_bit = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).shared_bit;
+
+        let s = self.ext.occupied_regions.len();
+        for i in 0..s
+            invariant
+                s == self.ext.occupied_regions@.len(),
+                self.wf(),
+                cr3.wf(),
+                cr3.inner.end@ - cr3.inner.start@ == PAGE_SIZE,
+        {
+            let cur = &self.ext.occupied_regions[i];
+            let start = cur.start;
+            let end = cur.end;
+            let len = (end.0 - start.0 + PAGE_SIZE - 1) / PAGE_SIZE;
+            let mut j = 0;
+
+            #[verus_spec(
+                invariant
+                    j <= len,
+                    cur == self.ext.occupied_regions@[i as int],
+                    len == (end@ - start@ + PAGE_SIZE - 1) / PAGE_SIZE as int,
+                    self.wf(),
+                    cr3.wf(),
+                    cr3.inner.end@ - cr3.inner.start@ == PAGE_SIZE,
+                    PAGE_SIZE == 0x1000,
+                decreases
+                    len - j,
+            )]
+            while j < len {
+                let va = VirtAddr(start.0 + j * PAGE_SIZE);
+                // Look up the mapping.
+                let mapping = PageTable::walk_lvl3_guest(&cr3, va, private_bit, shared_bit)?;
+                if mapping.temp_mappings.len() <= 2 || mapping.temp_mappings.len() > 4 {
+                    return Err(
+                        DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam),
+                    );
+                }
+                let final_mapping = mapping.final_mapping().unwrap();
+
+                j += 1;
+            }
+
         }
 
         Ok(())

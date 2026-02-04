@@ -60,6 +60,8 @@ pub enum PageStateChangeOp {
     Unsmash,
 }
 
+const VMPL1_MAGIC_SIGNATURE: u32 = 0xDE;
+
 // Currently VMPL3 is not used.
 pub const VMPL_GUEST_KERNEL: u32 = 0x2;
 
@@ -1630,6 +1632,31 @@ fn do_copy_cpuid_to_fw(cpuid_table: &CpuidTable, to: TempMapping) {
 pub fn after_irq_enable() {
     doorbell::process_pending_hv_events();
 }
+
+/// Gets the current VMPL of this CPU.
+///
+/// The trick we made here is to read the TSC_AUX MSR which is set by the
+/// hypervisor when doing VM-Entry. The VMPL 0 monitor will set the high
+/// bit of the TSC_AUX to `0xDE` so that we can identify if we are running
+/// at VMPL1 or VMPL2.
+#[inline]
+#[verifier::external_body]
+pub fn is_vmpl1() -> bool {
+    let tsc_aux: u32;
+
+    unsafe {
+        core::arch::asm!(
+            "rdtscp",
+            out("eax") _,
+            out("edx") _,
+            out("ecx") tsc_aux,
+            options(att_syntax, nomem, nostack, preserves_flags),
+        );
+    }
+
+    (tsc_aux >> 24) == VMPL1_MAGIC_SIGNATURE
+}
+
 
 /// # HV is delivered without regard to interrupt shadows, so chances are high
 /// that the guest will lose the ability to control interaction between HLT and

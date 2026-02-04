@@ -6,7 +6,8 @@ use vstd::raw_ptr::PointsToRaw;
 
 use crate::cpu::irq::IrqUnSafeLockGuard;
 use crate::hal::is_stage2;
-use crate::mm::{DEKO_FRAME_ALLOCATOR, DEKO_FRAME_ALLOCATOR_FULL};
+use crate::imp::is_vmpl1;
+use crate::mm::{DEKO_FRAME_ALLOCATOR, DEKO_FRAME_ALLOCATOR_FULL, DEKO_IFC_FRAME_ALLOCATOR};
 
 verus! {
 
@@ -133,6 +134,12 @@ unsafe impl core::alloc::Allocator for DekoAllocatorApi {
     > {
         if is_stage2() {
             DEKO_FRAME_ALLOCATOR.0.allocate(layout)
+        } else if is_vmpl1() {
+            if let Some(allocator) = DEKO_IFC_FRAME_ALLOCATOR.get() {
+                allocator.0.allocate(layout)
+            } else {
+                panic!("Deko IFC frame allocator is not initialized");
+            }
         } else {
             DEKO_FRAME_ALLOCATOR_FULL.0.allocate(layout)
         }
@@ -142,6 +149,12 @@ unsafe impl core::alloc::Allocator for DekoAllocatorApi {
     unsafe fn deallocate(&self, ptr: core::ptr::NonNull<u8>, layout: core::alloc::Layout) {
         if is_stage2() {
             DEKO_FRAME_ALLOCATOR.0.deallocate(ptr, layout)
+        } else if is_vmpl1() {
+            if let Some(allocator) = DEKO_IFC_FRAME_ALLOCATOR.get() {
+                allocator.0.deallocate(ptr, layout)
+            } else {
+                panic!("Deko IFC frame allocator is not initialized");
+            }
         } else {
             DEKO_FRAME_ALLOCATOR_FULL.0.deallocate(ptr, layout)
         }

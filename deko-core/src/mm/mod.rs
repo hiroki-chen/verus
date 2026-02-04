@@ -6,6 +6,7 @@
 //! - Kernel page frame allocator that allocates physical pages.
 //! - Some high level allocators that allocates pages from the page frame allocators.
 //! - A memory manager that manages the page tables and memory regions.
+pub mod bounce_buffer;
 #[cfg(feature = "alloc")]
 pub mod frame_allocator;
 pub mod paging;
@@ -237,6 +238,13 @@ pub exec static DEKO_FRAME_ALLOCATOR_FULL: DekoPageFrameAllocator<HEAP_SIZE_FULL
         DEKO_FRAME_ALLOCATOR_FULL.wf(),
 {
     DekoPageFrameAllocator::new()
+}
+
+pub exec static DEKO_IFC_FRAME_ALLOCATOR: DekoSimpleOnceCell<DekoPageFrameAllocator<10>>
+    ensures
+        DEKO_IFC_FRAME_ALLOCATOR.wf(),
+{
+    DekoSimpleOnceCell::new(Ghost(()))
 }
 
 pub exec static PTE_MASK_PRIVATE: DekoSimpleOnceCell<u64>

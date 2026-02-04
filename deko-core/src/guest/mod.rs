@@ -19,6 +19,18 @@ pub(crate) mod service;
 
 verus! {
 
+/// Represents the reason for a guest VM exit event when forwarded to the monitor.
+#[repr(u64)]
+#[allow(non_snake_case)]
+#[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
+pub enum DekoGuestExitReason {
+    /// We need to intercept the VMMCALL instruction from the guest.
+    VMMCALL = 0x81,
+    /// Caused by an explicit VMGEXIT via GHCB instruction
+    /// and the protocol is a SVSM call.
+    VMGEXIT = 0x403,
+}
+
 pub exec static DEKO_POLICY_ENGINE_BLOB: DekoSimpleOnceCell<&'static [u8]>
     ensures
         DEKO_POLICY_ENGINE_BLOB.wf(),

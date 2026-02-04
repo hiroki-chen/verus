@@ -218,7 +218,7 @@ pub struct VMSA {
     pub reserved_2e0: u64,
     pub pkru: u32,
     #[deko(skip)]
-    pub reserved_2ec: u32,
+    pub tsc_aux: u32,
     pub guest_tsc_scale: u64,
     pub guest_tsc_offset: u64,
     pub reg_prot_nonce: u64,

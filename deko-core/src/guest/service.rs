@@ -31,8 +31,9 @@ use crate::policy::guest_paging::{GuestPageOffsetBase, GUEST_PAGE_OFFSET_BASE};
 use crate::policy::syscall::analysis_syscall;
 use crate::policy::userapp::register_user_app;
 use crate::policy::{
-    self, enable_syscall_hook, inject_ifc_policy_engine, install_hook, DekoMsrIntercept,
-    DekoMsrInterceptVec0, DekoSyscallBody,
+    self, deko_sysret_trampoline_func_ptr, deko_trampoline_start_func_ptr, enable_syscall_hook,
+    inject_ifc_policy_engine, install_hook, DekoMsrIntercept, DekoMsrInterceptVec0,
+    DekoSyscallBody,
 };
 use crate::snp::vmsa::VMSA;
 use crate::snp::{pvalidate, rmpadjust, validate_vaddr_region};
@@ -83,7 +84,7 @@ pub struct DekoGuestLstarWriteReq {
     /// Guest  page offset base.
     pub page_offset_base: VirtAddr,
     /// Being returned.
-    pub ok: u64,
+    pub sysret_trampoline: u64,
 }
 
 #[repr(C, align(8))]
@@ -141,6 +142,8 @@ pub const DEKO_SERVICE_EXTEND_MSR_INTERCEPT: u32 = 0x0;
 pub const DEKO_SERVICE_EXTEND_SYSCALL_ANALYSIS: u32 = 0x1;
 
 pub const DEKO_SERVICE_EXTEND_REPORT_APP: u32 = 0x2;
+
+pub const DEKO_SERVICE_EXTEND_LAUNCH_APP: u32 = 0x3;
 
 with_atomic_pred! {
     PhysAddr,
@@ -879,8 +882,12 @@ fn handle_deko_service_lstar_intercept(
             }
             inject_ifc_policy_engine(req.trampoline_gva, req.blob_gpa, blob)?;
         }
-        req.ok = 1;
+        req.sysret_trampoline = deko_sysret_trampoline_func_ptr().wrapping_sub(
+            deko_trampoline_start_func_ptr(),
+        );
         lstar_req_mapping.write_ref_at::<DekoGuestLstarWriteReq>(offset as usize, &req);
+
+        kinfo!("MSR intercept: LSTAR MSR intercept handled successfully");
 
         if TRAMPOLINE_PA.get().is_none() {
             TRAMPOLINE_PA.init(DekoAtomicData::new(req.trampoline_gpa));
@@ -933,6 +940,26 @@ fn handle_deko_serivce_syscall_analysis(params: &mut DekoGuestRequestParams) -> 
     let syscall_body = temp_mapping.read_ref_at::<DekoSyscallBody>(offset as usize).clone();
 
     analysis_syscall(syscall_body)
+}
+
+/// This function gets called by the guest to notify us that a new sensitive application
+/// might have been launched so that we can register it accordingly.
+///
+/// The guest kernel replaces ctxt->ip to trampoline which does a VMMCALL which is intercepted
+/// by us in the VMSA. The guest #VC handler then simply forwards the request to this function.
+#[verus_spec(r =>
+    with
+        Tracked(cpu_perm): Tracked<&mut DekoCpuCtxPermission>,
+    requires
+        old(cpu_perm).wf(),
+    ensures
+        cpu_perm.wf(),
+        cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
+)]
+fn handle_deko_service_launch_app(params: &mut DekoGuestRequestParams) -> DekoGuestServResult<()> {
+    kinfo!("handle_deko_service_launch_app: received launch app notification from guest", params);
+
+    Ok(())
 }
 
 #[verus_spec(r =>
@@ -1137,6 +1164,10 @@ pub(super) fn handle_guest_exit_extend_service(
         DEKO_SERVICE_EXTEND_REPORT_APP => {
             proof_with!(Tracked(cpu_perm));
             handle_deko_service_report_app(params)
+        },
+        DEKO_SERVICE_EXTEND_LAUNCH_APP => {
+            proof_with!(Tracked(cpu_perm));
+            handle_deko_service_launch_app(params)
         },
         _ => {
             kerror!("Unsupported extend service request: ", req);

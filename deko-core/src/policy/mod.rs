@@ -36,8 +36,10 @@ core::arch::global_asm!(include_str!("trampoline.S"), options(att_syntax));
 
 extern "C" {
     fn deko_trampoline_start();
+    fn deko_sysret_trampoline();
     fn deko_trampoline_end();
     static mut deko_trampoline_data_entry: u64;
+    static mut deko_ifc_engine_entry: u64;
 }
 
 verus! {
@@ -115,6 +117,8 @@ pub const GUEST_TRAMPOLINE_MAGIC: &'static [u8; 15] = &[
 
 func_ptr!(deko_trampoline_start);
 
+func_ptr!(deko_sysret_trampoline);
+
 func_ptr!(deko_trampoline_end);
 
 #[inline(always)]
@@ -123,6 +127,15 @@ func_ptr!(deko_trampoline_end);
 pub fn update_syscall_entry(entry: u64) {
     unsafe {
         core::ptr::write_volatile(core::ptr::addr_of_mut!(deko_trampoline_data_entry), entry);
+    }
+}
+
+#[inline(always)]
+#[verifier::external_body]
+#[doc(hidden)]
+pub fn update_ifc_engine_entry(entry: u64) {
+    unsafe {
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(deko_ifc_engine_entry), entry);
     }
 }
 
@@ -156,6 +169,16 @@ pub enum DekoMsrInterceptVec0 {
     LstarWrite = 11,
     CstarRead = 12,
     CstarWrite = 13,
+}
+
+#[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
+pub enum DekoInterceptVec4 {
+    VmmCall = 1 << 1,
+}
+
+#[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
+pub enum DekoInterceptVec {
+    InterceptVec4(DekoInterceptVec4),
 }
 
 #[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
@@ -224,6 +247,48 @@ impl VMSA {
             }
         }
     }
+
+    #[verifier::external_body]
+    #[verus_spec(
+        with
+            Tracked(vmsa_perm): Tracked<&mut DekoPointsTo<Self>>,
+        requires
+            old(vmsa_perm).is_init(),
+            old(vmsa_perm).wf(),
+            old(vmsa_perm).pptr() == ptr@,
+        ensures
+            vmsa_perm.is_init(),
+            vmsa_perm.wf(),
+            vmsa_perm.pptr() == ptr@,
+    )]
+    pub fn enable_vec4_intercept(ptr: DekoPPtr<Self>, intercepts: &[DekoInterceptVec4]) {
+        unsafe {
+            let vmsa = ptr.addr() as *mut VMSA;
+
+            let vmpl_ptr = core::ptr::addr_of_mut!((*vmsa).vmpl);
+            let current_vmpl = core::ptr::read_unaligned(vmpl_ptr);
+            if current_vmpl != 2 {
+                // VMPL 0 cannot set intercepts.
+                kinfo!("VMPL 0 cannot set intercepts in VMSA");
+                return ;
+            }
+            let vec4_ptr = core::ptr::addr_of_mut!((*vmsa).intercept_vecs);
+
+            for i in 0..intercepts.len() {
+                let which = intercepts[i];
+
+                match which {
+                    DekoInterceptVec4::VmmCall => {
+                        let bit = which as u32;
+                        let vec4_ptr = (vec4_ptr as *mut u32).add(4);
+                        let mut current_val = core::ptr::read_unaligned(vec4_ptr);
+                        current_val |= bit;
+                        core::ptr::write_unaligned(vec4_ptr, current_val);
+                    },
+                }
+            }
+        }
+    }
 }
 
 /// Note that the bit `GuestinterceptCtl` may only be used if
@@ -257,6 +322,10 @@ pub fn enable_syscall_hook() {
         vmsa,
         &[DekoMsrIntercept::InterceptMsrVec0(DekoMsrInterceptVec0::LstarWrite)],
     );
+
+    // Also enable the VMMCALL intercept in intercept_vec4
+    proof_with!(Tracked(&mut vmsa_perm));
+    VMSA::enable_vec4_intercept(vmsa, &[DekoInterceptVec4::VmmCall]);
 }
 
 /// Installs the syscall hook and locks down the guest entry page.
@@ -311,7 +380,7 @@ pub fn install_hook(
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
     let guest_trampoline_frame = g_trampoline_mapping.final_mapping().unwrap();
-    move_to_guest(guest_trampoline_frame, syscall_enter_addr)?;
+    move_to_guest(guest_trampoline_frame, req.trampoline_gva, syscall_enter_addr)?;
 
     // And then we lock down the guest syscall entry page
     g_trampoline_mapping.lock_translation_path()?;
@@ -370,7 +439,10 @@ pub(crate) fn inject_ifc_policy_engine(
             "Injecting IFC policy engine of size",
             payload.len(),
             "bytes into guest at",
-            ifc_start_va => hex);
+            ifc_start_va,
+            "with blob GPA",
+            blob_gpa,
+        );
 
         let Some(temp_mapping) = TempMapping::new(create_paddr_range(blob_gpa, len as usize)) else {
             kerror!("Failed to create temporary mapping for IFC policy engine blob");
@@ -392,11 +464,14 @@ pub(crate) fn inject_ifc_policy_engine(
         guest_trampoline_frame.wf(),
         syscall_enter_addr.wf(),
         syscall_enter_addr@ >= VADDR_UPPER_MASK,
+        trampoline_gva.wf(),
+        trampoline_gva@ >= VADDR_UPPER_MASK,
         guest_trampoline_frame.inner.end@ - guest_trampoline_frame.inner.start@ >= PAGE_SIZE,
 )]
 fn move_to_guest(
     guest_trampoline_frame: &TempMapping,
     syscall_enter_addr: VirtAddr,
+    trampoline_gva: VirtAddr,
 ) -> DekoGuestServResult<()> {
     // This is awkward
     assume(core::mem::size_of::<[u8; 15]>() == 15);
@@ -414,7 +489,7 @@ fn move_to_guest(
     // Safety: We have already verified that the guest page table
     //         maps the syscall entry address.
 
-    unsafe { patch_trampoline(syscall_enter_addr, guest_trampoline_frame) }
+    unsafe { patch_trampoline(syscall_enter_addr, trampoline_gva, guest_trampoline_frame) }
 }
 
 /// Patch the incomplete trampoline code with the real entry point
@@ -433,9 +508,12 @@ fn move_to_guest(
         syscall_enter_addr.wf(),
         syscall_enter_addr@ >= VADDR_UPPER_MASK,
         g_trampoline.wf(),
+        trampoline_gva.wf(),
+        trampoline_gva@ >= VADDR_UPPER_MASK,
 )]
 unsafe fn patch_trampoline(
     syscall_enter_addr: VirtAddr,
+    trampoline_gva: VirtAddr,
     g_trampoline: &TempMapping,
 ) -> DekoGuestServResult<()> {
     let trampoline_start = deko_trampoline_start as usize;
@@ -456,6 +534,7 @@ unsafe fn patch_trampoline(
         return Err(DekoGuestServError::FatalError);
     }
     update_syscall_entry(syscall_enter_addr.0 as u64);
+    update_ifc_engine_entry((trampoline_gva.0 + PAGE_SIZE_2M) as u64);
 
     core::ptr::copy_nonoverlapping(
         trampoline_start as *const u8,
