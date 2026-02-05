@@ -11,6 +11,7 @@ use deko_std::wf::WellFormed;
 use deko_std::{
     deko_bitflags, deko_rwlock_read_atomic_data, deko_rwlock_write_atomic_data, TrivialPredicate,
 };
+use uuid::Uuid;
 use vstd::prelude::*;
 
 use crate::collections::{update_vec, Vec};
@@ -19,8 +20,9 @@ use crate::cpu::regs::no_smap_zone;
 use crate::cpu::task::{generate_id, DekoRunnableState};
 use crate::cpu::DekoCpuCtx;
 use crate::crypto::aes::aes_gcm_256_key_gen;
-use crate::guest::service::DekoNewAppReq;
-use crate::guest::{DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode};
+use crate::crypto::uuid::{generate_secure_uuid, uuid_print};
+use crate::guest::service::{DekoNewAppReq, DekoNewAppType};
+use crate::guest::{DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode, PtRegs};
 use crate::mm::check_within_guest_mmap;
 use crate::mm::frame_allocator::DekoAllocatorApi;
 use crate::mm::paging::{bit_not_in_addr_region, strip_confidentiality_bits, PageTable};
@@ -141,6 +143,8 @@ pub const RUNC_NAME: &'static str = "runc";
 
 pub const CONTAINERD_NAME: &'static str = "containerd";
 
+pub const DOCKER_INIT_NAME: &'static str = "docker-init";
+
 pub const CONTAINERD_SHIM_NAME: &'static str = "containerd-shim";
 
 pub const DOCKER_OVERLAY: &'static str = "overlay";
@@ -150,7 +154,7 @@ pub const DOCKER_OVERLAY: &'static str = "overlay";
 pub fn is_docker_request(path: &str) -> bool {
     path.contains(RUNC_NAME) || path.contains(CONTAINERD_NAME) || path.contains(
         CONTAINERD_SHIM_NAME,
-    )
+    ) || path.contains(DOCKER_INIT_NAME) || path.contains(DOCKER_OVERLAY)
 }
 
 /// Checks whether the given parent PID belongs to a shim process.
@@ -652,7 +656,7 @@ unsafe fn copy_from_user_same_vmpl(addr: u64, buf: *mut u8, len: usize) -> DekoG
         guest_cr3.wf(),
 )]
 pub fn register_user_app(
-    req: &DekoNewAppReq,
+    req: &mut DekoNewAppReq,
     guest_cr3: PhysAddr,
     is_creation: bool,
 ) -> DekoGuestServResult<()> {
@@ -661,7 +665,8 @@ pub fn register_user_app(
         kerror!("register_user_app: invalid guest CR3", guest_cr3);
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
-    let comm = core::ffi::CStr::from_bytes_until_nul(&req.comm).map_err(
+    let comm = req.comm;
+    let comm = core::ffi::CStr::from_bytes_until_nul(&comm).map_err(
         |_e| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam),
     )?.to_str().map_err(|_e| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))?;
 
@@ -691,7 +696,7 @@ fn check_user_vrange(req: &DekoNewAppReq) -> bool {
         guest_cr3@ % PAGE_SIZE == 0,
 )]
 fn do_reigster_user_app(
-    req: &DekoNewAppReq,
+    req: &mut DekoNewAppReq,
     comm: &str,
     guest_cr3: PhysAddr,
 ) -> DekoGuestServResult<()> {
@@ -700,44 +705,28 @@ fn do_reigster_user_app(
     ) {
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
-    if req.pid == 1 {
-        if comm.eq("/sbin/init") || comm.eq("systemd") {
-            kwarn!(
-                "[Init] Unexpected PID 1 process name:",
-                &req.comm,
-            );
-        }
-        kinfo!("[Init] Detected /sbin/init (PID 1). Setting Host Namespace Baseline:", req.mnt_ns_id=>hex);
-
-        // Might be called multiple times.
-        deko_rwlock_write_atomic_data!(
-            HOST_MNT_NS_ID,
-            host_ns_lock,
-            __,
-            {
-                host_ns_lock = req.mnt_ns_id;
-            }
-        )
-    } else {
-        // We are still in the host side; just check if this is a container runtime.
-        if is_docker_request(comm) {
+    match req.app_type {
+        DekoNewAppType::DEKO_DOCKER_INFRA => {
             add_to_shim_set(req.pid);
 
-            return Ok(());
-        }
-        let is_docker_app = lookup_parent_is_shim(req.ppid);
-        if is_docker_app {
-            let host_nid = get_host_ns_id()?;
-            if req.mnt_ns_id == host_nid {
-                // This app is in the host namespace; ignore it.
+            Ok(())
+        },
+        DekoNewAppType::DEKO_DOCKER_APPS => {
+            // Look up if the parent is a shim process.
+            if !lookup_parent_is_shim(req.ppid) {
+                // Ignore.
                 return Ok(());
             }
             if core::hint::unlikely(!check_user_vrange(req)) {
                 kerror!("do_register_user_app: invalid user vaddr range", comm, req.start_code=>hex, req.end_code=>hex);
                 return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
             }
-            kinfo!("do_register_user_app: registering app", comm);
             let user_app = DekoUserApp::new(req, guest_cr3)?;
+            let new_user_uuid = generate_secure_uuid();
+            uuid_print(&new_user_uuid);
+            let (low, high) = new_user_uuid.as_u64_pair();
+            req.token_low = low;
+            req.token_high = high;
 
             deko_rwlock_write_atomic_data! {
                 DEKO_SHADOW_APP_LIST,
@@ -774,10 +763,11 @@ fn do_reigster_user_app(
                     app_list = Some(napp_list);
                 }
             }
-        }
-    }
 
-    Ok(())
+            Ok(())
+        },
+        _ => Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam)),
+    }
 }
 
 fn do_unregister_user_app(
@@ -789,8 +779,6 @@ fn do_unregister_user_app(
         // Ignore /sbin/init exit: this means the guest is shutting down.
         return Ok(());
     }
-    // We are still in the host side; just check if this is a container runtime.
-
     if is_docker_request(comm) {
         remove_from_shim_set(req.pid);
 
@@ -830,6 +818,25 @@ fn do_unregister_user_app(
     }
     }
     Ok(())
+}
+
+/// Try to kick the applications in the guest VM to VMPL1.
+///
+/// This function never returns!
+#[verus_spec()]
+#[verifier::exec_allows_no_decreases_clause]
+pub fn try_kick_app(regs: &PtRegs) -> ! {
+    // Reconstruct the UUID from the registers.
+    let token_low = regs.cx;
+    let token_high = regs.dx;
+    let uuid = Uuid::from_u64_pair(token_low, token_high);
+
+    uuid_print(&uuid);
+
+    kinfo!("placeholder. loop now");
+
+    loop {
+    }
 }
 
 } // verus!

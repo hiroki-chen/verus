@@ -19,7 +19,7 @@ use crate::cpu::tlb::{flush_tlb_global_percpu, flush_tlb_global_sync};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission, PERCPU_AREAS};
 use crate::guest::{
     self, guest_page_table, DekoGuestRequestParams, DekoGuestServError, DekoGuestServResult,
-    DekoGuestServResultCode, DEKO_POLICY_ENGINE_BLOB,
+    DekoGuestServResultCode, PtRegs, DEKO_POLICY_ENGINE_BLOB,
 };
 use crate::imp::RmpFlags;
 use crate::mm::paging::{
@@ -29,7 +29,7 @@ use crate::mm::vm::TempMapping;
 use crate::mm::{check_within_guest_mmap, zero_page};
 use crate::policy::guest_paging::{GuestPageOffsetBase, GUEST_PAGE_OFFSET_BASE};
 use crate::policy::syscall::analysis_syscall;
-use crate::policy::userapp::register_user_app;
+use crate::policy::userapp::{register_user_app, try_kick_app};
 use crate::policy::{
     self, deko_sysret_trampoline_func_ptr, deko_trampoline_start_func_ptr, enable_syscall_hook,
     inject_ifc_policy_engine, install_hook, DekoMsrIntercept, DekoMsrInterceptVec0,
@@ -41,7 +41,7 @@ use crate::{kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
 
 const _: () = {
     assert!(core::mem::size_of::<DekoGuestLstarWriteReq>() == 0x30);
-    assert!(core::mem::size_of::<DekoNewAppReq>() == 0x38);
+    assert!(core::mem::size_of::<DekoNewAppReq>() == 0x50);
 };
 
 verus! {
@@ -52,7 +52,7 @@ global layout DekoGuestPValidateReq is size == 8;
 
 global layout DekoGuestLstarWriteReq is size == 0x30;
 
-global layout DekoNewAppReq is size == 0x38;
+global layout DekoNewAppReq is size == 0x50;
 
 /// Represents a request structure for page validation operations.
 ///
@@ -87,6 +87,15 @@ pub struct DekoGuestLstarWriteReq {
     pub sysret_trampoline: u64,
 }
 
+#[allow(non_camel_case_types)]
+#[repr(u32)]
+#[derive(Copy, Clone, DekoDebug, PartialEq, Eq)]
+pub enum DekoNewAppType {
+    DEKO_DOCKER_INFRA = 0,
+    DEKO_DOCKER_APPS = 1,
+    DEKO_UNKNOWN = 0xffffffff,
+}
+
 #[repr(C, align(8))]
 #[derive(Copy, Clone, DekoDebug)]
 pub struct DekoNewAppReq {
@@ -111,6 +120,9 @@ pub struct DekoNewAppReq {
     pub end_code: u64,
     /// Command excluding the path.
     pub comm: [u8; 16],
+    pub token_low: u64,
+    pub token_high: u64,
+    pub app_type: DekoNewAppType,
 }
 
 impl WellFormed for DekoNewAppReq {
@@ -592,8 +604,6 @@ fn handle_deko_service_vcpu_create(params: &DekoGuestRequestParams) -> DekoGuest
         }
 
         let vmsa = vmsa_mapping.read_ref::<VMSA>();
-        // kinfo!("Guest vCPU create: VMSA read: ", vmsa);
-
         // Now check if the VMSA is valid.
         if vmsa.vmpl != 2 || vmsa.efer & (1 << 12) == 0 || vmsa.sev_features != sev_features {
             kerror!("Guest vCPU create: invalid VMSA parameters");
@@ -957,9 +967,44 @@ fn handle_deko_serivce_syscall_analysis(params: &mut DekoGuestRequestParams) -> 
         cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
 )]
 fn handle_deko_service_launch_app(params: &mut DekoGuestRequestParams) -> DekoGuestServResult<()> {
-    kinfo!("handle_deko_service_launch_app: received launch app notification from guest", params);
+    let r9 = params.r9;
+    if core::hint::unlikely(!check_within_guest_mmap(PhysAddr(r9))) {
+        kerror!("Launch app: request body NOT within guest mmap:", PhysAddr(r9));
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    let offset = r9 % PAGE_SIZE as u64;
+    let req_body = r9 & !0xfff;
 
-    Ok(())
+    assume(core::mem::size_of::<PtRegs>() == 0xa8);
+
+    if core::hint::unlikely(
+        req_body >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE || offset + core::mem::size_of::<
+            PtRegs,
+        >() as u64 > PAGE_SIZE as u64,
+    ) {
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    proof {
+        let n = params.r9;
+
+        assert(req_body % PAGE_SIZE == 0) by (bit_vector)
+            requires
+                req_body == (n & !((PAGE_SIZE as u64 - 1) as u64)),
+                PAGE_SIZE == 0x1000,
+        ;
+    }
+
+    let req_mapping = match TempMapping::new(create_paddr_range(PhysAddr(req_body), 1)) {
+        Some(m) => m,
+        None => {
+            kerror!("Launch app: failed to create temporary mapping for request body at:", PhysAddr(req_body));
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy));
+        },
+    };
+
+    let regs = req_mapping.read_ref_at::<PtRegs>(offset as usize);
+
+    try_kick_app(regs)
 }
 
 #[verus_spec(r =>
@@ -1012,13 +1057,16 @@ fn handle_deko_service_report_app(params: &mut DekoGuestRequestParams) -> DekoGu
         },
     };
 
-    let req = req_mapping.read_ref_at::<DekoNewAppReq>(offset as usize);
+    let mut req = req_mapping.read_ref_at::<DekoNewAppReq>(offset as usize).clone();
     let guest_cr3 = strip_confidentiality_bits(
         params.additional_data.unwrap().guest_cr3,
         private_bit,
     );
 
-    register_user_app(req, PhysAddr(guest_cr3), is_creation)
+    register_user_app(&mut req, PhysAddr(guest_cr3), is_creation)?;
+    req_mapping.write_ref_at::<DekoNewAppReq>(offset as usize, &req);
+
+    Ok(())
 }
 
 #[verus_spec(r =>

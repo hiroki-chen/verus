@@ -19,6 +19,55 @@ pub(crate) mod service;
 
 verus! {
 
+global layout PtRegs is size == 0xa8, align == 8;
+
+/// Linux `pt_regs` structure representing the CPU registers
+/// saved during a context switch or interrupt.
+#[repr(C)]
+#[derive(DekoDebug, Clone, Copy)]
+pub struct PtRegs {
+    /*
+     * C ABI says these regs are callee-preserved. They aren't saved on
+     * kernel entry unless syscall needs a complete, fully filled
+     * "struct pt_regs".
+     */
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub bp: u64,
+    pub bx: u64,
+    /* These regs are callee-clobbered. Always saved on kernel entry. */
+    pub r11: u64,
+    pub r10: u64,
+    pub r9: u64,
+    pub r8: u64,
+    pub ax: u64,
+    pub cx: u64,
+    pub dx: u64,
+    pub si: u64,
+    pub di: u64,
+    /*
+     * orig_ax is used on entry for:
+     * - the syscall number (syscall, sysenter, int80)
+     * - error_code stored by the CPU on traps and exceptions
+     * - the interrupt number for device interrupts
+     *
+     * A FRED stack frame starts here:
+     *   1) It _always_ includes an error code;
+     *
+     *   2) The return frame for ERET[US] starts here, but
+     *      the content of orig_ax is ignored.
+     */
+    pub orig_ax: u64,
+    /* The IRETQ return frame starts here */
+    pub ip: u64,
+    pub cs: u64,
+    pub flags: u64,
+    pub sp: u64,
+    pub ss: u64,
+}
+
 /// Represents the reason for a guest VM exit event when forwarded to the monitor.
 #[repr(u64)]
 #[allow(non_snake_case)]
@@ -86,6 +135,11 @@ pub enum DekoGuestServResultCode {
     InvalidFormat,
     InvalidParam,
     InvalidReq,
+    /// Special note on `Busy`: This indicates that the service
+    /// request could not be processed at this time because
+    /// the monitor is currently busy with another operation.
+    /// The guest retry the request later; be sure this will
+    /// not trigger a livelock.
     Busy,
     Other(u64),
 }
@@ -213,6 +267,9 @@ impl DekoGuestExitInformation {
             let protocol = (vmsa.rax >> 32) as u32;
             let req = (vmsa.rax & 0xFFFFFFFFu64) as u32;
             let ai = if protocol == DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE {
+                if req == service::DEKO_SERVICE_EXTEND_LAUNCH_APP {
+                    kinfo!("the vmsa is", vmsa);
+                }
                 Some(DekoGuestRequestAdditionalData { guest_cr3: vmsa.cr3 })
             } else {
                 None
@@ -342,6 +399,10 @@ pub fn handle_guest_exit(
             service::handle_guest_exit_extend_service(req, params, cpu_idx)
         },
         _ => {
+            // Sometimes this will get hit by APIC setup of the
+            // guest kernel. However, returning error to the
+            // function confuses the kernel and will trigger
+            // a #PF when booting the guest.
             kerror!("Unsupported guest exit protocol: ");
             kerror!(" protocol=", protocol);
             kerror!(" req=", req);
