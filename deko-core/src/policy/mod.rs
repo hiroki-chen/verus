@@ -150,6 +150,13 @@ pub enum DekoInterceptVec0 {
     Cr3Write = 1 << (3 + 16),
 }
 
+#[repr(u32)]
+#[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
+pub enum DekoInterceptVec3 {
+    Intr = 1 << 0,
+    Nmi = 1 << 1,
+}
+
 /// See AMD's manual. Table B-3. INTERCEPT_VEC2 Layout
 ///
 /// This is for intercepting the excepton vectors.
@@ -178,6 +185,8 @@ pub enum DekoInterceptVec4 {
 
 #[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
 pub enum DekoInterceptVec {
+    InterceptVec0(DekoInterceptVec0),
+    InterceptVec3(DekoInterceptVec3),
     InterceptVec4(DekoInterceptVec4),
 }
 

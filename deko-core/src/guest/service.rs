@@ -962,6 +962,7 @@ fn handle_deko_serivce_syscall_analysis(params: &mut DekoGuestRequestParams) -> 
         Tracked(cpu_perm): Tracked<&mut DekoCpuCtxPermission>,
     requires
         old(cpu_perm).wf(),
+        old(params).additional_data is Some,
     ensures
         cpu_perm.wf(),
         cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
@@ -1004,7 +1005,7 @@ fn handle_deko_service_launch_app(params: &mut DekoGuestRequestParams) -> DekoGu
 
     let regs = req_mapping.read_ref_at::<PtRegs>(offset as usize);
 
-    try_kick_app(regs)
+    try_kick_app(regs, PhysAddr(params.additional_data.unwrap().guest_cr3))
 }
 
 #[verus_spec(r =>
@@ -1146,6 +1147,8 @@ pub(super) fn handle_guest_exit_deko_service(
         },
         _ => {
             kerror!("Unsupported deko service request: ", req);
+            VMSA::err_dump_vmsa();
+
             Err(DekoGuestServError::SoftError(DekoGuestServResultCode::UnsupportedProtocol))
         },
     }

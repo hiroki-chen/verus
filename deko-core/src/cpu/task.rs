@@ -2295,7 +2295,6 @@ pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
         VMSA::disable(vmsa);
 
         // Now we parse the information.
-        kdebug!("Guest VM exit occurred on CPU ", this_cpu_index);
         if let Some(info) = DekoGuestExitInformation::get_guest_exit_information() {
             return info;
         } else {

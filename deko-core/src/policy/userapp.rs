@@ -1,5 +1,6 @@
 use deko_macros::DekoDebug;
 use deko_std::address::{create_paddr_range, PhysAddr, VaddrRange};
+use deko_std::misc::early_dbg;
 use deko_std::prelude::collections::hashmap::HashMap;
 use deko_std::prelude::{VirtAddr, PAGE_SIZE, VADDR_LOWER_MASK};
 use deko_std::std_extra::allocator::AllocatorWrapper;
@@ -15,7 +16,7 @@ use uuid::Uuid;
 use vstd::prelude::*;
 
 use crate::collections::{update_vec, Vec};
-use crate::cpu::irq::IrqSafeLockGuard;
+use crate::cpu::irq::{raw_irq_enable, IrqSafeLockGuard};
 use crate::cpu::regs::no_smap_zone;
 use crate::cpu::task::{generate_id, DekoRunnableState};
 use crate::cpu::DekoCpuCtx;
@@ -366,7 +367,7 @@ impl DekoUserApp {
         let end_code = VirtAddr(app_req.end_code);
         let range = start_code..end_code;
 
-        kinfo!("New app range is", range=>hex);
+        kinfo!("Creating new DekoUserApp", app_req, guest_cr3=>hex, range);
 
         let mut r = Self {
             pid: app_req.pid,
@@ -825,18 +826,25 @@ fn do_unregister_user_app(
 /// This function never returns!
 #[verus_spec()]
 #[verifier::exec_allows_no_decreases_clause]
-pub fn try_kick_app(regs: &PtRegs) -> ! {
+pub fn try_kick_app(regs: &PtRegs, guest_cr3: PhysAddr) -> DekoGuestServResult<()> {
     // Reconstruct the UUID from the registers.
     let token_low = regs.cx;
     let token_high = regs.dx;
+    let original_entry = regs.bx;
+    let guest_stack = regs.sp;
+
     let uuid = Uuid::from_u64_pair(token_low, token_high);
 
     uuid_print(&uuid);
 
     kinfo!("placeholder. loop now");
 
-    loop {
-    }
+    // Now setup the VMSA1 (if not set) and jump to the original entry point.
+    raw_irq_enable();
+
+    early_dbg();
+
+    Ok(())
 }
 
 } // verus!

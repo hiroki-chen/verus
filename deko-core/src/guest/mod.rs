@@ -9,7 +9,7 @@ use deko_std::{deko_rwlock_read_atomic_data, trace_is_enabled, TrivialPredicate}
 use vstd::prelude::*;
 
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission, PERCPU_AREAS};
-use crate::guest::service::handle_guest_exit_deko_service;
+use crate::guest::service::{handle_guest_exit_deko_service, DEKO_SERVICE_REMAP_CA};
 use crate::imp::vmsa::{GuestVMExit, VMSA};
 use crate::mm::paging::{PageTable, PageTablePermission};
 use crate::mm::vm::TempMapping;
@@ -259,17 +259,21 @@ impl DekoGuestExitInformation {
         ensures
             r.wf(),
     )]
-    fn try_parse_vmsa(vmsa: DekoPPtr<VMSA>) -> Option<Self> {
+    fn try_parse_vmsa(vmsa: DekoPPtr<VMSA>, call_pending: bool) -> Option<Self> {
         let vmsa = vmsa.borrow(Tracked(vmsa_perm));
         let exit_code = vmsa.guest_exit_code.0;
 
-        if exit_code == 0x403 {
+        if exit_code == DekoGuestExitReason::VMGEXIT as u64 {
             let protocol = (vmsa.rax >> 32) as u32;
             let req = (vmsa.rax & 0xFFFFFFFFu64) as u32;
+
+            // If there is no call pending and the protocol is not DEKO_
+            // GUEST_EXIT_PROTOCOL_EXTEND_SERVICE, then the VMPL must
+            // be abort due to HV doorbell or other reasons.
+            if !call_pending && protocol != DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE {
+                return None;
+            }
             let ai = if protocol == DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE {
-                if req == service::DEKO_SERVICE_EXTEND_LAUNCH_APP {
-                    kinfo!("the vmsa is", vmsa);
-                }
                 Some(DekoGuestRequestAdditionalData { guest_cr3: vmsa.cr3 })
             } else {
                 None
@@ -288,6 +292,7 @@ impl DekoGuestExitInformation {
         } else {
             // Sometimes we would have `SVM_EXIT_INTR` here?
             kerror!("Unsupported guest exit code: ", exit_code=>hex);
+            kerror!("Dumping VMSA: ", vmsa);
 
             None
         }
@@ -332,13 +337,8 @@ impl DekoGuestExitInformation {
                 let caa = CaaArea::this_caa(this_cpu);
 
                 let v = caa.take(Tracked(&mut caa_perm));
+                let call_pending = v.call_pending;
 
-                // FIXME: If call_pending != 1, we might still need to
-                // process it in case we are within the syscall path.
-                // if v.call_pending != 1 {
-                //     // No call pending.
-                //     return None;
-                // }
                 caa.write(
                     Tracked(&mut caa_perm),
                     CaaArea {
@@ -350,7 +350,7 @@ impl DekoGuestExitInformation {
                 );
 
                 proof_with!(Tracked(&vmsa_perm));
-                Self::try_parse_vmsa(vmsa)
+                Self::try_parse_vmsa(vmsa, call_pending != 0)
             },
             None => {
                 kwarn!("Guest caa not created for CPU index ", cpu_index);

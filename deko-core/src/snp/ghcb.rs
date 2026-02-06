@@ -333,10 +333,12 @@ pub enum GHCBExitCode {
     AP_CREATE = 0x80000013,
     HV_DOORBELL = 0x8000_0014,
     HV_IPI = 0x8000_0015,
+    HV_TIMER = 0x8000_0016,
     SNP_VMPL_RUN = 0x8000_0018,
     CONFIGURE_INT_INJ = 0x8000_001B,
     DISABLE_ALT_INJ = 0x8000_001C,
     SPECIFIC_EOI = 0x8000_001D,
+    REQUEST_TIMER = 0x8000_001E,
 }
 
 /// Commands used to communicate withe GHCB MSR.

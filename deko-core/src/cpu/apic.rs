@@ -18,7 +18,7 @@ use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission, CPUID_MAX_COUNT, PERCPU_AREAS
 use crate::guest::CaaArea;
 use crate::imp::ghcb::GuestHostCommunicationBlock;
 use crate::imp::vmsa::VMSA;
-use crate::imp::{wrmsr, SnpStatusFlags, REST_INJ};
+use crate::imp::{rdtsc, wrmsr, SnpStatusFlags, REST_INJ};
 use crate::snp::rdmsr;
 use crate::{kdebug, kerror, kinfo, kpanic_if, kwarn};
 
@@ -27,6 +27,28 @@ verus! {
 /// A representation of the x86 APIC (x2APIC).
 #[derive(DekoDebug)]
 pub struct X86Apic;
+
+pub const APIC_LVT_TIMER_TSC_DEADLINE: u64 = 0x2 << 17;
+
+// 10b at 18:17
+pub const APIC_LVT_MASKED: u64 = 1 << 16;
+
+pub const APIC_LVT_DELIVERY_MODE_MASK: u64 = 0x7 << 8;
+
+// bits 10:8
+pub const APIC_LVT_TIMER_MODE_MASK: u64 = 0x3 << 17;
+
+// bits 18:17
+pub const APIC_LVT_VECTOR_MASK: u64 = 0xFF;
+
+// bits 7:0
+pub const SVSM_TIMER_VECTOR: u64 = 0xEF;
+
+pub const IA32_X2APIC_LVT_TIMER: u32 = 0x00000832;
+
+pub const IA32_TSC_DEADLINE: u32 = 0x000006E0;
+
+pub const IA32_X2APIC_EOI: u32 = 0x0000080B;
 
 pub const MSR_X2APIC_BASE: u32 = 0x800;
 

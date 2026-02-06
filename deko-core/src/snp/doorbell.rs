@@ -47,7 +47,7 @@ use vstd::atomic::{PAtomicU8, PermissionU8};
 use vstd::prelude::*;
 
 use crate::cpu::apic::Apic;
-use crate::cpu::idt::IPI_VECTOR;
+use crate::cpu::idt::{IPI_VECTOR, TIMER_VECTOR};
 use crate::cpu::irq::{
     irq_disable, irq_enable, raw_irq_disable, raw_irq_enable, IrqUnSafeLockGuard,
 };
@@ -408,7 +408,6 @@ impl HVDoorbell {
         hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb_perm.ptr_perm.value().per_vmpl_events),
 )]
 pub unsafe extern "C" fn handle_hv_doorbell(hvdb_ptr: DekoPPtr<HVDoorbell>) {
-    // kdebug!("doorbell rang");
     let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
     let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
 
@@ -455,8 +454,21 @@ pub unsafe extern "C" fn handle_hv_doorbell(hvdb_ptr: DekoPPtr<HVDoorbell>) {
 
                 return ;
             },
+            TIMER_VECTOR => {
+                kinfo!("Received HV timer doorbell");
+
+                // cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
+
+                // Do nothing.
+                // let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
+                // proof_with!(Tracked(&mut cpu_perm.irq_state_perm));
+                // cpu_taken.nested_irq.pop();
+                // cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
+
+                // return;
+            },
             _ => {
-                // Unknown vector.
+                kwarn!("Unhandled HV doorbell vector:", vector => hex);
             },
         }
     }

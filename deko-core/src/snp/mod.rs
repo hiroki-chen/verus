@@ -1598,6 +1598,15 @@ pub fn page_state_change(mm: PaddrRange, op: PageStateChangeOp) {
 }
 
 #[inline]
+#[verus_spec()]
+pub fn rdtsc() -> u64 {
+    let (ghcb, Tracked(perm)) = current_ghcb();
+    let (r, _) = GuestHostCommunicationBlock::rdtsc(ghcb, Tracked(perm));
+
+    r
+}
+
+#[inline]
 #[verus_spec(
     requires
         vmpl <= 3,

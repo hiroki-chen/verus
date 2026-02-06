@@ -189,6 +189,8 @@ pub const INT_INJ_VECTOR: usize = 0x50;
 
 pub const IPI_VECTOR: usize = 0xE0;
 
+pub const TIMER_VECTOR: usize = 0xEF;
+
 pub const SYSCALL: usize = 0x80;
 
 const IDT_TARGET_MASK_1: u64 = 0x0000_0000_0000_ffff;
@@ -374,6 +376,7 @@ impl Idt {
         this.entries.update(SYSCALL, IdtEntry::raw_entry(VirtAddr::new(int80_handler_func_ptr())));
         this.entries.update(IPI_VECTOR, IdtEntry::raw_entry(VirtAddr::new(irq_ipi_handler_func_ptr())));
         this.entries.update(INT_INJ_VECTOR, IdtEntry::raw_entry(VirtAddr::new(irq_int_inj_handler_func_ptr())));
+        this.entries.update(TIMER_VECTOR, IdtEntry::raw_entry(VirtAddr::new(deko_ifc_idt_handler_default_func_ptr())));
     }
 
     /// Load an IDT.

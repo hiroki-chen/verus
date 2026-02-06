@@ -409,6 +409,17 @@ impl VMSA {
         }
     }
 
+    #[verus_spec()]
+    pub fn err_dump_vmsa() {
+        let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+        proof_with!(Tracked(&cpu_perm) => Tracked(vmsa_perm));
+        let this_vmsa = VMSA::this_vmsa(cpu);
+
+        let vmsa = this_vmsa.borrow(Tracked(&vmsa_perm));
+
+        kerror!("VMSA dump:", vmsa);
+    }
+
     #[verifier::external_body]
     #[verus_spec(r =>
         with
