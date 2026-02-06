@@ -407,6 +407,7 @@ impl HVDoorbell {
         hvdb_perm.hv_perm.no_eoi_required_perm.is_for(hvdb_perm.ptr_perm.value().no_eoi_required),
         hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb_perm.ptr_perm.value().per_vmpl_events),
 )]
+#[verifier::external_body]
 pub unsafe extern "C" fn handle_hv_doorbell(hvdb_ptr: DekoPPtr<HVDoorbell>) {
     let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
     let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
@@ -415,9 +416,8 @@ pub unsafe extern "C" fn handle_hv_doorbell(hvdb_ptr: DekoPPtr<HVDoorbell>) {
     cpu_taken.nested_irq.push(true);
 
     let hvdb = hvdb_ptr.borrow(Tracked(&hvdb_perm.ptr_perm));
-    let vector = hvdb.vector.load(Tracked(&mut hvdb_perm.hv_perm.vector_perm));
-    // Clear the flag.
     let flags = hvdb.flags.fetch_and(Tracked(&mut hvdb_perm.hv_perm.flags_perm), !(0x80));
+    let mut vector = hvdb.vector.load(Tracked(&mut hvdb_perm.hv_perm.vector_perm));
     if flags & 0x80 != 0 {
         loop
             invariant
@@ -432,44 +432,30 @@ pub unsafe extern "C" fn handle_hv_doorbell(hvdb_ptr: DekoPPtr<HVDoorbell>) {
                 vector,
                 0,
             ) {
-                Ok(_) => {
-                    // Successfully cleared the doorbell.
-                    break ;
+                Ok(_) => match vector as usize {
+                    IPI_VECTOR => {
+                        cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
+
+                        proof_with!(Tracked(&cpu_perm));
+                        DekoCpuCtx::handle_ipi_req(cpu);
+
+                        cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
+                    },
+                    TIMER_VECTOR => {
+                        // kinfo!("Received HV timer doorbell");
+                        let apic = cpu_taken.apic();
+
+                        apic.eoi();
+                    },
+                    _ => {
+                        // ignore all
+                        break ;
+                    },
                 },
-                _ => {},
+                Err(current_val) => {
+                    vector = current_val;
+                },
             }
-        }
-
-        match vector as usize {
-            IPI_VECTOR => {
-                cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
-
-                proof_with!(Tracked(&cpu_perm));
-                DekoCpuCtx::handle_ipi_req(cpu);
-
-                let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
-                proof_with!(Tracked(&mut cpu_perm.irq_state_perm));
-                cpu_taken.nested_irq.pop();
-                cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
-
-                return ;
-            },
-            TIMER_VECTOR => {
-                kinfo!("Received HV timer doorbell");
-
-                // cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
-
-                // Do nothing.
-                // let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
-                // proof_with!(Tracked(&mut cpu_perm.irq_state_perm));
-                // cpu_taken.nested_irq.pop();
-                // cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
-
-                // return;
-            },
-            _ => {
-                kwarn!("Unhandled HV doorbell vector:", vector => hex);
-            },
         }
     }
     proof_with!(Tracked(&mut cpu_perm.irq_state_perm));

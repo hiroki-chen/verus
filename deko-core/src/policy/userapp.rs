@@ -16,7 +16,7 @@ use uuid::Uuid;
 use vstd::prelude::*;
 
 use crate::collections::{update_vec, Vec};
-use crate::cpu::irq::{raw_irq_enable, IrqSafeLockGuard};
+use crate::cpu::irq::{no_irq_zone, raw_irq_enable, IrqSafeLockGuard};
 use crate::cpu::regs::no_smap_zone;
 use crate::cpu::task::{generate_id, DekoRunnableState};
 use crate::cpu::DekoCpuCtx;
@@ -366,8 +366,6 @@ impl DekoUserApp {
         let start_code = VirtAddr(app_req.start_code);
         let end_code = VirtAddr(app_req.end_code);
         let range = start_code..end_code;
-
-        kinfo!("Creating new DekoUserApp", app_req, guest_cr3=>hex, range);
 
         let mut r = Self {
             pid: app_req.pid,
@@ -835,14 +833,27 @@ pub fn try_kick_app(regs: &PtRegs, guest_cr3: PhysAddr) -> DekoGuestServResult<(
 
     let uuid = Uuid::from_u64_pair(token_low, token_high);
 
-    uuid_print(&uuid);
+    // WARNING: CRITICAL SECTION
+    //
+    // This requires VMPL switch so we should NEVER enable interrupts here
+    // because if there is a #HV doorbell arriving, it will be interrupt
+    // right before the VMPL switch and the context gets corrupted.
+    //
+    // In our current HV handler routine we will actively check if the RFLAGS
+    // contains the IF flag; if so, the doorbell will get postponed and the
+    // control flow will continue here.
+    //
+    // Since we do not clear `NoFurtherSignal` here, the KVM will not attempt
+    // to inject another interrupt until we re-enable interrupts at the end,
+    // which then checks if there is any pending doorbells and processes them.
+    no_irq_zone(
+        ||
+            {
+                uuid_print(&uuid);
 
-    kinfo!("placeholder. loop now");
-
-    // Now setup the VMSA1 (if not set) and jump to the original entry point.
-    raw_irq_enable();
-
-    early_dbg();
+                kinfo!("placeholder. loop now");
+            },
+    );
 
     Ok(())
 }

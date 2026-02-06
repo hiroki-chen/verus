@@ -267,10 +267,9 @@ impl DekoGuestExitInformation {
             let protocol = (vmsa.rax >> 32) as u32;
             let req = (vmsa.rax & 0xFFFFFFFFu64) as u32;
 
-            // If there is no call pending and the protocol is not DEKO_
-            // GUEST_EXIT_PROTOCOL_EXTEND_SERVICE, then the VMPL must
+            // If there is no call pendin; then the VMPL must
             // be abort due to HV doorbell or other reasons.
-            if !call_pending && protocol != DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE {
+            if !call_pending {
                 return None;
             }
             let ai = if protocol == DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE {

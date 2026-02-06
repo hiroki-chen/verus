@@ -219,6 +219,8 @@ deko_sysret_trampoline:
   // wrmsr is not allowed in guest mode.
   vmmcall
 
+  jmp deko_sysret_trampoline
+
   // if we return here, just exit the guest.
 
   movq $60, %rax
