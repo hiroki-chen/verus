@@ -569,6 +569,7 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
         ghcb_perm,
         vm_region_perm: None,
         irq_state_perm,
+        deko_app_vmsa_perm: None,
     };
 
     assume(cpu_ctx_perm.wf_with(bsp_percpu_ptr));
@@ -1069,7 +1070,7 @@ pub fn launch_fw(
     // We now register vmsa through ghcb.
     kinfo!("Registering the guest VMSA page. paddr => ", paddr);
 
-    GuestHostCommunicationBlock::register_vmsa(ghcb, Tracked(cpu_perm.ghcb_perm), paddr, 0, 2, sev_features, 0);
+    GuestHostCommunicationBlock::register_vmsa(ghcb, Tracked(cpu_perm.ghcb_perm), paddr, 0, VMPL_GUEST_KERNEL as _, sev_features, 0);
 
     kinfo!("Finished registration");
 }

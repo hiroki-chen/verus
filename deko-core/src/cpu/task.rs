@@ -1156,6 +1156,7 @@ impl DekoRunnable {
             temp_mapping_4k,
             temp_mapping_2m,
             deko_vmsa,
+            deko_app_vmsa,
             doorbell,
             nested_irq,
             current_stack,
@@ -1187,6 +1188,7 @@ impl DekoRunnable {
             ghcb_perm,
             vm_region_perm,
             irq_state_perm,
+            deko_app_vmsa_perm,
         } = ctx_perm;
 
         let mut vm_region = vm_region.unwrap();
@@ -1288,6 +1290,7 @@ impl DekoRunnable {
             temp_mapping_4k,
             temp_mapping_2m,
             deko_vmsa,
+            deko_app_vmsa,
             doorbell,
             nested_irq,
             guest_apic,
@@ -1299,6 +1302,7 @@ impl DekoRunnable {
             ghcb_perm,
             vm_region_perm: Some(vm_region_perm),
             irq_state_perm,
+            deko_app_vmsa_perm,
         };
         cpu.write(Tracked(&mut ctx_perm.ptr_perm), cpu_new);
 
@@ -2077,8 +2081,9 @@ pub fn set_cpu_affinity(which: usize) {
 #[verifier::spinoff_prover]
 #[verifier::exec_allows_no_decreases_clause]
 pub fn serv_main(cpu_index: usize) {
+    let (this_cpu, Tracked(mut perm)) = DekoCpuCtx::this_cpu();
+
     if cpu_index == 0 {
-        let (this_cpu, Tracked(mut perm)) = DekoCpuCtx::this_cpu();
         let cpu_nums: u64 = match CPU_NUM.get() {
             Some(DekoAtomicData { data, .. }) => data.num,
             None => 1,
@@ -2148,15 +2153,12 @@ pub fn serv_main(cpu_index: usize) {
         set_cpu_affinity(cpu_index);
     }
 
+    // Also allocated application vmsa here.
+    DekoCpuCtx::allocate_app_vmsa(this_cpu, Tracked(&mut perm));
+
     kinfo!("Core ", cpu_index, " entering guest execution loop.");
 
     wait_ipi_blocking();  // ensure all cores are synchronized.
-
-    {
-        let guard = CONSOLE_LOCK.acquire_write();
-        print_str(r"\x1b[2J\x1b[1;1H");
-        guard.release_write_no_val();
-    }
 
     let mut r = 0;
 

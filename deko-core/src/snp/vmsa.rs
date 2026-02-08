@@ -48,16 +48,30 @@ global layout VMSASegment is size == 16;
 
 global layout VmsaTableRegister is size == 16;
 
+#[inline]
 fn real_mode_code_segment(rip: u64) -> VMSASegment {
     VMSASegment { selector: 0xf000, base: rip & 0xffff_0000u64, limit: 0xffff, flags: 0x9b }
 }
 
+#[inline]
 fn real_mode_data_segment() -> VMSASegment {
     VMSASegment { selector: 0, flags: 0x93, limit: 0xFFFF, base: 0 }
 }
 
+#[inline]
 fn real_mode_sys_seg(flags: u16) -> VMSASegment {
     VMSASegment { selector: 0, base: 0, limit: 0xffff, flags }
+}
+
+#[inline]
+pub fn guest_user_code_segment() -> VMSASegment {
+    VMSASegment { selector: 0x33, base: 0, limit: 0xffff_ffff, flags: 0x2FB }
+}
+
+#[inline]
+pub fn guest_user_stack_segment() -> VMSASegment {
+    // 0xCF3 (G=1, B=1, P=1, DPL=3, S=1, Type=3)
+    VMSASegment { selector: 0x2B, base: 0, limit: 0xffff_ffff, flags: 0xCF3 }
 }
 
 #[repr(C)]
@@ -330,7 +344,7 @@ with_atomic_pred! {
     VmsaPagePermission,
     fields: { page },
     perm_fields: { ptr_perm },
-    ptr_perm.pptr() == page.view() && ptr_perm.is_init() && ptr_perm.wf()
+    ptr_perm.pptr() == page.view() && ptr_perm.is_init() && ptr_perm.wf() && data.wf()
 }
 
 #[verus_verify]

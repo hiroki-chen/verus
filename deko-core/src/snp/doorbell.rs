@@ -58,7 +58,7 @@ use crate::mm::paging::PageTable;
 use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR_FULL};
 use crate::snp::doorbell;
 use crate::snp::ghcb::{current_ghcb, GuestHostCommunicationBlock};
-use crate::{die, kdebug, kerror, kinfo, kpanic_if, kwarn};
+use crate::{die, kdebug, kerror, kinfo, kpanic_if, ktrace, kwarn};
 
 extern "C" {
     // exclusive.
@@ -90,7 +90,24 @@ core::arch::global_asm!(
     options(att_syntax)
 );
 
+const _: () = {
+    assert!(core::mem::size_of::<HVDoorbell>() == 0x100);
+};
+
 verus! {
+
+global layout HVDoorbell is size == 0x100, align == 0x4;
+
+/// The flag bit in the doorbell's `flags` field indicating that there are no
+/// further pending events to be signaled by the hypervisor.
+///
+/// See also [`HVDoorbell`].
+///
+/// Think of it as a hint from the guest to the hypervisor that it is busy
+/// processing the current event and the hypervisor should not attempt to
+/// signal any new events until the guest is ready again (e.g., after re-
+/// enabling interrupts).
+pub const HV_DOORBELL_NO_FURTHER_SIGNAL_FLAG: u8 = 0x80;
 
 /// Initializes the global address of the per-CPU `HVDoorbell` pointer slot.
 ///
@@ -143,7 +160,13 @@ impl WellFormed for HVExtIntInfo {
 /// This struct needs to be protected via a _lock_.
 #[repr(C)]
 pub struct HVDoorbell {
+    /// Vector it tries to inject.
     pub vector: PAtomicU8,
+    /// Bit 7 (0x80) is the "`NoFurtherSignal`" flag indicating that there are no
+    /// further pending events to be signaled by the hypervisor.
+    ///
+    /// The original bitfield is u16 but for convenience we split them into two
+    /// while maintaining the byte orders of the fields.
     pub flags: PAtomicU8,
     pub no_eoi_required: PAtomicU8,
     pub per_vmpl_events: PAtomicU8,
@@ -416,9 +439,12 @@ pub unsafe extern "C" fn handle_hv_doorbell(hvdb_ptr: DekoPPtr<HVDoorbell>) {
     cpu_taken.nested_irq.push(true);
 
     let hvdb = hvdb_ptr.borrow(Tracked(&hvdb_perm.ptr_perm));
-    let flags = hvdb.flags.fetch_and(Tracked(&mut hvdb_perm.hv_perm.flags_perm), !(0x80));
+    let flags = hvdb.flags.fetch_and(
+        Tracked(&mut hvdb_perm.hv_perm.flags_perm),
+        !(HV_DOORBELL_NO_FURTHER_SIGNAL_FLAG),
+    );
     let mut vector = hvdb.vector.load(Tracked(&mut hvdb_perm.hv_perm.vector_perm));
-    if flags & 0x80 != 0 {
+    if flags & HV_DOORBELL_NO_FURTHER_SIGNAL_FLAG != 0 {
         loop
             invariant
                 hvdb_perm.hv_perm.vector_perm.is_for(hvdb.vector),
@@ -442,9 +468,19 @@ pub unsafe extern "C" fn handle_hv_doorbell(hvdb_ptr: DekoPPtr<HVDoorbell>) {
                         cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
                     },
                     TIMER_VECTOR => {
-                        // kinfo!("Received HV timer doorbell");
+                        ktrace!("Received HV timer doorbell");
                         let apic = cpu_taken.apic();
 
+                        // The trick here is that the physical APIC
+                        // is ignorant of the VMPL so anyone can attempt
+                        // to send an EOI signal to the hypervisor.
+                        //
+                        // Thus, if the timer arrives when monitor
+                        // is running the timer will be consumed by
+                        // us; and if the timer arrives when guest
+                        // is running, the interrupt will be injected
+                        // by the hypervisor; the guest will handle
+                        // the rest.
                         apic.eoi();
                     },
                     _ => {
@@ -487,7 +523,7 @@ pub fn process_pending_hv_events() {
                 let flags = doorbell.flags.load(Tracked(&doorbell_perm.borrow().hv_perm.flags_perm));
                 let vector = doorbell.vector.load(Tracked(&doorbell_perm.borrow().hv_perm.vector_perm));
 
-                if flags & 0x80 != 0 || vector != 0 {
+                if flags & HV_DOORBELL_NO_FURTHER_SIGNAL_FLAG != 0 || vector != 0 {
                     // No further signal.
                     irq_disable();
 

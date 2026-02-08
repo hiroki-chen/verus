@@ -56,7 +56,7 @@ use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR_FULL};
 use crate::snp::doorbell::{HVDoorbell, HvDoorbellPtrPermission, HvDoorbellPtrPred};
 use crate::snp::ghcb::{validate_ghcb, GuestHostCommunicationBlock};
 use crate::snp::vmsa::{VmsaInitialContext, VmsaPage, VmsaPagePermission, VmsaPagePred, VMSA};
-use crate::snp::Rmp_ALL_BITS;
+use crate::snp::{Rmp_ALL_BITS, VMPL_GUEST_SECURE_APP};
 use crate::{die, kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
 
 verus! {
@@ -584,8 +584,10 @@ pub struct DekoCpuCtx {
     /// example, a guest explicitly requests us to perform some validations on a
     /// 2M page (pvalidate, for example).
     pub temp_mapping_2m: VirtualMemoryTemporary,
-    /// The VMSA.
+    /// The VMSA for VMPL0 [fixed and will not change].
     pub deko_vmsa: DekoOnceCell<VmsaPage, VmsaPagePermission, VmsaPagePred>,
+    /// The VMSA for VMPL1
+    pub deko_app_vmsa: Option<VmsaPage>,
     /// The doorbell for SEV-SNP restricted interrupt mode.
     ///
     /// The lock only protects the pointer itself from other vCPUs.
@@ -606,6 +608,7 @@ with_permission! {
     ghcb_perm: DekoPointsTo<GuestHostCommunicationBlock>,
     vm_region_perm: Option<VirtualMemoryRegionPermission>,
     irq_state_perm: IrqStatePermission,
+    deko_app_vmsa_perm: Option<VmsaPagePermission>,
 }
 
 impl DekoCpuCtxPermission {
@@ -626,6 +629,12 @@ impl DekoCpuCtxPermission {
             &&& perm.vm_perms.wf()
             &&& vm.wf_with(&perm)
         }
+        &&& self.ptr_perm.value().deko_app_vmsa matches Some(app_vmsa)
+            ==> self.deko_app_vmsa_perm matches Some(perm) && {
+            &&& perm.ptr_perm.wf()
+            &&& perm.ptr_perm.is_init()
+            &&& perm.ptr_perm.pptr() == app_vmsa.page@
+        }
         &&& self.wf()
     }
 }
@@ -638,6 +647,7 @@ impl WellFormed for DekoCpuCtxPermission {
         &&& self.ptr_perm.value().vm_region matches Some(vm) ==> vm.wf()
         &&& self.ptr_perm.value().run_queue matches Some(rq) ==> rq.wf()
         &&& self.ptr_perm.value().doorbell matches Some(db) ==> db.wf()
+        &&& self.ptr_perm.value().deko_app_vmsa matches Some(vmsa) ==> vmsa.wf()
         &&& self.pgtable_perm.wf()
         &&& self.pgtable_perm.pgtable_perm.pptr() == self.ptr_perm.value().pgtable_spec()@
         &&& self.pgtable_perm.mapping_space === self.ptr_perm.value().kernel_mapping_spec()
@@ -1014,6 +1024,7 @@ impl DekoCpuCtx {
             temp_mapping_4k: VirtualMemoryTemporary::new_zeroed(),
             temp_mapping_2m: VirtualMemoryTemporary::new_zeroed(),
             deko_vmsa: DekoOnceCell::new(Ghost(VmsaPagePred {  })),
+            deko_app_vmsa: None,
             doorbell: None,
             guest_apic,
             nested_irq: irq_state,
@@ -1134,6 +1145,7 @@ impl DekoCpuCtx {
                                     temp_mapping_4k,
                                     temp_mapping_2m,
                                     deko_vmsa,
+                                    deko_app_vmsa,
                                     doorbell,
                                     nested_irq,
                                     guest_apic,
@@ -1146,6 +1158,7 @@ impl DekoCpuCtx {
                                     ghcb_perm,
                                     vm_region_perm,
                                     irq_state_perm,
+                                    deko_app_vmsa_perm,
                                 } = perm;
 
                                 let mut vm_region = vm_region.unwrap();
@@ -1221,6 +1234,7 @@ impl DekoCpuCtx {
                                         ghcb_perm,
                                         vm_region_perm: Some(vm_region_perm),
                                         irq_state_perm,
+                                        deko_app_vmsa_perm,
                                     };
                                 }
 
@@ -1241,6 +1255,7 @@ impl DekoCpuCtx {
                                     temp_mapping_4k,
                                     temp_mapping_2m,
                                     deko_vmsa,
+                                    deko_app_vmsa,
                                     doorbell,
                                     nested_irq,
                                     current_stack,
@@ -1253,6 +1268,70 @@ impl DekoCpuCtx {
                 }
             }
         )
+    }
+
+    /// Allocates a VMSA for the secured application at VMPL1 and initialize the VMSA as empty.
+    pub fn allocate_app_vmsa(ptr: DekoPPtr<Self>, Tracked(perm): Tracked<&mut DekoCpuCtxPermission>)
+        requires
+            old(perm).wf_with(ptr),
+        ensures
+            perm.wf_with(ptr),
+    {
+        broadcast use crate::snp::RmpFlags::lemma_each_bit_is_valid;
+
+        proof {
+            bit_u64_and_auto();
+            bit_u32_and_auto();
+        }
+
+        let cpu_borrow = ptr.borrow(Tracked(&perm.ptr_perm));
+        if cpu_borrow.deko_app_vmsa.is_some() {
+            kwarn!("App VMSA already allocated");
+
+            return ;
+        }
+        let private_bit = cpu_borrow.private_bit;
+        let shared_bit = cpu_borrow.shared_bit;
+        let cpu_idx = cpu_borrow.cpu_id as usize;
+
+        #[verus_spec(with Tracked(&mut perm.pgtable_perm) => Tracked(vmsa_perm))]
+        let vmsa = VmsaPage::alloc(RmpFlags::vmpl1());
+
+        let (ghcb, Tracked(ghcb_perm)) = current_ghcb();
+        let vmsa_paddr = match virt_to_phys_checked(
+            private_bit,
+            shared_bit,
+            VirtAddr::new(vmsa.page.addr() as u64),
+            Tracked(&perm.pgtable_perm),
+        ) {
+            Some(paddr) => paddr,
+            None => {
+                kerror!("Failed to get physical address for app VMSA allocation");
+                die("App VMSA physical address translation failed");
+            },
+        };
+
+        // Now notify GHCB.
+        GuestHostCommunicationBlock::register_vmsa(
+            ghcb,
+            Tracked(ghcb_perm),
+            vmsa_paddr,
+            cpu_idx as _,
+            VMPL_GUEST_SECURE_APP as u64,
+            0x0,
+            0,  /* Do not launch it. */
+        );
+
+        let mut cpu_taken = ptr.take(Tracked(&mut perm.ptr_perm));
+        cpu_taken.deko_app_vmsa = Some(vmsa);
+
+        proof {
+            perm.deko_app_vmsa_perm = Some(vmsa_perm);
+        }
+
+        ptr.write(Tracked(&mut perm.ptr_perm), cpu_taken);
+
+        kinfo!("Allocated application VMSA and vCPU");
     }
 
     /// Different from [`Self::allocate_deko_vmsa`] which allocates the VMSA for Deko's own
@@ -1323,7 +1402,6 @@ impl DekoCpuCtx {
                 };
             }
         );
-
     }
 
     /// Allocates a VMSA for the given entry point for AP launches.
@@ -1514,7 +1592,6 @@ impl DekoCpuCtx {
         cpu_perm@.ptr_perm().value().ctx_switch_stack is Some,
         cpu_perm@.ptr_perm().value().run_queue is Some,
         cpu_perm@.ptr_perm().value().vm_region is Some
-
 )]
     #[verifier::external_body]  // this function times out.
     pub fn setup_cpu<A: DekoFrameAllocator>(

@@ -9,7 +9,7 @@ use deko_std::prelude::*;
 #[cfg(feature = "logging")]
 use vstd::prelude::*;
 
-use crate::cpu::irq::IrqUnSafeLockGuard;
+use crate::cpu::irq::{IrqSafeLockGuard, IrqUnSafeLockGuard};
 use crate::hal::{PlatformType, PLATFORM};
 use crate::snp::logging::GHCB_IO_PORT;
 
@@ -78,14 +78,21 @@ pub struct Console;
 
 pub const CONSOLE: Console = Console;
 
-// Now we need a lock to protect concurrent access to the console.
-pub exec static CONSOLE_LOCK: DekoSimpleRwLock<(), IrqUnSafeLockGuard>
+/// A global lock to protect concurrent access to the console.
+/// This is necessary because the console is a shared resource  and we want to
+/// prevent interleaved output from multiple CPUs.
+///
+/// Note that this lock is required to be IRQ-safe as this requires GHCB protocol
+/// which will have conplex control flows; in the meantime, the lock can be interrupt
+/// by external #HV exception which may cause it into an inconsistent state if we
+/// use a non-IRQ-safe lock.
+pub exec static CONSOLE_LOCK: DekoSimpleRwLock<(), IrqSafeLockGuard>
     ensures
         CONSOLE_LOCK.wf(),
 {
     let r = DekoSimpleRwLock::new(
         DekoAtomicData::new(()),
-        IrqUnSafeLockGuard {  },
+        IrqSafeLockGuard {  },
         Ghost(TrivialPredicate::new()),
     );
 

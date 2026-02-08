@@ -68,6 +68,19 @@ pub struct PtRegs {
     pub ss: u64,
 }
 
+impl WellFormed for PtRegs {
+    open spec fn wf(&self) -> bool {
+        true
+    }
+}
+
+impl PtRegs {
+    /// Checks whether this [`PtRegs`] instance represents the user-space register state.
+    pub open spec fn is_user_regs(&self) -> bool {
+        true
+    }
+}
+
 /// Represents the reason for a guest VM exit event when forwarded to the monitor.
 #[repr(u64)]
 #[allow(non_snake_case)]

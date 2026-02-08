@@ -24,10 +24,16 @@ use crate::crypto::aes::aes_gcm_256_key_gen;
 use crate::crypto::uuid::{generate_secure_uuid, uuid_print};
 use crate::guest::service::{DekoNewAppReq, DekoNewAppType};
 use crate::guest::{DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode, PtRegs};
+use crate::imp::ghcb::vmpl_switch;
+use crate::imp::vmsa::GuestVMExit;
+use crate::imp::{flush_tlb_global_sync, VMPL_GUEST_SECURE_APP};
 use crate::mm::check_within_guest_mmap;
 use crate::mm::frame_allocator::DekoAllocatorApi;
 use crate::mm::paging::{bit_not_in_addr_region, strip_confidentiality_bits, PageTable};
 use crate::mm::vm::TempMapping;
+use crate::snp::vmsa::{
+    guest_user_code_segment, guest_user_stack_segment, VmsaPage, VmsaPagePermission, VMSA,
+};
 use crate::{kdebug, kerror, kinfo, kwarn, vec};
 
 deko_bitflags! {
@@ -204,6 +210,132 @@ pub fn remove_from_shim_set(ppid: u32) {
             }
         }
     )
+}
+
+#[verus_verify]
+impl VmsaPage {
+    #[verus_spec(
+        requires
+            vmsa.wf(),
+    )]
+    fn do_init_for_app(vmsa: &VMSA, linux_pt_regs: &PtRegs) {
+        // Need to first get the active VMSA here.
+        let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+        proof_with!(Tracked(&cpu_perm) => Tracked(mut active_vmsa_perm));
+        let active_vmsa = VMSA::this_vmsa(cpu);
+        let active_vmsa_borrow = active_vmsa.borrow(Tracked(&active_vmsa_perm));
+
+        Self::copy_from_guest_context(vmsa, active_vmsa_borrow);
+        Self::copy_from_user_context(vmsa, linux_pt_regs);
+
+        kinfo!("Now vmsa is ", vmsa);
+    }
+
+    #[verifier::external_body]
+    #[verus_spec(
+        requires
+            vmsa_app.wf(),
+            vmsa_user.is_user_regs(),
+    )]
+    fn copy_from_user_context(vmsa_app: &VMSA, vmsa_user: &PtRegs) {
+        kinfo!("Copying from user context", vmsa_user);
+
+        unsafe {
+            let dst = vmsa_app as *const VMSA as *mut VMSA;
+
+            // Copy the general-purpose registers.
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rax), 0x0);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rbx), 0x0);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rcx), 0x0);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rdx), 0x0);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rsi), vmsa_user.si);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rdi), vmsa_user.di);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rbp), 0x0);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).r8), vmsa_user.r8);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).r9), vmsa_user.r9);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).r10), vmsa_user.r10);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).r11), vmsa_user.r11);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).r12), vmsa_user.r12);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).r13), vmsa_user.r13);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).r14), vmsa_user.r14);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).r15), vmsa_user.r15);
+
+            // Copy the instruction pointer and stack pointer.
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rsp), vmsa_user.sp);
+            // Original entry here.
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rip), vmsa_user.bx);
+            // Flags.
+            core::ptr::write_unaligned(
+                core::ptr::addr_of_mut!((*dst).rflags),
+                vmsa_user.flags | 0x200,
+            );
+            // Restore the code segment.
+            core::ptr::write_unaligned(
+                core::ptr::addr_of_mut!((*dst).cs),
+                guest_user_code_segment(),
+            );
+            core::ptr::write_unaligned(
+                core::ptr::addr_of_mut!((*dst).ss),
+                guest_user_stack_segment(),
+            );
+            // Set back the cpl.
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).cpl), 3);
+            core::ptr::write_unaligned(
+                core::ptr::addr_of_mut!((*dst).vmpl),
+                VMPL_GUEST_SECURE_APP as _,
+            );
+            core::ptr::write_unaligned(
+                core::ptr::addr_of_mut!((*dst).guest_exit_code),
+                GuestVMExit(0),
+            );
+
+            // Enable SVME.
+            let efer = core::ptr::read_unaligned(core::ptr::addr_of!((*dst).efer));
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).efer), efer | (1 << 12));
+        }
+    }
+
+    #[verifier::external_body]
+    #[verus_spec(
+        requires
+            vmsa_app.wf(),
+            vmsa_guest_kernel.wf(),
+    )]
+    fn copy_from_guest_context(vmsa_app: &VMSA, vmsa_guest_kernel: &VMSA) {
+        kinfo!("Copying from guest kernel context", vmsa_guest_kernel);
+
+        unsafe {
+            let src = vmsa_guest_kernel as *const VMSA;
+            let dst = vmsa_app as *const VMSA as *mut VMSA;
+
+            core::ptr::copy_nonoverlapping(src, dst, 1);
+
+        }
+    }
+
+    /// Prepare the user context for VMPL1 so that the caller can kick the current vCPU
+    /// into the desired user application with this VMSA.
+    #[inline]
+    #[verus_spec(
+        with
+            Tracked(vmsa_page_perm): Tracked<&mut VmsaPagePermission>,
+        requires
+            old(self).wf(),
+            old(vmsa_page_perm).ptr_perm.wf(),
+            old(vmsa_page_perm).ptr_perm.is_init(),
+            old(vmsa_page_perm).ptr_perm.pptr() == old(self).page@,
+            linux_pt_regs.is_user_regs(),
+        ensures
+            self.wf(),
+            vmsa_page_perm.ptr_perm.wf(),
+            vmsa_page_perm.ptr_perm.is_init(),
+            vmsa_page_perm.ptr_perm.pptr() == self.page@,
+    )]
+    pub fn init_for_app(&mut self, linux_pt_regs: &PtRegs) {
+        let vmsa = &self.page.borrow(Tracked(&vmsa_page_perm.ptr_perm))[self.idx];
+
+        Self::do_init_for_app(vmsa, linux_pt_regs);
+    }
 }
 
 pub fn get_host_ns_id() -> DekoGuestServResult<u64> {
@@ -825,14 +957,24 @@ fn do_unregister_user_app(
 #[verus_spec()]
 #[verifier::exec_allows_no_decreases_clause]
 pub fn try_kick_app(regs: &PtRegs, guest_cr3: PhysAddr) -> DekoGuestServResult<()> {
+    // TODO: Check if the application is indeed registered.
+    // If not, ignore this request.
     // Reconstruct the UUID from the registers.
     let token_low = regs.cx;
     let token_high = regs.dx;
     let original_entry = regs.bx;
     let guest_stack = regs.sp;
 
+    // Now sure if this is really needed.
     let uuid = Uuid::from_u64_pair(token_low, token_high);
 
+    let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+
+    if core::hint::unlikely(cpu_borrow.deko_app_vmsa.is_none()) {
+        kerror!("try_kick_app: no VMSA allocated for this CPU");
+        return Err(DekoGuestServError::FatalError);
+    }
     // WARNING: CRITICAL SECTION
     //
     // This requires VMPL switch so we should NEVER enable interrupts here
@@ -846,12 +988,28 @@ pub fn try_kick_app(regs: &PtRegs, guest_cr3: PhysAddr) -> DekoGuestServResult<(
     // Since we do not clear `NoFurtherSignal` here, the KVM will not attempt
     // to inject another interrupt until we re-enable interrupts at the end,
     // which then checks if there is any pending doorbells and processes them.
+    // Now copy the information to the VMSA and prepare for the VMPL switch.
+
+    let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
+    let mut app_vmsa = cpu_taken.deko_app_vmsa.take().unwrap();
+    let tracked mut deko_app_vmsa_perm = cpu_perm.deko_app_vmsa_perm.tracked_take();
+
+    proof_with!(Tracked(&mut deko_app_vmsa_perm));
+    app_vmsa.init_for_app(regs);
+
+    proof {
+        cpu_perm.deko_app_vmsa_perm = Some(deko_app_vmsa_perm);
+    }
+    cpu_taken.deko_app_vmsa = Some(app_vmsa);
+    cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
+
+    // The code below should be merged with the `try_enter_guest` main loop.
     no_irq_zone(
         ||
             {
-                uuid_print(&uuid);
+                flush_tlb_global_sync();
 
-                kinfo!("placeholder. loop now");
+                vmpl_switch(VMPL_GUEST_SECURE_APP);
             },
     );
 
