@@ -110,8 +110,8 @@ pub(crate) exec const PSC_GFN_MASK: u64
 deko_bitflags! {
     /// RMP (Reverse Map Table) entry flags.
     pub struct Rmp: u32 {
-        const VMPL_LOW = 0;
-        const VMPL_HIGH = 1;
+        const VMPL_LOW = 0;  // 1
+        const VMPL_HIGH = 1; // 2
         const READ = 8;
         const WRITE = 9;
         const X_USER = 10;
@@ -137,6 +137,7 @@ deko_bitflags_quick! {
     rx_guest_vmpl1: { VMPL_LOW, READ, X_USER, X_SUPER },
     rwx_guest_vmpl2: { VMPL_HIGH, READ, WRITE, X_USER, X_SUPER },
     rx_guest_vmpl2: { VMPL_HIGH, READ, X_USER, X_SUPER },
+    revoke_guest_vmpl2: { VMPL_HIGH },
 }
 
 pub const VMPCK_SIZE: usize = 32;
@@ -715,6 +716,25 @@ pub fn pvalidate(
 
 /// Adjusts the RMP entry for the given virtual address range => RMP can be used to
 /// change the permissions of a page (e.g., from private to shared).
+///
+/// The flags can be used to set the permission for _each_ VMPL. However, there is
+/// no "single-shot" setting to set the permission for _multiple_ VMPLs at once.
+/// For instance, if we want to set the page as shared for both VMPL1 and VMPL2, we need to
+/// call [`rmpadjust`] twice. Otherwise, the VMPL will be ill-interpreted as VMPL3.
+///
+/// # Examples
+///
+/// ```rs, ignore
+///     let some_vaddr = VirtAddr(0x1234_0000);
+///     // Set some_vaddr to be readable and executable for VMPL1.
+///     rmpadjust(some_vaddr, PAGE_SIZE, RmpFlags::rwx_guest_vmpl1(), Tracked(&mut pgtable_perm));
+///
+///     // revoke the permission for VMPL3 if set.
+///     rmpadjust(some_vaddr, PAGE_SIZE, RmpFlags::revoke_guest_vmpl3(), Tracked(&mut pgtable_perm));
+///
+///     // ❌ Wrong: this means "rwx_guest_vmpl3".
+///     rmpadjust(some_vaddr, PAGE_SIZE, RmpFlags::rwx_guest_vmpl1() | RmpFlags::revoke_guest_vmpl3(), Tracked(&mut pgtable_perm));
+/// ```
 #[verifier::external_body]
 pub fn rmpadjust(
     vaddr: VirtAddr,
