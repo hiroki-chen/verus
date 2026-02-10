@@ -8,7 +8,7 @@ use deko_std::wf::WellFormed;
 use vstd::prelude::*;
 
 use crate::collections::Vec;
-use crate::guest::{DekoGuestServError, DekoGuestServResult};
+use crate::guest::{DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode};
 use crate::imp::{RmpFlags, Rmp_ALL_BITS};
 use crate::mm::check_within_guest_mmap;
 use crate::mm::paging::{
@@ -191,6 +191,32 @@ impl Page {
 
 #[verus_verify]
 impl PageTable {
+    /// Creates a temporary mapping for the guest's CR3 page table.
+    #[verus_spec(r =>
+        ensures
+            r matches Ok(tm) ==> {
+                &&& tm.wf()
+                &&& tm.inner.end@ - tm.inner.start@ == PAGE_SIZE
+            }
+    )]
+    pub fn map_guest_cr3(guest_cr3: PhysAddr) -> DekoGuestServResult<TempMapping> {
+        if core::hint::unlikely(!check_within_guest_mmap(guest_cr3)) {
+            kerror!("Guest provided invalid CR3 value", guest_cr3);
+
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
+        }
+        if core::hint::unlikely(
+            guest_cr3.0 >= 0x0000_FFFF_FFFF_F000u64 || guest_cr3.0 % PAGE_SIZE != 0,
+        ) {
+            kerror!("Guest provided invalid CR3 value", guest_cr3);
+
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
+        }
+        TempMapping::new(create_paddr_range(guest_cr3, 1)).ok_or(
+            DekoGuestServError::SoftError(DekoGuestServResultCode::Busy),
+        )
+    }
+
     /// Walks the guest page table to resolve the given guest virtual address.
     ///
     /// Note that this function does not behave the same way as the normal way

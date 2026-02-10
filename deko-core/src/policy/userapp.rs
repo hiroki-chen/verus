@@ -1,8 +1,9 @@
 use deko_macros::DekoDebug;
 use deko_std::address::{create_paddr_range, PhysAddr, VaddrRange};
-use deko_std::misc::early_dbg;
+use deko_std::bits::{bit_u32_and_auto, bit_u64_and_auto};
+use deko_std::misc::{early_dbg, early_die};
 use deko_std::prelude::collections::hashmap::HashMap;
-use deko_std::prelude::{VirtAddr, PAGE_SIZE, VADDR_LOWER_MASK};
+use deko_std::prelude::{func_ptr, VirtAddr, PAGE_SIZE, VADDR_LOWER_MASK, VADDR_UPPER_MASK};
 use deko_std::std_extra::allocator::AllocatorWrapper;
 use deko_std::std_extra::num::isize_abs;
 use deko_std::sync::{
@@ -24,17 +25,23 @@ use crate::crypto::aes::aes_gcm_256_key_gen;
 use crate::crypto::uuid::{generate_secure_uuid, uuid_print};
 use crate::guest::service::{DekoNewAppReq, DekoNewAppType};
 use crate::guest::{DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode, PtRegs};
-use crate::imp::ghcb::vmpl_switch;
+use crate::imp::ghcb::{vmpl_switch, GuestHostCommunicationBlock};
+use crate::imp::logging::init_ghcb_logging;
 use crate::imp::vmsa::GuestVMExit;
-use crate::imp::{flush_tlb_global_sync, VMPL_GUEST_SECURE_APP};
-use crate::mm::check_within_guest_mmap;
+use crate::imp::{flush_tlb_global_sync, RmpFlags, VMPL1_MAGIC_SIGNATURE, VMPL_GUEST_SECURE_APP};
 use crate::mm::frame_allocator::DekoAllocatorApi;
-use crate::mm::paging::{bit_not_in_addr_region, strip_confidentiality_bits, PageTable};
+use crate::mm::paging::{
+    bit_not_in_addr_region, phys_to_virt, strip_confidentiality_bits, PageTable, PageTableEntry,
+};
 use crate::mm::vm::TempMapping;
+use crate::mm::{check_within_guest_mmap, virt_to_phys, virt_to_phys_checked};
+use crate::policy::syscall::DEKO_VMPL1_SYSCALL_TRAMPOLINE;
+use crate::snp::ghcb::{msr_register_ghcb_gpa, validate_ghcb};
 use crate::snp::vmsa::{
     guest_user_code_segment, guest_user_stack_segment, VmsaPage, VmsaPagePermission, VMSA,
 };
-use crate::{kdebug, kerror, kinfo, kwarn, vec};
+use crate::snp::{init_guest_host, is_vmpl1, rmpadjust, VMPL_GUEST_DEKO_MONITOR};
+use crate::{die, kdebug, kerror, kinfo, kwarn, vec};
 
 deko_bitflags! {
     pub struct DekoFile: u32 {
@@ -218,17 +225,22 @@ impl VmsaPage {
         requires
             vmsa.wf(),
     )]
-    fn do_init_for_app(vmsa: &VMSA, linux_pt_regs: &PtRegs) {
+    fn do_init_for_app(vmsa: &VMSA, linux_pt_regs: &PtRegs) -> DekoGuestServResult<()> {
+        let DekoAtomicData { data: syscall_trampoline, .. } =
+            DEKO_VMPL1_SYSCALL_TRAMPOLINE.get().ok_or(DekoGuestServError::FatalError)?;
+
         // Need to first get the active VMSA here.
         let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
         proof_with!(Tracked(&cpu_perm) => Tracked(mut active_vmsa_perm));
         let active_vmsa = VMSA::this_vmsa(cpu);
         let active_vmsa_borrow = active_vmsa.borrow(Tracked(&active_vmsa_perm));
 
-        Self::copy_from_guest_context(vmsa, active_vmsa_borrow);
+        Self::copy_from_guest_context(vmsa, active_vmsa_borrow, *syscall_trampoline);
         Self::copy_from_user_context(vmsa, linux_pt_regs);
 
         kinfo!("Now vmsa is ", vmsa);
+
+        Ok(())
     }
 
     #[verifier::external_body]
@@ -243,22 +255,22 @@ impl VmsaPage {
         unsafe {
             let dst = vmsa_app as *const VMSA as *mut VMSA;
 
-            // Copy the general-purpose registers.
+            // Clear the general-purpose registers first
             core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rax), 0x0);
             core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rbx), 0x0);
             core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rcx), 0x0);
             core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rdx), 0x0);
-            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rsi), vmsa_user.si);
-            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rdi), vmsa_user.di);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rsi), 0x0);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rdi), 0x0);
             core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rbp), 0x0);
-            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).r8), vmsa_user.r8);
-            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).r9), vmsa_user.r9);
-            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).r10), vmsa_user.r10);
-            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).r11), vmsa_user.r11);
-            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).r12), vmsa_user.r12);
-            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).r13), vmsa_user.r13);
-            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).r14), vmsa_user.r14);
-            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).r15), vmsa_user.r15);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).r8), 0x0);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).r9), 0x0);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).r10), 0x0);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).r11), 0x0);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).r12), 0x0);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).r13), 0x0);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).r14), 0x0);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).r15), 0x0);
 
             // Copy the instruction pointer and stack pointer.
             core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rsp), vmsa_user.sp);
@@ -284,14 +296,13 @@ impl VmsaPage {
                 core::ptr::addr_of_mut!((*dst).vmpl),
                 VMPL_GUEST_SECURE_APP as _,
             );
-            core::ptr::write_unaligned(
-                core::ptr::addr_of_mut!((*dst).guest_exit_code),
-                GuestVMExit(0),
-            );
 
             // Enable SVME.
             let efer = core::ptr::read_unaligned(core::ptr::addr_of!((*dst).efer));
             core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).efer), efer | (1 << 12));
+
+            // Clear IDT.
+            // core::ptr::write_bytes(core::ptr::addr_of_mut!((*dst).idt), 0, 0x10);
         }
     }
 
@@ -300,23 +311,47 @@ impl VmsaPage {
         requires
             vmsa_app.wf(),
             vmsa_guest_kernel.wf(),
+            syscall_trampoline_base.wf(),
+            syscall_trampoline_base@ >= VADDR_UPPER_MASK,
     )]
-    fn copy_from_guest_context(vmsa_app: &VMSA, vmsa_guest_kernel: &VMSA) {
-        kinfo!("Copying from guest kernel context", vmsa_guest_kernel);
+    fn copy_from_guest_context(
+        vmsa_app: &VMSA,
+        vmsa_guest_kernel: &VMSA,
+        syscall_trampoline_base: VirtAddr,
+    ) {
+        let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+        let id = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).cpu_id;
+        let syscall_trampoline_addr = syscall_trampoline_base.0.wrapping_add(
+            (id as u64) * PAGE_SIZE,
+        );
 
         unsafe {
             let src = vmsa_guest_kernel as *const VMSA;
             let dst = vmsa_app as *const VMSA as *mut VMSA;
 
             core::ptr::copy_nonoverlapping(src, dst, 1);
+            // Patch the syscall trampoline address.
+            core::ptr::write_unaligned(
+                core::ptr::addr_of_mut!((*dst).lstar),
+                syscall_trampoline_addr,
+            );
 
+            core::ptr::write_bytes(core::ptr::addr_of_mut!((*dst).intercept_vecs), 0, 0x20);
+            core::ptr::write_bytes(core::ptr::addr_of_mut!((*dst).intercept_msr_vecs), 0, 0x20);
+
+            // Write special magic to the TSC_AUX.
+            let tsc_aux = core::ptr::read_unaligned(core::ptr::addr_of!((*dst).tsc_aux));
+            core::ptr::write_unaligned(
+                core::ptr::addr_of_mut!((*dst).tsc_aux),
+                tsc_aux | (VMPL1_MAGIC_SIGNATURE << 24),
+            );
         }
     }
 
     /// Prepare the user context for VMPL1 so that the caller can kick the current vCPU
     /// into the desired user application with this VMSA.
     #[inline]
-    #[verus_spec(
+    #[verus_spec(r =>
         with
             Tracked(vmsa_page_perm): Tracked<&mut VmsaPagePermission>,
         requires
@@ -331,10 +366,10 @@ impl VmsaPage {
             vmsa_page_perm.ptr_perm.is_init(),
             vmsa_page_perm.ptr_perm.pptr() == self.page@,
     )]
-    pub fn init_for_app(&mut self, linux_pt_regs: &PtRegs) {
+    pub fn init_for_app(&mut self, linux_pt_regs: &PtRegs) -> DekoGuestServResult<()> {
         let vmsa = &self.page.borrow(Tracked(&vmsa_page_perm.ptr_perm))[self.idx];
 
-        Self::do_init_for_app(vmsa, linux_pt_regs);
+        Self::do_init_for_app(vmsa, linux_pt_regs)
     }
 }
 
@@ -481,6 +516,7 @@ impl WellFormed for DekoUserApp {
 impl DekoUserApp {
     /// Creates a new [`DekoUserApp`] with a unique id, an empty set of opened files,
     /// and a randomly generated AES-GCM-256 key.
+    #[verifier::external_body]
     #[verus_spec(r =>
         requires
             app_req.wf(),
@@ -495,6 +531,8 @@ impl DekoUserApp {
             r matches Ok(r) ==> r.wf(),
     )]
     pub fn new(app_req: &DekoNewAppReq, guest_cr3: PhysAddr) -> DekoGuestServResult<Self> {
+        kinfo!("Creating new DekoUserApp with request", app_req, guest_cr3=>hex);
+
         let start_code = VirtAddr(app_req.start_code);
         let end_code = VirtAddr(app_req.end_code);
         let range = start_code..end_code;
@@ -521,6 +559,26 @@ impl DekoUserApp {
         r.add_and_measure(range)?;
 
         kinfo!("measurement is", r.ext.measurement);
+
+        r.lift_vmpl()?;
+
+        {
+            let cr3 = PageTable::map_guest_cr3(r.cr3)?;
+            let addr = VirtAddr(app_req.user_stack);
+            let mapping = PageTable::walk_lvl3_guest(&cr3, addr, 1 << 51, 0)?;
+            kinfo!("User stack mapping is", mapping);
+
+            if let Some(mapping) = mapping.final_mapping() {
+                let phys_addr: PhysAddr = virt_to_phys(
+                    1 << 51,
+                    1 << 0,
+                    mapping.inner.start,
+                    Tracked::assume_new(),
+                );
+
+                kinfo!("User stack phys addr is", phys_addr=>hex);
+            }
+        }
 
         Ok(r)
     }
@@ -611,6 +669,8 @@ impl DekoUserApp {
             i += 1;
         }
 
+        self.ext.occupied_regions.push(region.clone());
+
         Ok(())
     }
 
@@ -628,12 +688,15 @@ impl DekoUserApp {
             self.wf(),
     )]
     pub fn lift_vmpl(&self) -> DekoGuestServResult<()> {
-        let cr3 = TempMapping::new(create_paddr_range(self.cr3, 1)).ok_or(
-            DekoGuestServError::SoftError(DekoGuestServResultCode::Busy),
-        )?;
+        let cr3 = PageTable::map_guest_cr3(self.cr3)?;
         let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
         let private_bit = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).private_bit;
         let shared_bit = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).shared_bit;
+
+        // HACK: Now we allow vmpl1 to read/write/execute all pages at VMPL2 but
+        // this might be problematic?
+        // TODO: We should ideally only lift the VMPL for the pages that we care about (e.g., the occupied regions).
+        // and the guest page tables.
 
         let s = self.ext.occupied_regions.len();
         for i in 0..s
@@ -662,6 +725,13 @@ impl DekoUserApp {
                     len - j,
             )]
             while j < len {
+                broadcast use RmpFlags::lemma_each_bit_is_valid;
+
+                proof {
+                    bit_u32_and_auto();
+                    bit_u64_and_auto();
+                }
+
                 let va = VirtAddr(start.0 + j * PAGE_SIZE);
                 // Look up the mapping.
                 let mapping = PageTable::walk_lvl3_guest(&cr3, va, private_bit, shared_bit)?;
@@ -672,6 +742,37 @@ impl DekoUserApp {
                 }
                 let final_mapping = mapping.final_mapping().unwrap();
 
+                let (_, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
+                assume(cpu_perm.pgtable_perm.mapped(final_mapping.inner.start));
+
+                // First we will need to revoke the access permission for VMPL2.
+                // if rmpadjust(
+                //     final_mapping.inner.start,
+                //     PAGE_SIZE,
+                //     RmpFlags::revoke_guest_vmpl2(),
+                //     Tracked(&mut cpu_perm.pgtable_perm),
+                // ) != 0 {
+                //     kerror!("Failed to adjust RMP for revoking VMPL2", final_mapping.inner.start=>hex);
+                //     return Err(
+                //         DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam),
+                //     );
+                // }
+
+                // if rmpadjust(
+                //     final_mapping.inner.start,
+                //     PAGE_SIZE,
+                //     RmpFlags::rwx_guest_vmpl1(),
+                //     Tracked(&mut cpu_perm.pgtable_perm),
+                // ) != 0 {
+                //     kerror!("Failed to adjust RMP for lifting VMPL", final_mapping.inner.start=>hex);
+                //     return Err(
+                //         DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam),
+                //     );
+                // }
+
+                // flush_tlb_global_sync();
+
+                kinfo!("Lifted VMPL for guest page", (start.0 + j * PAGE_SIZE) => hex);
                 j += 1;
             }
 
@@ -964,17 +1065,26 @@ pub fn try_kick_app(regs: &PtRegs, guest_cr3: PhysAddr) -> DekoGuestServResult<(
     let token_high = regs.dx;
     let original_entry = regs.bx;
     let guest_stack = regs.sp;
-
     // Now sure if this is really needed.
     let uuid = Uuid::from_u64_pair(token_low, token_high);
-
     let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
     let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
-
-    if core::hint::unlikely(cpu_borrow.deko_app_vmsa.is_none()) {
-        kerror!("try_kick_app: no VMSA allocated for this CPU");
+    if core::hint::unlikely(cpu_borrow.ext_vmpl1.is_none()) {
+        kerror!("try_kick_app: no VMPL1 context allocated for this CPU");
         return Err(DekoGuestServError::FatalError);
     }
+    let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
+    let mut ctx_vmpl1 = cpu_taken.ext_vmpl1.take().unwrap();
+    let tracked mut vmpl1_perm = cpu_perm.ext_vmpl1_perm.tracked_take();
+    proof_with!(Tracked(&mut vmpl1_perm.vmsa_perm));
+    ctx_vmpl1.vmsa.init_for_app(regs)?;
+    proof {
+        cpu_perm.ext_vmpl1_perm = Some(vmpl1_perm);
+    }
+    cpu_taken.ext_vmpl1 = Some(ctx_vmpl1);
+    cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
+
+    kinfo!("try_kick_app: prepared VMSA for the app, now switching to VMPL1");
     // WARNING: CRITICAL SECTION
     //
     // This requires VMPL switch so we should NEVER enable interrupts here
@@ -989,31 +1099,62 @@ pub fn try_kick_app(regs: &PtRegs, guest_cr3: PhysAddr) -> DekoGuestServResult<(
     // to inject another interrupt until we re-enable interrupts at the end,
     // which then checks if there is any pending doorbells and processes them.
     // Now copy the information to the VMSA and prepare for the VMPL switch.
-
-    let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
-    let mut app_vmsa = cpu_taken.deko_app_vmsa.take().unwrap();
-    let tracked mut deko_app_vmsa_perm = cpu_perm.deko_app_vmsa_perm.tracked_take();
-
-    proof_with!(Tracked(&mut deko_app_vmsa_perm));
-    app_vmsa.init_for_app(regs);
-
-    proof {
-        cpu_perm.deko_app_vmsa_perm = Some(deko_app_vmsa_perm);
-    }
-    cpu_taken.deko_app_vmsa = Some(app_vmsa);
-    cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
-
-    // The code below should be merged with the `try_enter_guest` main loop.
     no_irq_zone(
         ||
             {
                 flush_tlb_global_sync();
-
                 vmpl_switch(VMPL_GUEST_SECURE_APP);
             },
     );
 
     Ok(())
 }
+
+/// Called at VMPL1. This sets up some necessary state for the user application
+/// before jumping to the original entry point.
+#[verus_spec(
+    requires
+
+)]
+#[verifier::exec_allows_no_decreases_clause]
+pub fn setup_vmpl1() {
+    // Sanity check to ensure that we are indeed at VMPL1; if not, just return
+    // and since the return address is invalid the vCPU will simply hang.
+    if !is_vmpl1() {
+        return ;
+    }
+    // Now we setup the GHCB.
+    //
+    // If we do not call this function at VMPL1 then the GHCB will never
+    // get registered.
+
+    let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+    if cpu_borrow.ext_vmpl1.is_none() {
+        return ;
+    }
+    let private_bit = cpu_borrow.private_bit;
+    let shared_bit = cpu_borrow.shared_bit;
+    let ext = cpu_borrow.ext_vmpl1.as_ref().unwrap();
+    let ghcb_gpa = match virt_to_phys_checked(
+        private_bit,
+        shared_bit,
+        ext.ghcb.into_vaddr(),
+        Tracked(&cpu_perm.pgtable_perm),
+    ) {
+        Some(gpa) => gpa,
+        None => return ,
+    };
+    msr_register_ghcb_gpa(ghcb_gpa);
+    init_ghcb_logging(0x3f8);
+
+    kinfo!("setup_vmpl1: logger init");
+
+    vmpl_switch(VMPL_GUEST_DEKO_MONITOR);
+
+    die("setup_vmpl1: this should never return");
+}
+
+func_ptr!(setup_vmpl1);
 
 } // verus!

@@ -182,6 +182,18 @@ impl DekoGuestServResultCode {
     }
 }
 
+#[verifier::external]
+impl core::fmt::Debug for DekoGuestServError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            DekoGuestServError::SoftError(
+                code,
+            ) => write!(f, "SoftError({:?})", code.into_error_code()),
+            DekoGuestServError::FatalError => write!(f, "FatalError"),
+        }
+    }
+}
+
 pub type DekoGuestServResult<T> = core::result::Result<T, DekoGuestServError>;
 
 pub const DEKO_GUEST_EXIT_PROTOCOL_DEKO_SERVICE: u32 = 0x0;

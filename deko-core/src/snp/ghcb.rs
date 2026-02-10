@@ -18,6 +18,7 @@ use vstd::atomic::{
 };
 use vstd::prelude::*;
 
+use super::is_vmpl1;
 use crate::cpu::irq::no_irq_zone;
 use crate::cpu::tlb::{flush_tlb_global_percpu, flush_tlb_global_sync};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
@@ -116,20 +117,27 @@ impl PageStateChangeHeader {
 pub fn validate_ghcb(
     ctx: DekoPPtr<DekoCpuCtx>,
     Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
-)
+    is_vmpl1: bool,
+) -> (r: PhysAddr)
     requires
         old(ctx_perm).wf_with(ctx),
         old(ctx_perm).ghcb_perm.wf(),
+        is_vmpl1 ==> old(ctx_perm).ptr_perm.value().ext_vmpl1 is Some,
     ensures
         ctx_perm.wf_with(ctx),
+        old(ctx_perm).ptr_perm.value().ext_vmpl1 == ctx_perm.ptr_perm.value().ext_vmpl1,
 {
     let ctx = ctx.borrow(Tracked(&ctx_perm.ptr_perm));
     let pgtable = ctx.pgtable();
-    let ghcb = ctx.ghcb();
+    let ghcb = if is_vmpl1 {
+        ctx.ext_vmpl1.as_ref().unwrap().ghcb
+    } else {
+        ctx.ghcb
+    };
+
     let ms = ctx.kernel_mapping();
     let private_bit = ctx.private_bit();
     let shared_bit = ctx.shared_bit();
-
     let ghcb_vaddr = VirtAddr::new(ghcb.addr() as u64);
     let ghcb_paddr = virt_to_phys_checked(
         private_bit,
@@ -138,7 +146,6 @@ pub fn validate_ghcb(
         Tracked(&ctx_perm.pgtable_perm),
     ).unwrap_or(PhysAddr(ghcb.addr() as u64));
 
-    // Invalidate this page from the CVM.
     let (ret, changed) = crate::imp::pvalidate(
         ghcb_vaddr.0,
         0x1000,
@@ -167,8 +174,7 @@ pub fn validate_ghcb(
 
     flush_tlb_global_sync();
 
-    // Register the GHCB GPA with the hypervisor.
-    msr_register_ghcb_gpa(ghcb_paddr);
+    ghcb_paddr
 }
 
 pub fn msr_register_ghcb_gpa(paddr: PhysAddr)
@@ -239,8 +245,16 @@ pub fn current_ghcb() -> (r: (
     let (cpu, Tracked(perm)) = DekoCpuCtx::this_cpu();
     let cpu = cpu.borrow(Tracked(&perm.ptr_perm));
 
-    // `this_cpu` is causing page fault so the mapping is problematic.
-    (cpu.ghcb(), Tracked(perm.ghcb_perm))
+    if is_vmpl1() {
+        kpanic_if!(cpu.ext_vmpl1.is_none(), "No VMPL1 context");
+
+        (
+            cpu.ext_vmpl1.as_ref().unwrap().ghcb,
+            Tracked(perm.ext_vmpl1_perm.tracked_unwrap().ghcb_perm),
+        )
+    } else {
+        (cpu.ghcb(), Tracked(perm.ghcb_perm))
+    }
 }
 
 deko_bitflags! {

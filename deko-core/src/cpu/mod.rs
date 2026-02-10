@@ -40,8 +40,8 @@ use crate::cpu::task::{
     DekoRunnable, DekoRunnablePred, DekoTaskArgs, DEKO_TASK_LIST,
 };
 use crate::guest::CaaArea;
-use crate::imp::ghcb::current_ghcb;
-use crate::imp::RmpFlags;
+use crate::imp::ghcb::{current_ghcb, msr_register_ghcb_gpa};
+use crate::imp::{RmpFlags, VMPL_GUEST_DEKO_MONITOR};
 use crate::mm::frame_allocator::DekoPageFrameBox;
 use crate::mm::paging::{
     bit_not_in_addr_region, bit_not_overlapping, index_at_level_spec, Mapping, Page, PageTable,
@@ -53,10 +53,11 @@ use crate::mm::vm::{
     VirtualMemoryTemporary, VmMapping, VmMappingPred, VMR_GRANULE,
 };
 use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR_FULL};
+use crate::policy::userapp::setup_vmpl1_func_ptr;
 use crate::snp::doorbell::{HVDoorbell, HvDoorbellPtrPermission, HvDoorbellPtrPred};
 use crate::snp::ghcb::{validate_ghcb, GuestHostCommunicationBlock};
 use crate::snp::vmsa::{VmsaInitialContext, VmsaPage, VmsaPagePermission, VmsaPagePred, VMSA};
-use crate::snp::{Rmp_ALL_BITS, VMPL_GUEST_SECURE_APP};
+use crate::snp::{rmpadjust, rmpquery, Rmp_ALL_BITS, VMPL_GUEST_SECURE_APP};
 use crate::{die, kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
 
 verus! {
@@ -460,6 +461,134 @@ pub exec static PERCPU_AREAS: DekoSafeRwLock<
     lock
 }
 
+/// Per-VMPL extended context for each CPU core.
+#[derive(DekoDebug)]
+pub struct DekoCpuCtxPerVmpl {
+    /// The VMPL level of this extended context.
+    pub vmpl: u8,
+    /// The VMSA for this extended context.
+    pub vmsa: VmsaPage,
+    /// The GHCB for this extended context.
+    pub ghcb: DekoPPtr<GuestHostCommunicationBlock>,
+}
+
+with_permission! {
+    DekoCpuCtxPerVmpl,
+    vmsa_perm: VmsaPagePermission,
+    ghcb_perm: DekoPointsTo<GuestHostCommunicationBlock>,
+}
+
+impl WellFormed for DekoCpuCtxPerVmpl {
+    open spec fn wf(&self) -> bool {
+        &&& self.vmpl < 4
+        &&& self.vmsa.wf()
+    }
+}
+
+#[verus_verify]
+impl DekoCpuCtxPerVmpl {
+    pub open spec fn wf_with(&self, perm: DekoCpuCtxPerVmplPermission) -> bool {
+        &&& perm.vmsa_perm.ptr_perm.pptr() == self.vmsa.page@
+        &&& perm.vmsa_perm.ptr_perm.is_init()
+        &&& perm.vmsa_perm.ptr_perm.wf()
+        &&& perm.ghcb_perm.pptr() == self.ghcb@
+        &&& perm.ghcb_perm.is_init()
+        &&& perm.ghcb_perm.wf()
+    }
+
+    /// Create a new [`DekoCpuCtxPerVmpl`] structure with dummy VMSA and GHCB.
+    ///
+    /// Note that we will not register the VMSA nor GHCB here. The caller must
+    /// ensure that they will be later registered before use.
+    #[verus_spec(r =>
+        with
+            Tracked(pgtable_perm): Tracked<&mut PageTablePermission>,
+            -> perm: Tracked<DekoCpuCtxPerVmplPermission>,
+        requires
+            vmpl < 4,
+            old(pgtable_perm).wf(),
+        ensures
+            r.wf(),
+            r.wf_with(perm@),
+            pgtable_perm.wf(),
+            pgtable_perm.pgtable_perm == old(pgtable_perm).pgtable_perm,
+            pgtable_perm.private_bit == old(pgtable_perm).private_bit,
+            pgtable_perm.shared_bit == old(pgtable_perm).shared_bit,
+            pgtable_perm.mapping_space == old(pgtable_perm).mapping_space,
+    )]
+    pub fn new(vmpl: u8) -> Self {
+        broadcast use RmpFlags::lemma_each_bit_is_valid;
+
+        proof {
+            bit_u32_and_auto();
+        }
+
+        proof_with!(Tracked(pgtable_perm) => Tracked(vmsa_perm));
+        let vmsa = VmsaPage::alloc(RmpFlags::vmpl1());
+
+        // Allocate a new GHCB.
+        let (ghcb, Tracked(ghcb_perm)) =
+            boxed_ptr!(GuestHostCommunicationBlock, &DEKO_FRAME_ALLOCATOR_FULL);
+
+        proof_with!(|= Tracked(
+            DekoCpuCtxPerVmplPermission {
+                vmsa_perm,
+                ghcb_perm,
+            }
+        ));
+        Self { vmpl, vmsa, ghcb }
+    }
+
+    /// Initialize the per-VMPL extended context for this CPU core.
+    #[verus_spec(
+        with
+            Tracked(perm): Tracked<&mut DekoCpuCtxPerVmplPermission>,
+            Tracked(pgtable_perm): Tracked<&PageTablePermission>,
+        requires
+            pgtable_perm.wf(),
+            self.wf(),
+            self.wf_with(*old(perm)),
+            private_bit == pgtable_perm.private_bit,
+            shared_bit == pgtable_perm.shared_bit,
+        ensures
+            self.wf_with(*perm),
+    )]
+    pub fn init(
+        &self,
+        cpu_id: u64,
+        css: u64,
+        tss: &X86Tss,
+        private_bit: u64,
+        shared_bit: u64,
+        cr3: u64,
+    ) {
+        let init_ctx = VmsaInitialContext::new_with(setup_vmpl1_func_ptr(), css, cr3, tss);
+
+        proof_with!(Tracked(&mut perm.vmsa_perm));
+        let sev_features = self.vmsa.init_from(&init_ctx, self.vmpl);
+
+        let (ghcb, Tracked(ghcb_perm)) = current_ghcb();
+
+        let vmsa_paddr = virt_to_phys(
+            private_bit,
+            shared_bit,
+            self.vmsa.vaddr(),
+            Tracked(pgtable_perm),
+        );
+
+        // Register the VMSA for this VMPL.
+        GuestHostCommunicationBlock::register_vmsa(
+            ghcb,
+            Tracked(ghcb_perm),
+            vmsa_paddr,
+            cpu_id,
+            self.vmpl as _,
+            sev_features,
+            0,
+        );
+    }
+}
+
 /// Physical per-CPU data structure and hardware interface.
 ///
 /// `DekoCpuCtx` represents the physical per-CPU area that contains all CPU-specific
@@ -557,8 +686,6 @@ pub struct DekoCpuCtx {
     pub ctx_switch_stack: Option<VirtAddr>,
     /// The stack for handling interrupts.
     pub ist_stack: Option<DekoIstStack>,
-    // /// The current stack.
-    // pub current_stack: ...
     /// The private bit of the PTE of this core.
     #[deko(hex)]
     pub private_bit: u64,
@@ -586,8 +713,6 @@ pub struct DekoCpuCtx {
     pub temp_mapping_2m: VirtualMemoryTemporary,
     /// The VMSA for VMPL0 [fixed and will not change].
     pub deko_vmsa: DekoOnceCell<VmsaPage, VmsaPagePermission, VmsaPagePred>,
-    /// The VMSA for VMPL1
-    pub deko_app_vmsa: Option<VmsaPage>,
     /// The doorbell for SEV-SNP restricted interrupt mode.
     ///
     /// The lock only protects the pointer itself from other vCPUs.
@@ -599,6 +724,9 @@ pub struct DekoCpuCtx {
     pub nested_irq: IrqState,
     /// Current active stack. This is mostly used for stack unwinder.
     pub current_stack: VaddrRange,
+    /// The VMPL1 extended context for this CPU, if any.
+    /// This is only used when we are running a VMPL1 guest
+    pub ext_vmpl1: Option<DekoCpuCtxPerVmpl>,
 }
 
 with_permission! {
@@ -608,7 +736,7 @@ with_permission! {
     ghcb_perm: DekoPointsTo<GuestHostCommunicationBlock>,
     vm_region_perm: Option<VirtualMemoryRegionPermission>,
     irq_state_perm: IrqStatePermission,
-    deko_app_vmsa_perm: Option<VmsaPagePermission>,
+    ext_vmpl1_perm: Option<DekoCpuCtxPerVmplPermission>,
 }
 
 impl DekoCpuCtxPermission {
@@ -629,12 +757,9 @@ impl DekoCpuCtxPermission {
             &&& perm.vm_perms.wf()
             &&& vm.wf_with(&perm)
         }
-        &&& self.ptr_perm.value().deko_app_vmsa matches Some(app_vmsa)
-            ==> self.deko_app_vmsa_perm matches Some(perm) && {
-            &&& perm.ptr_perm.wf()
-            &&& perm.ptr_perm.is_init()
-            &&& perm.ptr_perm.pptr() == app_vmsa.page@
-        }
+        &&& self.ptr_perm.value().ext_vmpl1 matches Some(ext) ==> self.ext_vmpl1_perm matches Some(
+            perm,
+        ) && ext.wf_with(perm)
         &&& self.wf()
     }
 }
@@ -647,7 +772,8 @@ impl WellFormed for DekoCpuCtxPermission {
         &&& self.ptr_perm.value().vm_region matches Some(vm) ==> vm.wf()
         &&& self.ptr_perm.value().run_queue matches Some(rq) ==> rq.wf()
         &&& self.ptr_perm.value().doorbell matches Some(db) ==> db.wf()
-        &&& self.ptr_perm.value().deko_app_vmsa matches Some(vmsa) ==> vmsa.wf()
+        &&& self.ptr_perm.value().guest_apic matches Some(ga) ==> ga.wf()
+        &&& self.ptr_perm.value().ext_vmpl1 matches Some(ext) ==> ext.wf()
         &&& self.pgtable_perm.wf()
         &&& self.pgtable_perm.pgtable_perm.pptr() == self.ptr_perm.value().pgtable_spec()@
         &&& self.pgtable_perm.mapping_space === self.ptr_perm.value().kernel_mapping_spec()
@@ -1024,11 +1150,11 @@ impl DekoCpuCtx {
             temp_mapping_4k: VirtualMemoryTemporary::new_zeroed(),
             temp_mapping_2m: VirtualMemoryTemporary::new_zeroed(),
             deko_vmsa: DekoOnceCell::new(Ghost(VmsaPagePred {  })),
-            deko_app_vmsa: None,
             doorbell: None,
             guest_apic,
             nested_irq: irq_state,
             current_stack: VirtAddr::new(0)..VirtAddr::new(0),  // set to none.
+            ext_vmpl1: None,
         }
     }
 
@@ -1038,10 +1164,7 @@ impl DekoCpuCtx {
             self.wf(),
         ensures
             r == self.addr(),
-            PTE_BASE@ + ((r & 0x0000_FFFF_FFFF_F000u64) >> 9)
-                <= 0x0000_FFFF_FFFF_FFFFu64
-            // todo: add something to ensure the address is valid.
-            ,
+            PTE_BASE@ + ((r & 0x0000_FFFF_FFFF_F000u64) >> 9) <= 0x0000_FFFF_FFFF_FFFFu64,
     {
         self as *const DekoCpuCtx as u64
     }
@@ -1145,11 +1268,11 @@ impl DekoCpuCtx {
                                     temp_mapping_4k,
                                     temp_mapping_2m,
                                     deko_vmsa,
-                                    deko_app_vmsa,
                                     doorbell,
                                     nested_irq,
                                     guest_apic,
                                     current_stack,
+                                    ext_vmpl1,
                                 } = ptr.take(Tracked(&mut perm.ptr_perm));
 
                                 let tracked DekoCpuCtxPermission {
@@ -1158,7 +1281,7 @@ impl DekoCpuCtx {
                                     ghcb_perm,
                                     vm_region_perm,
                                     irq_state_perm,
-                                    deko_app_vmsa_perm,
+                                    ext_vmpl1_perm,
                                 } = perm;
 
                                 let mut vm_region = vm_region.unwrap();
@@ -1234,7 +1357,7 @@ impl DekoCpuCtx {
                                         ghcb_perm,
                                         vm_region_perm: Some(vm_region_perm),
                                         irq_state_perm,
-                                        deko_app_vmsa_perm,
+                                        ext_vmpl1_perm,
                                     };
                                 }
 
@@ -1255,11 +1378,11 @@ impl DekoCpuCtx {
                                     temp_mapping_4k,
                                     temp_mapping_2m,
                                     deko_vmsa,
-                                    deko_app_vmsa,
                                     doorbell,
                                     nested_irq,
                                     current_stack,
                                     guest_apic,
+                                    ext_vmpl1,
                                 });
 
                                 (ok, Tracked(perm))
@@ -1270,73 +1393,46 @@ impl DekoCpuCtx {
         )
     }
 
-    /// Allocates a VMSA for the secured application at VMPL1 and initialize the VMSA as empty.
-    pub fn allocate_app_vmsa(ptr: DekoPPtr<Self>, Tracked(perm): Tracked<&mut DekoCpuCtxPermission>)
+    /// Sets up the VMPL1 extended context for this CPU. This should only be called once when we are
+    /// initializing the VMPL1 guest. After this function is called, the VMPL1 extended context will be
+    /// set up and the VMSA for VMPL1 will be registered to GHCB.
+    #[verus_spec]
+    pub fn setup_vmpl1(ptr: DekoPPtr<Self>, Tracked(perm): Tracked<&mut DekoCpuCtxPermission>)
         requires
             old(perm).wf_with(ptr),
+            old(perm).ptr_perm.value().ctx_switch_stack is Some,
         ensures
             perm.wf_with(ptr),
+            perm.ptr_perm.value().ext_vmpl1 is Some,
+            perm.ext_vmpl1_perm is Some,
     {
-        broadcast use crate::snp::RmpFlags::lemma_each_bit_is_valid;
+        let cr3 = read_cr3();  // re-use it.
+        let mut cpu = ptr.take(Tracked(&mut perm.ptr_perm));
+        let cpu_id = cpu.cpu_id;
+        let private_bit = cpu.private_bit;
+        let shared_bit = cpu.shared_bit;
 
-        proof {
-            bit_u64_and_auto();
-            bit_u32_and_auto();
-        }
-
-        let cpu_borrow = ptr.borrow(Tracked(&perm.ptr_perm));
-        if cpu_borrow.deko_app_vmsa.is_some() {
-            kwarn!("App VMSA already allocated");
-
-            return ;
-        }
-        let private_bit = cpu_borrow.private_bit;
-        let shared_bit = cpu_borrow.shared_bit;
-        let cpu_idx = cpu_borrow.cpu_id as usize;
-
-        #[verus_spec(with Tracked(&mut perm.pgtable_perm) => Tracked(vmsa_perm))]
-        let vmsa = VmsaPage::alloc(RmpFlags::vmpl1());
-
-        let (ghcb, Tracked(ghcb_perm)) = current_ghcb();
-        let vmsa_paddr = match virt_to_phys_checked(
+        proof_with!(Tracked(&mut perm.pgtable_perm) => Tracked(mut ext_vmpl1_perm));
+        let ext_vmpl1 = DekoCpuCtxPerVmpl::new(VMPL_GUEST_SECURE_APP as _);
+        proof_with!(Tracked(&mut ext_vmpl1_perm), Tracked(&perm.pgtable_perm));
+        ext_vmpl1.init(
+            cpu_id,
+            cpu.ctx_switch_stack.unwrap().0,
+            &cpu.tss,
             private_bit,
             shared_bit,
-            VirtAddr::new(vmsa.page.addr() as u64),
-            Tracked(&perm.pgtable_perm),
-        ) {
-            Some(paddr) => paddr,
-            None => {
-                kerror!("Failed to get physical address for app VMSA allocation");
-                die("App VMSA physical address translation failed");
-            },
-        };
-
-        // Now notify GHCB.
-        GuestHostCommunicationBlock::register_vmsa(
-            ghcb,
-            Tracked(ghcb_perm),
-            vmsa_paddr,
-            cpu_idx as _,
-            VMPL_GUEST_SECURE_APP as u64,
-            0x0,
-            0,  /* Do not launch it. */
+            cr3,
         );
 
-        let mut cpu_taken = ptr.take(Tracked(&mut perm.ptr_perm));
-        cpu_taken.deko_app_vmsa = Some(vmsa);
-
+        cpu.ext_vmpl1 = Some(ext_vmpl1);
         proof {
-            perm.deko_app_vmsa_perm = Some(vmsa_perm);
+            perm.ext_vmpl1_perm = Some(ext_vmpl1_perm);
         }
 
-        ptr.write(Tracked(&mut perm.ptr_perm), cpu_taken);
-
-        kinfo!("Allocated application VMSA and vCPU");
+        ptr.write(Tracked(&mut perm.ptr_perm), cpu);
+        validate_ghcb(ptr, Tracked(perm), true);
     }
 
-    /// Different from [`Self::allocate_deko_vmsa`] which allocates the VMSA for Deko's own
-    /// use, this function allocates a VMSA for the guest for context switches, hypercalls,
-    /// etc.
     pub fn allocate_guest_vmsa(
         ptr: DekoPPtr<Self>,
         Tracked(perm): Tracked<&mut DekoCpuCtxPermission>,
@@ -1429,12 +1525,17 @@ impl DekoCpuCtx {
         }
 
         broadcast use crate::snp::RmpFlags::lemma_each_bit_is_valid;
+        // Explanation:
+        //
+        // The `rmpadjust` refuses to modify the RMP entry is the current VMPL <= target
+        // VMPL even if we are VMPL0. So it is impossible to modify a page into VMSA page
+        // if we use VMPL0. However though, the VMSA page itself is *ignorant* of the
+        // the rwx bits so we can just use arbitrary flags as long as they are valid.
+        // Using VMPL/2/3 is fine.
 
         let flags = RmpFlags::vmpl1();
         proof {
-            assert(flags.bits() & Rmp_ALL_BITS == flags.bits()) by {
-                bit_u64_and_auto();
-            }
+            bit_u32_and_auto();
         }
 
         let cpu_borrow = ptr.borrow(Tracked(&perm.ptr_perm));
@@ -1481,7 +1582,7 @@ impl DekoCpuCtx {
         kinfo!("Populating the VMSA from initial context");
 
         #[verus_spec(with Tracked(&mut vmsa_perm))]
-        let sev_features = vmsa.init_from(&init_ctx);
+        let sev_features = vmsa.init_from(&init_ctx, VMPL_GUEST_DEKO_MONITOR as _);
         cpu_borrow.deko_vmsa.init(DekoAtomicData::new_with(vmsa, Tracked(vmsa_perm)));
 
         (paddr, sev_features)
@@ -1945,6 +2046,7 @@ impl DekoCpuCtx {
             perm.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
             perm.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
             perm.ptr_perm.value().cpu_id == old(perm).ptr_perm.value().cpu_id,
+            perm.ptr_perm.value().ctx_switch_stack == old(perm).ptr_perm.value().ctx_switch_stack,
     {
         let cpu = ptr.borrow(Tracked(&perm.ptr_perm));
 
@@ -2225,16 +2327,15 @@ pub fn start_application_processor(which: &PerCpuShared) {
 unsafe extern "C" fn ap_start() -> ! {
     // BSP must have initialized DekoCpuCtx and map the per-cpu area onto the AP's
     // own page table.
-    let (cpu_ctx_ptr, Tracked(ap_perm)) = DekoCpuCtx::this_cpu();
+    let (cpu_ctx_ptr, Tracked(mut ap_perm)) = DekoCpuCtx::this_cpu();
     let cpuid = cpu_ctx_ptr.borrow(Tracked(&ap_perm.ptr_perm)).cpu_id;
 
     // Now we must initialize the GHCB on this cpu.
     kpanic_if!(cpuid == 0, "AP started with CPU ID 0, which is reserved for BSP");
 
-    validate_ghcb(cpu_ctx_ptr, Tracked(&mut ap_perm));
+    msr_register_ghcb_gpa(validate_ghcb(cpu_ctx_ptr, Tracked(&mut ap_perm), false));
 
     kinfo!("AP CPU", cpuid => hex, "is starting.");
-
     let is_vm_region_none = cpu_ctx_ptr.borrow(Tracked(&ap_perm.ptr_perm)).vm_region.is_none();
     if core::hint::unlikely(is_vm_region_none) {
         die("AP CPU VM region is not initialized");
@@ -2247,6 +2348,7 @@ unsafe extern "C" fn ap_start() -> ! {
     assume(ap_perm.ptr_perm.value().run_queue_spec().unwrap().wf());
     // Also setup the APIC for this cpu.
     crate::imp::setup_apic(cpu_ctx_ptr, Tracked(&mut ap_perm));
+
     // Also set the idle task.
     proof_with!(Tracked(ap_perm));
     DekoCpuCtx::setup_idle_task(cpu_ctx_ptr, cpu_idle_func_ptr(), "cpu_idle");

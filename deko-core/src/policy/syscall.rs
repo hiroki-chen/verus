@@ -1,10 +1,13 @@
 #![allow(non_upper_case_globals)]
 
+use deko_macros::with_atomic_pred;
 use deko_std::deko_rwlock_write_atomic_data;
 use deko_std::mem::PAGE_SIZE;
 use deko_std::prelude::collections::hashmap::HashMap;
-use deko_std::prelude::{PhysAddr, VirtAddr};
+use deko_std::prelude::{PhysAddr, VirtAddr, VADDR_UPPER_MASK};
 use deko_std::std_extra::allocator::AllocatorWrapper;
+use deko_std::sync::DekoOnceCell;
+use deko_std::wf::WellFormed;
 use vstd::prelude::*;
 
 use crate::guest::{DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode};
@@ -15,6 +18,23 @@ use crate::policy::DekoSyscallBody;
 use crate::{die, kdebug, kerror, kinfo, ktrace, kwarn, vec};
 
 verus! {
+
+type DekoSyscall = VirtAddr;
+
+with_atomic_pred!(
+    DekoSyscall,
+    (),
+    fields: { },
+    perm_fields: { },
+    data.wf() && data.view() >= VADDR_UPPER_MASK // No need to make it page-aligned.
+);
+
+pub exec static DEKO_VMPL1_SYSCALL_TRAMPOLINE: DekoOnceCell<VirtAddr, (), DekoSyscallPred>
+    ensures
+        DEKO_VMPL1_SYSCALL_TRAMPOLINE.wf(),
+{
+    DekoOnceCell::new(Ghost(DekoSyscallPred {  }))
+}
 
 /// The names of syscalls indexed by their syscall numbers.
 ///
@@ -1211,6 +1231,9 @@ pub fn analysis_syscall(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()
     if core::hint::unlikely(syscall_body.rax as usize >= SYS_CALL_NAME.len()) {
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
+    kinfo!("Syscall invoked: ", SYS_CALL_NAME[syscall_body.rax as usize]);
+    deko_std::misc::early_dbg();
+
     match syscall_body.rax {
         // In June 2023, Google's security team reported that 60% of the exploits submitted
         // to their bug bounty program in 2022 were exploits of io_uring vulnerabilities.

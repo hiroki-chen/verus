@@ -31,11 +31,15 @@ use crate::cpu::ipi::{wait_ipi_blocking, DekoIpIMessage, DekoIpiRequest};
 use crate::cpu::irq::{irq_enable, no_irq_zone, DekoUnsafeRwLock, IrqUnSafeLockGuard};
 use crate::cpu::regs::{sse_restore_context, sse_save_context};
 use crate::cpu::tlb::{flush_tlb_global_percpu, flush_tlb_global_sync};
-use crate::cpu::{self, DekoCpuCtx, DekoCpuCtxPermission, CPUID_MAX_COUNT, CPU_NUM, PERCPU_AREAS};
+use crate::cpu::{
+    self, start_application_processor, DekoCpuCtx, DekoCpuCtxPermission, CPUID_MAX_COUNT, CPU_NUM,
+    PERCPU_AREAS,
+};
 use crate::guest::{handle_guest_exit, DekoGuestExitInformation, DekoGuestServError};
 use crate::imp::doorbell::HVDoorbell;
 use crate::imp::ghcb::{vmpl_switch, GuestHostCommunicationBlock};
 use crate::imp::vmsa::VMSA;
+use crate::imp::{VMPL_GUEST_KERNEL, VMPL_GUEST_SECURE_APP};
 use crate::logging::{print_str, CONSOLE_LOCK};
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
 use crate::mm::paging::{
@@ -1084,7 +1088,7 @@ impl DekoRunnable {
             ctx_perm_updated@.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
             ctx_perm_updated@.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
             ctx_perm_updated@.ptr_perm.value().cpu_id == ctx_perm.ptr_perm.value().cpu_id,
-            // r@.???
+            ctx_perm_updated@.ptr_perm.value().ctx_switch_stack == ctx_perm.ptr_perm.value().ctx_switch_stack,
     )]
     pub fn new(cpu: DekoPPtr<DekoCpuCtx>, args: DekoTaskArgs) -> DekoRunnablePtr {
         kdebug!("Creating new task with args", args);
@@ -1156,11 +1160,11 @@ impl DekoRunnable {
             temp_mapping_4k,
             temp_mapping_2m,
             deko_vmsa,
-            deko_app_vmsa,
             doorbell,
             nested_irq,
             current_stack,
             guest_apic,
+            ext_vmpl1,
         } = cpu_taken;
         kpanic_if!(core::hint::unlikely(
             vm_region.is_none(),
@@ -1188,7 +1192,7 @@ impl DekoRunnable {
             ghcb_perm,
             vm_region_perm,
             irq_state_perm,
-            deko_app_vmsa_perm,
+            ext_vmpl1_perm,
         } = ctx_perm;
 
         let mut vm_region = vm_region.unwrap();
@@ -1290,11 +1294,11 @@ impl DekoRunnable {
             temp_mapping_4k,
             temp_mapping_2m,
             deko_vmsa,
-            deko_app_vmsa,
             doorbell,
             nested_irq,
             guest_apic,
             current_stack,
+            ext_vmpl1,
         };
         let tracked ctx_perm = DekoCpuCtxPermission {
             ptr_perm,
@@ -1302,7 +1306,7 @@ impl DekoRunnable {
             ghcb_perm,
             vm_region_perm: Some(vm_region_perm),
             irq_state_perm,
-            deko_app_vmsa_perm,
+            ext_vmpl1_perm,
         };
         cpu.write(Tracked(&mut ctx_perm.ptr_perm), cpu_new);
 
@@ -2082,6 +2086,11 @@ pub fn set_cpu_affinity(which: usize) {
 #[verifier::exec_allows_no_decreases_clause]
 pub fn serv_main(cpu_index: usize) {
     let (this_cpu, Tracked(mut perm)) = DekoCpuCtx::this_cpu();
+    let css = &this_cpu.borrow(Tracked(&perm.ptr_perm)).ctx_switch_stack;
+    kpanic_if!(
+        core::hint::unlikely(css.is_none()),
+        "No context switch stack is assigned to the CPU.",
+    );
 
     if cpu_index == 0 {
         let cpu_nums: u64 = match CPU_NUM.get() {
@@ -2121,6 +2130,7 @@ pub fn serv_main(cpu_index: usize) {
                 perm.wf_with(this_cpu),
                 perm.ptr_perm.value().run_queue_spec() matches Some(rq_val) && rq_val.wf(),
                 perm.ptr_perm.value().vm_region_spec() matches Some(vm_val) && vm_val.wf(),
+                perm.ptr_perm.value().ctx_switch_stack is Some,
                 current.wf(),
             decreases cpu_nums - i,
         {
@@ -2153,13 +2163,38 @@ pub fn serv_main(cpu_index: usize) {
         set_cpu_affinity(cpu_index);
     }
 
-    // Also allocated application vmsa here.
-    DekoCpuCtx::allocate_app_vmsa(this_cpu, Tracked(&mut perm));
+    DekoCpuCtx::setup_vmpl1(this_cpu, Tracked(&mut perm));
 
     kinfo!("Core ", cpu_index, " entering guest execution loop.");
-
     wait_ipi_blocking();  // ensure all cores are synchronized.
 
+    loop
+        invariant
+            cpu_index < CPUID_MAX_COUNT,
+    {
+        // First kick the core into VMPL1 for setting up the necessary contexts.
+        if no_irq_zone(
+            ||
+                {
+                    flush_tlb_global_sync();
+                    vmpl_switch(VMPL_GUEST_SECURE_APP)
+                },
+        ) {
+            break ;
+        }
+    }
+
+    // If the above function returns then we simply enter the main loop for
+    // serving the guest exits.
+    serv_main_loop(cpu_index)
+}
+
+#[verus_spec(
+    requires
+        cpu_index < CPUID_MAX_COUNT,
+)]
+#[verifier::exec_allows_no_decreases_clause]
+fn serv_main_loop(cpu_index: usize) -> ! {
     let mut r = 0;
 
     // Try to enter the guest again.
@@ -2272,7 +2307,7 @@ pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
                     // Also need to update the guest interrupt delivery information here.
                     // Need to update the guest APIC status here so no interrupt will
                     // be delivered.
-                    vmpl_switch(2);
+                    vmpl_switch(VMPL_GUEST_KERNEL);
                 },
         );
 

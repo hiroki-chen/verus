@@ -33,10 +33,9 @@ deko_trampoline_start:
   ja     continue_analysis
 
   btq    %rax, filter_bitmap(%rip)
-  jnc    back_to_linux
+  jc    back_to_linux
 
 continue_analysis:
-  swapgs
 prepare_syscall:
   movq    %rsp, scratch_rsp(%rip)   // Save User RSP
   // switch to our temporary stack.
@@ -126,8 +125,6 @@ call_ifc:
 
   // Restore User RSP from our saved location.
   movq    scratch_rsp(%rip), %rsp
-
-  swapgs
 back_to_linux:
   // --------------------------------------------------------------------------
   // 9. Handover to Linux Kernel
@@ -155,7 +152,7 @@ deko_ifc_engine_entry:
 // Bitmap to filter syscalls (0-255) that do not need analysis.
 filter_bitmap:
   // [0-63]:    0
-  .quad 0x0000000000000200
+  .quad 0x0000000000000000
 
   // [64-127]:  0
   .quad 0x0000000000000000
@@ -204,25 +201,17 @@ deko_stack_top:
 // to launch a new privileged process.
 .global deko_sysret_trampoline
 deko_sysret_trampoline:
-  // rcx => return RIP
-  // r11 => return cookies.
-  // movl $0x16, %eax        // VMPL_SWITCH request
-  // movl $0xC0010130, %ecx
-  // xorl %edx, %edx        // vmpl 0
-  // wrmsr
-
-  // movabsq $0x400000002, %rax // protocol
-
-  // rep; vmmcall
-
   // do a naked vmmcall and let kvm handle the rest
   // wrmsr is not allowed in guest mode.
   vmmcall
 
-  jmp deko_sysret_trampoline
+  // Note: need to know if the program has been terminated.
+
+  // jmp deko_sysret_trampoline
 
   // if we return here, just exit the guest.
 
+  movq %rax, %rdi
   movq $60, %rax
   syscall
 

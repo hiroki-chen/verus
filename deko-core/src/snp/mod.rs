@@ -60,7 +60,7 @@ pub enum PageStateChangeOp {
     Unsmash,
 }
 
-const VMPL1_MAGIC_SIGNATURE: u32 = 0xDE;
+pub const VMPL1_MAGIC_SIGNATURE: u32 = 0xDE;
 
 // Currently VMPL3 is not used.
 pub const VMPL_GUEST_KERNEL: u32 = 0x2;
@@ -137,7 +137,11 @@ deko_bitflags_quick! {
     rx_guest_vmpl1: { VMPL_LOW, READ, X_USER, X_SUPER },
     rwx_guest_vmpl2: { VMPL_HIGH, READ, WRITE, X_USER, X_SUPER },
     rx_guest_vmpl2: { VMPL_HIGH, READ, X_USER, X_SUPER },
+    rwx_guest_vmpl3: { VMPL_LOW, VMPL_HIGH, READ, WRITE, X_USER, X_SUPER },
+    rx_guest_vmpl3: { VMPL_LOW, VMPL_HIGH, READ, X_USER, X_SUPER },
+    revoke_guest_vmpl1: { VMPL_LOW },
     revoke_guest_vmpl2: { VMPL_HIGH },
+    revoke_guest_vmpl3: { VMPL_LOW, VMPL_HIGH },
 }
 
 pub const VMPCK_SIZE: usize = 32;
@@ -477,6 +481,7 @@ pub const RMP_NO_WRITE: u8 = RMP_READ | RMP_USER_EXE | RMP_KERN_EXE;
 pub const RMP_RWX: u8 = RMP_NO_WRITE | RMP_WRITE;
 
 /// Set up the GHCB pages and other necessary state for SNP operation.
+#[inline]
 pub fn init_guest_host(
     ctx: DekoPPtr<DekoCpuCtx>,
     Tracked(ctx_perm): Tracked<&mut DekoCpuCtxPermission>,
@@ -486,7 +491,7 @@ pub fn init_guest_host(
     ensures
         ctx_perm.wf_with(ctx),
 {
-    crate::snp::ghcb::validate_ghcb(ctx, Tracked(ctx_perm));
+    msr_register_ghcb_gpa(crate::snp::ghcb::validate_ghcb(ctx, Tracked(ctx_perm), false));
 }
 
 pub fn init_platform_end(
@@ -506,8 +511,6 @@ pub fn init_platform_end(
 
     // Print IGVM parameter information for debugging
     kdebug!("IGVM Parameters\n\t", igvm_params);
-
-    kinfo!("enabled interrupt?", crate::cpu::irq::rflags() => hex);
 }
 
 pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxPermission>) -> (r: (
@@ -570,7 +573,7 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
         ghcb_perm,
         vm_region_perm: None,
         irq_state_perm,
-        deko_app_vmsa_perm: None,
+        ext_vmpl1_perm: None,
     };
 
     assume(cpu_ctx_perm.wf_with(bsp_percpu_ptr));
@@ -612,15 +615,21 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
 )]
 pub fn validate_vaddr_region(vrange: VaddrRange, validate: bool) {
     broadcast use vstd::arithmetic::div_mod::lemma_mod_equivalence;
+    broadcast use RmpFlags::lemma_each_bit_is_valid;
 
     let mut cur = vrange.start.0;
     let end = vrange.end.0;
+    let rmp_flag = RmpFlags::rwx_guest_vmpl1();
 
     proof {
         assert(end % PAGE_SIZE == 0);
         assert(cur % PAGE_SIZE == 0);
         assert(((end - cur)) % PAGE_SIZE as int == 0);
+
+        bit_u32_and_auto();
     }
+
+    kinfo!("Now validating ", vrange);
 
     while cur < end
         invariant
@@ -634,8 +643,9 @@ pub fn validate_vaddr_region(vrange: VaddrRange, validate: bool) {
             vrange.end@ % PAGE_SIZE == 0,
             cur % PAGE_SIZE == 0,
             ((end - cur) as u64) % PAGE_SIZE == 0,
-            PAGE_SIZE == PAGE_SIZE,  // <- important: must inline it.
-
+            PAGE_SIZE == 0x1000,
+            rmp_flag.wf(),
+            rmp_flag.bits() & Rmp_ALL_BITS == rmp_flag.bits(),
         decreases end - cur,
     {
         let tracked prev_ctx_perm = &*ctx_perm;
@@ -652,6 +662,11 @@ pub fn validate_vaddr_region(vrange: VaddrRange, validate: bool) {
             kerror!("RMPVALIDATE failed for vaddr regions");
             die("RMPVALIDATE failed");
         }
+        if rmpadjust(VirtAddr(cur), PAGE_SIZE, rmp_flag, Tracked(&mut ctx_perm.pgtable_perm)) != 0 {
+            // The glue code must also also be readable to VMPL1 to avoid duplicate code.
+            kerror!("RMPADJUST failed for vaddr regions");
+            die("RMPADJUST failed");
+        }
         proof {
             assert(forall|v: VirtAddr|
                 vrange.start@ <= v@ < vrange.end@ && v@ % PAGE_SIZE == 0
@@ -661,6 +676,8 @@ pub fn validate_vaddr_region(vrange: VaddrRange, validate: bool) {
         }
         cur += PAGE_SIZE;
     }
+
+    flush_tlb_global_sync();
 }
 
 /// PVALIDATE takes a page size as an input parameter indicating that either a
@@ -766,6 +783,34 @@ pub fn rmpadjust(
     }
 
     ret
+}
+
+/// Reads an RMP permission mask for a guest page. The guest virtual address is
+/// specified in the RA register. The target VMPL is specified in RDX[7:0]. RMP
+/// permissions for the specified VMPL are returned in RDX[63:8] and the RCX
+/// register as shown below.
+#[verifier::external_body]
+pub fn rmpquery(vaddr: VirtAddr, target_vmpl: u8) -> (r: RmpFlags)
+    requires
+        vaddr.wf(),
+        vaddr@ % PAGE_SIZE == 0,
+        target_vmpl < 4,
+    ensures
+        r.wf(),
+        r.bits() & Rmp_ALL_BITS == r.bits(),
+{
+    let flags: u64;
+    unsafe {
+        core::arch::asm!(
+            "rmpquery",
+            in("rax") vaddr.0,
+            in("dl") target_vmpl,
+            lateout("rdx") flags,
+            options(nostack, att_syntax)
+        );
+    }
+
+    RmpFlags::from_bits_truncate((flags & 0xffffffff) as u32)
 }
 
 pub fn rdmsr(msr: u32) -> u64 {

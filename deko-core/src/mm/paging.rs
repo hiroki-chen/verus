@@ -5052,8 +5052,6 @@ pub(crate) fn map_and_validate(
         Tracked(&mut ctx_perm.pgtable_perm),
     );
 
-    kinfo!("Mapping done. Now validating paddr", paddr);
-
     // Then validate these pages.
     #[verus_spec(with Tracked(ctx_perm))]
     crate::imp::validate_vaddr_region(virt_range, true);

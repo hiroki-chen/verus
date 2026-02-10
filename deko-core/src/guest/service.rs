@@ -41,7 +41,7 @@ use crate::{kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
 
 const _: () = {
     assert!(core::mem::size_of::<DekoGuestLstarWriteReq>() == 0x30);
-    assert!(core::mem::size_of::<DekoNewAppReq>() == 0x50);
+    assert!(core::mem::size_of::<DekoNewAppReq>() == 0x60);
 };
 
 verus! {
@@ -52,7 +52,7 @@ global layout DekoGuestPValidateReq is size == 8;
 
 global layout DekoGuestLstarWriteReq is size == 0x30;
 
-global layout DekoNewAppReq is size == 0x50;
+global layout DekoNewAppReq is size == 0x60;
 
 /// Represents a request structure for page validation operations.
 ///
@@ -118,6 +118,10 @@ pub struct DekoNewAppReq {
     pub start_code: u64,
     /// The end code virtual address of the new application.
     pub end_code: u64,
+    /// The beginning of the user stack.
+    pub user_stack: u64,
+    /// The size of the user stack.
+    pub user_stack_size: u64,
     /// Command excluding the path.
     pub comm: [u8; 16],
     pub token_low: u64,
@@ -294,6 +298,14 @@ fn pvalidate_guest_one_page(paddr: PhysAddr) -> DekoGuestServResult<()> {
                 temp_va.inner.start,
                 page_size,
                 RmpFlags::rwx_guest_vmpl2(),
+                Tracked(&mut cpu_perm.pgtable_perm),
+            ) != 0 {
+                return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidReq));
+            }
+            if rmpadjust(
+                temp_va.inner.start,
+                page_size,
+                RmpFlags::rwx_guest_vmpl1(),  // also make it accessible to VMPL1.
                 Tracked(&mut cpu_perm.pgtable_perm),
             ) != 0 {
                 return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidReq));
@@ -619,7 +631,7 @@ fn handle_deko_service_vcpu_create(params: &DekoGuestRequestParams) -> DekoGuest
     rmpadjust(
         vmsa_mapping.inner.start,
         PAGE_SIZE,
-        RmpFlags::from_bits_truncate(RmpFlags::vmpl3().bits()),
+        RmpFlags::from_bits_truncate(RmpFlags::vmpl2().bits()),
         Tracked(&mut cpu_perm.pgtable_perm),
     );
 

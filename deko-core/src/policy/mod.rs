@@ -7,11 +7,12 @@ use deko_std::prelude::{
     func_ptr, DekoPointsTo, MappingSpace, PhysAddr, PAGE_SIZE, VADDR_UPPER_MASK,
 };
 use deko_std::ptr::DekoPPtr;
+use deko_std::sync::DekoAtomicData;
 use deko_std::wf::WellFormed;
-use deko_std::with_permission;
+use deko_std::{deko_rwlock_read_atomic_data, with_permission};
 use vstd::prelude::*;
 
-use crate::cpu::DekoCpuCtx;
+use crate::cpu::{DekoCpuCtx, PERCPU_AREAS};
 use crate::guest::service::DekoGuestLstarWriteReq;
 use crate::guest::{DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode};
 use crate::imp::{RmpFlags, SnpStatusFlags, GUEST_MSR_INTERCEPT, MSR_SEV_STATUS};
@@ -22,9 +23,11 @@ use crate::mm::paging::{
 };
 use crate::mm::vm::TempMapping;
 use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR_FULL};
+use crate::policy::syscall::DEKO_VMPL1_SYSCALL_TRAMPOLINE;
+use crate::policy::userapp::setup_vmpl1_func_ptr;
 use crate::snp::vmsa::VMSA;
-use crate::snp::SnpStatus;
-use crate::{kerror, kinfo, kpanic_if};
+use crate::snp::{SnpStatus, VMPL_GUEST_SECURE_APP};
+use crate::{check_shared_cpu_idx, kerror, kinfo, kpanic_if};
 
 pub(crate) mod guest_paging;
 pub(crate) mod labels;
@@ -389,7 +392,7 @@ pub fn install_hook(
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
     let guest_trampoline_frame = g_trampoline_mapping.final_mapping().unwrap();
-    move_to_guest(guest_trampoline_frame, req.trampoline_gva, syscall_enter_addr)?;
+    move_to_guest(guest_trampoline_frame, syscall_enter_addr, req.trampoline_gva)?;
 
     // And then we lock down the guest syscall entry page
     g_trampoline_mapping.lock_translation_path()?;
@@ -545,12 +548,16 @@ unsafe fn patch_trampoline(
     update_syscall_entry(syscall_enter_addr.0 as u64);
     update_ifc_engine_entry((trampoline_gva.0 + PAGE_SIZE_2M) as u64);
 
+    // Make it a wrapper.
     core::ptr::copy_nonoverlapping(
         trampoline_start as *const u8,
         // The offset must be added to each PER_CPU area here.
         g_trampoline.inner.start.0 as *mut u8,
         trampoline_size,
     );
+
+    // Then we initialize the trampoline address.
+    DEKO_VMPL1_SYSCALL_TRAMPOLINE.init(DekoAtomicData::new(trampoline_gva));
 
     Ok(())
 }

@@ -27,7 +27,8 @@ use crate::mm::DEKO_FRAME_ALLOCATOR_FULL;
 use crate::policy::DekoMsrInterceptVec0;
 use crate::snp::{
     rmpadjust, DekoCpuCtxPermission, PageTablePermission, RmpFlags, Rmp_ALL_BITS, SnpStatusFlags,
-    ALT_INJ, BIT_VMSA, GUEST_MSR_INTERCEPT, REST_INJ,
+    ALT_INJ, BIT_VMSA, GUEST_MSR_INTERCEPT, REST_INJ, VMPL1_MAGIC_SIGNATURE,
+    VMPL_GUEST_DEKO_MONITOR,
 };
 use crate::{die, kdebug, kerror, kinfo, kunimplemented, kwarn};
 
@@ -783,6 +784,24 @@ impl VmsaPage {
         VirtAddr::new(self.page.addr() as u64 + (self.idx as u64) * PAGE_SIZE)
     }
 
+    #[inline]
+    #[verifier::external_body]
+    #[verus_spec(r =>
+        with
+            -> ptr_perm: Tracked<DekoPointsTo<VMSA>>,
+        requires
+            self.wf(),
+        ensures
+            r.wf(),
+            ptr_perm@.pptr() == r@,
+            ptr_perm@.is_init(),
+            ptr_perm@.wf(),
+    )]
+    pub fn ptr(&self) -> DekoPPtr<VMSA> {
+        proof_with!(|= Tracked::assume_new());
+        DekoPPtr(vstd::simple_pptr::PPtr(self.vaddr().0 as usize, core::marker::PhantomData))
+    }
+
     /// Allocates a VMSA page.
     #[verus_spec(r =>
         with
@@ -925,6 +944,7 @@ impl VmsaPage {
         with
             Tracked(perm): Tracked<&mut VmsaPagePermission>,
         requires
+            vmpl < 4,
             old(perm).ptr_perm.wf(),
             old(perm).ptr_perm.pptr() == self.page@,
             self.wf(),
@@ -933,7 +953,7 @@ impl VmsaPage {
             perm.ptr_perm.pptr() == self.page@,
             perm.ptr_perm.is_init(),
     )]
-    pub fn init_from(&self, ctx: &VmsaInitialContext) -> u64 {
+    pub fn init_from(&self, ctx: &VmsaInitialContext, vmpl: u8) -> u64 {
         // SAFETY: We have the permission to the VMSA page, and we ensure that
         // the pointer is valid and properly aligned because we deref it
         // from a valid DekoPPtr.
@@ -974,7 +994,7 @@ impl VmsaPage {
         this.cr0 = ctx.cr0;
         this.cr3 = ctx.cr3;
         this.cr4 = ctx.cr4;
-        this.efer = ctx.efer | (1 << 12);
+        this.efer = ctx.efer;
 
         this.g_pat = ctx.pat;
         this.dr6 = 0xffff_0ff0;
@@ -983,10 +1003,15 @@ impl VmsaPage {
         this.mxcsr = 0x1f80;
         this.x87_fcw = 0x40;
         this.x87_ftw = 0x5555;
-        this.vmpl = 0;
+        this.vmpl = vmpl;
         this.vtom = 0;  // unsupported.
 
-        this.sev_features = (SnpStatusFlags::get_status().bits() | GUEST_MSR_INTERCEPT) >> 2;  // make this sev.
+        if vmpl != VMPL_GUEST_DEKO_MONITOR as u8 {
+            this.sev_features = (SnpStatusFlags::get_status().bits() & !REST_INJ) >> 2;
+            this.tsc_aux |= VMPL1_MAGIC_SIGNATURE << 24;
+        } else {
+            this.sev_features = (SnpStatusFlags::get_status().bits()) >> 2;
+        }
 
         // Being lazy
         this.sev_features
