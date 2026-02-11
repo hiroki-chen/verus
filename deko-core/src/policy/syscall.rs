@@ -1232,7 +1232,6 @@ pub fn analysis_syscall(syscall_body: DekoSyscallBody) -> DekoGuestServResult<()
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
     kinfo!("Syscall invoked: ", SYS_CALL_NAME[syscall_body.rax as usize]);
-    deko_std::misc::early_dbg();
 
     match syscall_body.rax {
         // In June 2023, Google's security team reported that 60% of the exploits submitted

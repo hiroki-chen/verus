@@ -15,11 +15,11 @@
 #![feature(lang_items)]
 #![feature(likely_unlikely)]
 
-use deko_core::die;
 use deko_core::mm::frame_allocator::DekoPageFrameAllocator;
 use deko_core::mm::DEKO_IFC_FRAME_ALLOCATOR;
 use deko_core::policy::DekoSyscallBody;
 use deko_core::snp::is_vmpl1;
+use deko_core::{die, kinfo};
 use deko_std::mem::{valid_heap_param, DekoFrameAllocator};
 use deko_std::prelude::{func_ptr, PhysAddr};
 use deko_std::ptr::{DekoPPtr, DekoPointsTo};
@@ -76,7 +76,8 @@ fn try_init_deko_ifc_frame_allocator() {
             syscall_perm.pptr() == syscall_body@,
     )]
 pub extern "C" fn deko_ifc_entry(syscall_body: DekoPPtr<DekoSyscallBody>) {
-    if !is_vmpl1() {
+    if is_vmpl1() {
+        proof_with!(Tracked(syscall_perm));
         deko_ifc_entry_vmpl1(syscall_body);
     } else {
         die("Deko IFC at VMPL2 is not implemented yet");  // notify VMPL0
@@ -84,9 +85,18 @@ pub extern "C" fn deko_ifc_entry(syscall_body: DekoPPtr<DekoSyscallBody>) {
 }
 
 #[verifier::exec_allows_no_decreases_clause]
+#[verus_spec(
+    with
+        Tracked(syscall_perm): Tracked<DekoPointsTo<DekoSyscallBody>>,
+    requires
+        syscall_perm.wf(),
+        syscall_perm.is_init(),
+        syscall_perm.pptr() == syscall_body@,
+)]
 fn deko_ifc_entry_vmpl1(syscall_body: DekoPPtr<DekoSyscallBody>) {
-    try_init_deko_ifc_frame_allocator();
-
+    // try_init_deko_ifc_frame_allocator();
+    // kinfo!("deko_ifc_entry_vmpl1: hello world!");
+    // let syscall_body = syscall_body.borrow(Tracked(&syscall_perm));
     loop {
     }
 }

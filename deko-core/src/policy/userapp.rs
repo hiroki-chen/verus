@@ -1,6 +1,7 @@
 use deko_macros::DekoDebug;
 use deko_std::address::{create_paddr_range, PhysAddr, VaddrRange};
 use deko_std::bits::{bit_u32_and_auto, bit_u64_and_auto};
+use deko_std::mem::PAGE_SIZE_2M;
 use deko_std::misc::{early_dbg, early_die};
 use deko_std::prelude::collections::hashmap::HashMap;
 use deko_std::prelude::{func_ptr, VirtAddr, PAGE_SIZE, VADDR_LOWER_MASK, VADDR_UPPER_MASK};
@@ -17,6 +18,7 @@ use uuid::Uuid;
 use vstd::prelude::*;
 
 use crate::collections::{update_vec, Vec};
+use crate::cpu::ipi::wait_ipi_blocking;
 use crate::cpu::irq::{no_irq_zone, raw_irq_enable, IrqSafeLockGuard};
 use crate::cpu::regs::no_smap_zone;
 use crate::cpu::task::{generate_id, DekoRunnableState};
@@ -221,11 +223,13 @@ pub fn remove_from_shim_set(ppid: u32) {
 
 #[verus_verify]
 impl VmsaPage {
-    #[verus_spec(
+    #[verus_spec(r =>
         requires
+            old(vmsa).wf(),
+        ensures
             vmsa.wf(),
     )]
-    fn do_init_for_app(vmsa: &VMSA, linux_pt_regs: &PtRegs) -> DekoGuestServResult<()> {
+    fn do_init_for_app(vmsa: &mut VMSA, linux_pt_regs: &PtRegs) -> DekoGuestServResult<()> {
         let DekoAtomicData { data: syscall_trampoline, .. } =
             DEKO_VMPL1_SYSCALL_TRAMPOLINE.get().ok_or(DekoGuestServError::FatalError)?;
 
@@ -246,14 +250,16 @@ impl VmsaPage {
     #[verifier::external_body]
     #[verus_spec(
         requires
-            vmsa_app.wf(),
+            old(vmsa_app).wf(),
             vmsa_user.is_user_regs(),
+        ensures
+            vmsa_app.wf(),
     )]
-    fn copy_from_user_context(vmsa_app: &VMSA, vmsa_user: &PtRegs) {
+    fn copy_from_user_context(vmsa_app: &mut VMSA, vmsa_user: &PtRegs) {
         kinfo!("Copying from user context", vmsa_user);
 
         unsafe {
-            let dst = vmsa_app as *const VMSA as *mut VMSA;
+            let dst = vmsa_app as *mut VMSA;
 
             // Clear the general-purpose registers first
             core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rax), 0x0);
@@ -301,21 +307,46 @@ impl VmsaPage {
             let efer = core::ptr::read_unaligned(core::ptr::addr_of!((*dst).efer));
             core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).efer), efer | (1 << 12));
 
+            let cr3 = PageTable::map_guest_cr3(
+                PhysAddr((strip_confidentiality_bits((*dst).cr3, 1 << 51))),
+            ).unwrap();
+            let mapping = PageTable::walk_lvl3_guest(
+                &cr3,
+                VirtAddr((*dst).lstar),
+                1 << 51,
+                0,
+            ).unwrap();
+
+            kinfo!("Syscall trampoline mapping is", mapping);
+            let final_mapping = mapping.final_mapping().unwrap();
+
+            unsafe {
+                let trampoline_code = core::slice::from_raw_parts(
+                    final_mapping.inner.start.0 as *const u8,
+                    PAGE_SIZE as _,
+                );
+                kinfo!("Trampoline code in user memory:", trampoline_code);
+            }
+
+            kinfo!("rmpquery:", crate::imp::rmpquery(final_mapping.inner.start, 1));
+
             // Clear IDT.
-            // core::ptr::write_bytes(core::ptr::addr_of_mut!((*dst).idt), 0, 0x10);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).idt.base), 0);
         }
     }
 
     #[verifier::external_body]
     #[verus_spec(
         requires
-            vmsa_app.wf(),
+            old(vmsa_app).wf(),
             vmsa_guest_kernel.wf(),
             syscall_trampoline_base.wf(),
             syscall_trampoline_base@ >= VADDR_UPPER_MASK,
+        ensures
+            vmsa_app.wf(),
     )]
     fn copy_from_guest_context(
-        vmsa_app: &VMSA,
+        vmsa_app: &mut VMSA,
         vmsa_guest_kernel: &VMSA,
         syscall_trampoline_base: VirtAddr,
     ) {
@@ -351,6 +382,7 @@ impl VmsaPage {
     /// Prepare the user context for VMPL1 so that the caller can kick the current vCPU
     /// into the desired user application with this VMSA.
     #[inline]
+    #[verifier::external_body]
     #[verus_spec(r =>
         with
             Tracked(vmsa_page_perm): Tracked<&mut VmsaPagePermission>,
@@ -367,7 +399,7 @@ impl VmsaPage {
             vmsa_page_perm.ptr_perm.pptr() == self.page@,
     )]
     pub fn init_for_app(&mut self, linux_pt_regs: &PtRegs) -> DekoGuestServResult<()> {
-        let vmsa = &self.page.borrow(Tracked(&vmsa_page_perm.ptr_perm))[self.idx];
+        let vmsa = &mut unsafe { &mut *(self.page.addr() as *mut [VMSA; 2]) }[self.idx as usize];
 
         Self::do_init_for_app(vmsa, linux_pt_regs)
     }
@@ -1118,15 +1150,13 @@ pub fn try_kick_app(regs: &PtRegs, guest_cr3: PhysAddr) -> DekoGuestServResult<(
 )]
 #[verifier::exec_allows_no_decreases_clause]
 pub fn setup_vmpl1() {
-    // Sanity check to ensure that we are indeed at VMPL1; if not, just return
-    // and since the return address is invalid the vCPU will simply hang.
+    // If we are not at VMPL1, we return immediately. Since this function is usually
+    // the entry point of a VMRUN command, the return address on the stack is likely
+    // invalid or empty, causing the vCPU to hang (safely halting execution).
     if !is_vmpl1() {
         return ;
     }
-    // Now we setup the GHCB.
-    //
-    // If we do not call this function at VMPL1 then the GHCB will never
-    // get registered.
+    // Now we setup the GHCB (Guest-Hypervisor Communication Block).
 
     let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
     let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
@@ -1148,8 +1178,17 @@ pub fn setup_vmpl1() {
     msr_register_ghcb_gpa(ghcb_gpa);
     init_ghcb_logging(0x3f8);
 
-    kinfo!("setup_vmpl1: logger init");
+    kinfo!("setup_vmpl1: GHCB registered @", ghcb_gpa=>hex);
 
+    wait_ipi_blocking();  // ensure all cores are synchronized.
+
+    // We have finished the VMPL1 setup. Now we switch context to the target payload
+    // (e.g., the actual Guest OS or the Monitor loop).
+    //
+    // This is typically a one-way transition.
+    //
+    // Do not need to guard this with `no_irq_zone` because we will not setup the
+    // #HV doorbell for that so no one is going to interrupt us in the middle.
     vmpl_switch(VMPL_GUEST_DEKO_MONITOR);
 
     die("setup_vmpl1: this should never return");

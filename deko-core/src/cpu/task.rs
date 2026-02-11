@@ -2166,7 +2166,6 @@ pub fn serv_main(cpu_index: usize) {
     DekoCpuCtx::setup_vmpl1(this_cpu, Tracked(&mut perm));
 
     kinfo!("Core ", cpu_index, " entering guest execution loop.");
-    wait_ipi_blocking();  // ensure all cores are synchronized.
 
     loop
         invariant

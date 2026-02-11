@@ -3,6 +3,7 @@
 .global _start
 
 _start:
+  endbr64
   // Entry point for the deko IFC component.
   // Set up the stack pointer and jump to the Rust main function.
 
