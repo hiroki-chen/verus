@@ -21,6 +21,7 @@ use deko_core::policy::DekoSyscallBody;
 use deko_core::snp::is_vmpl1;
 use deko_core::{die, kinfo};
 use deko_std::mem::{valid_heap_param, DekoFrameAllocator};
+use deko_std::misc::early_die;
 use deko_std::prelude::{func_ptr, PhysAddr};
 use deko_std::ptr::{DekoPPtr, DekoPointsTo};
 use deko_std::sync::DekoSimpleOnceCell;

@@ -125,11 +125,12 @@ pub trait Apic: deko_std::fmt::DekoDebug + WellFormed {
 
         if SnpStatusFlags::get_status().contains(REST_INJ) {
             // Forward this to HV doorbell.
-            let (ghcb, Tracked(perm)) = crate::snp::ghcb::current_ghcb();
+            let (ghcb, Tracked(perm), ghcb_gpa) = crate::snp::ghcb::current_ghcb();
             GuestHostCommunicationBlock::hv_ipi(
                 ghcb,
                 Tracked(perm),
                 (low as u64 | ((high as u64) << 32)),
+                ghcb_gpa,
             );
         } else {
             self.apic_write(APIC_OFFSET_ICR as u32, (low as u64 | ((high as u64) << 32)));

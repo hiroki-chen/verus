@@ -175,11 +175,11 @@ impl Page {
         let val = pte.borrow(Tracked(pte_perm));
         let paddr = val.address(private_bit, shared_bit);
 
-        if core::hint::unlikely(!check_within_guest_mmap(paddr)) {
-            kerror!("Guest created unmapped memory at physical address", paddr);
+        // if core::hint::unlikely(!check_within_guest_mmap(paddr)) {
+        //     kerror!("Guest created unmapped memory at physical address", paddr);
 
-            return Err(DekoGuestServError::FatalError);
-        }
+        //     return Err(DekoGuestServError::FatalError);
+        // }
         if core::hint::unlikely(paddr.0 >= 0x0000_FFFF_FFFF_F000u64 || paddr.0 % PAGE_SIZE != 0) {
             kerror!("Guest created invalid physical address", paddr);
 
@@ -453,4 +453,25 @@ impl PageTable {
     }
 }
 
+// /// Converts a guest physical address to virtual address accessible to us.
+// #[verus_spec(
+//     requires
+//         guest_cr3.wf(),
+// )]
+// pub fn guest_raw_pa_to_va(guest_cr3: &TempMapping, pa: u64) -> DekoGuestServResult<GuestMapping> {
+//     let pa = PhysAddr(pa % PAGE_SIZE);
+//     if core::hint::unlikely(!check_within_guest_mmap(pa)) {
+//         kerror!("Guest provided invalid physical address", pa);
+//         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
+//     }
+//     guest_pa_to_va(guest_cr3, pa)
+// }
+// #[verus_spec(
+//     requires
+//         guest_cr3.wf(),
+//         pa.wf(),
+//         pa@ % PAGE_SIZE == 0,
+// )]
+// pub fn guest_pa_to_va(guest_cr3: &TempMapping, pa: PhysAddr) -> DekoGuestServResult<GuestMapping> {
+// }
 } // verus!

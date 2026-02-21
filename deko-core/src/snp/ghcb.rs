@@ -236,6 +236,7 @@ pub fn msr_set_page_valid(paddr: PhysAddr, valid: bool)
 pub fn current_ghcb() -> (r: (
     DekoPPtr<GuestHostCommunicationBlock>,
     Tracked<DekoPointsTo<GuestHostCommunicationBlock>>,
+    PhysAddr,
 ))
     ensures
         r.1@.wf(),
@@ -248,12 +249,15 @@ pub fn current_ghcb() -> (r: (
     if is_vmpl1() {
         kpanic_if!(cpu.ext_vmpl1.is_none(), "No VMPL1 context");
 
+        let ext_vmpl1 = cpu.ext_vmpl1.as_ref().unwrap();
+
         (
-            cpu.ext_vmpl1.as_ref().unwrap().ghcb,
+            ext_vmpl1.ghcb,
             Tracked(perm.ext_vmpl1_perm.tracked_unwrap().ghcb_perm),
+            ext_vmpl1.ghcb_gpa,
         )
     } else {
-        (cpu.ghcb(), Tracked(perm.ghcb_perm))
+        (cpu.ghcb, Tracked(perm.ghcb_perm), cpu.ghcb_gpa)
     }
 }
 
@@ -302,7 +306,7 @@ macro_rules! ghcb_setter {
         verus! {
             impl GuestHostCommunicationBlock {
                 #[verifier::external_body]
-                fn $name(
+               pub fn $name(
                     ptr: DekoPPtr<Self>,
                     perm: Tracked<DekoPointsTo<Self>>,
                     value: $t,
@@ -568,6 +572,7 @@ impl GuestHostCommunicationBlock {
         reason: GHCBExitCode,
         info_1: u64,
         info_2: u64,
+        ghcb_gpa: PhysAddr,
     ) -> (r: Tracked<DekoPointsTo<Self>>)
         requires
             perm.wf(),
@@ -587,32 +592,18 @@ impl GuestHostCommunicationBlock {
         let Tracked(perm) = Self::set_exit_info_1(ptr, Tracked(perm), info_1);
         let Tracked(perm) = Self::set_exit_info_2(ptr, Tracked(perm), info_2);
 
-        let ghcb_pa = virt_to_phys_checked(
-            1 << 51, // fix it later.
-            1 << 0,
-            VirtAddr(ptr.addr() as u64),
-            Tracked::assume_new(),
-        ).unwrap_or(PhysAddr(ptr.addr() as u64)).0;
-
         no_irq_zone(
             ||
                 {
-                    write_msr(MSR_AMD64_SEV_ES_GHCB, ghcb_pa);
+                    write_msr(MSR_AMD64_SEV_ES_GHCB, ghcb_gpa.0);
                     raw_vmgexit();
                 },
         );
 
         // Make error information more detailed.
         let sw_exit_info_1 = Self::get_exit_info_1(ptr, Tracked(&perm));
-        // kpanic_if!((sw_exit_info_1 != 0), "GHCB VMGEXIT failed: ", sw_exit_info_1);
-        if sw_exit_info_1 != 0 {
-            kerror!("GHCB VMGEXIT failed: ", sw_exit_info_1);
 
-            let sw_exit_info_2 = Self::get_exit_info_1(ptr, Tracked(&perm));
-            kerror!("  Additional info: ", sw_exit_info_2);
-
-            crate::die("GHCB VMGEXIT failed");
-        }
+        // Deal with errors?
 
         Tracked(perm)
     }
@@ -658,6 +649,7 @@ impl GuestHostCommunicationBlock {
         ptr: DekoPPtr<Self>,
         Tracked(perm): Tracked<DekoPointsTo<Self>>,
         icr: u64,
+        ghcb_gpa: PhysAddr,
     ) -> (r: Tracked<DekoPointsTo<Self>>)
         requires
             perm.wf(),
@@ -670,13 +662,14 @@ impl GuestHostCommunicationBlock {
     {
         let Tracked(perm) = Self::clear(ptr, Tracked(perm));
 
-        Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::HV_IPI, icr, 0)
+        Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::HV_IPI, icr, 0, ghcb_gpa)
     }
 
     pub fn rdmsr(
         ptr: DekoPPtr<Self>,
         Tracked(perm): Tracked<DekoPointsTo<Self>>,
         msr_index: u32,
+        ghcb_gpa: PhysAddr,
     ) -> (r: (u32, u32, Tracked<DekoPointsTo<Self>>))
         requires
             perm.wf(),
@@ -685,7 +678,7 @@ impl GuestHostCommunicationBlock {
     {
         let Tracked(perm) = Self::clear(ptr, Tracked(perm));
         let Tracked(perm) = Self::set_rcx(ptr, Tracked(perm), msr_index as _);
-        let Tracked(perm) = Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::MSR, 0, 0);
+        let Tracked(perm) = Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::MSR, 0, 0, ghcb_gpa);
 
         let eax = Self::get_rax(ptr, Tracked(&perm)) & 0xffff_ffff;
         let edx = Self::get_rdx(ptr, Tracked(&perm)) & 0xffff_ffff;
@@ -699,6 +692,7 @@ impl GuestHostCommunicationBlock {
         msr_index: u32,
         high: u32,
         low: u32,
+        ghcb_gpa: PhysAddr,
     ) -> (r: Tracked<DekoPointsTo<Self>>)
         requires
             perm.wf(),
@@ -716,12 +710,12 @@ impl GuestHostCommunicationBlock {
         let Tracked(perm) = Self::set_rcx(ptr, Tracked(perm), msr_index as _);
         let Tracked(perm) = Self::set_rax(ptr, Tracked(perm), val_low);
         let Tracked(perm) = Self::set_rdx(ptr, Tracked(perm), val_high);
-        let Tracked(perm) = Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::MSR, 1, 0);
+        let Tracked(perm) = Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::MSR, 1, 0, ghcb_gpa);
 
         Tracked(perm)
     }
 
-    pub fn rdtsc(ptr: DekoPPtr<Self>, Tracked(perm): Tracked<DekoPointsTo<Self>>) -> (r: (
+    pub fn rdtsc(ptr: DekoPPtr<Self>, Tracked(perm): Tracked<DekoPointsTo<Self>>, ghcb_gpa: PhysAddr) -> (r: (
         u64,
         Tracked<DekoPointsTo<Self>>,
     ))
@@ -731,7 +725,7 @@ impl GuestHostCommunicationBlock {
             perm.pptr() == ptr@,
     {
         let Tracked(perm) = Self::clear(ptr, Tracked(perm));
-        let Tracked(perm) = Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::RDTSC, 0, 0);
+        let Tracked(perm) = Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::RDTSC, 0, 0, ghcb_gpa);
 
         let rax = Self::get_rax(ptr, Tracked(&perm));
         let rdx = Self::get_rdx(ptr, Tracked(&perm));
@@ -745,6 +739,7 @@ impl GuestHostCommunicationBlock {
         ptr: DekoPPtr<Self>,
         Tracked(perm): Tracked<DekoPointsTo<Self>>,
         target_vmpl: u32,
+        ghcb_gpa: PhysAddr,
     ) -> (r: Tracked<DekoPointsTo<Self>>)
         requires
             target_vmpl <= 3,
@@ -760,7 +755,7 @@ impl GuestHostCommunicationBlock {
 
         let info_1 = target_vmpl as u64;
 
-        Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::SNP_VMPL_RUN, info_1, 0)
+        Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::SNP_VMPL_RUN, info_1, 0, ghcb_gpa)
     }
 
     #[verifier::external_body]
@@ -769,13 +764,16 @@ impl GuestHostCommunicationBlock {
         Tracked(perm): Tracked<DekoPointsTo<Self>>,
         port: u16,
         size: u8,
+        ghcb_gpa: PhysAddr,
     ) -> (r: u64) {
+        let Tracked(perm) = Self::clear(ptr, Tracked(perm));
+
         let mut info: u64 = 1;  // IN instruction
 
         info |= (port as u64) << 16;
         info |= 1 << ((size as u64) + 3);
 
-        let Tracked(perm) = Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::IOIO, info, 0);
+        let Tracked(perm) = Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::IOIO, info, 0, ghcb_gpa);
         let rax = Self::get_rax(ptr, Tracked(&perm));
 
         rax
@@ -788,14 +786,17 @@ impl GuestHostCommunicationBlock {
         port: u16,
         value: u64,
         size: u8,
+        ghcb_gpa: PhysAddr,
     ) {
+        let Tracked(perm) = Self::clear(ptr, Tracked(perm));
+
         let mut info: u64 = 0;  // OUT instruction
 
         info |= (port as u64) << 16;
         info |= 1 << ((size as u64) + 3);
 
         let Tracked(perm) = Self::set_rax(ptr, Tracked(perm), value);
-        Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::IOIO, info, 0);
+        Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::IOIO, info, 0, ghcb_gpa);
     }
 
     /// Create an application processor via GHCB.
@@ -823,6 +824,7 @@ impl GuestHostCommunicationBlock {
         sev_features: u64,
         vmpl: u64,
         vmsa: PhysAddr,
+        ghcb_gpa: PhysAddr,
     ) -> (r: Tracked<DekoPointsTo<Self>>)
         requires
             perm.wf(),
@@ -833,7 +835,7 @@ impl GuestHostCommunicationBlock {
             r@.is_init(),
             r@.pptr() == ptr@,
     {
-        Self::register_vmsa(ptr, Tracked(perm), vmsa, apic_id as _, vmpl, sev_features, 1)
+        Self::register_vmsa(ptr, Tracked(perm), vmsa, apic_id as _, vmpl, sev_features, 1, ghcb_gpa)
     }
 
     pub fn register_vmsa(
@@ -844,6 +846,7 @@ impl GuestHostCommunicationBlock {
         vmpl: u64,
         sev_features: u64,
         how: u64,
+        ghcb_gpa: PhysAddr,
     ) -> (r: Tracked<DekoPointsTo<Self>>)
         requires
             perm.wf(),
@@ -860,7 +863,7 @@ impl GuestHostCommunicationBlock {
 
         let Tracked(perm) = Self::set_rax(ptr, Tracked(perm), sev_features);
 
-        Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::AP_CREATE, info_1, info_2)
+        Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::AP_CREATE, info_1, info_2, ghcb_gpa)
     }
 
     /// Request a state of a page to be changed via GHCB.
@@ -871,6 +874,7 @@ impl GuestHostCommunicationBlock {
         Tracked(perm): Tracked<DekoPointsTo<Self>>,
         prange: PaddrRange,
         how: PageStateChangeOp,
+        ghcb_gpa: PhysAddr,
     ) -> (r: Tracked<DekoPointsTo<Self>>)
         requires
             perm.wf(),
@@ -950,7 +954,7 @@ impl GuestHostCommunicationBlock {
                 );
 
                 let Tracked(new_perm) = Self::prepare_shared_buffer(ptr, Tracked(perm));
-                let Tracked(new_perm) = Self::vmgexit(ptr, Tracked(new_perm), GHCBExitCode::SNP_PSC, 0, 0);
+                let Tracked(new_perm) = Self::vmgexit(ptr, Tracked(new_perm), GHCBExitCode::SNP_PSC, 0, 0, ghcb_gpa);
 
                 entries = 0;
                 proof {
@@ -969,6 +973,7 @@ impl GuestHostCommunicationBlock {
         ptr: DekoPPtr<Self>,
         Tracked(perm): Tracked<DekoPointsTo<Self>>,
         doorbell_paddr: PhysAddr,
+        ghcb_gpa: PhysAddr,
     ) -> (r: Tracked<DekoPointsTo<Self>>)
         requires
             perm.wf(),
@@ -981,13 +986,11 @@ impl GuestHostCommunicationBlock {
             r@.is_init(),
             r@.pptr() == ptr@,
     {
-        kdebug!("Registering HV doorbell at paddr ", doorbell_paddr);
-
         let doorbell_gpa_val = doorbell_paddr.0;
 
         let Tracked(perm) = Self::clear(ptr, Tracked(perm));
 
-        Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::HV_DOORBELL, 1, /* set */ doorbell_gpa_val /* guest gPA */)
+        Self::vmgexit(ptr, Tracked(perm), GHCBExitCode::HV_DOORBELL, 1, /* set */ doorbell_gpa_val /* guest gPA */, ghcb_gpa)
     }
 
     /// Write a slice into the GHCB shared buffer.

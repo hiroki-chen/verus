@@ -48,3 +48,6 @@ rustflags = [
 	"--cfg",
 	"polyval_force_soft",
 ]
+
+[profile.dev]
+opt-level = 1

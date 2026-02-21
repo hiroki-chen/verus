@@ -143,7 +143,7 @@ impl GHCBIoPort {
             self.wf(),
             self.valid_port(port),
     {
-        let (current_ghcb, Tracked(current_ghcb_perm)) = current_ghcb();
+        let (current_ghcb, Tracked(current_ghcb_perm), ghcb_gpa) = current_ghcb();
 
         GuestHostCommunicationBlock::ioout(
             current_ghcb,
@@ -151,6 +151,7 @@ impl GHCBIoPort {
             self.0 + port,
             value as u64,
             core::mem::size_of::<u8>() as u8,
+            ghcb_gpa,
         );
     }
 
@@ -159,13 +160,14 @@ impl GHCBIoPort {
             self.wf(),
             self.valid_port(port),
     {
-        let (current_ghcb, Tracked(current_ghcb_perm)) = current_ghcb();
+        let (current_ghcb, Tracked(current_ghcb_perm), ghcb_gpa) = current_ghcb();
 
         GuestHostCommunicationBlock::ioin(
             current_ghcb,
             Tracked(current_ghcb_perm),
             self.0 + port,
             1,
+            ghcb_gpa,
         ) as u8
     }
 

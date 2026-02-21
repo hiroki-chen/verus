@@ -73,6 +73,9 @@ pub const PGTABLE_LVL3_IDX_PERCPU: u64 = 510;
 // FIXME: Hardcoded due to verus verification issues
 pub const PERCPU_BASE: VirtAddr = VirtAddr(0xFFFF_FF00_0000_0000);
 
+/// Used for VMPL1 to access its own PER-CPU structure.
+pub const PERCPU_BASE_VMPL1: VirtAddr = VirtAddr(0xFFFF_FFFF_0000_0000);
+
 /// End Address of per-cpu memory region
 pub const PERCPU_END: VirtAddr = VirtAddr(0xFFFF_FF80_0000_0000);
 

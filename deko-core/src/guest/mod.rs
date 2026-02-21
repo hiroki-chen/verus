@@ -9,10 +9,16 @@ use deko_std::{deko_rwlock_read_atomic_data, trace_is_enabled, TrivialPredicate}
 use vstd::prelude::*;
 
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission, PERCPU_AREAS};
-use crate::guest::service::{handle_guest_exit_deko_service, DEKO_SERVICE_REMAP_CA};
+use crate::guest::service::{
+    handle_guest_exit_deko_service, DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER,
+    DEKO_SERVICE_REMAP_CA,
+};
 use crate::imp::vmsa::{GuestVMExit, VMSA};
+use crate::imp::VMPL_GUEST_DEKO_MONITOR;
 use crate::mm::paging::{PageTable, PageTablePermission};
 use crate::mm::vm::TempMapping;
+use crate::policy::DekoSyscallBody;
+use crate::snp::{is_vmpl1, is_vmpl1_kernel, is_vmpl1_user};
 use crate::{kdebug, kerror, kinfo, kwarn};
 
 pub(crate) mod service;
@@ -284,7 +290,7 @@ impl DekoGuestExitInformation {
         ensures
             r.wf(),
     )]
-    fn try_parse_vmsa(vmsa: DekoPPtr<VMSA>, call_pending: bool) -> Option<Self> {
+    pub fn try_parse_vmsa(vmsa: DekoPPtr<VMSA>, call_pending: bool) -> Option<Self> {
         let vmsa = vmsa.borrow(Tracked(vmsa_perm));
         let exit_code = vmsa.guest_exit_code.0;
 
@@ -292,7 +298,7 @@ impl DekoGuestExitInformation {
             let protocol = (vmsa.rax >> 32) as u32;
             let req = (vmsa.rax & 0xFFFFFFFFu64) as u32;
 
-            // If there is no call pendin; then the VMPL must
+            // If there is no call pending; then the VMPL must
             // be abort due to HV doorbell or other reasons.
             if !call_pending {
                 return None;
@@ -456,6 +462,41 @@ pub fn guest_page_table(cr3: u64) -> DekoGuestServResult<TempMapping> {
             DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr),
         )?,
     )
+}
+
+/// Used by the VMPL1 guest to request a service of the VMPL0 monitor.
+#[verifier::external_body]
+pub fn request_vmpl2_syscall_handler(syscall_body: &DekoSyscallBody) -> DekoGuestServResult<()> {
+    if !is_vmpl1() {
+        kerror!("request_deko_service called outside of VMPL1");
+
+        return Err(DekoGuestServError::FatalError);
+    }
+    unsafe {
+        core::arch::asm!(
+            "
+                movl $0xc0010130, %ecx
+                movl $0x16, %eax
+                movl {vmpl_level:e}, %edx
+                wrmsr
+
+                movq {extend_service}, %rax
+                movq {syscall_body}, %rcx
+
+                rep; vmmcall
+            ",
+            vmpl_level = in(reg) VMPL_GUEST_DEKO_MONITOR,
+            extend_service = in(reg)
+                ((DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE as u64) << 32 | DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER as u64),
+            syscall_body = in(reg) syscall_body,
+            out("rax") _,
+            out("rcx") _,
+            out("rdx") _,
+            options(att_syntax)
+        );
+    }
+
+    Ok(())
 }
 
 } // verus!

@@ -79,8 +79,7 @@ fn load_elf_segment(
     let segment_end = segment.vaddr_range().end.page_align_up();
     let segment_len = segment_end.0 - segment_start.0;
 
-    kinfo!("Mapping ELF segment: [",
-            segment_start.0 => hex, " - ", segment_end.0 => hex, "]");
+    kinfo!("Mapping ELF segment", segment.vaddr_range(), "to", paddr, "with length", segment_len=>hex);
 
     // Although we've checked in the spec that the segment start is page-aligned,
     // double-check here to avoid any risk just to ensure safety.

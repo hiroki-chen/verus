@@ -22,7 +22,10 @@ use deko_std::prelude::*;
 use elf::ElfFile;
 use vstd::prelude::*;
 
+use crate::collections::Vec;
 use crate::cpu::apic::Apic;
+use crate::cpu::irq::IrqSafeLockGuard;
+use crate::mm::DEKO_FRAME_ALLOCATOR_FULL;
 
 #[cfg(not(target_arch = "x86_64"))]
 compile_error!("Cannot be compiled against non x86_64 architecture!");
@@ -57,6 +60,13 @@ pub mod snp;
 pub mod tdx;
 
 verus! {
+
+pub exec static SELF_MAP: DekoSimpleOnceCell<Vec<(VaddrRange, PaddrRange)>>
+    ensures
+        SELF_MAP.wf(),
+{
+    DekoSimpleOnceCell::new(Ghost(()))
+}
 
 /// We avoid using [`vstd::vpanic`] to prevent heap-allocated strings
 /// that panics itself:

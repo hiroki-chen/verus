@@ -41,14 +41,15 @@ use deko_core::snp::req::init_snp_guest_driver;
 use deko_core::snp::{init_guest_host, init_secrets_page, prepare_guest_fw, setup_apic};
 use deko_core::{
     dbg, die, get_igvm_params, kdebug, kerror, kinfo, kpanic_if, kwarn, DekoKernelLaunchInfo,
+    SELF_MAP,
 };
 use deko_std::prelude::*;
 use vstd::prelude::*;
 
 core::arch::global_asm!(include_str!("../monitor.S"), options(att_syntax));
 
-const POLICY_BLOB: &'static [u8] =
-    include_bytes!("../../../target/x86_64-snp-deko/debug/deko-ifc.bin");
+// const POLICY_BLOB: &'static [u8] =
+//     include_bytes!("../../../target/x86_64-snp-deko/debug/deko-ifc.bin");
 
 verus! {
 
@@ -491,8 +492,6 @@ fn deko_main(cpu_index: usize) {
 
         deko_core::imp::launch_fw(&igvm_params);
 
-        init_blob();
-
         proof_with!(Tracked(cpu_ctx_perm) => Tracked(mut new_perm));
         let serv_task = DekoRunnable::new(
             this_cpu,
@@ -535,7 +534,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 #[verifier::external_body]
 #[inline(always)]
 fn init_blob() {
-    DEKO_POLICY_ENGINE_BLOB.init(POLICY_BLOB);
+    // DEKO_POLICY_ENGINE_BLOB.init(POLICY_BLOB);
 }
 
 } // verus!

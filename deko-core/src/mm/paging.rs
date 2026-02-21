@@ -20,8 +20,8 @@ use crate::mm::{
     DEKO_FRAME_ALLOCATOR_FULL,
 };
 use crate::{
-    kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn, path, DekoKernelLaunchInfo,
-    Stage2LaunchInfo,
+    kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn, path, vec, DekoKernelLaunchInfo,
+    Stage2LaunchInfo, SELF_MAP,
 };
 
 extern "C" {
@@ -5089,6 +5089,7 @@ pub fn init_monitor_paging(
     let mut phys = header.kernel_region_phys_start;
     let seg_num = elf.load_segment_num(VirtAddr(header.kernel_region_virt_start));
     let mut i = 0;
+    let mut v = vec![];
 
     while i < seg_num
         invariant
@@ -5144,6 +5145,13 @@ pub fn init_monitor_paging(
         proof {
             assume(phys <= 0x000f_ffff_ffff_f000);
         }
+
+        let vaddr_region = vaddr_start..vaddr_end;
+        let paddr_region = PhysAddr(
+            strip_confidentiality_bits(phys - segment_len, private_bit),
+        )..PhysAddr(strip_confidentiality_bits(phys, private_bit));
+
+        v.push((vaddr_region, paddr_region));
     }
 
     // We then map the IGVM parameters.
@@ -5203,6 +5211,18 @@ pub fn init_monitor_paging(
     ).page_align_up();
     let heap_phys_start = PhysAddr(header.heap_area_phys_start);
     let flags = PteFlags::data();
+    let vaddr_region = heap_vaddr_start..heap_vaddr_end;
+    let paddr_region = PhysAddr(
+        strip_confidentiality_bits(heap_phys_start.0, private_bit),
+    )..PhysAddr(
+        strip_confidentiality_bits(
+            heap_phys_start.0 + (heap_vaddr_end.0 - heap_vaddr_start.0),
+            private_bit,
+        ),
+    );
+
+    v.push((vaddr_region, paddr_region));
+    SELF_MAP.init(v);
 
     proof {
         assume(perm.map_page_multiple_requires(

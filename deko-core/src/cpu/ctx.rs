@@ -190,6 +190,8 @@ impl WellFormed for DekoCtxPermission {
                 === self.stage2_launch_info_perm.pptr()
             &&& self.deko_ctx_ptr_perm.value().pgtable@ === self.pgtable_perm.pgtable_perm.pptr()
             &&& self.deko_ctx_ptr_perm.value().gdt@ === self.gdt_perm.pptr()
+            &&& self.deko_ctx_ptr_perm.value().private_bit == self.pgtable_perm.private_bit
+            &&& self.deko_ctx_ptr_perm.value().shared_bit == self.pgtable_perm.shared_bit
         }
         &&& self.mem_range_wf()
         &&& self.pgtable_perm.pte_within_range(heap_phys_start as u64, heap_phys_end as u64)

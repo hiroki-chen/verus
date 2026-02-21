@@ -6,6 +6,7 @@ use vstd::prelude::*;
 
 use crate::cpu::DekoCpuCtx;
 use crate::kinfo;
+use crate::snp::is_vmpl1;
 
 verus! {
 
@@ -237,8 +238,11 @@ pub fn irq_enable() {
 
         if state {
             raw_irq_enable();
-            // Cleanup any pending events that happened while IRQs were disabled.
-            crate::imp::after_irq_enable();
+
+            if !is_vmpl1() {
+                // Cleanup any pending events that happened while IRQs were disabled.
+                crate::imp::after_irq_enable();
+            }
         }
     }
     this_cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
@@ -276,13 +280,17 @@ pub fn irq_enabled() -> bool {
 /// Enter a zone where interrupts are disabled.
 #[verifier::external_body]
 pub fn no_irq_zone<T>(f: impl FnOnce() -> T) -> T {
-    irq_disable();
+    if is_vmpl1() {
+        f()
+    } else {
+        irq_disable();
 
-    let v = f();
+        let v = f();
 
-    irq_enable();
+        irq_enable();
 
-    v
+        v
+    }
 }
 
 } // verus!

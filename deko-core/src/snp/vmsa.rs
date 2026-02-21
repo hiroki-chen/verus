@@ -24,11 +24,10 @@ use crate::cpu::{DekoCpuCtx, X86Tss};
 use crate::mm::paging::PageTable;
 use crate::mm::vm::TempMapping;
 use crate::mm::DEKO_FRAME_ALLOCATOR_FULL;
-use crate::policy::DekoMsrInterceptVec0;
+use crate::policy::{DekoMsrInterceptVec0, DekoSyscallBody};
 use crate::snp::{
     rmpadjust, DekoCpuCtxPermission, PageTablePermission, RmpFlags, Rmp_ALL_BITS, SnpStatusFlags,
-    ALT_INJ, BIT_VMSA, GUEST_MSR_INTERCEPT, REST_INJ, VMPL1_MAGIC_SIGNATURE,
-    VMPL_GUEST_DEKO_MONITOR,
+    ALT_INJ, BIT_VMSA, GUEST_MSR_INTERCEPT, REST_INJ, VMPL1_MAGIC_KERN, VMPL_GUEST_DEKO_MONITOR,
 };
 use crate::{die, kdebug, kerror, kinfo, kunimplemented, kwarn};
 
@@ -349,6 +348,52 @@ with_atomic_pred! {
 
 #[verus_verify]
 impl VMSA {
+    #[verifier::external_body]
+    #[verus_spec(
+        with
+            Tracked(cpu_perm): Tracked<&mut DekoPointsTo<Self>>,
+        requires
+            old(cpu_perm).wf(),
+            old(cpu_perm).is_init(),
+            old(cpu_perm).pptr() == ptr@,
+        ensures
+            cpu_perm.wf(),
+            cpu_perm.is_init(),
+            cpu_perm.pptr() == ptr@,
+    )]
+    pub fn copy_system_call_registers(ptr: DekoPPtr<Self>, syscall_body: &DekoSyscallBody) {
+        unsafe {
+            let struct_ptr = ptr.addr() as *mut Self;
+
+            core::ptr::write_unaligned(
+                core::ptr::addr_of_mut!((*struct_ptr).rax),
+                syscall_body.rax,
+            );
+            core::ptr::write_unaligned(
+                core::ptr::addr_of_mut!((*struct_ptr).rcx),
+                syscall_body.rcx,
+            );
+            core::ptr::write_unaligned(
+                core::ptr::addr_of_mut!((*struct_ptr).rdx),
+                syscall_body.rdx,
+            );
+            core::ptr::write_unaligned(
+                core::ptr::addr_of_mut!((*struct_ptr).rdi),
+                syscall_body.rdi,
+            );
+            core::ptr::write_unaligned(
+                core::ptr::addr_of_mut!((*struct_ptr).rsi),
+                syscall_body.rsi,
+            );
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*struct_ptr).r8), syscall_body.r8);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*struct_ptr).r9), syscall_body.r9);
+            core::ptr::write_unaligned(
+                core::ptr::addr_of_mut!((*struct_ptr).r10),
+                syscall_body.r10,
+            );
+        }
+    }
+
     /// Enables the VMSA by setting the SVME bit in the EFER register.
     ///
     /// This function modifies the EFER (Extended Feature Enable Register) field
@@ -787,6 +832,7 @@ impl VmsaPage {
     #[verifier::external_body]
     #[verus_spec(r =>
         with
+           // Need vmsaperm.
             -> ptr_perm: Tracked<DekoPointsTo<VMSA>>,
         requires
             self.wf(),
@@ -1007,7 +1053,7 @@ impl VmsaPage {
 
         if vmpl != VMPL_GUEST_DEKO_MONITOR as u8 {
             this.sev_features = (SnpStatusFlags::get_status().bits() & !REST_INJ) >> 2;
-            this.tsc_aux |= VMPL1_MAGIC_SIGNATURE << 24;
+            this.tsc_aux |= VMPL1_MAGIC_KERN << 24;
         } else {
             this.sev_features = (SnpStatusFlags::get_status().bits()) >> 2;
         }

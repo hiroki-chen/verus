@@ -23,6 +23,7 @@ use crate::mm::paging::{
 };
 use crate::mm::vm::TempMapping;
 use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR_FULL};
+use crate::policy::ifc::deko_ifc_entry_func_ptr;
 use crate::policy::syscall::DEKO_VMPL1_SYSCALL_TRAMPOLINE;
 use crate::policy::userapp::setup_vmpl1_func_ptr;
 use crate::snp::vmsa::VMSA;
@@ -30,6 +31,7 @@ use crate::snp::{SnpStatus, VMPL_GUEST_SECURE_APP};
 use crate::{check_shared_cpu_idx, kerror, kinfo, kpanic_if};
 
 pub(crate) mod guest_paging;
+pub(crate) mod ifc;
 pub(crate) mod labels;
 pub(crate) mod msr;
 pub(crate) mod syscall;
@@ -546,7 +548,7 @@ unsafe fn patch_trampoline(
         return Err(DekoGuestServError::FatalError);
     }
     update_syscall_entry(syscall_enter_addr.0 as u64);
-    update_ifc_engine_entry((trampoline_gva.0 + PAGE_SIZE_2M) as u64);
+    update_ifc_engine_entry(deko_ifc_entry_func_ptr() as u64);
 
     // Make it a wrapper.
     core::ptr::copy_nonoverlapping(

@@ -10,6 +10,7 @@ use deko_std::prelude::*;
 use vstd::prelude::*;
 
 use crate::cpu::irq::{IrqSafeLockGuard, IrqUnSafeLockGuard};
+use crate::cpu::{DekoCpuCtx, DekoCpuCtxPerVmpl};
 use crate::hal::{PlatformType, PLATFORM};
 use crate::snp::logging::GHCB_IO_PORT;
 
@@ -165,7 +166,9 @@ pub fn print_cpu_id()
     opens_invariants none
     no_unwind
 {
-    let cpu_id = get_current_cpu_id();
+    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpu_id = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).cpu_id;
+
     print_str("[CPU:");
     cpu_id.deko_debug(&CONSOLE);
     print_str("] ");

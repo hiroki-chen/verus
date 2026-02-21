@@ -41,7 +41,7 @@ use crate::cpu::task::{
 };
 use crate::guest::CaaArea;
 use crate::imp::ghcb::{current_ghcb, msr_register_ghcb_gpa};
-use crate::imp::{RmpFlags, VMPL_GUEST_DEKO_MONITOR};
+use crate::imp::{vmpl1_cpuid, RmpFlags, VMPL_GUEST_DEKO_MONITOR};
 use crate::mm::frame_allocator::DekoPageFrameBox;
 use crate::mm::paging::{
     bit_not_in_addr_region, bit_not_overlapping, index_at_level_spec, Mapping, Page, PageTable,
@@ -57,7 +57,9 @@ use crate::policy::userapp::setup_vmpl1_func_ptr;
 use crate::snp::doorbell::{HVDoorbell, HvDoorbellPtrPermission, HvDoorbellPtrPred};
 use crate::snp::ghcb::{validate_ghcb, GuestHostCommunicationBlock};
 use crate::snp::vmsa::{VmsaInitialContext, VmsaPage, VmsaPagePermission, VmsaPagePred, VMSA};
-use crate::snp::{rmpadjust, rmpquery, Rmp_ALL_BITS, VMPL_GUEST_SECURE_APP};
+use crate::snp::{
+    is_vmpl1, is_vmpl1_user, rmpadjust, rmpquery, Rmp_ALL_BITS, VMPL_GUEST_SECURE_APP,
+};
 use crate::{die, kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
 
 verus! {
@@ -470,6 +472,10 @@ pub struct DekoCpuCtxPerVmpl {
     pub vmsa: VmsaPage,
     /// The GHCB for this extended context.
     pub ghcb: DekoPPtr<GuestHostCommunicationBlock>,
+    /// The gpa of the GHCB for this extended context.
+    pub ghcb_gpa: PhysAddr,
+    /// The stack for this extended context.
+    pub vmpl1_stack: VirtAddr,
 }
 
 with_permission! {
@@ -507,6 +513,8 @@ impl DekoCpuCtxPerVmpl {
         requires
             vmpl < 4,
             old(pgtable_perm).wf(),
+            private_bit == old(pgtable_perm).private_bit,
+            shared_bit == old(pgtable_perm).shared_bit,
         ensures
             r.wf(),
             r.wf_with(perm@),
@@ -516,7 +524,7 @@ impl DekoCpuCtxPerVmpl {
             pgtable_perm.shared_bit == old(pgtable_perm).shared_bit,
             pgtable_perm.mapping_space == old(pgtable_perm).mapping_space,
     )]
-    pub fn new(vmpl: u8) -> Self {
+    pub fn new(vmpl: u8, private_bit: u64, shared_bit: u64) -> Self {
         broadcast use RmpFlags::lemma_each_bit_is_valid;
 
         proof {
@@ -529,6 +537,15 @@ impl DekoCpuCtxPerVmpl {
         // Allocate a new GHCB.
         let (ghcb, Tracked(ghcb_perm)) =
             boxed_ptr!(GuestHostCommunicationBlock, &DEKO_FRAME_ALLOCATOR_FULL);
+        let (stack_ptr, _) = boxed_ptr!([u8; 0x8000], &DEKO_FRAME_ALLOCATOR_FULL);
+
+        kinfo!("Allocated VMSA at", vmsa.page, ", GHCB at", ghcb, ", stack at", stack_ptr);
+        let ghcb_gpa = virt_to_phys_checked(
+            private_bit,
+            shared_bit,
+            ghcb.into_vaddr(),
+            Tracked(pgtable_perm),
+        ).expect("GHCB physical address must be valid");
 
         proof_with!(|= Tracked(
             DekoCpuCtxPerVmplPermission {
@@ -536,7 +553,13 @@ impl DekoCpuCtxPerVmpl {
                 ghcb_perm,
             }
         ));
-        Self { vmpl, vmsa, ghcb }
+        Self {
+            vmpl,
+            vmsa,
+            ghcb,
+            ghcb_gpa,
+            vmpl1_stack: VirtAddr(stack_ptr.into_vaddr().0.wrapping_add(0x8000)),
+        }
     }
 
     /// Initialize the per-VMPL extended context for this CPU core.
@@ -567,7 +590,7 @@ impl DekoCpuCtxPerVmpl {
         proof_with!(Tracked(&mut perm.vmsa_perm));
         let sev_features = self.vmsa.init_from(&init_ctx, self.vmpl);
 
-        let (ghcb, Tracked(ghcb_perm)) = current_ghcb();
+        let (ghcb, Tracked(ghcb_perm), ghcb_gpa) = current_ghcb();
 
         let vmsa_paddr = virt_to_phys(
             private_bit,
@@ -585,6 +608,7 @@ impl DekoCpuCtxPerVmpl {
             self.vmpl as _,
             sev_features,
             0,
+            ghcb_gpa,
         );
     }
 }
@@ -679,6 +703,8 @@ pub struct DekoCpuCtx {
     pub cpu_id: u64,
     /// The GHCB block for this CPU.
     pub ghcb: DekoPPtr<GuestHostCommunicationBlock>,
+    /// The gpa of the ghcb.
+    pub ghcb_gpa: PhysAddr,
     pub tss: X86Tss,
     /// The page table of this CPU.
     pub pgtable: DekoPPtr<PageTable>,
@@ -1096,17 +1122,27 @@ impl DekoCpuCtx {
         opens_invariants none
         no_unwind
     {
-        // SAFETY: The PerCPU area is always mapped at the same virtual address, so
-        // dereferencing a pointer to that address is safe. The PerCPU area is also
-        // never freed, so using a static lifetime is safe as well.
-        let (ptr, Tracked(ptr_perm)) = unsafe { DekoPPtr::<Self>::from_raw_uninit(PERCPU_BASE.0) };
+        if !is_vmpl1_user() {
+            // SAFETY: The PerCPU area is always mapped at the same virtual address, so
+            // dereferencing a pointer to that address is safe. The PerCPU area is also
+            // never freed, so using a static lifetime is safe as well.
+            let (ptr, Tracked(ptr_perm)) = unsafe { DekoPPtr::<Self>::from_raw_uninit(PERCPU_BASE.0)
+            };
 
-        (ptr, Tracked::assume_new())
+            (ptr, Tracked::assume_new())
+        } else {
+            let id = vmpl1_cpuid();
+            let addr = PERCPU_BASE_VMPL1.0 + (id as u64 * PAGE_SIZE_2M);
+            let (ptr, Tracked(ptr_perm)) = unsafe { DekoPPtr::<Self>::from_raw_uninit(addr) };
+
+            (ptr, Tracked::assume_new())
+        }
     }
 
     pub fn new(
         pgtable: DekoPPtr<PageTable>,
         ghcb: DekoPPtr<GuestHostCommunicationBlock>,
+        ghcb_gpa: PhysAddr,
         cpu_id: u64,
         shared_bit: u64,
         private_bit: u64,
@@ -1128,6 +1164,7 @@ impl DekoCpuCtx {
         DekoCpuCtx {
             magic: CPU_AREA_MAGIC,
             ghcb,
+            ghcb_gpa,
             tss: X86Tss {
                 reserved0: 0,
                 stacks: Array::fill(0),
@@ -1255,6 +1292,7 @@ impl DekoCpuCtx {
                                     magic,
                                     cpu_id,
                                     ghcb,
+                                    ghcb_gpa,
                                     tss,
                                     pgtable,
                                     ctx_switch_stack,
@@ -1365,6 +1403,7 @@ impl DekoCpuCtx {
                                     magic,
                                     cpu_id,
                                     ghcb,
+                                    ghcb_gpa,
                                     tss,
                                     pgtable,
                                     ctx_switch_stack,
@@ -1413,7 +1452,7 @@ impl DekoCpuCtx {
         let shared_bit = cpu.shared_bit;
 
         proof_with!(Tracked(&mut perm.pgtable_perm) => Tracked(mut ext_vmpl1_perm));
-        let ext_vmpl1 = DekoCpuCtxPerVmpl::new(VMPL_GUEST_SECURE_APP as _);
+        let ext_vmpl1 = DekoCpuCtxPerVmpl::new(VMPL_GUEST_SECURE_APP as _, private_bit, shared_bit);
         proof_with!(Tracked(&mut ext_vmpl1_perm), Tracked(&perm.pgtable_perm));
         ext_vmpl1.init(
             cpu_id,
@@ -1714,6 +1753,12 @@ impl DekoCpuCtx {
             allocator,
         );
         let (ghcb, Tracked(ghch_perm)) = boxed_ptr!(GuestHostCommunicationBlock, allocator);
+        let ghcb_gpa = virt_to_phys(
+            private_bit,
+            shared_bit,
+            ghcb.into_vaddr(),
+            Tracked(&pgtable_perm),
+        );
 
         // First step is to map itself.
         let vaddr = cpu_ctx_ptr.into_vaddr();
@@ -1942,6 +1987,7 @@ impl DekoCpuCtx {
         let mut cpu_ctx = DekoCpuCtx::new(
             init_pgtable,
             ghcb,
+            ghcb_gpa,
             id,
             shared_bit,
             private_bit,
@@ -2301,7 +2347,7 @@ pub fn start_application_processor(which: &PerCpuShared) {
     kinfo!("VMSA allocated at physical address: ", vmsa => hex);
 
     // Now invoke the ap creation routine.
-    let (ghcb, Tracked(ghcb_perm)) = current_ghcb();
+    let (ghcb, Tracked(ghcb_perm), ghcb_gpa) = current_ghcb();
     kdebug!("ap_create arguments:");
     kdebug!("  ghcb: ", ghcb);
     kdebug!("  apic_id: ", which.apic_id);
@@ -2316,6 +2362,7 @@ pub fn start_application_processor(which: &PerCpuShared) {
         sev_features,
         0,
         vmsa,
+        ghcb_gpa,
     );
 }
 

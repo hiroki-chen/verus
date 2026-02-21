@@ -3,7 +3,7 @@ use core::sync::atomic::AtomicBool;
 use deko_macros::{with_atomic_pred, DekoDebug};
 use deko_std::address::{create_paddr_range, PhysAddr, VirtAddr};
 use deko_std::bits::{bit_u32_and_auto, bit_u64_and_auto};
-use deko_std::mem::{PAGE_SIZE, PAGE_SIZE_2M};
+use deko_std::mem::{PAGE_SIZE, PAGE_SIZE_2M, PERCPU_BASE, PERCPU_END};
 use deko_std::misc::early_dbg;
 use deko_std::prelude::VADDR_UPPER_MASK;
 use deko_std::ptr::DekoPPtr;
@@ -14,7 +14,9 @@ use deko_std::{
 };
 use vstd::prelude::*;
 
+use crate::cpu::irq::no_irq_zone;
 use crate::cpu::regs::MSR_LSTAR;
+use crate::cpu::task::try_enter_guest;
 use crate::cpu::tlb::{flush_tlb_global_percpu, flush_tlb_global_sync};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission, PERCPU_AREAS};
 use crate::guest::{
@@ -26,18 +28,19 @@ use crate::mm::paging::{
     self, make_shared_address, strip_confidentiality_bits, PageTable, PageTableEntry, PageTablePath,
 };
 use crate::mm::vm::TempMapping;
-use crate::mm::{check_within_guest_mmap, zero_page};
+use crate::mm::{check_within_guest_mmap, virt_to_phys, zero_page};
 use crate::policy::guest_paging::{GuestPageOffsetBase, GUEST_PAGE_OFFSET_BASE};
-use crate::policy::syscall::analysis_syscall;
+use crate::policy::syscall::{analyze_syscall, SYS_exit, SYS_exit_group};
 use crate::policy::userapp::{register_user_app, try_kick_app};
 use crate::policy::{
     self, deko_sysret_trampoline_func_ptr, deko_trampoline_start_func_ptr, enable_syscall_hook,
     inject_ifc_policy_engine, install_hook, DekoMsrIntercept, DekoMsrInterceptVec0,
     DekoSyscallBody,
 };
+use crate::snp::ghcb::vmpl_switch;
 use crate::snp::vmsa::VMSA;
-use crate::snp::{pvalidate, rmpadjust, validate_vaddr_region};
-use crate::{kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
+use crate::snp::{pvalidate, rmpadjust, validate_vaddr_region, VMPL_GUEST_KERNEL};
+use crate::{kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn, SELF_MAP};
 
 const _: () = {
     assert!(core::mem::size_of::<DekoGuestLstarWriteReq>() == 0x30);
@@ -53,6 +56,12 @@ global layout DekoGuestPValidateReq is size == 8;
 global layout DekoGuestLstarWriteReq is size == 0x30;
 
 global layout DekoNewAppReq is size == 0x60;
+
+global layout DekoMapIfcReq is size == 0x290;
+
+const DEKO_SERVICE_APP_ENTER_OK: u64 = 0x9000_0000;
+
+const DEKO_SERVICE_APP_EXIT: u64 = 0x9000_0001;
 
 /// Represents a request structure for page validation operations.
 ///
@@ -85,6 +94,29 @@ pub struct DekoGuestLstarWriteReq {
     pub page_offset_base: VirtAddr,
     /// Being returned.
     pub sysret_trampoline: u64,
+}
+
+#[repr(C, align(8))]
+#[derive(Copy, Clone, DekoDebug)]
+pub struct DekoMapIfcSingleReq {
+    #[deko(hex)]
+    pub va_start: u64,
+    #[deko(hex)]
+    pub va_end: u64,
+    #[deko(hex)]
+    pub pa_start: u64,
+    #[deko(hex)]
+    pub pa_end: u64,
+    pub is_percpu: u64,
+}
+
+#[repr(C, align(8))]
+#[derive(Copy, Clone, DekoDebug)]
+pub struct DekoMapIfcReq {
+    pub req_len: u16,
+    pub _reserved: [u16; 3],
+    pub ghcb_va: u64,
+    pub reqs: [DekoMapIfcSingleReq; 16],
 }
 
 #[allow(non_camel_case_types)]
@@ -160,6 +192,10 @@ pub const DEKO_SERVICE_EXTEND_SYSCALL_ANALYSIS: u32 = 0x1;
 pub const DEKO_SERVICE_EXTEND_REPORT_APP: u32 = 0x2;
 
 pub const DEKO_SERVICE_EXTEND_LAUNCH_APP: u32 = 0x3;
+
+pub const DEKO_SERVICE_EXTEND_MAP_IFC: u32 = 0x4;
+
+pub const DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER: u32 = 0x5;
 
 with_atomic_pred! {
     PhysAddr,
@@ -902,7 +938,8 @@ fn handle_deko_service_lstar_intercept(
                 kerror!("MSR intercept: trampoline gva for policy engine injection not in kernel space:", req.trampoline_gva => hex);
                 return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
             }
-            inject_ifc_policy_engine(req.trampoline_gva, req.blob_gpa, blob)?;
+            // inject_ifc_policy_engine(req.trampoline_gva, req.blob_gpa, blob)?;
+
         }
         req.sysret_trampoline = deko_sysret_trampoline_func_ptr().wrapping_sub(
             deko_trampoline_start_func_ptr(),
@@ -918,50 +955,189 @@ fn handle_deko_service_lstar_intercept(
     Ok(())
 }
 
+/// Simply prepares the world switch from VMPL1 -> VMPL2 so that the latter
+/// can handle the corresponding system call request from the guest.
+#[verifier::exec_allows_no_decreases_clause]
+#[verus_spec(r =>
+    requires
+        old(params).additional_data is Some,
+)]
+pub fn handle_deko_service_invoke_syscall_handler(
+    params: &mut DekoGuestRequestParams,
+) -> DekoGuestServResult<()> {
+    kinfo!("Invoking syscall handler in the guest");
+
+    let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+
+    let syscall_body = params.rcx;
+    let syscall_body_va = VirtAddr(syscall_body & !(PAGE_SIZE as u64 - 1));
+    let syscall_body_offset = syscall_body % PAGE_SIZE as u64;
+    let guest_cr3 = strip_confidentiality_bits(
+        params.additional_data.unwrap().guest_cr3,
+        cpu_borrow.private_bit,
+    );
+
+    if core::hint::unlikely(
+        core::mem::size_of::<DekoSyscallBody>() as u64 > PAGE_SIZE - syscall_body_offset,
+    ) {
+        kerror!("Invoke syscall handler: syscall body exceeds page boundary: syscall_body=", syscall_body => hex);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    if core::hint::unlikely(guest_cr3 % PAGE_SIZE != 0) {
+        kerror!("Invoke syscall handler: unaligned guest CR3:", guest_cr3);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    let guest_pgtable = guest_page_table(guest_cr3)?;
+    let syscall_body_mapping = PageTable::walk_lvl3_guest(
+        &guest_pgtable,
+        syscall_body_va,
+        cpu_borrow.private_bit,
+        cpu_borrow.shared_bit,
+    )?;
+    let final_mapping = syscall_body_mapping.final_mapping().ok_or(
+        DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr),
+    )?;
+
+    let syscall_body = final_mapping.read_ref_at::<DekoSyscallBody>(syscall_body_offset as usize);
+    let errno = match syscall_body.rax {
+        SYS_exit | SYS_exit_group => DEKO_SERVICE_APP_EXIT,
+        _ => DEKO_SERVICE_APP_ENTER_OK,
+    };
+
+    kinfo!("Syscall body: ", syscall_body);
+
+    // // Now we need to update the VMSA and then launch the VMPL2 code to
+    // // help us handle this system call request.
+    // proof_with!(Tracked(&cpu_perm) => Tracked(mut vmsa_perm));
+    // let this_vmsa = VMSA::this_vmsa(cpu);
+
+    // // After this, resume the VMPL2 guest code to continue the syscall handling.
+    // proof_with!(Tracked(&mut vmsa_perm));
+    // VMSA::set_rax(this_vmsa, errno);
+    // // Need to use pointer-based value passing otherwise the context gets smashed.
+    // // VMSA::copy_system_call_registers(this_vmsa, &syscall_body);
+    // proof_with!(Tracked(&mut vmsa_perm));
+    // VMSA::enable(this_vmsa);
+
+    // loop {
+    //     // If `vmpl_switch` fails due to pending interrupts from the #HV exception doorbells,
+    //     // then `vmpl_switch` will simply abort and this transition will get re-entered as
+    //     // we place this call in a loop.
+    //      no_irq_zone(
+    //         ||
+    //             {
+    //                 flush_tlb_global_sync();
+    //                 vmpl_switch(VMPL_GUEST_KERNEL);
+    //             },
+    //     );
+    // }
+
+    Ok(())
+}
+
 #[verus_spec(r =>
     with
         Tracked(cpu_perm): Tracked<&mut DekoCpuCtxPermission>,
     requires
         old(cpu_perm).wf(),
-        old(params).additional_data is Some,
     ensures
         cpu_perm.wf(),
         cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
 )]
-fn handle_deko_serivce_syscall_analysis(params: &mut DekoGuestRequestParams) -> DekoGuestServResult<
-    (),
-> {
-    let guest_syscall_vaddr = params.rdx;
-    // This page is allocated using huge page.
-    let offset = guest_syscall_vaddr % PAGE_SIZE_2M as u64;
-    let trampoline_pa = match TRAMPOLINE_PA.get() {
-        Some(pa) => pa.data,
-        None => {
-            kerror!("Syscall analysis: trampoline PA is not initialized");
-            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy));
-        },
-    };
+fn handle_deko_service_map_ifc(params: &mut DekoGuestRequestParams) -> DekoGuestServResult<()> {
+    let gpa = params.rcx & !(PAGE_SIZE as u64 - 1);
+    let offset = params.rcx % PAGE_SIZE as u64;
 
-    let temp_mapping = match TempMapping::new(create_paddr_range(trampoline_pa, 64)) {
-        Some(m) => m,
-        None => {
-            kerror!("Syscall analysis: failed to create temporary mapping for trampoline at:", trampoline_pa);
-            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy));
-        },
-    };
+    proof {
+        let n = params.rcx;
 
-    // i don't know why verus cannot reason about this size check.
-    assume(core::mem::size_of::<DekoSyscallBody>() == 0x50);
+        assert(gpa % PAGE_SIZE == 0) by (bit_vector)
+            requires
+                gpa == (n & !((PAGE_SIZE as u64 - 1) as u64)),
+                PAGE_SIZE == 0x1000,
+        ;
+    }
+
+    let gpa = PhysAddr(gpa);
 
     if core::hint::unlikely(
-        core::mem::size_of::<DekoSyscallBody>() as u64 + offset > 64 * PAGE_SIZE,
+        gpa.0 >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE || offset + core::mem::size_of::<
+            DekoMapIfcReq,
+        >() as u64 > PAGE_SIZE as u64,
     ) {
-        kerror!("Syscall analysis: syscall body exceeds page boundary:", VirtAddr(guest_syscall_vaddr));
+        kerror!("Map IFC: unaligned GPA: gpa=", gpa);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
+    }
+    if core::hint::unlikely(!check_within_guest_mmap(gpa)) {
+        kerror!("Map IFC: invalid GPA: gpa=", gpa);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
+    }
+    let temp_mapping = match TempMapping::new(create_paddr_range(gpa, 1)) {
+        Some(m) => m,
+        None => {
+            kerror!("Map IFC: failed to create temporary mapping for GPA at: ", gpa);
+
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy));
+        },
+    };
+
+    let mut req = temp_mapping.read_ref_at::<DekoMapIfcReq>(offset as _).clone();
+    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+    let private_bit = cpu_borrow.private_bit;
+    let shared_bit = cpu_borrow.shared_bit;
+
+    let sm = match SELF_MAP.get() {
+        Some(sm) => sm,
+        None => {
+            kerror!("Map IFC: failed to get self-map regions");
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy));
+        },
+    };
+    if sm.len() > 15 {
+        kerror!("Map IFC: too many self-mapped regions: len=", sm.len());
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
-    let syscall_body = temp_mapping.read_ref_at::<DekoSyscallBody>(offset as usize).clone();
+    for i in 0..sm.len()
+        invariant
+            sm.len() <= 15,
+    {
+        let this = DekoMapIfcSingleReq {
+            va_start: sm[i].0.start.0,
+            va_end: sm[i].0.end.0,
+            pa_start: sm[i].1.start.0,
+            pa_end: sm[i].1.end.0,
+            is_percpu: 0,
+        };
 
-    analysis_syscall(syscall_body)
+        req.reqs[i] = this;
+    }
+
+    req.req_len = (sm.len() + 1) as u16;
+    // The last one is the percpu mapping.
+    let paddr_percpu = virt_to_phys(
+        private_bit,
+        shared_bit,
+        PERCPU_BASE,
+        Tracked(&cpu_perm.pgtable_perm),
+    ).0;
+    req.reqs[sm.len() as usize] = DekoMapIfcSingleReq {
+        va_start: PERCPU_BASE.0,
+        va_end: PERCPU_BASE.0 + PAGE_SIZE,
+        pa_start: paddr_percpu,
+        pa_end: paddr_percpu.wrapping_add(PAGE_SIZE),
+        is_percpu: 1,
+    };
+
+    let ghcb_va = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).ext_vmpl1.as_ref().ok_or(
+        DekoGuestServError::SoftError(DekoGuestServResultCode::Busy),
+    )?.ghcb.into_vaddr();
+
+    req.ghcb_va = ghcb_va.0;
+    temp_mapping.write_ref_at::<DekoMapIfcReq>(offset as _, &req);
+
+    Ok(())
 }
 
 /// This function gets called by the guest to notify us that a new sensitive application
@@ -1220,10 +1396,6 @@ pub(super) fn handle_guest_exit_extend_service(
             proof_with!(Tracked(cpu_perm));
             handle_deko_service_msr_intercepts(params)
         },
-        DEKO_SERVICE_EXTEND_SYSCALL_ANALYSIS => {
-            proof_with!(Tracked(cpu_perm));
-            handle_deko_serivce_syscall_analysis(params)
-        },
         DEKO_SERVICE_EXTEND_REPORT_APP => {
             proof_with!(Tracked(cpu_perm));
             handle_deko_service_report_app(params)
@@ -1231,6 +1403,10 @@ pub(super) fn handle_guest_exit_extend_service(
         DEKO_SERVICE_EXTEND_LAUNCH_APP => {
             proof_with!(Tracked(cpu_perm));
             handle_deko_service_launch_app(params)
+        },
+        DEKO_SERVICE_EXTEND_MAP_IFC => {
+            proof_with!(Tracked(cpu_perm));
+            handle_deko_service_map_ifc(params)
         },
         _ => {
             kerror!("Unsupported extend service request: ", req);

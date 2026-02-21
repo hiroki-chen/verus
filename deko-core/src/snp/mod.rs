@@ -60,7 +60,9 @@ pub enum PageStateChangeOp {
     Unsmash,
 }
 
-pub const VMPL1_MAGIC_SIGNATURE: u32 = 0xDE;
+pub const VMPL1_MAGIC_KERN: u32 = 0xDE;
+
+pub const VMPL1_MAGIC_USER: u32 = 0xDF;
 
 // Currently VMPL3 is not used.
 pub const VMPL_GUEST_KERNEL: u32 = 0x2;
@@ -525,6 +527,8 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
         r.1@.pgtable_perm.shared_bit == ctx_perm.shared_bit(),
         r.1@.pgtable_perm.mapping_space == ctx_perm.mapping_space,
 {
+    let shared_bit = ctx.borrow(Tracked(&ctx_perm.deko_ctx_ptr_perm)).shared_bit;
+    let private_bit = ctx.borrow(Tracked(&ctx_perm.deko_ctx_ptr_perm)).private_bit;
     // 1. First we set up the GHCB page for this CPU.
     // Get the page table from the context that was passed in
     let bsp_pgtable = ctx.borrow(Tracked(&ctx_perm.deko_ctx_ptr_perm)).pgtable;
@@ -533,7 +537,12 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
         &DEKO_FRAME_ALLOCATOR,
     );
     let (ghcb, Tracked(ghcb_perm)) = ghcb.into_ptr(Tracked(ghcb_perm));
-
+    let ghcb_gpa = virt_to_phys(
+        private_bit,
+        shared_bit,
+        ghcb.into_vaddr(),
+        Tracked(&bsp_pgtable_perm),
+    );
     // 2. We now set up the percpu area for this CPU.
     // Note that we do not need to initialize the percpu area since it is
     // zeroed out by Box::new_zeroed.
@@ -554,9 +563,10 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
     let bsp_percpu = DekoCpuCtx::new(
         bsp_pgtable,
         ghcb,
+        ghcb_gpa,
         0,  // cpu_id
-        ctx.borrow(Tracked(&ctx_perm.deko_ctx_ptr_perm)).shared_bit,
-        ctx.borrow(Tracked(&ctx_perm.deko_ctx_ptr_perm)).private_bit,
+        shared_bit,
+        private_bit,
         ctx.borrow(Tracked(&ctx_perm.deko_ctx_ptr_perm)).mapping_space,
         None,  // vm_region
         None,  // ctx_switch_stack
@@ -814,20 +824,20 @@ pub fn rmpquery(vaddr: VirtAddr, target_vmpl: u8) -> (r: RmpFlags)
 }
 
 pub fn rdmsr(msr: u32) -> u64 {
-    let (ghcb, Tracked(perm)) = current_ghcb();
+    let (ghcb, Tracked(perm), ghcb_gpa) = current_ghcb();
 
-    let (low, high, _) = GuestHostCommunicationBlock::rdmsr(ghcb, Tracked(perm), msr);
+    let (low, high, _) = GuestHostCommunicationBlock::rdmsr(ghcb, Tracked(perm), msr, ghcb_gpa);
 
     ((high as u64) << 32) | (low as u64)
 }
 
 pub fn wrmsr(msr: u32, value: u64) {
-    let (ghcb, Tracked(perm)) = current_ghcb();
+    let (ghcb, Tracked(perm), ghcb_gpa) = current_ghcb();
 
     let low = value as u32;
     let high = (value >> 32) as u32;
 
-    GuestHostCommunicationBlock::wrmsr(ghcb, Tracked(perm), msr, high, low);
+    GuestHostCommunicationBlock::wrmsr(ghcb, Tracked(perm), msr, high, low, ghcb_gpa);
 }
 
 /// Sets up the local APIC for the current CPU.
@@ -898,26 +908,26 @@ impl SnpStatusFlags {
 
 #[inline]
 pub fn outw(port: u16, val: u16) {
-    let (ghcb, Tracked(perm)) = current_ghcb();
-    GuestHostCommunicationBlock::ioout(ghcb, Tracked(perm), port, val as _, 2);
+    let (ghcb, Tracked(perm), ghcb_gpa) = current_ghcb();
+    GuestHostCommunicationBlock::ioout(ghcb, Tracked(perm), port, val as _, 2, ghcb_gpa);
 }
 
 #[inline]
 pub fn inb(port: u16) -> u8 {
-    let (ghcb, Tracked(perm)) = current_ghcb();
-    GuestHostCommunicationBlock::ioin(ghcb, Tracked(perm), port, 1) as u8
+    let (ghcb, Tracked(perm), ghcb_gpa) = current_ghcb();
+    GuestHostCommunicationBlock::ioin(ghcb, Tracked(perm), port, 1, ghcb_gpa) as u8
 }
 
 #[inline]
 pub fn inw(port: u16) -> u16 {
-    let (ghcb, Tracked(perm)) = current_ghcb();
-    GuestHostCommunicationBlock::ioin(ghcb, Tracked(perm), port, 2) as u16
+    let (ghcb, Tracked(perm), ghcb_gpa) = current_ghcb();
+    GuestHostCommunicationBlock::ioin(ghcb, Tracked(perm), port, 2, ghcb_gpa) as u16
 }
 
 #[inline]
 pub fn inl(port: u16) -> u32 {
-    let (ghcb, Tracked(perm)) = current_ghcb();
-    GuestHostCommunicationBlock::ioin(ghcb, Tracked(perm), port, 3) as u32
+    let (ghcb, Tracked(perm), ghcb_gpa) = current_ghcb();
+    GuestHostCommunicationBlock::ioin(ghcb, Tracked(perm), port, 3, ghcb_gpa) as u32
 }
 
 #[derive(DekoDebug)]
@@ -1095,7 +1105,8 @@ pub fn launch_fw(
     igvm_params: &IgvmParams<'_>,
 ) {
     let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
-    let cpu_id = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).cpu_id;
+    let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+    let cpu_id = cpu_borrow.cpu_id;
     let ghcb = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).ghcb;
 
     let vmsa_paddr = deko_rwlock_read_atomic_data! {
@@ -1135,7 +1146,7 @@ pub fn launch_fw(
     // We now register vmsa through ghcb.
     kinfo!("Registering the guest VMSA page. paddr => ", paddr);
 
-    GuestHostCommunicationBlock::register_vmsa(ghcb, Tracked(cpu_perm.ghcb_perm), paddr, 0, VMPL_GUEST_KERNEL as _, sev_features, 0);
+    GuestHostCommunicationBlock::register_vmsa(ghcb, Tracked(cpu_perm.ghcb_perm), paddr, 0, VMPL_GUEST_KERNEL as _, sev_features, 0, cpu_borrow.ghcb_gpa);
 
     kinfo!("Finished registration");
 }
@@ -1458,12 +1469,13 @@ pub(crate) fn validate_fw_memories(
 
             // Consultb the GHCB for page state change.
             if need_page_change {
-                let (ghcb, Tracked(perm)) = current_ghcb();
+                let (ghcb, Tracked(perm), ghcb_gpa) = current_ghcb();
                 GuestHostCommunicationBlock::pstate_change(
                     ghcb,
                     Tracked(perm),
                     this.clone(),
                     PageStateChangeOp::Private,
+                    ghcb_gpa,
                 );
 
                 kdebug!("Performed page state change to Private for firmware memory region:", this);
@@ -1659,15 +1671,15 @@ fn validate_fw(igvm_params: &IgvmParams<'_>, kernel_region: PaddrRange) {
         mm.end@ % PAGE_SIZE == 0,
 )]
 pub fn page_state_change(mm: PaddrRange, op: PageStateChangeOp) {
-    let (ghcb, Tracked(perm)) = current_ghcb();
-    GuestHostCommunicationBlock::pstate_change(ghcb, Tracked(perm), mm, op);
+    let (ghcb, Tracked(perm), ghcb_gpa) = current_ghcb();
+    GuestHostCommunicationBlock::pstate_change(ghcb, Tracked(perm), mm, op, ghcb_gpa);
 }
 
 #[inline]
 #[verus_spec()]
 pub fn rdtsc() -> u64 {
-    let (ghcb, Tracked(perm)) = current_ghcb();
-    let (r, _) = GuestHostCommunicationBlock::rdtsc(ghcb, Tracked(perm));
+    let (ghcb, Tracked(perm), ghcb_gpa) = current_ghcb();
+    let (r, _) = GuestHostCommunicationBlock::rdtsc(ghcb, Tracked(perm), ghcb_gpa);
 
     r
 }
@@ -1678,8 +1690,8 @@ pub fn rdtsc() -> u64 {
         vmpl <= 3,
 )]
 pub fn vmpl_run(vmpl: u32) {
-    let (ghcb, Tracked(perm)) = current_ghcb();
-    GuestHostCommunicationBlock::vmpl_run(ghcb, Tracked(perm), vmpl);
+    let (ghcb, Tracked(perm), ghcb_gpa) = current_ghcb();
+    GuestHostCommunicationBlock::vmpl_run(ghcb, Tracked(perm), vmpl, ghcb_gpa);
 }
 
 #[inline]
@@ -1715,8 +1727,37 @@ pub fn after_irq_enable() {
 /// bit of the TSC_AUX to `0xDE` so that we can identify if we are running
 /// at VMPL1 or VMPL2.
 #[inline]
-#[verifier::external_body]
 pub fn is_vmpl1() -> bool {
+    let tsc_aux = rdtscp();
+
+    (tsc_aux >> 24) == VMPL1_MAGIC_KERN || (tsc_aux >> 24) == VMPL1_MAGIC_USER
+}
+
+#[inline]
+pub fn is_vmpl1_kernel() -> bool {
+    let tsc_aux = rdtscp();
+
+    (tsc_aux >> 24) == VMPL1_MAGIC_KERN
+}
+
+#[inline]
+pub fn is_vmpl1_user() -> bool {
+    let tsc_aux = rdtscp();
+
+    (tsc_aux >> 24) == VMPL1_MAGIC_USER
+}
+
+/// Gets the current VMPL of this CPU by reading the TSC_AUX MSR.
+#[inline]
+pub fn vmpl1_cpuid() -> u32 {
+    let tsc_aux = rdtscp();
+
+    tsc_aux & 0x00FF_FFFF
+}
+
+#[inline]
+#[verifier::external_body]
+pub fn rdtscp() -> u32 {
     let tsc_aux: u32;
 
     unsafe {
@@ -1729,9 +1770,8 @@ pub fn is_vmpl1() -> bool {
         );
     }
 
-    (tsc_aux >> 24) == VMPL1_MAGIC_SIGNATURE
+    tsc_aux
 }
-
 
 /// # HV is delivered without regard to interrupt shadows, so chances are high
 /// that the guest will lose the ability to control interaction between HLT and

@@ -354,6 +354,7 @@ impl HVDoorbell {
             ghcb,
             Tracked(cpu_perm.ghcb_perm),
             doorbell_paddr,
+            cpu_borrowed.ghcb_gpa,
         );
 
         let tracked db_perm = HvDoorbellPtrPermission { hv_perm: doorbell_perm, ptr_perm: perm };

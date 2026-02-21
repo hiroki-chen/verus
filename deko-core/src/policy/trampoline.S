@@ -15,7 +15,7 @@
 // SERVES THE CONTAINER!!!
 // ============================================================================
 
-.equ PER_CPU_STACK_SIZE,   0x100
+.equ PER_CPU_STACK_SIZE,   0x800
 .equ SYSCALL_BODY_SIZE,    0x50
 .equ USER_STACK_SAVE_SIZE, 0x8
 
@@ -93,12 +93,12 @@ prepare_syscall_body:
   movq     %rax, 0x48(%rdi)        // Current CR3
 
 call_ifc:
-  // movq    deko_ifc_engine_entry(%rip), %rax Something
+  movq    deko_ifc_engine_entry(%rip), %rax
 
   // HACK: Hardcode it for now since we know where the trampoline code is mapped.
   // Something is wrong with RIP-relative addressing here, maybe because the code
   // is copied in a weird way?
-  movabsq    $DEKO_IFC_ENTRY_ADDR, %rax 
+  // movabsq    $DEKO_IFC_ENTRY_ADDR, %rax 
   jmpq   *%rax                   // Call IFC engine
 
   testq   %rax, %rax
