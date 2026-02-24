@@ -529,38 +529,38 @@ impl Builder {
             self.execute_with_logging(cmd, &log_file)?;
         }
 
-        // Build the IFC payload for Deko.
-        println!("{}", "--- Building Deko IFC Payload ---".bright_cyan().bold());
-        let deko_ifc_path = self.config.root.join("bin").join("deko-ifc");
-        std::env::set_current_dir(&deko_ifc_path)
-            .context("Failed to change directory to deko-ifc bin directory")?;
+        // // Build the IFC payload for Deko.
+        // println!("{}", "--- Building Deko IFC Payload ---".bright_cyan().bold());
+        // let deko_ifc_path = self.config.root.join("bin").join("deko-ifc");
+        // std::env::set_current_dir(&deko_ifc_path)
+        //     .context("Failed to change directory to deko-ifc bin directory")?;
 
-        let mut cmd = Command::new("cargo-verus");
-        cmd.arg("build")
-            .arg("--package")
-            .arg("deko-ifc")
-            .arg("--target")
-            .arg(self.config.custom_target_json())
-            .arg("--features")
-            .arg(&self.config.target_arch)
-            .arg("--")
-            .arg("--expand-errors");
-        if release {
-            cmd.arg("--release");
-        }
+        // let mut cmd = Command::new("cargo-verus");
+        // cmd.arg("build")
+        //     .arg("--package")
+        //     .arg("deko-ifc")
+        //     .arg("--target")
+        //     .arg(self.config.custom_target_json())
+        //     .arg("--features")
+        //     .arg(&self.config.target_arch)
+        //     .arg("--")
+        //     .arg("--expand-errors");
+        // if release {
+        //     cmd.arg("--release");
+        // }
 
-        let log_file = format!("deko-ifc-build-{}-{}.log", self.config.target_arch, profile);
-        self.execute_cargo_with_json(cmd, &log_file)?;
+        // let log_file = format!("deko-ifc-build-{}-{}.log", self.config.target_arch, profile);
+        // self.execute_cargo_with_json(cmd, &log_file)?;
 
-        let mut cmd = Command::new("objcopy");
-        cmd.arg("-O")
-            .arg("binary")
-            .arg("--strip-all")
-            .arg(self.config.deko_ifc_path(release))
-            .arg(self.config.deko_ifc_binary_path(release));
+        // let mut cmd = Command::new("objcopy");
+        // cmd.arg("-O")
+        //     .arg("binary")
+        //     .arg("--strip-all")
+        //     .arg(self.config.deko_ifc_path(release))
+        //     .arg(self.config.deko_ifc_binary_path(release));
 
-        let log_file = format!("deko-ifc-objcopy-{}-{}.log", self.config.target_arch, profile);
-        self.execute_with_logging(cmd, &log_file)?;
+        // let log_file = format!("deko-ifc-objcopy-{}-{}.log", self.config.target_arch, profile);
+        // self.execute_with_logging(cmd, &log_file)?;
 
         println!("{}", "--- Building Deko Monitor ---".bright_cyan().bold());
 

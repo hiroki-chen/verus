@@ -476,6 +476,8 @@ pub struct DekoCpuCtxPerVmpl {
     pub ghcb_gpa: PhysAddr,
     /// The stack for this extended context.
     pub vmpl1_stack: VirtAddr,
+    /// The active application id.
+    pub pid: Option<u32>,
 }
 
 with_permission! {
@@ -518,6 +520,7 @@ impl DekoCpuCtxPerVmpl {
         ensures
             r.wf(),
             r.wf_with(perm@),
+            r.pid is None,
             pgtable_perm.wf(),
             pgtable_perm.pgtable_perm == old(pgtable_perm).pgtable_perm,
             pgtable_perm.private_bit == old(pgtable_perm).private_bit,
@@ -559,6 +562,7 @@ impl DekoCpuCtxPerVmpl {
             ghcb,
             ghcb_gpa,
             vmpl1_stack: VirtAddr(stack_ptr.into_vaddr().0.wrapping_add(0x8000)),
+            pid: None,
         }
     }
 

@@ -466,7 +466,7 @@ pub fn guest_page_table(cr3: u64) -> DekoGuestServResult<TempMapping> {
 
 /// Used by the VMPL1 guest to request a service of the VMPL0 monitor.
 #[verifier::external_body]
-pub fn request_vmpl2_syscall_handler(syscall_body: &DekoSyscallBody) -> DekoGuestServResult<()> {
+pub fn request_vmpl2_syscall_handler() -> DekoGuestServResult<()> {
     if !is_vmpl1() {
         kerror!("request_deko_service called outside of VMPL1");
 
@@ -481,14 +481,12 @@ pub fn request_vmpl2_syscall_handler(syscall_body: &DekoSyscallBody) -> DekoGues
                 wrmsr
 
                 movq {extend_service}, %rax
-                movq {syscall_body}, %rcx
 
                 rep; vmmcall
             ",
             vmpl_level = in(reg) VMPL_GUEST_DEKO_MONITOR,
             extend_service = in(reg)
                 ((DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE as u64) << 32 | DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER as u64),
-            syscall_body = in(reg) syscall_body,
             out("rax") _,
             out("rcx") _,
             out("rdx") _,

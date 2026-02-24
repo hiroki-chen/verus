@@ -567,4 +567,11 @@ pub proof fn lemma_lt_is_power_of_two_bitor(p: u64, x: u64, y: u64, n: u64)
     }
 }
 
+#[verifier::bit_vector]
+pub broadcast proof fn lemma_aligned_to_4k(addr: u64)
+    ensures
+        #[trigger] (addr & !0xfff) % 0x1000 == 0,
+{
+}
+
 } // verus!

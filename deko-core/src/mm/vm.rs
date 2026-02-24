@@ -614,7 +614,7 @@ impl TempMapping {
     #[verus_spec(
         requires
             self.wf(),
-            self.inner.end@ - self.inner.start@ >= offset as u64 + core::mem::size_of::<T>() as u64,
+            self.inner.end@ - self.inner.start@ >= offset + core::mem::size_of::<T>(),
     )]
     pub fn write_ref_at<T: Sized>(&self, offset: usize, value: &T) {
         let ptr = (self.inner.start.0 + offset as u64) as *mut T;

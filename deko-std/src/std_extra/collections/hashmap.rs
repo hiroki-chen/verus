@@ -43,7 +43,7 @@ pub struct HashMap<K, V, A: core::alloc::Allocator>(HashMapInner<K, V, A>);
 
 impl<K: WellFormed, V: WellFormed, A: core::alloc::Allocator> WellFormed for HashMap<K, V, A> {
     open spec fn wf(&self) -> bool {
-        forall|k: K, v: V| #[trigger] self@.kv_pairs().contains((k, v)) ==> k.wf() && v.wf()
+        forall|k: K| #[trigger] self@.contains_key(k) ==> k.wf() && self@[k].wf()
     }
 }
 
@@ -133,6 +133,19 @@ impl<K: Eq + Hash, V, A: core::alloc::Allocator> HashMap<K, V, A> {
     )]
     pub fn len(&self) -> usize {
         self.0.len()
+    }
+
+    #[inline]
+    #[verifier::external_body]
+    #[verus_spec(r =>
+        ensures
+            match r {
+                Some(v) => self@.contains_key(*key) && *v == self@[*key],
+                None => !self@.contains_key(*key),
+            }
+    )]
+    pub fn get(&self, key: &K) -> Option<&V> {
+        self.0.get(key)
     }
 }
 

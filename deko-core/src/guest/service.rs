@@ -2,7 +2,7 @@ use core::sync::atomic::AtomicBool;
 
 use deko_macros::{with_atomic_pred, DekoDebug};
 use deko_std::address::{create_paddr_range, PhysAddr, VirtAddr};
-use deko_std::bits::{bit_u32_and_auto, bit_u64_and_auto};
+use deko_std::bits::{bit_u32_and_auto, bit_u64_and_auto, lemma_aligned_to_4k};
 use deko_std::mem::{PAGE_SIZE, PAGE_SIZE_2M, PERCPU_BASE, PERCPU_END};
 use deko_std::misc::early_dbg;
 use deko_std::prelude::VADDR_UPPER_MASK;
@@ -30,7 +30,7 @@ use crate::mm::paging::{
 use crate::mm::vm::TempMapping;
 use crate::mm::{check_within_guest_mmap, virt_to_phys, zero_page};
 use crate::policy::guest_paging::{GuestPageOffsetBase, GUEST_PAGE_OFFSET_BASE};
-use crate::policy::syscall::{analyze_syscall, SYS_exit, SYS_exit_group};
+use crate::policy::syscall::{analyze_and_prepare_syscall, SYS_exit, SYS_exit_group};
 use crate::policy::userapp::{register_user_app, try_kick_app};
 use crate::policy::{
     self, deko_sysret_trampoline_func_ptr, deko_trampoline_start_func_ptr, enable_syscall_hook,
@@ -59,9 +59,9 @@ global layout DekoNewAppReq is size == 0x60;
 
 global layout DekoMapIfcReq is size == 0x290;
 
-const DEKO_SERVICE_APP_ENTER_OK: u64 = 0x9000_0000;
+pub const DEKO_SERVICE_APP_ENTER_OK: u64 = 0x9000_0000;
 
-const DEKO_SERVICE_APP_EXIT: u64 = 0x9000_0001;
+pub const DEKO_SERVICE_APP_EXIT: u64 = 0x9000_0001;
 
 /// Represents a request structure for page validation operations.
 ///
@@ -938,8 +938,6 @@ fn handle_deko_service_lstar_intercept(
                 kerror!("MSR intercept: trampoline gva for policy engine injection not in kernel space:", req.trampoline_gva => hex);
                 return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
             }
-            // inject_ifc_policy_engine(req.trampoline_gva, req.blob_gpa, blob)?;
-
         }
         req.sysret_trampoline = deko_sysret_trampoline_func_ptr().wrapping_sub(
             deko_trampoline_start_func_ptr(),
@@ -952,87 +950,6 @@ fn handle_deko_service_lstar_intercept(
             TRAMPOLINE_PA.init(DekoAtomicData::new(req.trampoline_gpa));
         }
     }
-    Ok(())
-}
-
-/// Simply prepares the world switch from VMPL1 -> VMPL2 so that the latter
-/// can handle the corresponding system call request from the guest.
-#[verifier::exec_allows_no_decreases_clause]
-#[verus_spec(r =>
-    requires
-        old(params).additional_data is Some,
-)]
-pub fn handle_deko_service_invoke_syscall_handler(
-    params: &mut DekoGuestRequestParams,
-) -> DekoGuestServResult<()> {
-    kinfo!("Invoking syscall handler in the guest");
-
-    let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
-    let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
-
-    let syscall_body = params.rcx;
-    let syscall_body_va = VirtAddr(syscall_body & !(PAGE_SIZE as u64 - 1));
-    let syscall_body_offset = syscall_body % PAGE_SIZE as u64;
-    let guest_cr3 = strip_confidentiality_bits(
-        params.additional_data.unwrap().guest_cr3,
-        cpu_borrow.private_bit,
-    );
-
-    if core::hint::unlikely(
-        core::mem::size_of::<DekoSyscallBody>() as u64 > PAGE_SIZE - syscall_body_offset,
-    ) {
-        kerror!("Invoke syscall handler: syscall body exceeds page boundary: syscall_body=", syscall_body => hex);
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-    }
-    if core::hint::unlikely(guest_cr3 % PAGE_SIZE != 0) {
-        kerror!("Invoke syscall handler: unaligned guest CR3:", guest_cr3);
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-    }
-    let guest_pgtable = guest_page_table(guest_cr3)?;
-    let syscall_body_mapping = PageTable::walk_lvl3_guest(
-        &guest_pgtable,
-        syscall_body_va,
-        cpu_borrow.private_bit,
-        cpu_borrow.shared_bit,
-    )?;
-    let final_mapping = syscall_body_mapping.final_mapping().ok_or(
-        DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr),
-    )?;
-
-    let syscall_body = final_mapping.read_ref_at::<DekoSyscallBody>(syscall_body_offset as usize);
-    let errno = match syscall_body.rax {
-        SYS_exit | SYS_exit_group => DEKO_SERVICE_APP_EXIT,
-        _ => DEKO_SERVICE_APP_ENTER_OK,
-    };
-
-    kinfo!("Syscall body: ", syscall_body);
-
-    // // Now we need to update the VMSA and then launch the VMPL2 code to
-    // // help us handle this system call request.
-    // proof_with!(Tracked(&cpu_perm) => Tracked(mut vmsa_perm));
-    // let this_vmsa = VMSA::this_vmsa(cpu);
-
-    // // After this, resume the VMPL2 guest code to continue the syscall handling.
-    // proof_with!(Tracked(&mut vmsa_perm));
-    // VMSA::set_rax(this_vmsa, errno);
-    // // Need to use pointer-based value passing otherwise the context gets smashed.
-    // // VMSA::copy_system_call_registers(this_vmsa, &syscall_body);
-    // proof_with!(Tracked(&mut vmsa_perm));
-    // VMSA::enable(this_vmsa);
-
-    // loop {
-    //     // If `vmpl_switch` fails due to pending interrupts from the #HV exception doorbells,
-    //     // then `vmpl_switch` will simply abort and this transition will get re-entered as
-    //     // we place this call in a loop.
-    //      no_irq_zone(
-    //         ||
-    //             {
-    //                 flush_tlb_global_sync();
-    //                 vmpl_switch(VMPL_GUEST_KERNEL);
-    //             },
-    //     );
-    // }
-
     Ok(())
 }
 
@@ -1157,43 +1074,32 @@ fn handle_deko_service_map_ifc(params: &mut DekoGuestRequestParams) -> DekoGuest
 )]
 fn handle_deko_service_launch_app(params: &mut DekoGuestRequestParams) -> DekoGuestServResult<()> {
     let r9 = params.r9;
-    if core::hint::unlikely(!check_within_guest_mmap(PhysAddr(r9))) {
-        kerror!("Launch app: request body NOT within guest mmap:", PhysAddr(r9));
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-    }
-    let offset = r9 % PAGE_SIZE as u64;
+    let r9_offset = r9 % PAGE_SIZE as u64;
     let req_body = r9 & !0xfff;
 
-    assume(core::mem::size_of::<PtRegs>() == 0xa8);
+    broadcast use lemma_aligned_to_4k;
 
+    if core::hint::unlikely(!check_within_guest_mmap(PhysAddr(req_body))) {
+        kerror!("Launch app: request body NOT within guest mmap:", PhysAddr(req_body));
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
     if core::hint::unlikely(
-        req_body >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE || offset + core::mem::size_of::<
-            PtRegs,
-        >() as u64 > PAGE_SIZE as u64,
+        req_body >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE || core::mem::size_of::<PtRegs>() as u64
+            > PAGE_SIZE - r9_offset,
     ) {
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
-    proof {
-        let n = params.r9;
+    let regs_mapping = TempMapping::new(create_paddr_range(PhysAddr(req_body), 1)).ok_or(
+        DekoGuestServError::SoftError(DekoGuestServResultCode::Busy),
+    )?;
+    let regs = regs_mapping.read_ref_at::<PtRegs>(r9_offset as usize);
 
-        assert(req_body % PAGE_SIZE == 0) by (bit_vector)
-            requires
-                req_body == (n & !((PAGE_SIZE as u64 - 1) as u64)),
-                PAGE_SIZE == 0x1000,
-        ;
-    }
-
-    let req_mapping = match TempMapping::new(create_paddr_range(PhysAddr(req_body), 1)) {
-        Some(m) => m,
-        None => {
-            kerror!("Launch app: failed to create temporary mapping for request body at:", PhysAddr(req_body));
-            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy));
-        },
-    };
-
-    let regs = req_mapping.read_ref_at::<PtRegs>(offset as usize);
-
-    try_kick_app(regs, PhysAddr(params.additional_data.unwrap().guest_cr3))
+    try_kick_app(
+        regs,
+        PhysAddr(params.additional_data.unwrap().guest_cr3),
+        (params.rdx & 0xffff_ffffu64) as u32,
+        VirtAddr(params.rcx),
+    )
 }
 
 #[verus_spec(r =>

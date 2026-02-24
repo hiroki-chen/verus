@@ -1,18 +1,21 @@
 #![allow(non_upper_case_globals)]
 
 use deko_macros::with_atomic_pred;
-use deko_std::deko_rwlock_write_atomic_data;
 use deko_std::mem::PAGE_SIZE;
 use deko_std::prelude::collections::hashmap::HashMap;
 use deko_std::prelude::{PhysAddr, VirtAddr, VADDR_UPPER_MASK};
 use deko_std::std_extra::allocator::AllocatorWrapper;
 use deko_std::sync::DekoOnceCell;
 use deko_std::wf::WellFormed;
+use deko_std::{deko_rwlock_read_atomic_data, deko_rwlock_write_atomic_data};
 use vstd::prelude::*;
 
+use crate::cpu::DekoCpuCtx;
 use crate::guest::{DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode};
 use crate::mm::frame_allocator::DekoAllocatorApi;
-use crate::policy::userapp::{copy_from_user, is_docker_request, IS_DOCKER_RUNNING};
+use crate::policy::userapp::{
+    copy_from_user, is_docker_request, DEKO_SHADOW_APP_LIST, IS_DOCKER_RUNNING,
+};
 // use crate::policy::userapp::copy_from_guest_user;
 use crate::policy::DekoSyscallBody;
 use crate::{die, kdebug, kerror, kinfo, ktrace, kwarn, vec};
@@ -1221,38 +1224,92 @@ pub const SYS_cachestat: u64 = 0x1c3;
 
 pub const SYS_fchmodat2: u64 = 0x1c4;
 
+/// Moves the syscall arguments to the shared buffer for the VMPL2 handler to process this request.
+#[verus_spec(
+
+)]
+fn move_to_shared_buf(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResult<()> {
+    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+    let ext_vmpl1 = cpu_borrow.ext_vmpl1.as_ref().ok_or(DekoGuestServError::FatalError)?;
+    let active_pid = ext_vmpl1.pid.ok_or(DekoGuestServError::FatalError)?;
+    kinfo!("Active PID is ", active_pid);
+
+    // Check the shared buffer.
+    let buf_va =
+        deko_rwlock_read_atomic_data! {
+        DEKO_SHADOW_APP_LIST,
+        app_list,
+        __,
+        {
+            if let Some(ref app_list) = app_list {
+                if core::hint::unlikely(!app_list.contains_key(&active_pid)) {
+                    kerror!("The active PID ", active_pid, " is not in the app list");
+                    Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))
+                } else {
+                    let app = app_list.get(&active_pid).unwrap();
+                    proof {
+                        assert(app.wf()) by {
+                            assert(app_list.wf());
+                            assert(forall |k: u32| #[trigger] app_list@.contains_key(k) ==> app_list@[k].wf() && k.wf());
+                            assert(app_list@.contains_key(active_pid));
+                        }
+                    }
+                    match app.ext.shared_buf.get() {
+                        Some(buf) => Ok(*buf),
+                        None => {
+                            kerror!("The shared buffer for PID ", active_pid, " is not initialized");
+                            Err(DekoGuestServError::FatalError)
+                        },
+                    }
+                }
+            } else {
+                kerror!("The app list is not initialized");
+                Err(DekoGuestServError::FatalError)
+            }
+        }
+    }?;
+
+    unsafe {
+        buf_va.copy_nonoverlapping(syscall_body);
+    }
+
+    Ok(())
+}
+
 /// The entry point for analyzing syscalls for security purposes.
 ///
 /// This function should be called by the IFC engine!
 #[verus_spec(
     requires
 )]
-pub fn analyze_syscall(syscall_body: &DekoSyscallBody) -> DekoGuestServResult<()> {
+pub fn analyze_and_prepare_syscall(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResult<()> {
     if core::hint::unlikely(syscall_body.rax as usize >= SYS_CALL_NAME.len()) {
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
     kinfo!("Syscall invoked: ", SYS_CALL_NAME[syscall_body.rax as usize]);
 
     match syscall_body.rax {
-        SYS_read => { analyze_syscall_read(syscall_body)
-        }
+        SYS_read => { analyze_syscall_read(syscall_body)? },
         // In June 2023, Google's security team reported that 60% of the exploits submitted
         // to their bug bounty program in 2022 were exploits of io_uring vulnerabilities.
         //
         // As a result, io_uring was disabled for apps in Android, and disabled entirely in
         // ChromeOS as well as Google servers. Docker also consequently disabled io_uring
         // from their default seccomp profile.
-        ,
         SYS_io_uring_setup | SYS_io_uring_register | SYS_io_uring_enter => {
             kerror!("For safety reasons these syscall(s) is forbidden: ", SYS_CALL_NAME[syscall_body.rax as usize]);
 
             die("");
         },
-        _ => Ok(()),
+        _ => (),
     }
+
+    move_to_shared_buf(syscall_body)
 }
 
-fn analyze_syscall_read(syscall_body: &DekoSyscallBody) -> DekoGuestServResult<()> {
+#[verus_spec()]
+fn analyze_syscall_read(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResult<()> {
     Ok(())
 }
 

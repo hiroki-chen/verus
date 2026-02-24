@@ -21,9 +21,19 @@ SECTIONS
 		exception_table_end = .;
 	}
 	. = ALIGN(4096);
-	.rodata : { *(.rodata) *(.rodata.*) }
+	.rodata : {
+		*(.rodata)
+		*(.rodata.*)
+		*(.data.rel.ro)
+    *(.data.rel.ro.*) 
+	}
 	. = ALIGN(4096);
-	.data : { *(.data) *(.data.*) }
+	.data : {
+		*(.data)
+		*(.data.*)
+		*(.got)
+		*(.got.plt)
+	}
 	. = ALIGN(4096);
 	.ro_after_init : {
 		ro_after_init_start = .;
@@ -34,6 +44,7 @@ SECTIONS
 	. = ALIGN(4096);
 	.bss : {
 		*(.bss) *(.bss.*)
+		*(COMMON)
 		. = ALIGN(4096);
 	}
 	. = ALIGN(4096);

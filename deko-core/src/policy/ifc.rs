@@ -13,7 +13,7 @@ use crate::cpu::DekoCpuCtx;
 use crate::guest::request_vmpl2_syscall_handler;
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
 use crate::mm::DEKO_IFC_FRAME_ALLOCATOR;
-use crate::policy::syscall::analyze_syscall;
+use crate::policy::syscall::analyze_and_prepare_syscall;
 use crate::policy::{syscall, DekoSyscallBody};
 use crate::snp::ghcb::{current_ghcb, GuestHostCommunicationBlock};
 use crate::snp::{is_vmpl1, is_vmpl1_user, MSR_AMD64_SEV_ES_GHCB};
@@ -58,9 +58,6 @@ pub extern "C" fn deko_ifc_entry(syscall_body: DekoPPtr<DekoSyscallBody>) {
     if is_vmpl1_user() {
         // Swap the current stack to the per-CPU large stack.
         replace_stack(syscall_body);
-
-        // proof_with!(Tracked(syscall_perm));
-        // deko_ifc_entry_vmpl1(syscall_body);
     } else {
         die("Deko IFC at VMPL2 is not implemented yet");  // notify VMPL0
     }
@@ -73,16 +70,22 @@ pub extern "C" fn deko_ifc_entry(syscall_body: DekoPPtr<DekoSyscallBody>) {
     requires
         syscall_perm.wf(),
         syscall_perm.is_init(),
-        syscall_perm.pptr() == syscall_body@,
+        syscall_perm.pptr() == syscall_body_ptr@,
 )]
-fn deko_ifc_entry_vmpl1(syscall_body: DekoPPtr<DekoSyscallBody>) {
-    let syscall_body = syscall_body.borrow(Tracked(&syscall_perm));
+fn deko_ifc_entry_vmpl1(syscall_body_ptr: DekoPPtr<DekoSyscallBody>) {
+    let tracked mut syscall_perm = syscall_perm;
+    let mut syscall_body = syscall_body_ptr.take(Tracked(&mut syscall_perm));
 
-    analyze_syscall(syscall_body);
+    // First analyze the syscall.
+    analyze_and_prepare_syscall(&mut syscall_body);
 
-    if request_vmpl2_syscall_handler(syscall_body).is_err() {
+    if request_vmpl2_syscall_handler().is_err() {
         kerror!("Failed to invoke untrusted syscall handler");
     }
+    kinfo!("Finished handling syscall, returning to guest");
+
+    // TODO: Return to the application.
+
     loop {
     }
 }

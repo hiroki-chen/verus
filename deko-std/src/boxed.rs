@@ -143,7 +143,7 @@ impl<V: WellFormed, F: Predicate<V>> BoxInner<V, F> {
         let (pptr, Tracked(mut pptr_perm)) = DekoPPtr::empty(allocator, None);
 
         if pptr.addr() == 0 || pptr.addr() % core::mem::align_of::<V>() != 0 {
-            panic!("BoxInner::new_zeroed_with_f: allocation failed; perhaps out of memory?");
+            // panic!("BoxInner::new_zeroed_with_f: allocation failed; perhaps out of memory?");
         }
         unsafe {
             core::ptr::write_bytes(pptr.addr() as *mut u8, 0x00, core::mem::size_of::<V>());

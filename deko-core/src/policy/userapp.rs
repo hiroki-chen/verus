@@ -28,12 +28,13 @@ use crate::cpu::{self, DekoCpuCtx, DekoCpuCtxPermission};
 use crate::crypto::aes::aes_gcm_256_key_gen;
 use crate::crypto::uuid::{generate_secure_uuid, uuid_print};
 use crate::guest::service::{
-    handle_deko_service_invoke_syscall_handler, DekoNewAppReq, DekoNewAppType,
+    DekoNewAppReq, DekoNewAppType, DEKO_SERVICE_APP_ENTER_OK, DEKO_SERVICE_APP_EXIT,
     DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER,
 };
 use crate::guest::{
-    handle_guest_exit, DekoGuestExitInformation, DekoGuestServError, DekoGuestServResult,
-    DekoGuestServResultCode, PtRegs, DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE,
+    guest_page_table, handle_guest_exit, DekoGuestExitInformation, DekoGuestRequestParams,
+    DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode, PtRegs,
+    DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE,
 };
 use crate::imp::ghcb::{vmpl_switch, GuestHostCommunicationBlock};
 use crate::imp::logging::init_ghcb_logging;
@@ -47,7 +48,8 @@ use crate::mm::paging::{
 };
 use crate::mm::vm::TempMapping;
 use crate::mm::{check_within_guest_mmap, virt_to_phys, virt_to_phys_checked};
-use crate::policy::syscall::DEKO_VMPL1_SYSCALL_TRAMPOLINE;
+use crate::policy::syscall::{SYS_exit, SYS_exit_group, DEKO_VMPL1_SYSCALL_TRAMPOLINE};
+use crate::policy::DekoSyscallBody;
 use crate::snp::ghcb::{msr_register_ghcb_gpa, validate_ghcb};
 use crate::snp::vmsa::{
     guest_user_code_segment, guest_user_stack_segment, VmsaPage, VmsaPagePermission, VMSA,
@@ -65,25 +67,14 @@ deko_bitflags! {
 
 verus! {
 
-pub exec static HOST_MNT_NS_ID: DekoSimpleRwLock<u64, IrqSafeLockGuard>
-    ensures
-        HOST_MNT_NS_ID.wf(),
-{
-    let r = DekoSimpleRwLock::new(
-        DekoAtomicData::new(0),
-        IrqSafeLockGuard {  },
-        Ghost(TrivialPredicate::new()),
-    );
+/// A unique identifier for a shadowed user application running inside the guest VM.
+pub type Pid = u32;
 
-    proof {
-        use_type_invariant(&r);
-    }
+/// Application identifiers are just process ids.
+pub type AppId = Pid;
 
-    r
-}
-
-pub type AppId = PhysAddr;
-
+/// A hashmap that keeps tracks of all shadowed user applications running inside the guest VM,
+/// keyed by their Application IDs.
 pub type DekoProcessMap = HashMap<AppId, DekoUserApp, DekoAllocatorApi>;
 
 pub type DekoShimSet = HashMap<u32, (), DekoAllocatorApi>;
@@ -321,32 +312,6 @@ impl VmsaPage {
                 core::ptr::addr_of_mut!((*dst).guest_exit_code),
                 GuestVMExit(0),
             );
-
-            let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
-            let cpu = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
-            let cr3 = PageTable::map_guest_cr3(
-                PhysAddr((strip_confidentiality_bits((*dst).cr3, 1 << 51))),
-            ).unwrap();
-            let mapping = PageTable::walk_lvl3_guest(
-                &cr3,
-                VirtAddr(0xFFFFFF800048A000),
-                1 << 51,
-                0,
-            ).unwrap();
-            kinfo!("Syscall trampoline mapping is", mapping);
-            kinfo!("vaddr,", VirtAddr(0xFFFFFF800048A000));
-
-            let val = mapping.temp_mappings[3].read_copied::<u64>();
-            kinfo!("Read syscall trampoline value", val);
-            let val = mapping.temp_mappings[2].read_copied::<u64>();
-            kinfo!("Read syscall trampoline value again", val);
-            let val = mapping.temp_mappings[1].read_copied::<u64>();
-            kinfo!("Read syscall trampoline value again again", val);
-            let val = mapping.temp_mappings[0].read_copied::<u64>();
-            kinfo!("Read syscall trampoline value again again again", val);
-
-            kinfo!("flag=>", rmpquery(mapping.final_mapping().as_ref().unwrap().inner.start.clone(), 1));
-
             // Clear IDT.
             core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).idt.base), 0);
         }
@@ -422,23 +387,6 @@ impl VmsaPage {
     }
 }
 
-pub fn get_host_ns_id() -> DekoGuestServResult<u64> {
-    let host_ns_id =
-        deko_rwlock_read_atomic_data!(
-        HOST_MNT_NS_ID,
-        host_ns_lock,
-        __,
-        {
-            *host_ns_lock
-        }
-    );
-
-    if host_ns_id == 0 {
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy));
-    }
-    Ok(host_ns_id)
-}
-
 /// A regular file opened by a shadowed user application.
 #[derive(DekoDebug)]
 pub struct DekoUserFile {
@@ -479,6 +427,23 @@ impl WellFormed for DekoUserAppResource {
     }
 }
 
+#[repr(u8)]
+#[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
+pub enum DekoUserAppState {
+    /// The application is currently running inside the guest VM.
+    Running = 0,
+    /// The application has exited but has not been reaped by the guest kernel yet.
+    Created,
+    /// The application has exited and has been reaped by the guest kernel.
+    Exit,
+}
+
+impl WellFormed for DekoUserAppState {
+    open spec fn wf(&self) -> bool {
+        true
+    }
+}
+
 /// The type of the shadowed user application.
 #[derive(DekoDebug)]
 pub struct DekoUserAppExt {
@@ -493,6 +458,10 @@ pub struct DekoUserAppExt {
     pub occupied_regions: Vec<VaddrRange>,
     /// Sha3-384 measurement of the user application's binary.
     pub measurement: [u8; 48],
+    /// The current state of this user application.
+    pub state: DekoUserAppState,
+    /// The shared buffer between the application and the VMPL2 kernel.
+    pub shared_buf: DekoSimpleOnceCell<VirtAddr>,
 }
 
 impl WellFormed for DekoUserAppExt {
@@ -509,6 +478,8 @@ impl WellFormed for DekoUserAppExt {
                     <= 0x8000_0000_0000  // Linux user-space limit
 
             }&&& self.measurement.len() == 48
+        &&& self.state.wf()
+        &&& self.shared_buf.wf()
     }
 }
 
@@ -602,32 +573,16 @@ impl DekoUserApp {
                 },
                 occupied_regions: vec![],
                 measurement: [0u8;48],
+                state: DekoUserAppState::Created,
+                shared_buf: DekoSimpleOnceCell::new(Ghost(())),
             },
         };
 
         r.add_and_measure(range)?;
 
-        kinfo!("measurement is", r.ext.measurement);
+        kdebug!("measurement is", r.ext.measurement);
 
         r.lift_vmpl()?;
-
-        {
-            let cr3 = PageTable::map_guest_cr3(r.cr3)?;
-            let addr = VirtAddr(app_req.user_stack);
-            let mapping = PageTable::walk_lvl3_guest(&cr3, addr, 1 << 51, 0)?;
-            kinfo!("User stack mapping is", mapping);
-
-            if let Some(mapping) = mapping.final_mapping() {
-                let phys_addr: PhysAddr = virt_to_phys(
-                    1 << 51,
-                    1 << 0,
-                    mapping.inner.start,
-                    Tracked::assume_new(),
-                );
-
-                kinfo!("User stack phys addr is", phys_addr=>hex);
-            }
-        }
 
         Ok(r)
     }
@@ -947,7 +902,9 @@ pub fn register_user_app(
     if is_creation {
         do_reigster_user_app(req, comm, guest_cr3)
     } else {
-        do_unregister_user_app(req, comm, guest_cr3)
+        // do_unregister_user_app(req, comm, guest_cr3)
+        // todo.
+        Ok(())
     }
 }
 
@@ -996,11 +953,11 @@ fn do_reigster_user_app(
                 return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
             }
             let user_app = DekoUserApp::new(req, guest_cr3)?;
-            let new_user_uuid = generate_secure_uuid();
-            uuid_print(&new_user_uuid);
-            let (low, high) = new_user_uuid.as_u64_pair();
-            req.token_low = low;
-            req.token_high = high;
+            // let new_user_uuid = generate_secure_uuid();
+            // uuid_print(&new_user_uuid);
+            // let (low, high) = new_user_uuid.as_u64_pair();
+            // req.token_low = low;
+            // req.token_high = high;
 
             deko_rwlock_write_atomic_data! {
                 DEKO_SHADOW_APP_LIST,
@@ -1013,25 +970,11 @@ fn do_reigster_user_app(
                     };
                     let ghost old_napp_list = napp_list@;
 
-                    napp_list.insert(guest_cr3, user_app);
+                    napp_list.insert(req.tgid, user_app);
 
                     proof {
-                        assert(napp_list@ =~= old_napp_list.insert(guest_cr3, user_app));
-                        assert(napp_list.wf()) by {
-                            assert forall |k: AppId, v: DekoUserApp|
-                                #[trigger] napp_list@.kv_pairs().contains((k, v)) implies k.wf() && v.wf() by {
-                                    if old_napp_list.contains_key(k) {
-                                        if k == guest_cr3 {
-                                            broadcast use vstd::map::axiom_map_insert_same;
-                                            assert(napp_list@[k] == user_app);
-                                        } else {
-                                            broadcast use vstd::map::axiom_map_insert_different;
-
-                                            assert(old_napp_list.kv_pairs().contains((k, v)));
-                                        }
-                                    }
-                                }
-                        }
+                        assert(napp_list@ =~= old_napp_list.insert(req.tgid, user_app));
+                        assert(napp_list.wf());
                     }
 
                     app_list = Some(napp_list);
@@ -1044,67 +987,87 @@ fn do_reigster_user_app(
     }
 }
 
-fn do_unregister_user_app(
-    req: &DekoNewAppReq,
-    comm: &str,
+/// Try to kick the applications in the guest VM to VMPL1.
+#[verus_spec(
+    requires
+        // syscall_buf_mapping.wf(),
+        // syscall_buf_mapping.inner.start@ + syscall_buf_offset as u64 +
+        //     core::mem::size_of::<DekoSyscallBody>() as u64 <= syscall_buf_mapping.inner.end@,
+)]
+#[verifier::exec_allows_no_decreases_clause]
+pub fn try_kick_app(
+    regs: &PtRegs,
     guest_cr3: PhysAddr,
+    pid: u32,
+    shared_buf: VirtAddr,
 ) -> DekoGuestServResult<()> {
-    if req.pid == 1 {
-        // Ignore /sbin/init exit: this means the guest is shutting down.
-        return Ok(());
+    let (cpu_ptr, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
+    if core::hint::unlikely(cpu_ptr.borrow(Tracked(&cpu_perm.ptr_perm)).ext_vmpl1.is_none()) {
+        kerror!("try_kick_app: no VMPL1 context allocated for this CPU");
+        return Err(DekoGuestServError::FatalError);
     }
-    if is_docker_request(comm) {
-        remove_from_shim_set(req.pid);
+    // Look up the user application hashmap and see the current status
+    // of the application to decide whether this is an initial launch
+    // or a resume.
 
-        return Ok(());
-    }
-    let is_docker_app = lookup_parent_is_shim(req.ppid);
-    if is_docker_app {
-        kinfo!("do_unregister_user_app: unregistering app", comm);
-
-        deko_rwlock_write_atomic_data! {
+    let app_status =
+        deko_rwlock_write_atomic_data!(
         DEKO_SHADOW_APP_LIST,
         app_list,
         __,
         {
-            let mut napp_list = match app_list {
-                Some(mut ap) => ap,
-                None => {
-                    kinfo!("do_unregister_user_app: no apps registered");
-                    HashMap::new_in(AllocatorWrapper(DekoAllocatorApi {  }))
-                },
-            };
-            let ghost old_napp_list = napp_list@;
-            napp_list.remove(&guest_cr3);
-            proof {
-                assert(napp_list@ =~= old_napp_list.remove(guest_cr3));
-                assert(napp_list.wf()) by {
-                    assert forall |k: AppId, v: DekoUserApp|
-                        #[trigger] napp_list@.kv_pairs().contains((k, v)) implies k.wf() && v.wf() by {
-                            if napp_list@.contains_key(k) {
-                                assert(old_napp_list.kv_pairs().contains((k, v)));
+            if let Some(mut napp_list) = app_list {
+                // Need to check and update the application's status.
+                if !napp_list.contains_key(&pid) {
+                    app_list = Some(napp_list);
+
+                    kerror!("try_kick_app: no shadowed application found for pid", pid);
+                    Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))
+                } else {
+                    let old_state = napp_list.get(&pid).as_ref().unwrap().ext.state;
+                    match old_state {
+                        DekoUserAppState::Created => {
+                            let mut app = napp_list.remove(&pid).unwrap();
+                            let mut cpu = cpu_ptr.take(Tracked(&mut cpu_perm.ptr_perm));
+                            let mut ctx_vmpl1 = cpu.ext_vmpl1.take().unwrap();
+                            ctx_vmpl1.pid = Some(pid);
+                            cpu.ext_vmpl1 = Some(ctx_vmpl1);
+                            cpu_ptr.write(Tracked(&mut cpu_perm.ptr_perm), cpu);
+
+                            app.ext.state = DekoUserAppState::Running;
+                            app.ext.shared_buf.init(shared_buf);
+                            napp_list.insert(pid, app);
+                            app_list = Some(napp_list);
+
+                            proof {
+                                // TODO.
+                                assert(napp_list.wf()) by {
+                                    admit();
+                                }
                             }
-                        }
+
+                            Ok(old_state)
+                        },
+                        DekoUserAppState::Exit => {
+                            app_list = Some(napp_list);
+
+                            kerror!("try_kick_app: application has already exited for pid", pid);
+                            Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))
+                        },
+                        DekoUserAppState::Running => {
+                            app_list = Some(napp_list);
+
+                            Ok(old_state)
+                        },
+                    }
                 }
+            } else {
+                kerror!("try_kick_app: no shadowed applications found for pid", pid);
+
+                Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))
             }
-            app_list = Some(napp_list);
         }
-    }
-    }
-    Ok(())
-}
-
-/// Try to kick the applications in the guest VM to VMPL1.
-#[verus_spec()]
-#[verifier::exec_allows_no_decreases_clause]
-pub fn try_kick_app(regs: &PtRegs, guest_cr3: PhysAddr) -> DekoGuestServResult<()> {
-    let token_low = regs.cx;
-    let token_high = regs.dx;
-    let original_entry = regs.bx;
-    let guest_stack = regs.sp;
-
-    // Now sure if this is really needed.
-    let uuid = Uuid::from_u64_pair(token_low, token_high);
+    )?;
 
     let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
     let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
@@ -1112,21 +1075,30 @@ pub fn try_kick_app(regs: &PtRegs, guest_cr3: PhysAddr) -> DekoGuestServResult<(
         kerror!("try_kick_app: no VMPL1 context allocated for this CPU");
         return Err(DekoGuestServError::FatalError);
     }
-    let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
-    let mut ctx_vmpl1 = cpu_taken.ext_vmpl1.take().unwrap();
-    let tracked mut vmpl1_perm = cpu_perm.ext_vmpl1_perm.tracked_take();
-    proof_with!(Tracked(&mut vmpl1_perm.vmsa_perm));
-    ctx_vmpl1.vmsa.init_for_app(regs)?;
-    proof {
-        cpu_perm.ext_vmpl1_perm = Some(vmpl1_perm);
+    match app_status {
+        DekoUserAppState::Created => {
+            let original_entry = regs.bx;
+            let guest_stack = regs.sp;
+            let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
+            let mut ctx_vmpl1 = cpu_taken.ext_vmpl1.take().unwrap();
+
+            let tracked mut vmpl1_perm = cpu_perm.ext_vmpl1_perm.tracked_take();
+
+            proof_with!(Tracked(&mut vmpl1_perm.vmsa_perm));
+            ctx_vmpl1.vmsa.init_for_app(regs)?;
+
+            proof {
+                cpu_perm.ext_vmpl1_perm = Some(vmpl1_perm);
+            }
+            cpu_taken.ext_vmpl1 = Some(ctx_vmpl1);
+            cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
+        },
+        DekoUserAppState::Running => {},
+        _ => return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam)),
     }
-    cpu_taken.ext_vmpl1 = Some(ctx_vmpl1);
-    cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
 
     proof_with!(Tracked(&mut cpu_perm));
-    run_userapp(cpu);
-
-    Ok(())
+    run_userapp(cpu)
 }
 
 #[verifier::exec_allows_no_decreases_clause]
@@ -1137,14 +1109,15 @@ pub fn try_kick_app(regs: &PtRegs, guest_cr3: PhysAddr) -> DekoGuestServResult<(
         old(cpu_perm).wf_with(cpu),
         old(cpu_perm).ptr_perm.value().ext_vmpl1 is Some,
 )]
-fn run_userapp(cpu: DekoPPtr<DekoCpuCtx>) {
+fn run_userapp(cpu: DekoPPtr<DekoCpuCtx>) -> DekoGuestServResult<()> {
     kinfo!("try_kick_app: prepared VMSA for the app, now switching to VMPL1");
 
-    loop
+    #[verus_spec(
         invariant
             cpu_perm.wf_with(cpu),
             cpu_perm.ptr_perm.value().ext_vmpl1 is Some,
-    {
+    )]
+    loop {
         // WARNING: CRITICAL SECTION
         //
         // This requires VMPL switch so we should NEVER enable interrupts here
@@ -1179,24 +1152,10 @@ fn run_userapp(cpu: DekoPPtr<DekoCpuCtx>) {
         let info = DekoGuestExitInformation::try_parse_vmsa(vmsa_ptr, true);
 
         match info {
-            Some(DekoGuestExitInformation::ServiceRequest { protocol, req, mut params }) => {
-                if protocol == DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE && req
-                    == DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER
-                    && params.additional_data.is_some() {
-                    // TODO: Copy the system call body to the handlers.
-                    let r = handle_deko_service_invoke_syscall_handler(&mut params);
-
-                    if let Err(e) = r {
-                        kerror!("Failed to handle guest exit", protocol, req, params, e);
-
-                        die("");
-                    }
-                } else {
-                    kerror!("Unknown service request from guest app", protocol, req, params);
-
-                    die("");
-                }
-            },
+            Some(DekoGuestExitInformation::ServiceRequest { protocol, req, mut params }) if protocol
+                == DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE && req
+                == DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER
+                && params.additional_data.is_some() => {},
             info => {
                 kerror!("Unexpected exit from guest app", cpu_idx, info);
 
@@ -1206,10 +1165,62 @@ fn run_userapp(cpu: DekoPPtr<DekoCpuCtx>) {
 
         // Attempt to enter the guest only once and if it succeeds, we immediately
         // forward the request to the syscall handler in VMPL2.
-        return ;
+        return Ok(());
     }
 }
 
+// /// Simply prepares the world switch from VMPL1 -> VMPL2 so that the latter
+// /// can handle the corresponding system call request from the guest.
+// #[verifier::exec_allows_no_decreases_clause]
+// #[verus_spec(r =>
+//     requires
+//         old(params).additional_data is Some,
+//         syscall_buf_mapping.wf(),
+//         syscall_buf_mapping.inner.end@ - syscall_buf_mapping.inner.start@ >=
+//             syscall_buf_offset + core::mem::size_of::<DekoSyscallBody>()
+// )]
+// fn prepare_syscall(
+//     params: &mut DekoGuestRequestParams,
+//     syscall_buf_mapping: &TempMapping,
+//     syscall_buf_offset: usize,
+// ) -> DekoGuestServResult<()> {
+//     let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
+//     let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+//     let syscall_body = params.rcx;
+//     let syscall_body_va = VirtAddr(syscall_body & !(PAGE_SIZE as u64 - 1));
+//     let syscall_body_offset = syscall_body % PAGE_SIZE as u64;
+//     let guest_cr3 = strip_confidentiality_bits(
+//         params.additional_data.unwrap().guest_cr3,
+//         cpu_borrow.private_bit,
+//     );
+//     if core::hint::unlikely(
+//         core::mem::size_of::<DekoSyscallBody>() as u64 > PAGE_SIZE - syscall_body_offset,
+//     ) {
+//         kerror!("Invoke syscall handler: syscall body exceeds page boundary: syscall_body=", syscall_body => hex);
+//         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+//     }
+//     if core::hint::unlikely(guest_cr3 % PAGE_SIZE != 0) {
+//         kerror!("Invoke syscall handler: unaligned guest CR3:", guest_cr3);
+//         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+//     }
+//     let guest_pgtable = guest_page_table(guest_cr3)?;
+//     let syscall_body_mapping = PageTable::walk_lvl3_guest(
+//         &guest_pgtable,
+//         syscall_body_va,
+//         cpu_borrow.private_bit,
+//         cpu_borrow.shared_bit,
+//     )?;
+//     let final_mapping = syscall_body_mapping.final_mapping().ok_or(
+//         DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr),
+//     )?;
+//     let syscall_body = final_mapping.read_ref_at::<DekoSyscallBody>(syscall_body_offset as usize);
+//     let errno = match syscall_body.rax {
+//         SYS_exit | SYS_exit_group => DEKO_SERVICE_APP_EXIT,
+//         _ => DEKO_SERVICE_APP_ENTER_OK,
+//     };
+//     syscall_buf_mapping.write_ref_at::<DekoSyscallBody>(syscall_buf_offset, &syscall_body);
+//     Ok(())
+// }
 /// Called at VMPL1. This sets up some necessary state for the user application
 /// before jumping to the original entry point.
 #[verus_spec(

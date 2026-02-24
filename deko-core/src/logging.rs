@@ -12,6 +12,7 @@ use vstd::prelude::*;
 use crate::cpu::irq::{IrqSafeLockGuard, IrqUnSafeLockGuard};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPerVmpl};
 use crate::hal::{PlatformType, PLATFORM};
+use crate::snp::is_vmpl1;
 use crate::snp::logging::GHCB_IO_PORT;
 
 #[cfg(feature = "logging")]
@@ -171,6 +172,16 @@ pub fn print_cpu_id()
 
     print_str("[CPU:");
     cpu_id.deko_debug(&CONSOLE);
+    print_str("] ");
+
+    print_str("[VMPL:");
+    print_str(
+        if is_vmpl1() {
+            "1"
+        } else {
+            "0"
+        },
+    );
     print_str("] ");
 }
 
