@@ -1224,20 +1224,14 @@ pub const SYS_cachestat: u64 = 0x1c3;
 
 pub const SYS_fchmodat2: u64 = 0x1c4;
 
-/// Moves the syscall arguments to the shared buffer for the VMPL2 handler to process this request.
-#[verus_spec(
-
-)]
-fn move_to_shared_buf(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResult<()> {
+fn get_buf_va() -> DekoGuestServResult<VirtAddr> {
     let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
     let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
     let ext_vmpl1 = cpu_borrow.ext_vmpl1.as_ref().ok_or(DekoGuestServError::FatalError)?;
     let active_pid = ext_vmpl1.pid.ok_or(DekoGuestServError::FatalError)?;
-    kinfo!("Active PID is ", active_pid);
 
     // Check the shared buffer.
-    let buf_va =
-        deko_rwlock_read_atomic_data! {
+    deko_rwlock_read_atomic_data! {
         DEKO_SHADOW_APP_LIST,
         app_list,
         __,
@@ -1268,7 +1262,15 @@ fn move_to_shared_buf(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResult
                 Err(DekoGuestServError::FatalError)
             }
         }
-    }?;
+    }
+}
+
+/// Moves the syscall arguments to the shared buffer for the VMPL2 handler to process this request.
+#[verus_spec(
+
+)]
+fn move_to_shared_buf(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResult<()> {
+    let buf_va = get_buf_va()?;
 
     unsafe {
         buf_va.copy_nonoverlapping(syscall_body);
@@ -1306,6 +1308,20 @@ pub fn analyze_and_prepare_syscall(syscall_body: &mut DekoSyscallBody) -> DekoGu
     }
 
     move_to_shared_buf(syscall_body)
+}
+
+pub fn sysret_epilogue(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResult<()> {
+    let buf_va = get_buf_va()?;
+
+    kinfo!("Sysret check: the syscall handler has returned, now checking the result in the shared buffer");
+
+    let handled_syscall_body = unsafe { buf_va.read::<DekoSyscallBody>() };
+
+    kinfo!("syscall body is", handled_syscall_body);
+
+    syscall_body.rax = handled_syscall_body.rax;
+
+    Ok(())
 }
 
 #[verus_spec()]

@@ -170,6 +170,17 @@ pub enum DekoGuestServError {
 }
 
 #[verus_verify]
+impl DekoGuestServError {
+    #[verus_spec()]
+    pub fn into_result_code(&self) -> u64 {
+        match self {
+            DekoGuestServError::SoftError(code) => code.into_error_code(),
+            DekoGuestServError::FatalError => 0xFFFF_FFFF_FFFF_FFFFu64,
+        }
+    }
+}
+
+#[verus_verify]
 impl DekoGuestServResultCode {
     #[verus_spec()]
     pub fn into_error_code(&self) -> u64 {

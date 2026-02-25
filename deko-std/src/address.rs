@@ -952,6 +952,12 @@ impl VirtAddr {
             core::ptr::copy_nonoverlapping(src as *const T, self.0 as *mut T, 1);
         }
     }
+
+    #[inline]
+    #[verifier::external_body]
+    pub const unsafe fn read<T: Sized>(&self) -> T {
+        unsafe { core::ptr::read(self.0 as *const T) }
+    }
 }
 
 impl WellFormed for VirtAddr {

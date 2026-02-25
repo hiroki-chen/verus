@@ -26,24 +26,48 @@ impl WellFormed for GDTEntry {
 }
 
 impl GDTEntry {
+    #[inline(always)]
     pub const fn null() -> Self {
         GDTEntry(0)
     }
 
+    #[inline(always)]
     pub const fn code_64_kernel() -> Self {
         Self(0x00af9b000000ffffu64)
     }
 
+    #[inline(always)]
     pub const fn data_64_kernel() -> Self {
         Self(0x00cf93000000ffffu64)
     }
 
+    #[inline(always)]
     pub const fn code_64_user() -> Self {
         Self(0x00affb000000ffffu64)
     }
 
+    #[inline(always)]
     pub const fn data_64_user() -> Self {
         Self(0x00cff3000000ffffu64)
+    }
+
+    pub const fn tss_desc_64(tss_base: u64, tss_limit: u32) -> (Self, Self) {
+        let limit_low = (tss_limit & 0xFFFF) as u64;
+        let base_low = ((tss_base & 0xFFFF) as u64) << 16;
+        let base_mid = (((tss_base >> 16) & 0xFF) as u64) << 32;
+
+        // 0x89 = Present(1) | DPL(00) | Type(1001, 64-bit TSS)
+        let type_attr = 0x89u64 << 40;
+
+        let limit_high = (((tss_limit >> 16) & 0x0F) as u64) << 48;
+        let attr_high = 0x00u64 << 52;  // Granularity = 0 (Byte limit)
+        let base_high = (((tss_base >> 24) & 0xFF) as u64) << 56;
+
+        let low_entry = limit_low | base_low | base_mid | type_attr | limit_high | attr_high
+            | base_high;
+        let high_entry = tss_base >> 32;
+
+        (Self(low_entry), Self(high_entry))
     }
 }
 
@@ -84,6 +108,29 @@ impl GlobalDescriptorTable {
                     GDTEntry::null(),
                     GDTEntry::null(),
                     GDTEntry::null(),
+                ],
+            ),
+        }
+    }
+
+    #[verifier::external_body]
+    pub const fn new_vmpl1(tss_base: u64, tss_limit: u32) -> (r: Self)
+        ensures
+            r.wf(),
+    {
+        let (tss1, tss2) = GDTEntry::tss_desc_64(tss_base, tss_limit);
+
+        Self {
+            entries: Array::new(
+                [
+                    GDTEntry::null(),
+                    GDTEntry::code_64_kernel(),
+                    GDTEntry::data_64_kernel(),
+                    GDTEntry::code_64_user(),
+                    GDTEntry::data_64_user(),
+                    GDTEntry::null(),
+                    tss1,
+                    tss2,
                 ],
             ),
         }

@@ -5,7 +5,7 @@ use deko_std::mem::PAGE_SIZE_2M;
 use deko_std::misc::{early_dbg, early_die};
 use deko_std::prelude::collections::hashmap::HashMap;
 use deko_std::prelude::{func_ptr, VirtAddr, PAGE_SIZE, VADDR_LOWER_MASK, VADDR_UPPER_MASK};
-use deko_std::ptr::DekoPPtr;
+use deko_std::ptr::{addr_of_ref, DekoPPtr};
 use deko_std::std_extra::allocator::AllocatorWrapper;
 use deko_std::std_extra::num::isize_abs;
 use deko_std::sync::{
@@ -20,11 +20,13 @@ use vstd::invariant;
 use vstd::prelude::*;
 
 use crate::collections::{update_vec, Vec};
+use crate::cpu::gdt::{GlobalDescriptorTable, GLOBAL_GDT};
+use crate::cpu::idt::GLOBAL_IDT;
 use crate::cpu::ipi::wait_ipi_blocking;
 use crate::cpu::irq::{no_irq_zone, raw_irq_enable, IrqSafeLockGuard};
-use crate::cpu::regs::no_smap_zone;
+use crate::cpu::regs::{no_smap_zone, DEKO_TR_ATTRIBUTES, DEKO_TSS};
 use crate::cpu::task::{generate_id, DekoRunnableState};
-use crate::cpu::{self, DekoCpuCtx, DekoCpuCtxPermission};
+use crate::cpu::{self, DekoCpuCtx, DekoCpuCtxPermission, X86Tss};
 use crate::crypto::aes::aes_gcm_256_key_gen;
 use crate::crypto::uuid::{generate_secure_uuid, uuid_print};
 use crate::guest::service::{
@@ -38,7 +40,7 @@ use crate::guest::{
 };
 use crate::imp::ghcb::{vmpl_switch, GuestHostCommunicationBlock};
 use crate::imp::logging::init_ghcb_logging;
-use crate::imp::vmsa::GuestVMExit;
+use crate::imp::vmsa::{GuestVMExit, VMSASegment};
 use crate::imp::{
     flush_tlb_global_sync, RmpFlags, VMPL1_MAGIC_KERN, VMPL1_MAGIC_USER, VMPL_GUEST_SECURE_APP,
 };
@@ -55,7 +57,7 @@ use crate::snp::vmsa::{
     guest_user_code_segment, guest_user_stack_segment, VmsaPage, VmsaPagePermission, VMSA,
 };
 use crate::snp::{init_guest_host, is_vmpl1, rmpadjust, rmpquery, VMPL_GUEST_DEKO_MONITOR};
-use crate::{die, kdebug, kerror, kinfo, kwarn, vec};
+use crate::{die, kdebug, kerror, kinfo, kpanic_if, kwarn, vec};
 
 deko_bitflags! {
     pub struct DekoFile: u32 {
@@ -224,6 +226,9 @@ pub fn remove_from_shim_set(ppid: u32) {
 
 #[verus_verify]
 impl VmsaPage {
+    /// Initializes the given VMSA page for a new user application with the provided Linux `pt_regs` context.
+    ///
+    /// The base VMSA comes from the VMPL2 kernel context.
     #[verus_spec(r =>
         requires
             old(vmsa).wf(),
@@ -231,7 +236,6 @@ impl VmsaPage {
             vmsa.wf(),
     )]
     fn do_init_for_app(vmsa: &mut VMSA, linux_pt_regs: &PtRegs) -> DekoGuestServResult<()> {
-        kinfo!("vmsa is ", vmsa);
         let DekoAtomicData { data: syscall_trampoline, .. } =
             DEKO_VMPL1_SYSCALL_TRAMPOLINE.get().ok_or(DekoGuestServError::FatalError)?;
 
@@ -258,7 +262,7 @@ impl VmsaPage {
             vmsa_app.wf(),
     )]
     fn copy_from_user_context(vmsa_app: &mut VMSA, vmsa_user: &PtRegs) {
-        kinfo!("Copying from user context", vmsa_user);
+        kdebug!("Copying from user context", vmsa_user);
 
         unsafe {
             let dst = vmsa_app as *mut VMSA;
@@ -312,8 +316,31 @@ impl VmsaPage {
                 core::ptr::addr_of_mut!((*dst).guest_exit_code),
                 GuestVMExit(0),
             );
-            // Clear IDT.
-            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).idt.base), 0);
+
+            if let Some(DekoAtomicData { data, .. }) = GLOBAL_IDT.get() {
+                core::ptr::write_unaligned(
+                    core::ptr::addr_of_mut!((*dst).idt.base),
+                    data.addr() as _,
+                );
+            }
+            let (this_cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+            let ext_vmpl1 = this_cpu.borrow(Tracked(&cpu_perm.ptr_perm)).ext_vmpl1.as_ref();
+            kpanic_if!(ext_vmpl1.is_none(), "Current CPU must have an extended VMPL1 context");
+
+            let tss = &ext_vmpl1.unwrap().tss;
+            let gdt = &ext_vmpl1.unwrap().gdt;
+            core::ptr::write_unaligned(
+                core::ptr::addr_of_mut!((*dst).tr),
+                VMSASegment {
+                    selector: DEKO_TSS,
+                    flags: DEKO_TR_ATTRIBUTES,
+                    limit: core::mem::size_of::<X86Tss>() as u32,
+                    base: tss.addr() as u64,
+                },
+            );
+
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).gdt.base), gdt.addr() as _);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).gdt.limit), 0x3f);
         }
     }
 
@@ -578,7 +605,8 @@ impl DekoUserApp {
             },
         };
 
-        r.add_and_measure(range)?;
+        // FIXME:
+        // r.add_and_measure(range)?;
 
         kdebug!("measurement is", r.ext.measurement);
 
@@ -745,28 +773,28 @@ impl DekoUserApp {
                 assume(cpu_perm.pgtable_perm.mapped(final_mapping.inner.start));
 
                 // First we will need to revoke the access permission for VMPL2.
-                if rmpadjust(
-                    final_mapping.inner.start,
-                    PAGE_SIZE,
-                    RmpFlags::revoke_guest_vmpl2(),
-                    Tracked(&mut cpu_perm.pgtable_perm),
-                ) != 0 {
-                    kerror!("Failed to adjust RMP for revoking VMPL2", final_mapping.inner.start=>hex);
-                    return Err(
-                        DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam),
-                    );
-                }
-                if rmpadjust(
-                    final_mapping.inner.start,
-                    PAGE_SIZE,
-                    RmpFlags::rwx_guest_vmpl1(),
-                    Tracked(&mut cpu_perm.pgtable_perm),
-                ) != 0 {
-                    kerror!("Failed to adjust RMP for lifting VMPL", final_mapping.inner.start=>hex);
-                    return Err(
-                        DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam),
-                    );
-                }
+                // if rmpadjust(
+                //     final_mapping.inner.start,
+                //     PAGE_SIZE,
+                //     RmpFlags::revoke_guest_vmpl2(),
+                //     Tracked(&mut cpu_perm.pgtable_perm),
+                // ) != 0 {
+                //     kerror!("Failed to adjust RMP for revoking VMPL2", final_mapping.inner.start=>hex);
+                //     return Err(
+                //         DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam),
+                //     );
+                // }
+                // if rmpadjust(
+                //     final_mapping.inner.start,
+                //     PAGE_SIZE,
+                //     RmpFlags::rwx_guest_vmpl1(),
+                //     Tracked(&mut cpu_perm.pgtable_perm),
+                // ) != 0 {
+                //     kerror!("Failed to adjust RMP for lifting VMPL", final_mapping.inner.start=>hex);
+                //     return Err(
+                //         DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam),
+                //     );
+                // }
                 flush_tlb_global_sync();
 
                 kinfo!("Lifted VMPL for guest page", (start.0 + j * PAGE_SIZE) => hex);

@@ -10,10 +10,10 @@ use vstd::prelude::*;
 
 use crate::cpu::irq::no_irq_zone;
 use crate::cpu::DekoCpuCtx;
-use crate::guest::request_vmpl2_syscall_handler;
+use crate::guest::{request_vmpl2_syscall_handler, DekoGuestServResult};
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
 use crate::mm::DEKO_IFC_FRAME_ALLOCATOR;
-use crate::policy::syscall::analyze_and_prepare_syscall;
+use crate::policy::syscall::{analyze_and_prepare_syscall, sysret_epilogue};
 use crate::policy::{syscall, DekoSyscallBody};
 use crate::snp::ghcb::{current_ghcb, GuestHostCommunicationBlock};
 use crate::snp::{is_vmpl1, is_vmpl1_user, MSR_AMD64_SEV_ES_GHCB};
@@ -22,10 +22,11 @@ use crate::{die, kerror, kinfo};
 verus! {
 
 #[verifier::external_body]
-fn replace_stack(syscall_body: DekoPPtr<DekoSyscallBody>) {
+fn replace_stack(syscall_body: DekoPPtr<DekoSyscallBody>) -> u64 {
     let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
     let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
     let vmpl1_stack = cpu_borrow.ext_vmpl1.as_ref().unwrap().vmpl1_stack;
+    let ret: u64;
 
     unsafe {
         core::arch::asm!(
@@ -38,10 +39,13 @@ fn replace_stack(syscall_body: DekoPPtr<DekoSyscallBody>) {
             in(reg) vmpl1_stack.0,
             in(reg) deko_ifc_entry_vmpl1 as usize,
             in("rdi") syscall_body.into_vaddr().0,
+            out("rax") ret,
             clobber_abi("C"),
             options(att_syntax)
         );
     }
+
+    ret
 }
 
 // Need to switch to a large stack here.
@@ -72,22 +76,27 @@ pub extern "C" fn deko_ifc_entry(syscall_body: DekoPPtr<DekoSyscallBody>) {
         syscall_perm.is_init(),
         syscall_perm.pptr() == syscall_body_ptr@,
 )]
-fn deko_ifc_entry_vmpl1(syscall_body_ptr: DekoPPtr<DekoSyscallBody>) {
+fn deko_ifc_entry_vmpl1(syscall_body_ptr: DekoPPtr<DekoSyscallBody>) -> u64 {
     let tracked mut syscall_perm = syscall_perm;
     let mut syscall_body = syscall_body_ptr.take(Tracked(&mut syscall_perm));
 
     // First analyze the syscall.
-    analyze_and_prepare_syscall(&mut syscall_body);
-
-    if request_vmpl2_syscall_handler().is_err() {
-        kerror!("Failed to invoke untrusted syscall handler");
+    if let Err(e) = analyze_and_prepare_syscall(&mut syscall_body) {
+        return e.into_result_code();
     }
-    kinfo!("Finished handling syscall, returning to guest");
+    // Then request VMPL2 to handle the syscall.
 
-    // TODO: Return to the application.
-
-    loop {
+    if let Err(e) = request_vmpl2_syscall_handler() {
+        return e.into_result_code();
     }
+    // Check the syscall return value and prepare for returning to the guest.
+
+    if let Err(e) = sysret_epilogue(&mut syscall_body) {
+        return e.into_result_code();
+    }
+    syscall_body_ptr.write(Tracked(&mut syscall_perm), syscall_body);
+
+    0
 }
 
 func_ptr!(deko_ifc_entry);

@@ -65,13 +65,13 @@ fn real_mode_sys_seg(flags: u16) -> VMSASegment {
 
 #[inline]
 pub fn guest_user_code_segment() -> VMSASegment {
-    VMSASegment { selector: 0x33, base: 0, limit: 0xffff_ffff, flags: 0x2FB }
+    VMSASegment { selector: 0x1b, base: 0, limit: 0xffff_ffff, flags: 0x2FB }
 }
 
 #[inline]
 pub fn guest_user_stack_segment() -> VMSASegment {
     // 0xCF3 (G=1, B=1, P=1, DPL=3, S=1, Type=3)
-    VMSASegment { selector: 0x2B, base: 0, limit: 0xffff_ffff, flags: 0xCF3 }
+    VMSASegment { selector: 0x23, base: 0, limit: 0xffff_ffff, flags: 0xCF3 }
 }
 
 #[repr(C)]

@@ -27,6 +27,7 @@ use vstd::prelude::*;
 use crate::collections::{get_unchecked, update_vec};
 use crate::cpu::apic::{X86Apic, X86LocalApic, X86LocalApicPred};
 use crate::cpu::ctx::{DekoCtx, DekoCtxPermission};
+use crate::cpu::gdt::GlobalDescriptorTable;
 use crate::cpu::ipi::{
     add_ipi_available_cpu, CpuIpiArea, CpuIpiAreaPermission, DekoIpIMessage, DekoIpiRequest,
 };
@@ -476,6 +477,10 @@ pub struct DekoCpuCtxPerVmpl {
     pub ghcb_gpa: PhysAddr,
     /// The stack for this extended context.
     pub vmpl1_stack: VirtAddr,
+    /// The TSS.
+    pub tss: DekoPPtr<X86Tss>,
+    /// The GDT.
+    pub gdt: DekoPPtr<GlobalDescriptorTable>,
     /// The active application id.
     pub pid: Option<u32>,
 }
@@ -550,6 +555,27 @@ impl DekoCpuCtxPerVmpl {
             Tracked(pgtable_perm),
         ).expect("GHCB physical address must be valid");
 
+        let (tss_stack, _) = boxed_ptr!([u8; 0x1000], &DEKO_FRAME_ALLOCATOR_FULL);
+        let mut tss = X86Tss {
+            reserved0: 0,
+            stacks: Array::new([tss_stack.addr() as u64, 0, 0]),
+            _reserved1: 0,
+            ist_stacks: Array::fill(0),
+            _reserved2: 0,
+            _reserved3: 0,
+            io_bmp_base: 0,
+        };
+        let (tss_ptr, Tracked(mut tss_perm)) = boxed_ptr!(X86Tss, &DEKO_FRAME_ALLOCATOR_FULL);
+        tss_ptr.write(Tracked(&mut tss_perm), tss);
+
+        let (gdt_ptr, Tracked(gdt_perm)) =
+            boxed_ptr!(GlobalDescriptorTable, &DEKO_FRAME_ALLOCATOR_FULL);
+        let gdt = GlobalDescriptorTable::new_vmpl1(
+            tss_ptr.addr() as _,
+            core::mem::size_of::<X86Tss>() as u32,
+        );
+        gdt_ptr.write(Tracked(&mut gdt_perm), gdt);
+
         proof_with!(|= Tracked(
             DekoCpuCtxPerVmplPermission {
                 vmsa_perm,
@@ -562,6 +588,8 @@ impl DekoCpuCtxPerVmpl {
             ghcb,
             ghcb_gpa,
             vmpl1_stack: VirtAddr(stack_ptr.into_vaddr().0.wrapping_add(0x8000)),
+            tss: tss_ptr,
+            gdt: gdt_ptr,
             pid: None,
         }
     }

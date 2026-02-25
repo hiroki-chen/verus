@@ -7,6 +7,8 @@ use crate::{dbg, die, kdebug, kerror, kinfo};
 
 verus! {
 
+const SVM_EXIT_CPUID: usize = 0x072;
+
 const PF_ERRNO_PRESENT: u64 = 1 << 0;
 
 const PF_ERRNO_WRITE: u64 = 1 << 1;
@@ -52,6 +54,7 @@ pub fn pretty_pf_errno(errno: u64) {
 #[verus_spec(
 )]
 unsafe extern "C" fn deko_ifc_handler_page_fault(ctx: &mut X86ExceptionContext) {
+    kinfo!("Page Fault Exception occurred in VMPL1:", ctx);
     // handle this.
     // need to sanitize and forward to the guest OS for
     // the guest to handle page faults.
@@ -64,29 +67,17 @@ unsafe extern "C" fn deko_ifc_handler_page_fault(ctx: &mut X86ExceptionContext) 
 
 )]
 unsafe extern "C" fn deko_ifc_handler_nmi(ctx: &mut X86ExceptionContext) {
+    kinfo!("NMI occurred in VMPL1:", ctx);
     // Option 1: Forward to the guest OS NMI handler? or we just ignore it here.
     // Option 2: commit suicide.
 }
 
-#[verifier::external_body]
 #[no_mangle]
 #[verus_spec(
 
 )]
 unsafe extern "C" fn ex_handler_panic(ctx: &mut X86ExceptionContext) {
     kinfo!("Panic Exception occurred:", ctx);
-
-    let doorbell = core::slice::from_raw_parts(ctx.regs.rdi as *const u8, 0x100);
-
-    kinfo!("  ", doorbell);
-
-    let (cpu, Tracked(perm)) = crate::cpu::DekoCpuCtx::this_cpu();
-    let cpu = cpu.borrow(Tracked(&perm.ptr_perm));
-
-    let irq_was_enabled = cpu.nested_irq.state.load(Tracked(&perm.irq_state_perm.state_perm));
-    kinfo!("  - CPU IRQ enabled state before exception:", irq_was_enabled);
-    let count = cpu.nested_irq.counts[0].load(Tracked::assume_new());
-    kinfo!("  - CPU nested IRQ count level 0 before exception:", count);
 
     die("Panic Exception");
 }
@@ -123,6 +114,8 @@ unsafe extern "C" fn ex_handler_page_fault_early(ctx: &X86ExceptionContext) {
 
 )]
 unsafe extern "C" fn ex_handler_page_fault(ctx: &mut X86ExceptionContext) {
+    kinfo!("Page Fault Exception occurred:", ctx);
+
     let errno = ctx.error_code;
     let cr2 = crate::cpu::regs::read_cr2();
     pretty_pf_errno(errno as _);
@@ -142,18 +135,41 @@ unsafe extern "C" fn ex_handler_page_fault(ctx: &mut X86ExceptionContext) {
 
 #[no_mangle]
 unsafe extern "C" fn ex_handler_general_protection() {
+    kinfo!("General Protection Fault occurred");
 }
 
 #[no_mangle]
 unsafe extern "C" fn ex_handler_ve() {
+    kdebug!("Virtualization Exception occurred");
 }
 
 #[no_mangle]
 unsafe extern "C" fn ex_handler_syscall_handler(ctx: &mut X86ExceptionContext) {
 }
 
+/// This exception must and can only occur at VMPL1 due to some emulated instructions that
+/// the guest must do.
+///
+/// See `vc_handle_exitcode` in `arch/x86/coco/sev/core.c`
 #[no_mangle]
-unsafe extern "C" fn ex_handler_vmm_handler() {
+unsafe extern "C" fn ex_handler_vmm_handler(ctx: &mut X86ExceptionContext) {
+    let errno = ctx.error_code;
+
+    match errno {
+        SVM_EXIT_CPUID => vc_handle_cpuid(ctx),
+        _ => kerror!("Invalid VMM error code:", errno),
+    }
+}
+
+/// Handles the `cpuid` request. We do not forward this request to the guest OS as
+/// the guest OS can fake some CPUID features that might downgrade the security
+/// guarantees of the whole system.
+fn vc_handle_cpuid(ctx: &mut X86ExceptionContext) {
+    let leaf = ctx.regs.rax as u32;
+    let subfn = ctx.regs.rcx as u32;
+
+    // TODO.
+
 }
 
 #[no_mangle]

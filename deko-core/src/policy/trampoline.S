@@ -19,8 +19,6 @@
 .equ SYSCALL_BODY_SIZE,    0x50
 .equ USER_STACK_SAVE_SIZE, 0x8
 
-.equ DEKO_IFC_ENTRY_ADDR, 0xFFFFE90000200000
-
 .section .data
 .global deko_trampoline_start
 .global deko_trampoline_end
@@ -34,8 +32,8 @@ deko_trampoline_start:
   cmpq   $511, %rax
   ja     continue_analysis
 
-  btq    %rax, filter_bitmap(%rip)
-  jc    back_to_linux
+  // btq    %rax, filter_bitmap(%rip)
+  // jc    back_to_linux
 
 continue_analysis:
 prepare_syscall:
@@ -52,13 +50,16 @@ prepare_syscall:
   // --------------------------------------------------------------------------
   // 3. Save Volatile Registers
   // --------------------------------------------------------------------------
-  // We are about to perform a VMMCALL (Hypercall), which clobbers RAX, RCX, and RDX.
   // We must save the original values (which contain syscall arguments) to restore them later.
-  pushq   %rdi  // [RSP+32] Original Arg 1
-  pushq   %rax  // [RSP+24] Original Syscall No
-  pushq   %rdx  // [RSP+16] Original Arg 3
-  pushq   %rcx  // [RSP+8]  Original RIP (Return Address)
-  pushq   %r11  // [RSP+0]  Original RFLAGS
+  pushq   %r11  // [RSP+64] Original RFLAGS
+  pushq   %rcx  // [RSP+56] Original RIP
+  pushq   %r9   // [RSP+48] Arg 6
+  pushq   %r8   // [RSP+40] Arg 5
+  pushq   %r10  // [RSP+32] Arg 4
+  pushq   %rdx  // [RSP+24] Arg 3
+  pushq   %rsi  // [RSP+16] Arg 2
+  pushq   %rdi  // [RSP+8]  Arg 1
+  pushq   %rax  // [RSP+0]  Syscall Number
 
 prepare_syscall_body:
   // Prepare the syscall body.
@@ -69,40 +70,37 @@ prepare_syscall_body:
   movq     $SYSCALL_BODY_SIZE, %rcx               // Size of syscall body (80 bytes)
   rep stosb
 
-  movq     24(%rsp), %rax                 // Syscall number
-  movq     %rax, 0x0(%rdi)                // Syscall number in body
+  leaq     deko_syscall_body(%rip), %rdi
 
-  movq     32(%rsp), %rax          // Arg 1
-  movq     %rax, 0x8(%rdi)         // Arg 1 in body
-  movq     %rsi, 0x10(%rdi)        // Arg 2
-
-  movq     16(%rsp), %rax          // Arg 3
-  movq     %rax, 0x18(%rdi)        // Arg 3 in body
-
-  movq     %r10, 0x20(%rdi)        // Arg 4
-  movq     %r8, 0x28(%rdi)         // Arg 5
-  movq     %r9, 0x30(%rdi)         // Arg 6
-
-  movq     8(%rsp), %rax          // Original RIP
-  movq     %rax, 0x38(%rdi)        // Return RIP in body
-
-  movq     0(%rsp), %r11          // Original RFLAGS
-  movq     %r11, 0x40(%rdi)        // Return
+  movq     0(%rsp), %rax          
+  movq     %rax, 0x0(%rdi)        // ax
+  movq     8(%rsp), %rax          
+  movq     %rax, 0x8(%rdi)        // di
+  movq     16(%rsp), %rax         
+  movq     %rax, 0x10(%rdi)       // si
+  movq     24(%rsp), %rax         
+  movq     %rax, 0x18(%rdi)       // dx
+  movq     32(%rsp), %rax         
+  movq     %rax, 0x20(%rdi)       // r10
+  movq     40(%rsp), %rax         
+  movq     %rax, 0x28(%rdi)       // r8
+  movq     48(%rsp), %rax         
+  movq     %rax, 0x30(%rdi)       // r9
+  movq     56(%rsp), %rax         
+  movq     %rax, 0x38(%rdi)       // original RIP
+  movq     64(%rsp), %rax         
+  movq     %rax, 0x40(%rdi)       // original RFLAGS
 
   movq     %cr3, %rax
-  movq     %rax, 0x48(%rdi)        // Current CR3
+  movq     %rax, 0x48(%rdi)       // current CR3
 
 call_ifc:
   movq    deko_ifc_engine_entry(%rip), %rax
 
-  // HACK: Hardcode it for now since we know where the trampoline code is mapped.
-  // Something is wrong with RIP-relative addressing here, maybe because the code
-  // is copied in a weird way?
-  // movabsq    $DEKO_IFC_ENTRY_ADDR, %rax 
-  jmpq   *%rax                   // Call IFC engine
+  callq   *%rax                   // Call IFC engine
 
   testq   %rax, %rax
-  je      2f
+  je      return_to_user
 
   // --------------------------------------------------------------------------
   // 7. Error Handling
@@ -117,27 +115,26 @@ call_ifc:
   // --------------------------------------------------------------------------
   // 8. Restore State
   // --------------------------------------------------------------------------
-2:
+return_to_user:
+  addq    $8, %rsp
   // Restore the syscall arguments and context we saved earlier.
   // Order is LIFO (Last-In, First-Out).
-  popq     %r11
-  popq     %rcx
-  popq     %rdx
-  popq     %rax
-  popq     %rdi
+  popq    %rdi
+  popq    %rsi
+  popq    %rdx
+  popq    %r10
+  popq    %r8
+  popq    %r9
+  popq    %rcx    // RIP
+  popq    %r11    // RFLAGS
 
   // Restore User RSP from our saved location.
   movq    scratch_rsp(%rip), %rsp
-back_to_linux:
-  // --------------------------------------------------------------------------
-  // 9. Handover to Linux Kernel
-  // --------------------------------------------------------------------------
-  // Jump to the original Linux LSTAR address.
-  // The C setup code must populate 'deko_trampoline_data_entry' with the
-  // address of the real 'entry_SYSCALL_64'.
-  jmp     *deko_trampoline_data_entry(%rip)
 
-  // TODO: Here we MAY need a way to catch sysret.
+  leaq    deko_syscall_body(%rip), %rax
+  movq    0(%rax), %rax
+
+  sysretq
 
 // ============================================================================
 // Data & Stack Section
