@@ -31,10 +31,12 @@ fn replace_stack(syscall_body: DekoPPtr<DekoSyscallBody>) -> u64 {
     unsafe {
         core::arch::asm!(
             "
+                pushq %r12
                 movq %rsp, %r12
                 movq {0}, %rsp
                 callq *{1}
                 movq %r12, %rsp
+                popq %r12
             ",
             in(reg) vmpl1_stack.0,
             in(reg) deko_ifc_entry_vmpl1 as usize,

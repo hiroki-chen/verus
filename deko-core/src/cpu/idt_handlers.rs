@@ -1,9 +1,11 @@
 //! This module provides a set of default interrupt handlers for various CPU exceptions
 //! and interrupts.
+use deko_std::wf::WellFormed;
 use vstd::prelude::*;
 
 use crate::cpu::task::X86ExceptionContext;
-use crate::{dbg, die, kdebug, kerror, kinfo};
+use crate::cpu::{CPUID_MAX_COUNT, CPUID_TABLE};
+use crate::{dbg, die, kdebug, kerror, kinfo, kpanic_if, ktrace};
 
 verus! {
 
@@ -114,8 +116,6 @@ unsafe extern "C" fn ex_handler_page_fault_early(ctx: &X86ExceptionContext) {
 
 )]
 unsafe extern "C" fn ex_handler_page_fault(ctx: &mut X86ExceptionContext) {
-    kinfo!("Page Fault Exception occurred:", ctx);
-
     let errno = ctx.error_code;
     let cr2 = crate::cpu::regs::read_cr2();
     pretty_pf_errno(errno as _);
@@ -127,15 +127,11 @@ unsafe extern "C" fn ex_handler_page_fault(ctx: &mut X86ExceptionContext) {
 
     loop {
     }
-
-    // stub. to be implemented.
-
-    // Then we have to jump back to the instruction that caused the fault.
 }
 
 #[no_mangle]
-unsafe extern "C" fn ex_handler_general_protection() {
-    kinfo!("General Protection Fault occurred");
+unsafe extern "C" fn ex_handler_general_protection(ctx: &mut X86ExceptionContext) {
+    kinfo!("General Protection Fault occurred:", ctx);
 }
 
 #[no_mangle]
@@ -155,6 +151,8 @@ unsafe extern "C" fn ex_handler_syscall_handler(ctx: &mut X86ExceptionContext) {
 unsafe extern "C" fn ex_handler_vmm_handler(ctx: &mut X86ExceptionContext) {
     let errno = ctx.error_code;
 
+    ktrace!("VMM Exception occurred in VMPL1:", ctx);
+
     match errno {
         SVM_EXIT_CPUID => vc_handle_cpuid(ctx),
         _ => kerror!("Invalid VMM error code:", errno),
@@ -168,8 +166,31 @@ fn vc_handle_cpuid(ctx: &mut X86ExceptionContext) {
     let leaf = ctx.regs.rax as u32;
     let subfn = ctx.regs.rcx as u32;
 
-    // TODO.
+    // FIXME: Problematic... This is not the intended CPUID_table...
+    if let Some(cpu_id) = CPUID_TABLE.get() {
+        assume(cpu_id.func.wf());
+        if leaf < cpu_id.func.len() as u32 {
+            let entry = cpu_id.func.index(leaf as usize);
+            ctx.regs.rax = entry.eax_out as u64;
+            ctx.regs.rbx = entry.ebx_out as u64;
+            ctx.regs.rcx = entry.ecx_out as u64;
+            ctx.regs.rdx = entry.edx_out as u64;
 
+            kinfo!("Handled CPUID request: leaf =", leaf => hex, "subfn =", subfn => hex, "output: rax =", ctx.regs.rax => hex, "rbx =", ctx.regs.rbx => hex, "rcx =", ctx.regs.rcx => hex, "rdx =", ctx.regs.rdx => hex);
+        } else {
+            kerror!("Invalid CPUID leaf:", leaf);
+        }
+    } else {
+        kerror!("CPUID table not initialized");
+    }
+
+    // Advance the RIP to skip the `cpuid` instruction. The `cpuid` instruction is 2 bytes long.
+    ctx.frame.rip = ctx.frame.rip.wrapping_add(2);  // skip the `cpuid` instruction
+}
+
+#[no_mangle]
+extern "C" fn debug_iret_frame(rdi: u64, cs: u64, rflags: u64, rsp: u64, ss: u64) {
+    kdebug!("Debug IRET frame: rdi =", rdi => hex, "cs =", cs => hex, "rflags =", rflags => hex, "rsp =", rsp => hex, "ss =", ss => hex);
 }
 
 #[no_mangle]

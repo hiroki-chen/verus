@@ -123,14 +123,14 @@ impl GlobalDescriptorTable {
         Self {
             entries: Array::new(
                 [
-                    GDTEntry::null(),
-                    GDTEntry::code_64_kernel(),
-                    GDTEntry::data_64_kernel(),
-                    GDTEntry::code_64_user(),
-                    GDTEntry::data_64_user(),
-                    GDTEntry::null(),
-                    tss1,
-                    tss2,
+                    GDTEntry::null(),  // 0x0
+                    GDTEntry::code_64_kernel(),  // 0x8
+                    GDTEntry::data_64_kernel(),  // 0x10
+                    tss1,  // 0x18 (TSS low)
+                    tss2,  // 0x20 (TSS high)
+                    GDTEntry::data_64_user(),  // 0x28
+                    GDTEntry::code_64_user(),  // 0x30
+                    GDTEntry::null(),  // 0x38
                 ],
             ),
         }

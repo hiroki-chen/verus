@@ -30,6 +30,7 @@ use crate::snp::vmsa::VMSA;
 use crate::snp::{SnpStatus, VMPL_GUEST_SECURE_APP};
 use crate::{check_shared_cpu_idx, kerror, kinfo, kpanic_if};
 
+pub(crate) mod fs;
 pub(crate) mod guest_paging;
 pub(crate) mod ifc;
 pub(crate) mod labels;

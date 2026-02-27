@@ -5,6 +5,9 @@
 // Author: Joerg Roedel <jroedel@suse.de>
 //         Hiroki Chen <haobchen@iu.edu>
 
+.equ USER_CS, 0x1b
+.equ USER_SS, 0x23
+
 .code64
 
 .section .data
@@ -261,6 +264,14 @@ return_all_paths:
 	// #HV.
 	testl	$0x200, {EXCEP_FLAGS_OFF}(%rsp) // check EFLAGS.IF in exception frame
 	jz	begin_iret_return
+
+	rdtscp
+	shrl $24, %ecx
+	cmpl $0xde, %ecx
+	je   begin_iret_return
+	cmpl $0xdf, %ecx
+	je   begin_iret_return
+
 	movq	HV_DOORBELL_ADDR(%rip), %rdi
 	test	%rdi, %rdi
 	jz	begin_iret_return
@@ -299,10 +310,16 @@ begin_iret_return:
 	addq	${EXCEP_FRAME_OFF}, %rsp
 
 default_iret:
+	movq    0x00(%rsp), %rdi   // RIP
+    movq    0x08(%rsp), %rsi   // CS
+    movq    0x10(%rsp), %rdx   // RFLAGS
+    movq    0x18(%rsp), %rcx   // RSP
+    movq    0x20(%rsp), %r8    // SS
+    call    debug_iret_frame
+
 	iretq
 
 return_user:
-	// Put user-mode specific return code here
 	jmp	return_all_paths
 
 .globl return_new_task

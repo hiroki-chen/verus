@@ -293,15 +293,7 @@ impl VmsaPage {
                 core::ptr::addr_of_mut!((*dst).rflags),
                 vmsa_user.flags | 0x200,
             );
-            // Restore the code segment.
-            core::ptr::write_unaligned(
-                core::ptr::addr_of_mut!((*dst).cs),
-                guest_user_code_segment(),
-            );
-            core::ptr::write_unaligned(
-                core::ptr::addr_of_mut!((*dst).ss),
-                guest_user_stack_segment(),
-            );
+
             // Set back the cpl.
             core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).cpl), 3);
             core::ptr::write_unaligned(
@@ -332,7 +324,7 @@ impl VmsaPage {
             core::ptr::write_unaligned(
                 core::ptr::addr_of_mut!((*dst).tr),
                 VMSASegment {
-                    selector: DEKO_TSS,
+                    selector: 0x18,
                     flags: DEKO_TR_ATTRIBUTES,
                     limit: core::mem::size_of::<X86Tss>() as u32,
                     base: tss.addr() as u64,
@@ -930,8 +922,6 @@ pub fn register_user_app(
     if is_creation {
         do_reigster_user_app(req, comm, guest_cr3)
     } else {
-        // do_unregister_user_app(req, comm, guest_cr3)
-        // todo.
         Ok(())
     }
 }
@@ -981,11 +971,6 @@ fn do_reigster_user_app(
                 return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
             }
             let user_app = DekoUserApp::new(req, guest_cr3)?;
-            // let new_user_uuid = generate_secure_uuid();
-            // uuid_print(&new_user_uuid);
-            // let (low, high) = new_user_uuid.as_u64_pair();
-            // req.token_low = low;
-            // req.token_high = high;
 
             deko_rwlock_write_atomic_data! {
                 DEKO_SHADOW_APP_LIST,
@@ -1197,58 +1182,6 @@ fn run_userapp(cpu: DekoPPtr<DekoCpuCtx>) -> DekoGuestServResult<()> {
     }
 }
 
-// /// Simply prepares the world switch from VMPL1 -> VMPL2 so that the latter
-// /// can handle the corresponding system call request from the guest.
-// #[verifier::exec_allows_no_decreases_clause]
-// #[verus_spec(r =>
-//     requires
-//         old(params).additional_data is Some,
-//         syscall_buf_mapping.wf(),
-//         syscall_buf_mapping.inner.end@ - syscall_buf_mapping.inner.start@ >=
-//             syscall_buf_offset + core::mem::size_of::<DekoSyscallBody>()
-// )]
-// fn prepare_syscall(
-//     params: &mut DekoGuestRequestParams,
-//     syscall_buf_mapping: &TempMapping,
-//     syscall_buf_offset: usize,
-// ) -> DekoGuestServResult<()> {
-//     let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
-//     let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
-//     let syscall_body = params.rcx;
-//     let syscall_body_va = VirtAddr(syscall_body & !(PAGE_SIZE as u64 - 1));
-//     let syscall_body_offset = syscall_body % PAGE_SIZE as u64;
-//     let guest_cr3 = strip_confidentiality_bits(
-//         params.additional_data.unwrap().guest_cr3,
-//         cpu_borrow.private_bit,
-//     );
-//     if core::hint::unlikely(
-//         core::mem::size_of::<DekoSyscallBody>() as u64 > PAGE_SIZE - syscall_body_offset,
-//     ) {
-//         kerror!("Invoke syscall handler: syscall body exceeds page boundary: syscall_body=", syscall_body => hex);
-//         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-//     }
-//     if core::hint::unlikely(guest_cr3 % PAGE_SIZE != 0) {
-//         kerror!("Invoke syscall handler: unaligned guest CR3:", guest_cr3);
-//         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-//     }
-//     let guest_pgtable = guest_page_table(guest_cr3)?;
-//     let syscall_body_mapping = PageTable::walk_lvl3_guest(
-//         &guest_pgtable,
-//         syscall_body_va,
-//         cpu_borrow.private_bit,
-//         cpu_borrow.shared_bit,
-//     )?;
-//     let final_mapping = syscall_body_mapping.final_mapping().ok_or(
-//         DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr),
-//     )?;
-//     let syscall_body = final_mapping.read_ref_at::<DekoSyscallBody>(syscall_body_offset as usize);
-//     let errno = match syscall_body.rax {
-//         SYS_exit | SYS_exit_group => DEKO_SERVICE_APP_EXIT,
-//         _ => DEKO_SERVICE_APP_ENTER_OK,
-//     };
-//     syscall_buf_mapping.write_ref_at::<DekoSyscallBody>(syscall_buf_offset, &syscall_body);
-//     Ok(())
-// }
 /// Called at VMPL1. This sets up some necessary state for the user application
 /// before jumping to the original entry point.
 #[verus_spec(

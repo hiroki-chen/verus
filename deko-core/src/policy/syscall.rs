@@ -3,13 +3,14 @@
 use deko_macros::with_atomic_pred;
 use deko_std::mem::PAGE_SIZE;
 use deko_std::prelude::collections::hashmap::HashMap;
-use deko_std::prelude::{PhysAddr, VirtAddr, VADDR_UPPER_MASK};
+use deko_std::prelude::{PhysAddr, VirtAddr, VADDR_LOWER_MASK, VADDR_UPPER_MASK};
 use deko_std::std_extra::allocator::AllocatorWrapper;
 use deko_std::sync::DekoOnceCell;
 use deko_std::wf::WellFormed;
 use deko_std::{deko_rwlock_read_atomic_data, deko_rwlock_write_atomic_data};
 use vstd::prelude::*;
 
+use crate::cpu::regs::write_fs_base;
 use crate::cpu::DekoCpuCtx;
 use crate::guest::{DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode};
 use crate::mm::frame_allocator::DekoAllocatorApi;
@@ -18,6 +19,7 @@ use crate::policy::userapp::{
 };
 // use crate::policy::userapp::copy_from_guest_user;
 use crate::policy::DekoSyscallBody;
+use crate::snp::rmpadjust;
 use crate::{die, kdebug, kerror, kinfo, ktrace, kwarn, vec};
 
 verus! {
@@ -1224,6 +1226,24 @@ pub const SYS_cachestat: u64 = 0x1c3;
 
 pub const SYS_fchmodat2: u64 = 0x1c4;
 
+pub const PROT_READ: u64 = 0x1;
+
+pub const PROT_WRITE: u64 = 0x2;
+
+pub const PROT_EXEC: u64 = 0x4;
+
+pub const PROT_SEM: u64 = 0x8;
+
+pub const PROT_NONE: u64 = 0x0;
+
+pub const MAP_SHARED: u64 = 0x01;
+
+pub const MAP_PRIVATE: u64 = 0x02;
+
+pub const MAP_FIXED: u64 = 0x10;
+
+pub const MAP_ANONYMOUS: u64 = 0x20;
+
 fn get_buf_va() -> DekoGuestServResult<VirtAddr> {
     let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
     let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
@@ -1293,6 +1313,11 @@ pub fn analyze_and_prepare_syscall(syscall_body: &mut DekoSyscallBody) -> DekoGu
 
     match syscall_body.rax {
         SYS_read => { analyze_syscall_read(syscall_body)? },
+        // Memory-related system calls
+        SYS_mmap => { analyze_syscall_mmap(syscall_body)? },
+        SYS_mprotect => (),
+        SYS_mremap => (),
+        // Filesystem.
         // In June 2023, Google's security team reported that 60% of the exploits submitted
         // to their bug bounty program in 2022 were exploits of io_uring vulnerabilities.
         //
@@ -1311,15 +1336,147 @@ pub fn analyze_and_prepare_syscall(syscall_body: &mut DekoSyscallBody) -> DekoGu
 }
 
 pub fn sysret_epilogue(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResult<()> {
+    let syscall_num = syscall_body.rax;
     let buf_va = get_buf_va()?;
 
     kinfo!("Sysret check: the syscall handler has returned, now checking the result in the shared buffer");
 
     let handled_syscall_body = unsafe { buf_va.read::<DekoSyscallBody>() };
 
-    kinfo!("syscall body is", handled_syscall_body);
+    // For some special system calls we need some extra checks and processings.
+    match syscall_num {
+        SYS_mmap => syscall_mmap_ret(syscall_body, &handled_syscall_body),
+        SYS_arch_prctl => syscall_arch_prctl_ret(syscall_body, &handled_syscall_body),
+        _ => {
+            syscall_body.rax = handled_syscall_body.rax;
 
+            Ok(())
+        },
+    }
+}
+
+fn syscall_arch_prctl_ret(
+    syscall_body: &mut DekoSyscallBody,
+    handled_syscall_body: &DekoSyscallBody,
+) -> DekoGuestServResult<()> {
     syscall_body.rax = handled_syscall_body.rax;
+
+    let flag = syscall_body.rdi;
+    match flag {
+        0x1002 => {
+            kinfo!("arch_prctl set FS base to: ", syscall_body.rsi=>hex);
+
+            write_fs_base(syscall_body.rsi);
+        },
+        _ => {
+            kerror!("`arch_prctl` called with unknown flag: ", flag=>hex);
+            return Err(DekoGuestServError::FatalError);
+        },
+    }
+
+    Ok(())
+}
+
+/// The epilogue for the `mmap` syscall, which checks the return value of `mmap` and updates memory accordingly.
+/// Note that this does two things:
+///
+/// - Revoke the access permissions `(!(rwx))` for VMPL2.
+/// - Adds the memory region to the shadowed memory management for the guest.
+///
+/// To prevent potential page fault problems, we require that the guest must call `fix_user_fault` or similar
+/// functions _in advance_ to pin the memory pages for the `mmap` syscall.
+#[verus_spec(r =>
+    ensures
+        r is Ok ==> {
+            true
+        }
+)]
+fn syscall_mmap_ret(
+    syscall_body: &mut DekoSyscallBody,
+    handled_syscall_body: &DekoSyscallBody,
+) -> DekoGuestServResult<()> {
+    syscall_body.rax = handled_syscall_body.rax;
+
+    kinfo!("returned from mmap: ", handled_syscall_body.rax=>hex);
+
+    // Revoke the permission for VMPL2 for the returned address.
+    let length = handled_syscall_body.rsi / PAGE_SIZE as u64;
+    let addr = syscall_body.rax;
+
+    if core::hint::unlikely(
+        length * PAGE_SIZE >= u64::MAX || addr >= u64::MAX - length * PAGE_SIZE,
+    ) {
+        kerror!("Invalid return value for mmap: ", addr=>hex, ", length: ", length=>hex);
+        return Err(DekoGuestServError::FatalError);
+    }
+    // Make this a separate function.
+    // let mut i = 0;
+    // #[verus_spec(
+    //     invariant
+    //         i <= length,
+    //     decreases
+    //         length - i
+    // )]
+    // while i <= length {
+    // }
+
+    Ok(())
+}
+
+/// Prototype:
+///
+/// void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
+///
+/// mmap() creates a new mapping in the virtual address space of the calling process. The starting address for the new
+/// mapping is specified in `addr`. The length argument specifies the length of the mapping.
+#[verus_spec(r =>
+    ensures
+        r is Ok ==> {
+            true
+        }
+)]
+fn analyze_syscall_mmap(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResult<()> {
+    let addr = syscall_body.rdi;  // hint
+    let length = syscall_body.rsi;
+    let prot = syscall_body.rdx;
+    let flags = syscall_body.r10;
+    let fd = syscall_body.r8 as i32;
+    let offset = syscall_body.r9;
+
+    // `mmap` with zero length is invalid.
+    if core::hint::unlikely(length == 0) {
+        kerror!("mmap length is 0");
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    let aligned_length = match length.checked_add(PAGE_SIZE - 1) {
+        Some(l) => l & !(PAGE_SIZE as u64 - 1),
+        None => {
+            kerror!("mmap length is too large: ", length=>hex);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        },
+    };
+
+    if flags & MAP_FIXED != 0 {
+        if addr % PAGE_SIZE != 0 {
+            kerror!("MAP_FIXED used but addr is not page aligned: ", addr=>hex);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        }
+    }
+    if addr != 0 {
+        let end_addr = match addr.checked_add(aligned_length) {
+            Some(val) => val,
+            None => {
+                kerror!("mmap addr + length overflow");
+                return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+            },
+        };
+
+        if end_addr > VADDR_LOWER_MASK {
+            kerror!("mmap requested address out of user space bounds: ", end_addr=>hex);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        }
+    }
+    syscall_body.rsi = aligned_length;
 
     Ok(())
 }

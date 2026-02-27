@@ -17,7 +17,7 @@ use deko_core::cpu::task::{
 use deko_core::cpu::tlb::set_tlb_flush_smp;
 use deko_core::cpu::{
     set_availabe_cpu_nums, start_application_processor, CpuidTable, DekoCpuCtx,
-    DekoCpuCtxPermission, PerCpuShared, CPUID_MAX_COUNT, IST_DF, PERCPU_AREAS,
+    DekoCpuCtxPermission, PerCpuShared, CPUID_MAX_COUNT, CPUID_TABLE, IST_DF, PERCPU_AREAS,
 };
 use deko_core::elf::ElfFile;
 use deko_core::fw::{load_acpi_tables, read_acpi_table};
@@ -72,13 +72,6 @@ exec static LAUNCH_INFO: DekoOnceCell<DekoKernelLaunchInfo, (), DekoKernelLaunch
     DekoOnceCell::new(Ghost(DekoKernelLaunchInfoPred {  }))
 }
 
-exec static CPUID_PAGE: DekoSimpleOnceCell<CpuidTable>
-    ensures
-        CPUID_PAGE.wf(),
-{
-    DekoSimpleOnceCell::new(Ghost(()))
-}
-
 #[verifier::external_body]
 #[verus_spec(
     with
@@ -90,13 +83,15 @@ exec static CPUID_PAGE: DekoSimpleOnceCell<CpuidTable>
 fn init_cpuid_table(addr: VirtAddr) {
     let cpuid_tables = unsafe { &mut *(addr.0 as *mut CpuidTable) };
 
+    kinfo!("CPUID table read from address", cpuid_tables);
+
     for fns in cpuid_tables.func.0.iter_mut() {
         if fns.eax_in == 0x8000_001f {
             fns.eax_out |= 1 << 28;
         }
     }
 
-    CPUID_PAGE.init(cpuid_tables.clone());
+    CPUID_TABLE.init(cpuid_tables.clone());
 }
 
 /// Starts all application processors.
@@ -472,7 +467,7 @@ fn deko_main(cpu_index: usize) {
 
         assume(kernel_prange.wf());
 
-        let Some(cpuid_table) = CPUID_PAGE.get() else {
+        let Some(cpuid_table) = CPUID_TABLE.get() else {
             kerror!("deko_main: CPUID page not initialized; this is a fatal error");
             early_die();
         };

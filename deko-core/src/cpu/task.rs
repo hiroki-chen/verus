@@ -138,7 +138,7 @@ pub fn request_vm_region() -> Option<(usize, VaddrRange)> {
 }
 
 /// The interrupt frame saved during an x86 interrupt.
-#[repr(C)]
+#[repr(C, packed)]
 #[derive(DekoDebug, Clone, Copy)]
 pub struct X86InterruptFrame {
     pub rip: u64,

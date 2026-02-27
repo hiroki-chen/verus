@@ -65,6 +65,13 @@ use crate::{die, kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
 
 verus! {
 
+pub exec static CPUID_TABLE: DekoSimpleOnceCell<CpuidTable>
+    ensures
+        CPUID_TABLE.wf(),
+{
+    DekoSimpleOnceCell::new(Ghost(()))
+}
+
 pub const IST_DF: usize = 0;
 
 pub const CPUID_MAX_COUNT: usize = 32;

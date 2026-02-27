@@ -21,6 +21,8 @@ pub const DEKO_TR_ATTRIBUTES: u16 = 0x89;
 
 pub const MSR_LSTAR: u32 = 0xC0000082;
 
+pub const MSR_FS_BASE: u32 = 0xC000_0100;
+
 deko_bitflags! {
     pub struct Cr0: u64 {
         const PE = 0; // Protection Enable
@@ -64,6 +66,20 @@ deko_bitflags! {
         const MCOMMIT = 17; // MCOMMIT Enable
         const INTWB = 18; // INTWB Enable
         const UAIE = 20; // User Access Instruction Enable
+    }
+}
+
+#[inline]
+#[verifier::external_body]
+pub fn write_fs_base(fs_base: u64) {
+    unsafe {
+        core::arch::asm!(
+            "wrmsr",
+            in("ecx") MSR_FS_BASE,
+            in("eax") (fs_base & 0xFFFF_FFFF) as u32,
+            in("edx") (fs_base >> 32) as u32,
+            options(att_syntax),
+        );
     }
 }
 
