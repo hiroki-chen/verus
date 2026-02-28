@@ -724,6 +724,7 @@ impl<V: WellFormed> DekoPPtr<V> {
             align matches Some(align) ==> {
                 &&& valid_layout(core::mem::size_of::<V>(), align)
                 &&& align % core::mem::align_of::<V>() == 0
+                &&& align > 0
             },
         ensures
             pt.1@.pptr() == pt.0@,

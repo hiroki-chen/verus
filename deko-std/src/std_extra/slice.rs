@@ -9,6 +9,12 @@ use crate::WellFormed;
 
 verus! {
 
+// Issue #1693: https://github.com/verus-lang/verus/issues/1693
+// #[verifier::external_trait_specification]
+// pub trait ExPattern: Sized {
+//     type ExternalTraitSpecificationFor: core::str::pattern::Pattern;
+//     type Searcher<'a>: core::str::pattern::Searcher<'a>;
+// }
 pub assume_specification[ core::str::from_utf8 ](_0: &[u8]) -> core::result::Result<
     &str,
     core::str::Utf8Error,
@@ -68,12 +74,6 @@ pub assume_specification<T, U, const N: usize>[ <[T; N] as core::cmp::PartialEq<
     _0: &[T; N],
     _1: &[U; N],
 ) -> bool where T: core::cmp::PartialEq<U>
-;
-
-pub assume_specification<T>[ <[T]>::first ](s: &[T]) -> (r: Option<&T>)
-    ensures
-        s.len() == 0 ==> r == Option::<&T>::None,
-        s.len() > 0 ==> r == Option::Some(&s@[0]),
 ;
 
 pub assume_specification[ core::primitive::str::as_bytes ](s: &str) -> (r: &[u8])

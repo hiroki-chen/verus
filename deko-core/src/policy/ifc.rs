@@ -51,6 +51,7 @@ fn replace_stack(syscall_body: DekoPPtr<DekoSyscallBody>) -> u64 {
 }
 
 // Need to switch to a large stack here.
+#[allow(improper_ctypes_definitions)]
 #[no_mangle]
 #[verus_spec(r =>
         with

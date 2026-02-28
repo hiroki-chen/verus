@@ -95,6 +95,7 @@ pub(crate) const PSC_FLAG_HUGE: u64 = 1 << PSC_FLAG_HUGE_SHIFT;
 
 pub(crate) const GHCB_BUFFER_SIZE: usize = 0x7f0;
 
+#[allow(non_snake_case)]
 pub(crate) spec const PSC_GFN_MASK_SPEC: u64 = (((1u64 << 52) - 1) as u64) & !0xfffu64;
 
 #[verifier::when_used_as_spec(PSC_GFN_MASK_SPEC)]

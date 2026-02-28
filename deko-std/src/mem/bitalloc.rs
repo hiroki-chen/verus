@@ -190,7 +190,7 @@ pub trait DekoBitAlloc: Sized + WellFormed {
                         0 <= i < Self::cap_spec() && !(start <= i < start + entries)
                             ==> self.is_allocated(i) == old(self).is_allocated(i)
                 },
-                None => self == old(self),  // nothing has ever changed.
+                None => *self == *old(self),  // nothing has ever changed.
             },
     {
         if entries == 0 {
@@ -723,7 +723,7 @@ impl<T: DekoBitAlloc + deko_std::fmt::DekoDebug> DekoBitAlloc for DekoBitmapAllo
                         0 <= i < Self::cap_spec() && !(start <= i < start + entries)
                             ==> self.is_allocated(i) == old(self).is_allocated(i)
                 },
-                None => self == old(self),  // nothing has ever changed.
+                None => *self == *old(self),  // nothing has ever changed.
             },
     {
         Self::alloc_aligned(self, entries, align)

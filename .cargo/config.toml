@@ -33,7 +33,7 @@ test-collections = "xtest collections"
 install-igvmbuilder = "install --git https://github.com/coconut-svsm/svsm.git igvmbuilder"
 
 # For some reason the latest version does not work well on our end.
-bootstrap-verus = "xtask bootstrap-verus --commit b5f006ea513babdb608ae4d6db646d2fd5e75fc9"
+bootstrap-verus = "xtask bootstrap-verus"
 bootstrap-qemu = "xtask bootstrap-qemu"
 bootstrap-ovmf = "xtask bootstrap-ovmf"
 

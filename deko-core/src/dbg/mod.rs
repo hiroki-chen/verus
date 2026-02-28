@@ -230,14 +230,14 @@ fn print_stack_frame(frame: StackFrame) {
     msg.write_fmt(format_args!("  [{:016x}]", frame.rip.0)).unwrap();
 
     if frame.is_exception_frame {
-        msg.push_str(" @");
+        msg.push_str(" @").unwrap();
         annotated = true;
     }
     if !frame.is_aligned {
-        msg.push_str(if annotated { "#" } else { " #" });
+        msg.push_str(if annotated { "#" } else { " #" }).unwrap();
     }
 
-    let _ = msg.push_str("\n");
+    let _ = msg.push_str("\n").unwrap();
     print_str(msg.as_str());
 }
 

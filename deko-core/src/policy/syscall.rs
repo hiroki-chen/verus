@@ -1317,6 +1317,7 @@ pub fn analyze_and_prepare_syscall(syscall_body: &mut DekoSyscallBody) -> DekoGu
         SYS_mmap => { analyze_syscall_mmap(syscall_body)? },
         SYS_mprotect => (),
         SYS_mremap => (),
+        SYS_write => { analyze_syscall_write(syscall_body)? },
         // Filesystem.
         // In June 2023, Google's security team reported that 60% of the exploits submitted
         // to their bug bounty program in 2022 were exploits of io_uring vulnerabilities.
@@ -1377,6 +1378,15 @@ fn syscall_arch_prctl_ret(
     Ok(())
 }
 
+fn syscall_write_ret(
+    syscall_body: &mut DekoSyscallBody,
+    handled_syscall_body: &DekoSyscallBody,
+) -> DekoGuestServResult<()> {
+    syscall_body.rax = handled_syscall_body.rax;
+
+    Ok(())
+}
+
 /// The epilogue for the `mmap` syscall, which checks the return value of `mmap` and updates memory accordingly.
 /// Note that this does two things:
 ///
@@ -1420,6 +1430,14 @@ fn syscall_mmap_ret(
     // while i <= length {
     // }
 
+    Ok(())
+}
+
+/// Prototype:
+///
+/// ssize_t write(int fd, const void *buf, size_t count);
+#[verus_spec()]
+fn analyze_syscall_write(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResult<()> {
     Ok(())
 }
 

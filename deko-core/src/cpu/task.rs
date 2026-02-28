@@ -948,7 +948,7 @@ impl DekoRunnable {
             (*task_ctx_ptr).ret = ret;
             (*task_ctx_ptr).flags = 0x2;
 
-            (stack_ptr as *mut u64).write(on_task_exit as u64);
+            (stack_ptr as *mut u64).write(on_task_exit as *const () as u64);
         }
     }
 
