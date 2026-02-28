@@ -20,6 +20,7 @@ use rustc_span::Span;
 use rustc_span::def_id::{DefId, LOCAL_CRATE};
 use rustc_span::symbol::{Ident, kw};
 use rustc_trait_selection::infer::InferCtxtExt;
+use rustc_trait_selection::solve::BuiltinImplSource;
 use std::collections::HashMap;
 use std::ops::DerefMut;
 use std::sync::Arc;
@@ -446,9 +447,17 @@ pub(crate) fn get_impl_paths<'tcx>(
     target_id: DefId,
     node_substs: &'tcx rustc_middle::ty::List<rustc_middle::ty::GenericArg<'tcx>>,
     remove_self_trait_bound: Option<(DefId, &mut Option<vir::ast::ImplPath>)>,
-) -> vir::ast::ImplPaths {
+    span: Span,
+) -> Result<vir::ast::ImplPaths, VirErr> {
     let clauses = instantiate_pred_clauses(tcx, target_id, node_substs);
-    get_impl_paths_for_clauses(tcx, verus_items, param_env_src, clauses, remove_self_trait_bound)
+    get_impl_paths_for_clauses(
+        tcx,
+        verus_items,
+        param_env_src,
+        clauses,
+        remove_self_trait_bound,
+        span,
+    )
 }
 
 pub(crate) fn get_impl_paths_for_clauses<'tcx>(
@@ -457,7 +466,8 @@ pub(crate) fn get_impl_paths_for_clauses<'tcx>(
     param_env_src: DefId,
     clauses: Vec<(Option<ClauseFrom<'tcx>>, Clause<'tcx>)>,
     mut remove_self_trait_bound: Option<(DefId, &mut Option<vir::ast::ImplPath>)>,
-) -> vir::ast::ImplPaths {
+    span: Span,
+) -> Result<vir::ast::ImplPaths, VirErr> {
     let mut impl_paths = Vec::new();
     let typing_env = TypingEnv::non_body_analysis(tcx, param_env_src);
 
@@ -477,7 +487,7 @@ pub(crate) fn get_impl_paths_for_clauses<'tcx>(
     let mut idx = 0;
     while idx < predicate_worklist.len() {
         if idx == 100000 {
-            panic!("get_impl_paths nesting depth exceeds 1000");
+            panic!("get_impl_paths nesting depth exceeds 100000");
         }
 
         let (inst_bound, inst_pred) = &predicate_worklist[idx];
@@ -500,8 +510,10 @@ pub(crate) fn get_impl_paths_for_clauses<'tcx>(
                 let candidate_query_input = typing_env.as_query_input(trait_refs);
                 tcx.codegen_select_candidate(candidate_query_input)
             });
-            if let Ok(impl_source) = candidate {
-                if let rustc_middle::traits::ImplSource::UserDefined(u) = impl_source {
+            match candidate {
+                Ok(rustc_middle::traits::ImplSource::UserDefined(u)) => {
+                    err_for_builtin_tracked_ghost_deref(tcx, verus_items, u.impl_def_id, span)?;
+
                     let impl_path = def_id_to_vir_path(
                         tcx,
                         verus_items,
@@ -527,19 +539,12 @@ pub(crate) fn get_impl_paths_for_clauses<'tcx>(
                             predicate_worklist.push(p);
                         }
                     }
-                } else if let rustc_middle::traits::ImplSource::Builtin(
-                    rustc_middle::traits::BuiltinImplSource::Misc,
-                    _,
-                ) = impl_source
-                {
-                    // When the needed trait bound is `FnDef(f) : FnOnce(...)`
-                    // The `impl_source` doesn't have the information we need,
-                    // so we have to special case this here.
-
-                    // REVIEW: need to see if there are other problematic cases here;
-                    // I think codegen_select_candidate lacks some information because
-                    // it's used for codegen
-
+                }
+                Ok(rustc_middle::traits::ImplSource::Param(_)) => {}
+                Ok(rustc_middle::traits::ImplSource::Builtin(BuiltinImplSource::Object(_), _)) => {
+                    // builtin impl for dyn Trait : Trait
+                }
+                Ok(rustc_middle::traits::ImplSource::Builtin(_, _)) => {
                     match inst_pred_kind {
                         ClauseKind::Trait(TraitPredicate {
                             trait_ref:
@@ -554,6 +559,7 @@ pub(crate) fn get_impl_paths_for_clauses<'tcx>(
                                 || Some(trait_def_id) == tcx.lang_items().fn_mut_trait()
                                 || Some(trait_def_id) == tcx.lang_items().fn_once_trait()
                             {
+                                // Handle the trait bound is `FnDef(f) : FnOnce(...)`
                                 match trait_args.into_type_list(tcx)[0].kind() {
                                     TyKind::FnDef(fn_def_id, fn_node_substs) => {
                                         let fn_path = def_id_to_vir_path(
@@ -578,15 +584,113 @@ pub(crate) fn get_impl_paths_for_clauses<'tcx>(
                                     }
                                     _ => {}
                                 }
+                            } else if Some(trait_def_id) == tcx.lang_items().sized_trait()
+                                || Some(trait_def_id) == tcx.lang_items().meta_sized_trait()
+                                || Some(trait_def_id) == tcx.lang_items().copy_trait()
+                                || Some(trait_def_id) == tcx.lang_items().tuple_trait()
+                                || Some(trait_def_id) == tcx.lang_items().pointee_trait()
+                                || Some(trait_def_id) == tcx.lang_items().sync_trait()
+                                || Some(trait_def_id) == tcx.lang_items().destruct_trait()
+                                || matches!(
+                                    verus_items::get_rust_item(tcx, trait_def_id),
+                                    Some(RustItem::Send | RustItem::Thin | RustItem::Any)
+                                )
+                            {
+                                // Sized, MetaSized, Tuple, Pointee, Thin are all ok to do nothing.
+                                // There can't be user impls of these traits, they can only be built-in.
+                            } else {
+                                // If we don't recognize the trait bound, we don't know whether
+                                // we need to recurse further.
+                                return err_span(
+                                    span,
+                                    format!(
+                                        "Verus does not recognize this trait bound: {:?}",
+                                        trait_refs
+                                    ),
+                                );
                             }
                         }
-                        _ => {}
+                        _ => {
+                            return err_span(
+                                span,
+                                format!(
+                                    "Verus does not recognize this trait bound: {:?}",
+                                    trait_refs
+                                ),
+                            );
+                        }
                     }
+                }
+                Err(_) => {
+                    // TODO this happens sometimes - why?
                 }
             }
         }
     }
-    Arc::new(impl_paths)
+    Ok(Arc::new(impl_paths))
+}
+
+/// Err if the given impl is the builtin impl for (Tracked<T>/Ghost<T>) : Deref(Mut)
+fn err_for_builtin_tracked_ghost_deref<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    verus_items: &crate::verus_items::VerusItems,
+    impl_def_id: DefId,
+    span: Span,
+) -> Result<(), VirErr> {
+    let trait_polarity = tcx.impl_polarity(impl_def_id);
+    if trait_polarity == rustc_middle::ty::ImplPolarity::Negative {
+        return Ok(());
+    }
+
+    let trait_ref = tcx.impl_trait_ref(impl_def_id).skip_binder();
+    let trait_name = if Some(trait_ref.def_id) == tcx.lang_items().deref_trait() {
+        "Deref"
+    } else if Some(trait_ref.def_id) == tcx.lang_items().deref_mut_trait() {
+        "DerefMut"
+    } else {
+        return Ok(());
+    };
+
+    let ty = trait_ref.args[0].as_type().unwrap();
+    let ty_name = match ty.kind() {
+        TyKind::Adt(AdtDef(adt_def_data), _args) => {
+            let did = adt_def_data.did;
+            match verus_items.id_to_name.get(&did) {
+                Some(VerusItem::BuiltinType(BuiltinTypeItem::Ghost)) => "Ghost",
+                Some(VerusItem::BuiltinType(BuiltinTypeItem::Tracked)) => "Tracked",
+                _ => {
+                    return Ok(());
+                }
+            }
+        }
+        _ => {
+            return Ok(());
+        }
+    };
+
+    Err(crate::util::err_span_bare(span, format!("reliance on trait bound `{ty}: core::ops::{trait_name}`"))
+        .help(format!("The trait bound `{ty_name}<_>: {trait_name}` is treated specially by Verus, and it is not meant to be used generically")))
+}
+
+pub(crate) fn is_tracked_or_ghost_ty<'tcx>(
+    verus_items: &crate::verus_items::VerusItems,
+    ty: rustc_middle::ty::Ty<'tcx>,
+) -> Option<(rustc_middle::ty::Ty<'tcx>, bool)> {
+    match ty.kind() {
+        TyKind::Adt(AdtDef(adt_def_data), args) => {
+            let did = adt_def_data.did;
+            match verus_items.id_to_name.get(&did) {
+                Some(VerusItem::BuiltinType(BuiltinTypeItem::Ghost)) => {
+                    Some((args[0].as_type().unwrap(), false))
+                }
+                Some(VerusItem::BuiltinType(BuiltinTypeItem::Tracked)) => {
+                    Some((args[0].as_type().unwrap(), true))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn mk_visibility<'tcx>(ctxt: &Context<'tcx>, def_id: DefId) -> vir::ast::Visibility {
@@ -725,7 +829,7 @@ pub(crate) fn mid_ty_filter_for_external_impls<'tcx>(
         TyKind::Uint(_) | TyKind::Int(_) => true,
         TyKind::Char => true,
         TyKind::Float(_) => true,
-        TyKind::Ref(_, _, rustc_ast::Mutability::Not) => true,
+        TyKind::Ref(_, _, _) => true,
         TyKind::Param(_) => true,
         TyKind::Tuple(_) => true,
         TyKind::Slice(_) => true,
@@ -745,9 +849,8 @@ pub(crate) fn mid_ty_filter_for_external_impls<'tcx>(
         TyKind::Alias(rustc_middle::ty::AliasTyKind::Opaque, _) => false,
         TyKind::Alias(rustc_middle::ty::AliasTyKind::Free, _) => false,
         TyKind::Foreign(..) => false,
-        TyKind::Ref(_, _, rustc_ast::Mutability::Mut) => false,
-        TyKind::FnPtr(..) => false,
         TyKind::Dynamic(..) => false,
+        TyKind::FnPtr(..) => false,
         TyKind::Coroutine(..) => false,
         TyKind::CoroutineWitness(..) => false,
         TyKind::Bound(..) => false,
@@ -756,7 +859,13 @@ pub(crate) fn mid_ty_filter_for_external_impls<'tcx>(
         TyKind::Error(..) => false,
 
         TyKind::Adt(rustc_middle::ty::AdtDef(adt_def_data), _) => {
-            external_info.has_type_id(ctxt, adt_def_data.did)
+            let verus_item = ctxt.verus_items.id_to_name.get(&adt_def_data.did);
+            let is_verus_type = matches!(verus_item, Some(VerusItem::BuiltinType(_)));
+            let is_rust_type = match verus_items::get_rust_item(ctxt.tcx, adt_def_data.did) {
+                Some(RustItem::Box | RustItem::Rc | RustItem::Arc) => true,
+                _ => false,
+            };
+            is_verus_type || is_rust_type || external_info.has_type_id(ctxt, adt_def_data.did)
         }
         TyKind::Alias(
             rustc_middle::ty::AliasTyKind::Projection | rustc_middle::ty::AliasTyKind::Inherent,
@@ -996,13 +1105,6 @@ pub(crate) fn mid_ty_to_vir_ghost<'tcx>(
             } else {
                 let rust_item = verus_items::get_rust_item(tcx, did);
 
-                if let Some(RustItem::AllocGlobal) = rust_item {
-                    return Ok((
-                        Arc::new(TypX::Primitive(Primitive::Global, Arc::new(vec![]))),
-                        false,
-                    ));
-                }
-
                 let typ_args = mk_typ_args(&args)?;
                 if Some(did) == tcx.lang_items().owned_box() && typ_args.len() == 2 {
                     let (t0, ghost) = &typ_args[0];
@@ -1058,7 +1160,8 @@ pub(crate) fn mid_ty_to_vir_ghost<'tcx>(
                     return Ok((Arc::new(TypX::SpecFn(param_typs, ret_typ)), false));
                 }
                 let typ_args = typ_args.into_iter().map(|(t, _)| t).collect();
-                let impl_paths = get_impl_paths(tcx, verus_items, param_env_src, did, args, None);
+                let impl_paths =
+                    get_impl_paths(tcx, verus_items, param_env_src, did, args, None, span)?;
                 let datatypex = def_id_to_datatype(
                     tcx,
                     verus_items,
@@ -1260,7 +1363,8 @@ pub(crate) fn mid_ty_to_vir_ghost<'tcx>(
                         trait_did,
                         args_with_self,
                         None,
-                    );
+                        span,
+                    )?;
                     let typx = TypX::Dyn(trait_path, Arc::new(typ_args), impl_paths);
                     (Arc::new(typx), false)
                 }
@@ -2276,9 +2380,12 @@ pub(crate) fn opaque_def_to_vir<'tcx>(
                             span,
                             trait_def_id,
                             substs,
-                        )?
-                        .unwrap();
-                        trait_bounds.push(generic_bound);
+                        )?;
+                        if let Some(generic_bound) = generic_bound {
+                            trait_bounds.push(generic_bound);
+                        } else {
+                            unsupported_err!(span, "this type of bound");
+                        }
                     }
                     ClauseKind::Projection(pred) => {
                         let item_def_id = pred.projection_term.def_id;
