@@ -83,15 +83,13 @@ exec static LAUNCH_INFO: DekoOnceCell<DekoKernelLaunchInfo, (), DekoKernelLaunch
 fn init_cpuid_table(addr: VirtAddr) {
     let cpuid_tables = unsafe { &mut *(addr.0 as *mut CpuidTable) };
 
-    kinfo!("CPUID table read from address", cpuid_tables);
-
     for fns in cpuid_tables.func.0.iter_mut() {
         if fns.eax_in == 0x8000_001f {
             fns.eax_out |= 1 << 28;
         }
     }
 
-    CPUID_TABLE.init(cpuid_tables.clone());
+    CPUID_TABLE.init(DekoAtomicData::new(cpuid_tables.clone()));
 }
 
 /// Starts all application processors.
@@ -467,10 +465,12 @@ fn deko_main(cpu_index: usize) {
 
         assume(kernel_prange.wf());
 
-        let Some(cpuid_table) = CPUID_TABLE.get() else {
+        let Some(DekoAtomicData { data: cpuid_table, .. }) = CPUID_TABLE.get() else {
             kerror!("deko_main: CPUID page not initialized; this is a fatal error");
             early_die();
         };
+
+        kinfo!("cpuid_table", cpuid_table);
 
         init_mmap(&igvm_params);
 

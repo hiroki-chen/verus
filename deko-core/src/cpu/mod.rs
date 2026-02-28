@@ -65,11 +65,20 @@ use crate::{die, kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
 
 verus! {
 
-pub exec static CPUID_TABLE: DekoSimpleOnceCell<CpuidTable>
+pub struct CpuidTablePred;
+
+impl Predicate<DekoAtomicData<CpuidTable, ()>> for CpuidTablePred {
+    #[verifier::inline]
+    open spec fn inv(self, data: DekoAtomicData<CpuidTable, ()>) -> bool {
+        data.wf()
+    }
+}
+
+pub exec static CPUID_TABLE: DekoOnceCell<CpuidTable, (), CpuidTablePred>
     ensures
         CPUID_TABLE.wf(),
 {
-    DekoSimpleOnceCell::new(Ghost(()))
+    DekoOnceCell::new(Ghost(CpuidTablePred {  }))
 }
 
 pub const IST_DF: usize = 0;

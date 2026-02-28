@@ -1,5 +1,6 @@
 //! This module provides a set of default interrupt handlers for various CPU exceptions
 //! and interrupts.
+use deko_std::sync::DekoAtomicData;
 use deko_std::wf::WellFormed;
 use vstd::prelude::*;
 
@@ -159,26 +160,79 @@ unsafe extern "C" fn ex_handler_vmm_handler(ctx: &mut X86ExceptionContext) {
     }
 }
 
+#[inline]
+fn cpuid_requires_ecx(leaf: u32) -> bool {
+    match leaf {
+        0x4
+        | 0x7
+        | 0xB
+        | 0xD
+        | 0xF
+        | 0x10
+        | 0x12
+        | 0x14
+        | 0x17
+        | 0x18
+        | 0x1D
+        | 0x1E
+        | 0x1F
+        | 0x8000001D
+        | 0x80000020
+        | 0x80000026 => true,
+        _ => false,
+    }
+}
+
 /// Handles the `cpuid` request. We do not forward this request to the guest OS as
 /// the guest OS can fake some CPUID features that might downgrade the security
 /// guarantees of the whole system.
+#[verus_spec()]
 fn vc_handle_cpuid(ctx: &mut X86ExceptionContext) {
     let leaf = ctx.regs.rax as u32;
     let subfn = ctx.regs.rcx as u32;
 
-    // FIXME: Problematic... This is not the intended CPUID_table...
-    if let Some(cpu_id) = CPUID_TABLE.get() {
-        assume(cpu_id.func.wf());
-        if leaf < cpu_id.func.len() as u32 {
-            let entry = cpu_id.func.index(leaf as usize);
-            ctx.regs.rax = entry.eax_out as u64;
-            ctx.regs.rbx = entry.ebx_out as u64;
-            ctx.regs.rcx = entry.ecx_out as u64;
-            ctx.regs.rdx = entry.edx_out as u64;
+    ktrace!("Received CPUID request: leaf =", leaf => hex, "subfn =", subfn => hex);
 
-            kinfo!("Handled CPUID request: leaf =", leaf => hex, "subfn =", subfn => hex, "output: rax =", ctx.regs.rax => hex, "rbx =", ctx.regs.rbx => hex, "rcx =", ctx.regs.rcx => hex, "rdx =", ctx.regs.rdx => hex);
-        } else {
-            kerror!("Invalid CPUID leaf:", leaf);
+    if let Some(DekoAtomicData { data: cpu_id, .. }) = CPUID_TABLE.get() {
+        let mut i = 0;
+        let mut found = false;
+        let check_ecx = cpuid_requires_ecx(leaf);
+
+        #[verus_spec(
+            invariant
+                i <= cpu_id.func@.len(),
+                cpu_id.wf(),
+            decreases
+                cpu_id.func@.len() - i,
+        )]
+        while i < cpu_id.func.len() {
+            let fns = cpu_id.func.index(i);
+            let ecx_matches = if check_ecx {
+                fns.ecx_in == subfn
+            } else {
+                true
+            };
+
+            if fns.eax_in == leaf && ecx_matches {
+                ctx.regs.rax = fns.eax_out as u64;
+                ctx.regs.rbx = fns.ebx_out as u64;
+                ctx.regs.rcx = fns.ecx_out as u64;
+                ctx.regs.rdx = fns.edx_out as u64;
+
+                found = true;
+
+                ktrace!("Handled CPUID request: leaf =", leaf => hex, "subfn =", subfn => hex, "output: rax =", ctx.regs.rax => hex, "rbx =", ctx.regs.rbx => hex, "rcx =", ctx.regs.rcx => hex, "rdx =", ctx.regs.rdx => hex);
+
+                break ;
+            }
+            i += 1;
+        }
+
+        if !found {
+            ctx.regs.rax = 0;
+            ctx.regs.rbx = 0;
+            ctx.regs.rcx = 0;
+            ctx.regs.rdx = 0;
         }
     } else {
         kerror!("CPUID table not initialized");

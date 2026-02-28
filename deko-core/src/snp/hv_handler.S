@@ -310,13 +310,6 @@ begin_iret_return:
 	addq	${EXCEP_FRAME_OFF}, %rsp
 
 default_iret:
-	movq    0x00(%rsp), %rdi   // RIP
-    movq    0x08(%rsp), %rsi   // CS
-    movq    0x10(%rsp), %rdx   // RFLAGS
-    movq    0x18(%rsp), %rcx   // RSP
-    movq    0x20(%rsp), %r8    // SS
-    call    debug_iret_frame
-
 	iretq
 
 return_user:

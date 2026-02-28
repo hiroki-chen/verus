@@ -1205,10 +1205,6 @@ pub fn prepare_guest_fw(
 
         init_guest_mmap(igvm_params);
 
-        // BUG: Somebody overwrites the secrets/cpuid page so
-        // that vmpl_switch fails due to invalid values read
-        // on these pages.
-
         // copy the ACPI table into the fw so that
         // the guest fw can use it.
         copy_apci_tables_to_fw(&fw_meta, kernel_prange.clone(), cpuid_table);
