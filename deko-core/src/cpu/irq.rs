@@ -5,8 +5,8 @@ use vstd::atomic::{PAtomicBool, PAtomicI32, PermissionBool, PermissionI32};
 use vstd::prelude::*;
 
 use crate::cpu::DekoCpuCtx;
+use crate::kinfo;
 use crate::snp::is_vmpl1;
-use crate::{kinfo, kpanic_if};
 
 verus! {
 
@@ -94,7 +94,6 @@ impl IrqState {
             perm.wf_with(self),
     )]
     pub fn push(&mut self, was_enabled: bool) {
-        // todo: add this for both VMPL0 and VMPL1.
         let tracked mut count0_perm = perm.counts_perm.tracked_remove(0);
 
         let val = self.counts[0].fetch_add_wrapping(Tracked(&mut count0_perm), 1);
@@ -184,7 +183,7 @@ pub fn raw_irq_disable() {
     unsafe {
         core::arch::asm!(
             "cli",
-            options(att_syntax, nostack, nomem)
+            options(att_syntax, preserves_flags, nomem)
         );
     }
 }
@@ -193,49 +192,8 @@ pub fn raw_irq_disable() {
 #[verifier::external_body]
 pub fn raw_irq_enable() {
     unsafe {
-        core::arch::asm!("sti", options(att_syntax, nostack, nomem));
+        core::arch::asm!("sti", options(att_syntax, preserves_flags, nomem));
     }
-}
-
-#[verus_spec(r =>
-    // with
-        // Tracked(core): Tracked<DekoCPUCore>,
-)]
-fn irq_disable_vmpl0(irq_enabled: bool) {
-    // First we need to push to the cpu.
-    let (this_cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
-    let mut cpu_taken = this_cpu.take(Tracked(&mut cpu_perm.ptr_perm));
-
-    proof_with!(Tracked(&mut cpu_perm.irq_state_perm));
-    cpu_taken.nested_irq.push(irq_enabled);
-
-    // Finally, put back the cpu.
-    this_cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
-}
-
-#[verus_spec(r =>
-        // with
-        // Tracked(core): Tracked<DekoCPUCore>,
-)]
-fn irq_disable_vmpl1(irq_enabled: bool) {
-    let (this_cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
-
-    let mut cpu_taken = this_cpu.take(Tracked(&mut cpu_perm.ptr_perm));
-    let ext_vmpl1 = cpu_taken.ext_vmpl1.take();
-    kpanic_if!(core::hint::unlikely(ext_vmpl1.is_none()), "VMPL1 CPU context not initialized");
-
-    let tracked mut ext_vmpl1_perm = cpu_perm.ext_vmpl1_perm.tracked_take();
-    let mut ext_vmpl1 = ext_vmpl1.unwrap();
-
-    proof_with!(Tracked(&mut ext_vmpl1_perm.nested_irq_perm));
-    ext_vmpl1.nested_irq.push(irq_enabled);
-
-    // Put back the VMPL1 context.
-    cpu_taken.ext_vmpl1.replace(ext_vmpl1);
-    proof {
-        cpu_perm.ext_vmpl1_perm = Some(ext_vmpl1_perm);
-    }
-    this_cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
 }
 
 /// Disable the CPU interrupts.
@@ -249,19 +207,24 @@ pub fn irq_disable() {
     let irq_enabled = irq_enabled();
     raw_irq_disable();
 
-    if !is_vmpl1() {
-        irq_disable_vmpl0(irq_enabled);
-    } else {
-        irq_disable_vmpl1(irq_enabled);
-    }
+    // First we need to push to the cpu.
+    let (this_cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
+    let mut cpu_taken = this_cpu.take(Tracked(&mut cpu_perm.ptr_perm));
+
+    proof_with!(Tracked(&mut cpu_perm.irq_state_perm));
+    cpu_taken.nested_irq.push(irq_enabled);
+
+    // Finally, put back the cpu.
+    this_cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
 }
 
+/// Enable the CPU interrupts.
 #[verus_spec(r =>
     // with
         // Tracked(core): Tracked<DekoCPUCore>,
 )]
 #[verifier::exec_allows_no_decreases_clause]
-fn irq_enable_vmpl0() {
+pub fn irq_enable() {
     let (this_cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
     let mut cpu_taken = this_cpu.take(Tracked(&mut cpu_perm.ptr_perm));
 
@@ -275,61 +238,14 @@ fn irq_enable_vmpl0() {
 
         if state {
             raw_irq_enable();
-            crate::imp::after_irq_enable();
+
+            if !is_vmpl1() {
+                // Cleanup any pending events that happened while IRQs were disabled.
+                crate::imp::after_irq_enable();
+            }
         }
     }
     this_cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
-}
-
-#[verus_spec(r =>
-    // with
-        // Tracked(core): Tracked<DekoCPUCore>,
-)]
-#[verifier::exec_allows_no_decreases_clause]
-fn irq_enable_vmpl1() {
-    let (this_cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
-
-    let mut cpu_taken = this_cpu.take(Tracked(&mut cpu_perm.ptr_perm));
-    let ext_vmpl1 = cpu_taken.ext_vmpl1.take();
-    kpanic_if!(core::hint::unlikely(ext_vmpl1.is_none()), "VMPL1 CPU context not initialized");
-
-    let tracked mut ext_vmpl1_perm = cpu_perm.ext_vmpl1_perm.tracked_take();
-    let mut ext_vmpl1 = ext_vmpl1.unwrap();
-
-    proof_with!(Tracked(&mut ext_vmpl1_perm.nested_irq_perm));
-    let val = ext_vmpl1.nested_irq.pop();
-
-    if val == 0 {
-        let state = ext_vmpl1.nested_irq.state.load(
-            Tracked(&mut ext_vmpl1_perm.nested_irq_perm.state_perm),
-        );
-
-        if state {
-            raw_irq_enable();
-            crate::imp::after_irq_enable();
-        }
-    }
-    // Put back the VMPL1 context.
-
-    cpu_taken.ext_vmpl1.replace(ext_vmpl1);
-    proof {
-        cpu_perm.ext_vmpl1_perm = Some(ext_vmpl1_perm);
-    }
-    this_cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
-}
-
-/// Enable the CPU interrupts.
-#[verus_spec(r =>
-    // with
-        // Tracked(core): Tracked<DekoCPUCore>,
-)]
-#[verifier::exec_allows_no_decreases_clause]
-pub fn irq_enable() {
-    if is_vmpl1() {
-        irq_enable_vmpl1();
-    } else {
-        irq_enable_vmpl0();
-    }
 }
 
 #[inline]
@@ -341,7 +257,7 @@ pub fn rflags() -> u64 {
             "pushfq",
             "popq {}",
             out(reg) rflags,
-            options(att_syntax)
+            options(nomem, att_syntax, preserves_flags)
         );
     }
 
@@ -364,13 +280,17 @@ pub fn irq_enabled() -> bool {
 /// Enter a zone where interrupts are disabled.
 #[verifier::external_body]
 pub fn no_irq_zone<T>(f: impl FnOnce() -> T) -> T {
-    irq_disable();
+    if is_vmpl1() {
+        f()
+    } else {
+        irq_disable();
 
-    let v = f();
+        let v = f();
 
-    irq_enable();
+        irq_enable();
 
-    v
+        v
+    }
 }
 
 } // verus!

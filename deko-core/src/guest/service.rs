@@ -14,6 +14,7 @@ use deko_std::{
 };
 use vstd::prelude::*;
 
+use crate::cpu::irq::no_irq_zone;
 use crate::cpu::regs::MSR_LSTAR;
 use crate::cpu::task::try_enter_guest;
 use crate::cpu::tlb::{flush_tlb_global_percpu, flush_tlb_global_sync};
@@ -36,6 +37,7 @@ use crate::policy::{
     inject_ifc_policy_engine, install_hook, DekoMsrIntercept, DekoMsrInterceptVec0,
     DekoSyscallBody,
 };
+use crate::snp::ghcb::vmpl_switch;
 use crate::snp::vmsa::VMSA;
 use crate::snp::{pvalidate, rmpadjust, validate_vaddr_region, VMPL_GUEST_KERNEL};
 use crate::{kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn, SELF_MAP};
@@ -55,7 +57,7 @@ global layout DekoGuestLstarWriteReq is size == 0x30;
 
 global layout DekoNewAppReq is size == 0x60;
 
-global layout DekoMapIfcReq is size == 0x298;
+global layout DekoMapIfcReq is size == 0x290;
 
 pub const DEKO_SERVICE_APP_ENTER_OK: u64 = 0x9000_0000;
 
@@ -114,7 +116,6 @@ pub struct DekoMapIfcReq {
     pub req_len: u16,
     pub _reserved: [u16; 3],
     pub ghcb_va: u64,
-    pub db_va: u64,
     pub reqs: [DekoMapIfcSingleReq; 16],
 }
 
@@ -1048,23 +1049,11 @@ fn handle_deko_service_map_ifc(params: &mut DekoGuestRequestParams) -> DekoGuest
         is_percpu: 1,
     };
 
-    let ext_vmpl1 = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).ext_vmpl1.as_ref().ok_or(
+    let ghcb_va = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).ext_vmpl1.as_ref().ok_or(
         DekoGuestServError::SoftError(DekoGuestServResultCode::Busy),
-    )?;
-
-    let ghcb_va = ext_vmpl1.ghcb.into_vaddr();
-    let db_va =
-        deko_rwlock_read_atomic_data!{
-        ext_vmpl1.doorbell,
-        doorbell,
-        __,
-        {
-            doorbell.into_vaddr()
-        }
-    };
+    )?.ghcb.into_vaddr();
 
     req.ghcb_va = ghcb_va.0;
-    req.db_va = db_va.0;
     temp_mapping.write_ref_at::<DekoMapIfcReq>(offset as _, &req);
 
     Ok(())

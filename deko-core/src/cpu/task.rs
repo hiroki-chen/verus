@@ -35,9 +35,7 @@ use crate::cpu::{
     self, start_application_processor, DekoCpuCtx, DekoCpuCtxPermission, CPUID_MAX_COUNT, CPU_NUM,
     PERCPU_AREAS,
 };
-use crate::guest::{
-    handle_guest_exit, DekoGuestExitInformation, DekoGuestServError, DekoVmplSwitchErr,
-};
+use crate::guest::{handle_guest_exit, DekoGuestExitInformation, DekoGuestServError};
 use crate::imp::doorbell::HVDoorbell;
 use crate::imp::ghcb::{vmpl_switch, GuestHostCommunicationBlock};
 use crate::imp::vmsa::VMSA;
@@ -143,12 +141,9 @@ pub fn request_vm_region() -> Option<(usize, VaddrRange)> {
 #[repr(C, packed)]
 #[derive(DekoDebug, Clone, Copy)]
 pub struct X86InterruptFrame {
-    #[deko(hex)]
     pub rip: u64,
     pub cs: u64,
-    #[deko(hex)]
     pub flags: u64,
-    #[deko(hex)]
     pub rsp: u64,
     pub ss: u64,
 }
@@ -1512,8 +1507,8 @@ impl DekoRunnable {
 /// Before calling the function, a valid task must be created and
 /// properly assigned to the current thread.
 #[verus_spec(r =>
-    // with ???
-)]
+        // with ???
+    )]
 pub unsafe fn schedule_init() {
     // NO IRQ is allowed or the system will jump into
     // an inconsistent state.
@@ -2172,30 +2167,23 @@ pub fn serv_main(cpu_index: usize) {
 
     DekoCpuCtx::setup_vmpl1(this_cpu, Tracked(&mut perm));
 
+    kinfo!("Core ", cpu_index, " entering guest execution loop.");
+
     loop
         invariant
             cpu_index < CPUID_MAX_COUNT,
     {
-        kinfo!("entering VMPL_GUEST_SECURE_APP");
         // First kick the core into VMPL1 for setting up the necessary contexts.
-        match no_irq_zone(
+        if no_irq_zone(
             ||
                 {
                     flush_tlb_global_sync();
                     vmpl_switch(VMPL_GUEST_SECURE_APP)
                 },
         ) {
-            DekoVmplSwitchErr::Ok => break ,
-            DekoVmplSwitchErr::Failed => {
-                kinfo!("VMPL switch failed on core ", cpu_index, " when entering VMPL_GUEST_SECURE_APP.");
-            },
-            DekoVmplSwitchErr::Cancelled => {
-                kinfo!("Invalid VMPL level when switching to VMPL_GUEST_SECURE_APP on core ", cpu_index, ".");
-            },
+            break ;
         }
     }
-
-    kinfo!("Core ", cpu_index, " entering guest execution loop.");
 
     // If the above function returns then we simply enter the main loop for
     // serving the guest exits.
@@ -2320,7 +2308,7 @@ pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
                     // Also need to update the guest interrupt delivery information here.
                     // Need to update the guest APIC status here so no interrupt will
                     // be delivered.
-                    vmpl_switch(VMPL_GUEST_KERNEL)
+                    vmpl_switch(VMPL_GUEST_KERNEL);
                 },
         );
 

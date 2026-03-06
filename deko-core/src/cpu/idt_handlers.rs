@@ -12,8 +12,6 @@ verus! {
 
 const SVM_EXIT_CPUID: usize = 0x072;
 
-const SVM_EXIT_PAGE_NOT_VALIDATED: usize = 0x404;
-
 const PF_ERRNO_PRESENT: u64 = 1 << 0;
 
 const PF_ERRNO_WRITE: u64 = 1 << 1;
@@ -51,6 +49,30 @@ pub fn pretty_pf_errno(errno: u64) {
     if errno & PF_ERRNO_INSTR != 0 {
         crate::kinfo!("  - caused by an instruction fetch");
     }
+}
+
+/// Called from VMPL1 -> VMPL1 exception handler for page faults.
+#[verifier::external_body]
+#[no_mangle]
+#[verus_spec(
+)]
+unsafe extern "C" fn deko_ifc_handler_page_fault(ctx: &mut X86ExceptionContext) {
+    kinfo!("Page Fault Exception occurred in VMPL1:", ctx);
+    // handle this.
+    // need to sanitize and forward to the guest OS for
+    // the guest to handle page faults.
+}
+
+/// Called from VMPL1 -> VMPL1 exception handler for NMI.
+#[verifier::external_body]
+#[no_mangle]
+#[verus_spec(
+
+)]
+unsafe extern "C" fn deko_ifc_handler_nmi(ctx: &mut X86ExceptionContext) {
+    kinfo!("NMI occurred in VMPL1:", ctx);
+    // Option 1: Forward to the guest OS NMI handler? or we just ignore it here.
+    // Option 2: commit suicide.
 }
 
 #[no_mangle]
@@ -101,6 +123,7 @@ unsafe extern "C" fn ex_handler_page_fault(ctx: &mut X86ExceptionContext) {
     kinfo!("faulting address (CR2):", cr2 => hex);
 
     kinfo!("context:", ctx);
+
     dbg::print_stack(0);
 
     loop {
@@ -108,14 +131,8 @@ unsafe extern "C" fn ex_handler_page_fault(ctx: &mut X86ExceptionContext) {
 }
 
 #[no_mangle]
-#[verifier::exec_allows_no_decreases_clause]
 unsafe extern "C" fn ex_handler_general_protection(ctx: &mut X86ExceptionContext) {
     kinfo!("General Protection Fault occurred:", ctx);
-    dbg::print_stack_raw(ctx.frame.rsp.wrapping_sub(128), 128);
-    dbg::debug_doorbell();
-
-    loop {
-    }
 }
 
 #[no_mangle]
@@ -139,15 +156,7 @@ unsafe extern "C" fn ex_handler_vmm_handler(ctx: &mut X86ExceptionContext) {
 
     match errno {
         SVM_EXIT_CPUID => vc_handle_cpuid(ctx),
-        SVM_EXIT_PAGE_NOT_VALIDATED => {
-            let cr2 = crate::cpu::regs::read_cr2();
-            kerror!("Page Not Validated SVM Exit: CR2 =", cr2 => hex, "context:", ctx);
-            die("Page Not Validated SVM Exit");
-        },
-        _ => {
-            kerror!("Invalid VMM error code:", errno=>hex, "context:", ctx);
-            die("");
-        },
+        _ => kerror!("Invalid VMM error code:", errno),
     }
 }
 

@@ -7,6 +7,111 @@
 
 .text
 
+.globl deko_ifc_irq_reflection
+deko_ifc_irq_reflection:
+	pushq %rdi
+	pushq %rsi
+
+	movl  $0xc0010130, %ecx
+	xorl  %edx, %edx
+	movl  $0x16, %eax // VMPL_RUN
+	wrmsr
+
+	// todo: move the interrupt vector number into somewhere.
+  // construct the SVSM call to reflect the interrupt.
+	movabs $0x400000002, %rax
+	// movq $<interrupt-vector>, %rdx
+
+	rep; vmmcall
+
+	rdmsr
+	cmpl $0x17, %eax
+	jne   1f
+
+	popq %rsi
+	popq %rdi
+	iretq
+1:
+	// Error handling path.
+	cli
+	ud2
+	hlt
+
+// Let it die.
+.globl deko_ifc_idt_handler_default
+.globl deko_ifc_idt_handler_page_fault
+
+deko_ifc_idt_handler_default:
+  cli
+  ud2
+  hlt
+
+deko_ifc_idt_handler_nmi:
+	clac
+
+	pushq	%rax
+	pushq	%rbx
+	pushq	%rcx
+	pushq	%rdx
+	pushq	%rsi
+	pushq	%rdi
+	pushq	%rbp
+	pushq	%r8
+	pushq	%r9
+	pushq	%r10
+	pushq	%r11
+	pushq	%r12
+	pushq	%r13
+	pushq	%r14
+	pushq	%r15
+	xorl	%eax, %eax
+	rdsspq	%rax
+	pushq	%rax
+
+	testl	$0x200, 0x98(%rsp)
+
+	jz	.Lskip_nmi2
+	sti
+.Lskip_nmi2:
+	movl	$2, %esi               // NMI Vector
+	movq	%rsp, %rdi
+	xorl	%edx, %edx
+	call	deko_ifc_handler_nmi
+
+deko_ifc_idt_handler_page_fault:
+	clac
+
+	pushq	%rax
+	pushq	%rbx
+	pushq	%rcx
+	pushq	%rdx
+	pushq	%rsi
+	pushq	%rdi
+	pushq	%rbp
+	pushq	%r8
+	pushq	%r9
+	pushq	%r10
+	pushq	%r11
+	pushq	%r12
+	pushq	%r13
+	pushq	%r14
+	pushq	%r15
+	xorl	%eax, %eax
+	rdsspq	%rax
+	pushq	%rax
+
+	testl	$0x200, 0x98(%rsp)
+
+	jz	.Lskip_pf2
+	sti
+.Lskip_pf2:
+	movl	$14, %esi               // Page Fault Vector
+	movq	%rsp, %rdi
+	xorl	%edx, %edx
+	call	deko_ifc_handler_page_fault
+
+	iretq
+
 .globl stage2_generic_idt_handler
 .globl stage2_generic_idt_handler_no_ghcb
 stage2_generic_idt_handler:

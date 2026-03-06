@@ -22,7 +22,6 @@ use super::is_vmpl1;
 use crate::cpu::irq::no_irq_zone;
 use crate::cpu::tlb::{flush_tlb_global_percpu, flush_tlb_global_sync};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
-use crate::guest::DekoVmplSwitchErr;
 use crate::logging::CONSOLE_LOCK;
 use crate::mm::paging::{PageTable, PteFlags};
 use crate::mm::{virt_to_phys, virt_to_phys_checked};
@@ -35,30 +34,9 @@ use crate::snp::{
 use crate::{bits, kdebug, kerror, kinfo, kpanic_if, kunimplemented};
 
 extern "C" {
-    /// Attempts to switch execution to the specified VMPL level.
-    ///
-    /// # Parameters
-    /// - `hv_doorbell`: Pointer to the #HV doorbell page. If non-null, the
-    ///   NoFurtherSignal bit (bit 15 of the first word) is checked before
-    ///   issuing the VMPL switch request.
-    /// - `target_vmpl`: The VMPL level to switch to.
-    ///
-    /// # Returns
-    /// - `true` if the VMPL switch is considered successful. This includes
-    ///   both a completed switch and a switch aborted due to a pending #HV,
-    ///   which is treated as success by design.
-    /// - `false` if the VMPL switch request was not honored.
-    ///
-    /// # Safety
-    /// This function performs a low-level VMPL transition using MSR-based
-    /// requests and `vmmcall`. The caller must ensure that execution context,
-    /// segment state, and memory mappings are valid for the target VMPL.
     #[allow(improper_ctypes)]
     #[allow(improper_ctypes_definitions)]
-    fn switch_to_vmpl_unsafe(
-        hv_doorbell: *const doorbell::HVDoorbell,
-        target_vmpl: u32,
-    ) -> DekoVmplSwitchErr;
+    fn switch_to_vmpl_unsafe(hv_doorbell: *const doorbell::HVDoorbell, target_vmpl: u32) -> bool;
 }
 
 core::arch::global_asm!(include_str!("switch.S"), options(att_syntax));
@@ -81,7 +59,7 @@ verus! {
     requires
         target_vmpl <= 3,
 )]
-pub fn vmpl_switch(target_vmpl: u32) -> DekoVmplSwitchErr {
+pub fn vmpl_switch(target_vmpl: u32) -> bool {
     let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
     let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
     kpanic_if!(
@@ -89,7 +67,7 @@ pub fn vmpl_switch(target_vmpl: u32) -> DekoVmplSwitchErr {
         "GHCB doorbell pointer is None",
     );
 
-    let doorbell_ptr = if !is_vmpl1() {
+    let doorbell_ptr =
         deko_rwlock_read_atomic_data! {
         cpu_borrow.doorbell.as_ref().unwrap(),
         ptr,
@@ -97,25 +75,16 @@ pub fn vmpl_switch(target_vmpl: u32) -> DekoVmplSwitchErr {
         {
             *ptr
         }
-    }
-    } else {
-        if core::hint::unlikely(cpu_borrow.ext_vmpl1.is_none()) {
-            return DekoVmplSwitchErr::Failed;
-        }
-        let ext_vmpl1 = cpu_borrow.ext_vmpl1.as_ref().unwrap();
-        deko_rwlock_read_atomic_data! {
-            ext_vmpl1.doorbell,
-            ptr,
-            __,
-            {
-                *ptr
-            }
-        }
     };
+
+    // Here we need to disable printing.
+    // let guard = CONSOLE_LOCK.acquire_write();
 
     let r = unsafe {
         switch_to_vmpl_unsafe(doorbell_ptr.addr() as *const doorbell::HVDoorbell, target_vmpl)
     };
+
+    // guard.release_write_no_val();
 
     r
 }

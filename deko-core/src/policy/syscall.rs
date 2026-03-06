@@ -1330,7 +1330,6 @@ pub fn analyze_and_prepare_syscall(syscall_body: &mut DekoSyscallBody) -> DekoGu
 
             die("");
         },
-        SYS_exit | SYS_exit_group => { analyze_syscall_exit(syscall_body)? },
         _ => (),
     }
 
@@ -1340,6 +1339,8 @@ pub fn analyze_and_prepare_syscall(syscall_body: &mut DekoSyscallBody) -> DekoGu
 pub fn sysret_epilogue(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResult<()> {
     let syscall_num = syscall_body.rax;
     let buf_va = get_buf_va()?;
+
+    kinfo!("Sysret check: the syscall handler has returned, now checking the result in the shared buffer");
 
     let handled_syscall_body = unsafe { buf_va.read::<DekoSyscallBody>() };
 
@@ -1494,15 +1495,6 @@ fn analyze_syscall_mmap(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResu
         }
     }
     syscall_body.rsi = aligned_length;
-
-    Ok(())
-}
-
-fn analyze_syscall_exit(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResult<()> {
-    let _exit_code = syscall_body.rdi as u8;
-
-    // TODO: implement application unregistration / state transition on exit.
-    // For now, we intentionally treat SYS_exit/SYS_exit_group as successfully analyzed.
 
     Ok(())
 }

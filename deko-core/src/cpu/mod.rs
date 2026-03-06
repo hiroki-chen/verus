@@ -491,14 +491,6 @@ pub struct DekoCpuCtxPerVmpl {
     pub ghcb: DekoPPtr<GuestHostCommunicationBlock>,
     /// The gpa of the GHCB for this extended context.
     pub ghcb_gpa: PhysAddr,
-    /// The doorbell for this extended context to use.
-    pub doorbell: DekoUnsafeRwLock<
-        DekoPPtr<HVDoorbell>,
-        HvDoorbellPtrPermission,
-        HvDoorbellPtrPred,
-    >,
-    /// The physical address of the doorbell.
-    pub doorbell_pa: PhysAddr,
     /// The stack for this extended context.
     pub vmpl1_stack: VirtAddr,
     /// The TSS.
@@ -507,24 +499,18 @@ pub struct DekoCpuCtxPerVmpl {
     pub gdt: DekoPPtr<GlobalDescriptorTable>,
     /// The active application id.
     pub pid: Option<u32>,
-    /// The nested IRQ.
-    #[deko(skip)]
-    pub nested_irq: IrqState,
 }
 
 with_permission! {
     DekoCpuCtxPerVmpl,
     vmsa_perm: VmsaPagePermission,
     ghcb_perm: DekoPointsTo<GuestHostCommunicationBlock>,
-    nested_irq_perm: IrqStatePermission,
 }
 
 impl WellFormed for DekoCpuCtxPerVmpl {
     open spec fn wf(&self) -> bool {
         &&& self.vmpl < 4
         &&& self.vmsa.wf()
-        &&& self.doorbell.wf()
-        &&& self.doorbell_pa@ % PAGE_SIZE == 0
     }
 }
 
@@ -537,7 +523,6 @@ impl DekoCpuCtxPerVmpl {
         &&& perm.ghcb_perm.pptr() == self.ghcb@
         &&& perm.ghcb_perm.is_init()
         &&& perm.ghcb_perm.wf()
-        &&& perm.nested_irq_perm.wf_with(&self.nested_irq)
     }
 
     /// Create a new [`DekoCpuCtxPerVmpl`] structure with dummy VMSA and GHCB.
@@ -607,26 +592,10 @@ impl DekoCpuCtxPerVmpl {
         );
         gdt_ptr.write(Tracked(&mut gdt_perm), gdt);
 
-        proof_with!(=> Tracked(db_perm));
-        let (db_ptr, db_pa) = HVDoorbell::allocate(true);
-
-        let doorbell = DekoRwLock::new(
-            DekoAtomicData::new_with(db_ptr, Tracked(db_perm)),
-            IrqUnSafeLockGuard {  },
-            Ghost(HvDoorbellPtrPred {  }),
-        );
-
-        proof {
-            use_type_invariant(&doorbell);
-        }
-
-        let (nested_irq, Tracked(nested_irq_perm)) = IrqState::new();
-
         proof_with!(|= Tracked(
             DekoCpuCtxPerVmplPermission {
                 vmsa_perm,
                 ghcb_perm,
-                nested_irq_perm,
             }
         ));
         Self {
@@ -634,13 +603,10 @@ impl DekoCpuCtxPerVmpl {
             vmsa,
             ghcb,
             ghcb_gpa,
-            doorbell,
-            doorbell_pa: db_pa,
             vmpl1_stack: VirtAddr(stack_ptr.into_vaddr().0.wrapping_add(0x8000)),
             tss: tss_ptr,
             gdt: gdt_ptr,
             pid: None,
-            nested_irq,
         }
     }
 

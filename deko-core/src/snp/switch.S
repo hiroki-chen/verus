@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //
 // Copyright (c) 2022-2023 SUSE LLC
-// Copyright (c) 2025-2026 Hiroki Chen
 //
 // Author: Joerg Roedel <jroedel@suse.de>
 //         Hiroki Chen  <haobchen@iu.edu>
@@ -38,21 +37,18 @@ switch_vmpl_proceed:
     wrmsr
     rep; vmmcall
 
+.globl switch_vmpl_window_end
+switch_vmpl_window_end:
     /* Verify that the request was honored.  ECX still contains the MSR
       * number. */
     rdmsr
     andl $0xFFF, %eax
     cmpl $0x17, %eax
-    jnz switch_vmpl_failed
+    jz switch_vmpl_cancel
     xorl %eax, %eax
     ret
 
-.globl switch_vmpl_window_end
-switch_vmpl_window_end:
-switch_vmpl_failed:
-    movl $2, %eax
-    ret
-
+    /* An aborted VMPL switch is treated as a successful switch. */
 .globl switch_vmpl_cancel
 switch_vmpl_cancel:
     movl $1, %eax

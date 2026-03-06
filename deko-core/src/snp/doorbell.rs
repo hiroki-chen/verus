@@ -35,11 +35,10 @@ use core::ptr::addr_of;
 
 use deko_macros::{with_atomic_pred, DekoDebug};
 use deko_std::address::VirtAddr;
-use deko_std::mem::{PAGE_SIZE, PAGE_SIZE_2M, PERCPU_BASE_VMPL1};
+use deko_std::mem::PAGE_SIZE;
 use deko_std::misc::early_die;
-use deko_std::prelude::PhysAddr;
 use deko_std::ptr::{DekoPPtr, DekoPPtrPred, DekoPointsTo};
-use deko_std::sync::{DekoAtomicData, DekoRwLock, RwLock};
+use deko_std::sync::{DekoAtomicData, DekoRwLock};
 use deko_std::wf::WellFormed;
 use deko_std::{
     boxed_ptr, deko_rwlock_read_atomic_data, deko_rwlock_write_atomic_data, with_permission,
@@ -49,19 +48,21 @@ use vstd::prelude::*;
 
 use crate::cpu::apic::Apic;
 use crate::cpu::idt::{IPI_VECTOR, TIMER_VECTOR};
-use crate::cpu::irq::{irq_enabled, raw_irq_disable, raw_irq_enable, IrqUnSafeLockGuard};
+use crate::cpu::irq::{
+    irq_disable, irq_enable, raw_irq_disable, raw_irq_enable, IrqUnSafeLockGuard,
+};
 use crate::cpu::task::{debug_hv, X86ExceptionContext};
-use crate::cpu::{DekoCpuCtx, DekoCpuCtxPerVmpl, DekoCpuCtxPermission};
+use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
 use crate::mm::frame_allocator::DekoPageFrameBox;
 use crate::mm::paging::PageTable;
 use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR_FULL};
+use crate::snp::doorbell;
 use crate::snp::ghcb::{current_ghcb, GuestHostCommunicationBlock};
-use crate::snp::{doorbell, is_vmpl1, vmpl1_cpuid};
 use crate::{die, kdebug, kerror, kinfo, kpanic_if, ktrace, kwarn};
 
 extern "C" {
+    // exclusive.
     pub static mut HV_DOORBELL_ADDR: usize;
-    pub static mut HV_DOORBELL_ADDR_VMPL1: usize;
 }
 
 core::arch::global_asm!(
@@ -86,7 +87,6 @@ core::arch::global_asm!(
     EXCEP_R9_OFF = const offset_of!(X86ExceptionContext, regs.r9),
     EXCEP_R8_OFF = const offset_of!(X86ExceptionContext, regs.r8),
     EXCEP_RBP_OFF = const offset_of!(X86ExceptionContext, regs.rbp),
-    DEKO_DOORBELL_CTX_OFFSET = const offset_of!(DekoCpuCtx, ext_vmpl1) + offset_of!(DekoCpuCtxPerVmpl, doorbell),
     options(att_syntax)
 );
 
@@ -134,209 +134,6 @@ pub fn init_hv_doorbell(
         HV_DOORBELL_ADDR =
         addr_of!((*(ptr.addr() as *const DekoAtomicData<DekoPPtr<HVDoorbell>, HvDoorbellPtrPermission>)).data) as usize;
     }
-}
-
-#[verifier::external_body]
-#[inline]
-pub fn init_hv_doorbell_vmpl1() {
-    unsafe {
-        HV_DOORBELL_ADDR_VMPL1 = PERCPU_BASE_VMPL1.0 as usize;
-        kinfo!("Initialized VMPL1 HV_DOORBELL_ADDR at address:", HV_DOORBELL_ADDR_VMPL1 => hex);
-    }
-}
-
-#[inline]
-#[verifier::external_body]
-pub fn hv_trace_event(hv_ptr: DekoPPtr<HVDoorbell>, event: u8, arg0: u64, arg1: u64) {
-    const TRACE_EVT_SEQ_OFF: usize = 4;
-    const TRACE_EVT_TIMER_HITS_OFF: usize = 5;
-    const TRACE_EVT_LAST_VEC_OFF: usize = 6;
-    const TRACE_EVT_LAST_FLAGS_OFF: usize = 7;
-
-    unsafe {
-        let db_addr = hv_ptr.addr() as usize;
-        if db_addr == 0 {
-            return ;
-        }
-        let seq_ptr = (db_addr + TRACE_EVT_SEQ_OFF) as *mut u8;
-        let seq = core::ptr::read_volatile(seq_ptr);
-        core::ptr::write_volatile(seq_ptr, seq.wrapping_add(1));
-        if event == 2 {
-            let hits_ptr = (db_addr + TRACE_EVT_TIMER_HITS_OFF) as *mut u8;
-            let hits = core::ptr::read_volatile(hits_ptr);
-            core::ptr::write_volatile(hits_ptr, hits.wrapping_add(1));
-        }
-        core::ptr::write_volatile((db_addr + TRACE_EVT_LAST_VEC_OFF) as *mut u8, arg0 as u8);
-        core::ptr::write_volatile((db_addr + TRACE_EVT_LAST_FLAGS_OFF) as *mut u8, arg1 as u8);
-    }
-}
-
-#[verifier::external_body]
-#[inline]
-pub fn dump_hv_doorbell_trace_and_reset() {
-    const TRACE_EVT_SEQ_OFF: usize = 4;
-    const TRACE_EVT_TIMER_HITS_OFF: usize = 5;
-    const TRACE_EVT_LAST_VEC_OFF: usize = 6;
-    const TRACE_EVT_LAST_FLAGS_OFF: usize = 7;
-    const TRACE_RESERVED_OFF: usize = 8;
-    const TRACE_SLOT0_OFF: usize = TRACE_RESERVED_OFF + 0 * 8;
-    const TRACE_SLOT1_OFF: usize = TRACE_RESERVED_OFF + 1 * 8;
-    const TRACE_SLOT2_OFF: usize = TRACE_RESERVED_OFF + 2 * 8;
-    const TRACE_SLOT3_OFF: usize = TRACE_RESERVED_OFF + 3 * 8;
-    const TRACE_SLOT4_OFF: usize = TRACE_RESERVED_OFF + 4 * 8;
-    const TRACE_SLOT5_OFF: usize = TRACE_RESERVED_OFF + 5 * 8;
-    const TRACE_SLOT6_OFF: usize = TRACE_RESERVED_OFF + 6 * 8;
-
-    unsafe {
-        let db_slot_addr = if is_vmpl1() {
-            let cpu_off = vmpl1_cpuid() as usize * PAGE_SIZE_2M as usize;
-            let db_off = offset_of!(DekoCpuCtx, ext_vmpl1)
-                + offset_of!(DekoCpuCtxPerVmpl, doorbell);
-            HV_DOORBELL_ADDR_VMPL1 + cpu_off + db_off
-        } else {
-            HV_DOORBELL_ADDR
-        };
-        if db_slot_addr == 0 {
-            return ;
-        }
-        let db_addr = core::ptr::read_volatile(db_slot_addr as *const usize);
-        if db_addr == 0 {
-            return ;
-        }
-        let evt_seq = core::ptr::read_volatile((db_addr + TRACE_EVT_SEQ_OFF) as *const u8);
-        let evt_timer_hits = core::ptr::read_volatile(
-            (db_addr + TRACE_EVT_TIMER_HITS_OFF) as *const u8,
-        );
-        let evt_last_vec = core::ptr::read_volatile(
-            (db_addr + TRACE_EVT_LAST_VEC_OFF) as *const u8,
-        );
-        let evt_last_flags = core::ptr::read_volatile(
-            (db_addr + TRACE_EVT_LAST_FLAGS_OFF) as *const u8,
-        );
-
-        let slot0 = core::ptr::read_volatile((db_addr + TRACE_SLOT0_OFF) as *const u64);
-        let slot1 = core::ptr::read_volatile((db_addr + TRACE_SLOT1_OFF) as *const u64);
-        if slot0 == 0 && slot1 == 0 && evt_seq == 0 {
-            return ;
-        }
-        let slot2 = core::ptr::read_volatile((db_addr + TRACE_SLOT2_OFF) as *const u64);
-        let slot3 = core::ptr::read_volatile((db_addr + TRACE_SLOT3_OFF) as *const u64);
-        let slot4 = core::ptr::read_volatile((db_addr + TRACE_SLOT4_OFF) as *const u64);
-        let slot5 = core::ptr::read_volatile((db_addr + TRACE_SLOT5_OFF) as *const u64);
-        let slot6 = core::ptr::read_volatile((db_addr + TRACE_SLOT6_OFF) as *const u64);
-
-        kinfo!(
-            "HV doorbell trace iret_hits=",
-            slot0,
-            " restart_hits=",
-            slot1,
-            " iret_frame_rsp=",
-            slot2 => hex,
-            " iret_frame_rip=",
-            slot3 => hex,
-        );
-        kinfo!(
-            "HV doorbell trace restart_old_rsp=",
-            slot4 => hex,
-            " restart_new_rsp=",
-            slot5 => hex,
-            " restart_frame_rip=",
-            slot6 => hex,
-        );
-        kinfo!(
-            "HV doorbell event seq=",
-            evt_seq,
-            " timer_hits=",
-            evt_timer_hits,
-            " last_vec=",
-            evt_last_vec,
-            " last_flags=",
-            evt_last_flags,
-        );
-
-        core::ptr::write_volatile((db_addr + TRACE_EVT_SEQ_OFF) as *mut u8, 0);
-        core::ptr::write_volatile((db_addr + TRACE_EVT_TIMER_HITS_OFF) as *mut u8, 0);
-        core::ptr::write_volatile((db_addr + TRACE_EVT_LAST_VEC_OFF) as *mut u8, 0);
-        core::ptr::write_volatile((db_addr + TRACE_EVT_LAST_FLAGS_OFF) as *mut u8, 0);
-        core::ptr::write_volatile((db_addr + TRACE_SLOT0_OFF) as *mut u64, 0);
-        core::ptr::write_volatile((db_addr + TRACE_SLOT1_OFF) as *mut u64, 0);
-        core::ptr::write_volatile((db_addr + TRACE_SLOT2_OFF) as *mut u64, 0);
-        core::ptr::write_volatile((db_addr + TRACE_SLOT3_OFF) as *mut u64, 0);
-        core::ptr::write_volatile((db_addr + TRACE_SLOT4_OFF) as *mut u64, 0);
-        core::ptr::write_volatile((db_addr + TRACE_SLOT5_OFF) as *mut u64, 0);
-        core::ptr::write_volatile((db_addr + TRACE_SLOT6_OFF) as *mut u64, 0);
-    }
-}
-
-#[verifier::external_body]
-#[inline]
-pub fn dump_vmpl1_doorbell_snapshot_current_cpu() {
-    const TRACE_EVT_SEQ_OFF: usize = 4;
-    const TRACE_EVT_TIMER_HITS_OFF: usize = 5;
-    const TRACE_EVT_LAST_VEC_OFF: usize = 6;
-    const TRACE_EVT_LAST_FLAGS_OFF: usize = 7;
-
-    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
-    let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
-    let ext = match cpu_borrow.ext_vmpl1.as_ref() {
-        Some(e) => e,
-        None => return ,
-    };
-
-    let cpu_id = cpu_borrow.cpu_id;
-    let mut db_addr: usize = 0;
-    let mut vector: u8 = 0;
-    let mut flags: u8 = 0;
-    let mut no_eoi: u8 = 0;
-    let mut per_vmpl_events: u8 = 0;
-    let mut evt_seq: u8 = 0;
-    let mut evt_timer_hits: u8 = 0;
-    let mut evt_last_vec: u8 = 0;
-    let mut evt_last_flags: u8 = 0;
-
-    deko_rwlock_read_atomic_data! {
-        &ext.doorbell,
-        doorbell_ptr,
-        doorbell_perm,
-        {
-            db_addr = doorbell_ptr.addr() as usize;
-            let doorbell = doorbell_ptr.borrow(Tracked(&doorbell_perm.borrow().ptr_perm));
-            vector = doorbell.vector.load(Tracked(&doorbell_perm.borrow().hv_perm.vector_perm));
-            flags = doorbell.flags.load(Tracked(&doorbell_perm.borrow().hv_perm.flags_perm));
-            no_eoi = doorbell.no_eoi_required.load(Tracked(&doorbell_perm.borrow().hv_perm.no_eoi_required_perm));
-            per_vmpl_events = doorbell.per_vmpl_events.load(Tracked(&doorbell_perm.borrow().hv_perm.per_vmpl_events_perm));
-            unsafe {
-                let base = doorbell_ptr.addr() as usize;
-                evt_seq = core::ptr::read_volatile((base + TRACE_EVT_SEQ_OFF) as *const u8);
-                evt_timer_hits = core::ptr::read_volatile((base + TRACE_EVT_TIMER_HITS_OFF) as *const u8);
-                evt_last_vec = core::ptr::read_volatile((base + TRACE_EVT_LAST_VEC_OFF) as *const u8);
-                evt_last_flags = core::ptr::read_volatile((base + TRACE_EVT_LAST_FLAGS_OFF) as *const u8);
-            }
-        }
-    }
-
-    kinfo!(
-        "VMPL1 doorbell snapshot cpu=",
-        cpu_id,
-        " db=",
-        db_addr => hex,
-        " vector=",
-        vector,
-        " flags=",
-        flags,
-        " no_eoi=",
-        no_eoi,
-        " per_vmpl_events=",
-        per_vmpl_events,
-        " trace_seq=",
-        evt_seq,
-        " trace_timer_hits=",
-        evt_timer_hits,
-        " trace_last_vec=",
-        evt_last_vec,
-        " trace_last_flags=",
-        evt_last_flags,
-    );
 }
 
 #[repr(C)]
@@ -504,21 +301,8 @@ impl HVDoorbell {
     /// Consults the frame allocator and gets a new allocated [`HVDoorbell`] structure.
     ///
     /// The returned pointer is aligned to page size.
-    #[verus_spec(doorbell_ptr =>
-        with
-            -> db_perm: Tracked<HvDoorbellPtrPermission>,
-        ensures
-            db_perm.wf(),
-            db_perm.ptr_perm.pptr() == doorbell_ptr.0@,
-            db_perm.ptr_perm.is_init(),
-            db_perm.ptr_perm.wf(),
-            db_perm.hv_perm.vector_perm.is_for(db_perm.ptr_perm.value().vector),
-            db_perm.hv_perm.flags_perm.is_for(db_perm.ptr_perm.value().flags),
-            db_perm.hv_perm.no_eoi_required_perm.is_for(db_perm.ptr_perm.value().no_eoi_required),
-            db_perm.hv_perm.per_vmpl_events_perm.is_for(db_perm.ptr_perm.value().per_vmpl_events),
-            doorbell_ptr.1@ % PAGE_SIZE == 0,
-    )]
-    pub fn allocate(is_vmpl1: bool) -> (DekoPPtr<Self>, PhysAddr) {
+    #[verus_spec()]
+    pub fn allocate() {
         let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
 
         let cpu_borrowed = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
@@ -559,22 +343,19 @@ impl HVDoorbell {
             die("");
         };
 
-        kinfo!("Allocated HVDoorbell at virtual address:", vaddr => hex, "physical address:", doorbell_paddr => hex, "for VMPL", if is_vmpl1 { "1" } else { "0" });
+        kinfo!("Allocated HVDoorbell at virtual address:", vaddr => hex, "physical address:", doorbell_paddr => hex);
 
         kpanic_if!(core::hint::unlikely(doorbell_paddr.0 % PAGE_SIZE != 0),
             "HVDoorbell physical address is not page-aligned!"
         );
 
         // Then we register the doorbell with the GHCB.
-        if !is_vmpl1 {
-            GuestHostCommunicationBlock::register_hv_doorbell(
-                ghcb,
-                Tracked(cpu_perm.ghcb_perm),
-                doorbell_paddr,
-                cpu_borrowed.ghcb_gpa,
-            );
-        }
-        // The initialization of VMPL1 doorbell is deferred until we enter VMPL1.
+        GuestHostCommunicationBlock::register_hv_doorbell(
+            ghcb,
+            Tracked(cpu_perm.ghcb_perm),
+            doorbell_paddr,
+            cpu_borrowed.ghcb_gpa,
+        );
 
         let tracked db_perm = HvDoorbellPtrPermission { hv_perm: doorbell_perm, ptr_perm: perm };
 
@@ -592,8 +373,16 @@ impl HVDoorbell {
             ));
         }
 
-        proof_with!(|= Tracked(db_perm));
-        (doorbell_ptr, doorbell_paddr)
+        let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
+        cpu_taken.doorbell = Some(
+            DekoRwLock::new(
+                DekoAtomicData::new_with(doorbell_ptr, Tracked(db_perm)),
+                IrqUnSafeLockGuard {  },
+                Ghost(HvDoorbellPtrPred {  }),
+            ),
+        );
+
+        cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
     }
 }
 
@@ -642,241 +431,29 @@ impl HVDoorbell {
         hvdb_perm.hv_perm.no_eoi_required_perm.is_for(hvdb_perm.ptr_perm.value().no_eoi_required),
         hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb_perm.ptr_perm.value().per_vmpl_events),
 )]
+#[verifier::external_body]
 pub unsafe extern "C" fn handle_hv_doorbell(hvdb_ptr: DekoPPtr<HVDoorbell>) {
-    if is_vmpl1() {
-        proof_with!(Tracked(hvdb_perm));
-        handle_hv_doorbell_vmpl1(hvdb_ptr);
-    } else {
-        proof_with!(Tracked(hvdb_perm));
-        handle_hv_doorbell_vmpl0(hvdb_ptr);
-    }
-}
-
-/// Process pending #HV doorbell events without touching IRQ nesting state.
-///
-/// This is intended for the after-IRQ-enable drain path, where IRQ nesting
-/// bookkeeping has already been handled by the caller.
-#[verus_spec(r =>
-    with
-        Tracked(hvdb_perm): Tracked<&mut HvDoorbellPtrPermission>,
-    requires
-        old(hvdb_perm).ptr_perm.pptr() == hvdb_ptr@,
-        old(hvdb_perm).ptr_perm.is_init(),
-        old(hvdb_perm).ptr_perm.wf(),
-        old(hvdb_perm).hv_perm.vector_perm.is_for(old(hvdb_perm).ptr_perm.value().vector),
-        old(hvdb_perm).hv_perm.flags_perm.is_for(old(hvdb_perm).ptr_perm.value().flags),
-        old(hvdb_perm).hv_perm.no_eoi_required_perm.is_for(old(hvdb_perm).ptr_perm.value().no_eoi_required),
-        old(hvdb_perm).hv_perm.per_vmpl_events_perm.is_for(old(hvdb_perm).ptr_perm.value().per_vmpl_events),
-    ensures
-        hvdb_perm.ptr_perm == old(hvdb_perm).ptr_perm,
-        hvdb_perm.hv_perm.vector_perm.is_for(hvdb_perm.ptr_perm.value().vector),
-        hvdb_perm.hv_perm.flags_perm.is_for(hvdb_perm.ptr_perm.value().flags),
-        hvdb_perm.hv_perm.no_eoi_required_perm.is_for(hvdb_perm.ptr_perm.value().no_eoi_required),
-        hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb_perm.ptr_perm.value().per_vmpl_events),
-)]
-fn handle_hv_doorbell_pending(hvdb_ptr: DekoPPtr<HVDoorbell>) {
-    if is_vmpl1() {
-        proof_with!(Tracked(hvdb_perm));
-        handle_hv_doorbell_pending_vmpl1(hvdb_ptr);
-    } else {
-        proof_with!(Tracked(hvdb_perm));
-        handle_hv_doorbell_pending_vmpl0(hvdb_ptr);
-    }
-}
-
-#[verus_spec(r =>
-    with
-        Tracked(hvdb_perm): Tracked<&mut HvDoorbellPtrPermission>,
-    requires
-        old(hvdb_perm).ptr_perm.pptr() == hvdb_ptr@,
-        old(hvdb_perm).ptr_perm.is_init(),
-        old(hvdb_perm).ptr_perm.wf(),
-        old(hvdb_perm).hv_perm.vector_perm.is_for(old(hvdb_perm).ptr_perm.value().vector),
-        old(hvdb_perm).hv_perm.flags_perm.is_for(old(hvdb_perm).ptr_perm.value().flags),
-        old(hvdb_perm).hv_perm.no_eoi_required_perm.is_for(old(hvdb_perm).ptr_perm.value().no_eoi_required),
-        old(hvdb_perm).hv_perm.per_vmpl_events_perm.is_for(old(hvdb_perm).ptr_perm.value().per_vmpl_events),
-    ensures
-        hvdb_perm.ptr_perm == old(hvdb_perm).ptr_perm,
-        hvdb_perm.hv_perm.vector_perm.is_for(hvdb_perm.ptr_perm.value().vector),
-        hvdb_perm.hv_perm.flags_perm.is_for(hvdb_perm.ptr_perm.value().flags),
-        hvdb_perm.hv_perm.no_eoi_required_perm.is_for(hvdb_perm.ptr_perm.value().no_eoi_required),
-        hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb_perm.ptr_perm.value().per_vmpl_events),
-)]
-fn handle_hv_doorbell_pending_vmpl1(hvdb_ptr: DekoPPtr<HVDoorbell>) {
-    let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
-    let cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
-
-    proof_with!(Tracked(hvdb_perm), Tracked(&mut cpu_perm));
-    handle_hv_doorbell_common(hvdb_ptr, cpu, cpu_taken);
-}
-
-#[verus_spec(r =>
-    with
-        Tracked(hvdb_perm): Tracked<&mut HvDoorbellPtrPermission>,
-    requires
-        old(hvdb_perm).ptr_perm.pptr() == hvdb_ptr@,
-        old(hvdb_perm).ptr_perm.is_init(),
-        old(hvdb_perm).ptr_perm.wf(),
-        old(hvdb_perm).hv_perm.vector_perm.is_for(old(hvdb_perm).ptr_perm.value().vector),
-        old(hvdb_perm).hv_perm.flags_perm.is_for(old(hvdb_perm).ptr_perm.value().flags),
-        old(hvdb_perm).hv_perm.no_eoi_required_perm.is_for(old(hvdb_perm).ptr_perm.value().no_eoi_required),
-        old(hvdb_perm).hv_perm.per_vmpl_events_perm.is_for(old(hvdb_perm).ptr_perm.value().per_vmpl_events),
-    ensures
-        hvdb_perm.ptr_perm == old(hvdb_perm).ptr_perm,
-        hvdb_perm.hv_perm.vector_perm.is_for(hvdb_perm.ptr_perm.value().vector),
-        hvdb_perm.hv_perm.flags_perm.is_for(hvdb_perm.ptr_perm.value().flags),
-        hvdb_perm.hv_perm.no_eoi_required_perm.is_for(hvdb_perm.ptr_perm.value().no_eoi_required),
-        hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb_perm.ptr_perm.value().per_vmpl_events),
-)]
-fn handle_hv_doorbell_pending_vmpl0(hvdb_ptr: DekoPPtr<HVDoorbell>) {
-    let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
-    let cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
-
-    proof_with!(Tracked(hvdb_perm), Tracked(&mut cpu_perm));
-    handle_hv_doorbell_common(hvdb_ptr, cpu, cpu_taken);
-}
-
-// ============= Refactor the API ============== //
-//
-// Currently the "move-and-update" way is way too awkward to use and has many
-// ergonomic issues.
-#[verus_spec(r =>
-    with
-        Tracked(hvdb_perm): Tracked<&mut HvDoorbellPtrPermission>,
-    requires
-        old(hvdb_perm).ptr_perm.pptr() == hvdb_ptr@,
-        old(hvdb_perm).ptr_perm.is_init(),
-        old(hvdb_perm).ptr_perm.wf(),
-        old(hvdb_perm).hv_perm.vector_perm.is_for(old(hvdb_perm).ptr_perm.value().vector),
-        old(hvdb_perm).hv_perm.flags_perm.is_for(old(hvdb_perm).ptr_perm.value().flags),
-        old(hvdb_perm).hv_perm.no_eoi_required_perm.is_for(old(hvdb_perm).ptr_perm.value().no_eoi_required),
-        old(hvdb_perm).hv_perm.per_vmpl_events_perm.is_for(old(hvdb_perm).ptr_perm.value().per_vmpl_events),
-    ensures
-        hvdb_perm.ptr_perm == old(hvdb_perm).ptr_perm,
-        hvdb_perm.hv_perm.vector_perm.is_for(hvdb_perm.ptr_perm.value().vector),
-        hvdb_perm.hv_perm.flags_perm.is_for(hvdb_perm.ptr_perm.value().flags),
-        hvdb_perm.hv_perm.no_eoi_required_perm.is_for(hvdb_perm.ptr_perm.value().no_eoi_required),
-        hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb_perm.ptr_perm.value().per_vmpl_events),
-)]
-fn handle_hv_doorbell_vmpl1(hvdb_ptr: DekoPPtr<HVDoorbell>) {
-    let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
-    let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
-
-    kpanic_if!(core::hint::unlikely(cpu_taken.ext_vmpl1.is_none()), "VMPL1 CPU context not initialized");
-
-    let mut ext_vmpl1 = cpu_taken.ext_vmpl1.take().unwrap();
-    let tracked mut ext_vmpl1_perm = cpu_perm.ext_vmpl1_perm.tracked_take();
-    proof_with!(Tracked(&mut ext_vmpl1_perm.nested_irq_perm));
-    ext_vmpl1.nested_irq.push(true);
-    cpu_taken.ext_vmpl1.replace(ext_vmpl1);
-    proof {
-        cpu_perm.ext_vmpl1_perm = Some(ext_vmpl1_perm);
-    }
-
-    proof_with!(Tracked(hvdb_perm), Tracked(&mut cpu_perm));
-    handle_hv_doorbell_common(hvdb_ptr, cpu, cpu_taken);
-
-    cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
-    kpanic_if!(core::hint::unlikely(cpu_taken.ext_vmpl1.is_none()), "VMPL1 CPU context not initialized");
-    let mut ext_vmpl1 = cpu_taken.ext_vmpl1.take().unwrap();
-    let tracked mut ext_vmpl1_perm = cpu_perm.ext_vmpl1_perm.tracked_take();
-    proof_with!(Tracked(&mut ext_vmpl1_perm.nested_irq_perm));
-    ext_vmpl1.nested_irq.pop();
-    cpu_taken.ext_vmpl1.replace(ext_vmpl1);
-    proof {
-        cpu_perm.ext_vmpl1_perm = Some(ext_vmpl1_perm);
-    }
-    cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
-}
-
-#[verus_spec(r =>
-    with
-        Tracked(hvdb_perm): Tracked<&mut HvDoorbellPtrPermission>,
-    requires
-        old(hvdb_perm).ptr_perm.pptr() == hvdb_ptr@,
-        old(hvdb_perm).ptr_perm.is_init(),
-        old(hvdb_perm).ptr_perm.wf(),
-        old(hvdb_perm).hv_perm.vector_perm.is_for(old(hvdb_perm).ptr_perm.value().vector),
-        old(hvdb_perm).hv_perm.flags_perm.is_for(old(hvdb_perm).ptr_perm.value().flags),
-        old(hvdb_perm).hv_perm.no_eoi_required_perm.is_for(old(hvdb_perm).ptr_perm.value().no_eoi_required),
-        old(hvdb_perm).hv_perm.per_vmpl_events_perm.is_for(old(hvdb_perm).ptr_perm.value().per_vmpl_events),
-    ensures
-        hvdb_perm.ptr_perm == old(hvdb_perm).ptr_perm,
-        hvdb_perm.hv_perm.vector_perm.is_for(hvdb_perm.ptr_perm.value().vector),
-        hvdb_perm.hv_perm.flags_perm.is_for(hvdb_perm.ptr_perm.value().flags),
-        hvdb_perm.hv_perm.no_eoi_required_perm.is_for(hvdb_perm.ptr_perm.value().no_eoi_required),
-        hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb_perm.ptr_perm.value().per_vmpl_events),
-)]
-#[verifier::exec_allows_no_decreases_clause]
-fn handle_hv_doorbell_vmpl0(hvdb_ptr: DekoPPtr<HVDoorbell>) {
     let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
     let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
 
     proof_with!(Tracked(&mut cpu_perm.irq_state_perm));
     cpu_taken.nested_irq.push(true);
 
-    proof_with!(Tracked(hvdb_perm), Tracked(&mut cpu_perm));
-    handle_hv_doorbell_common(hvdb_ptr, cpu, cpu_taken);
-
-    cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
-
-    proof_with!(Tracked(&mut cpu_perm.irq_state_perm));
-    cpu_taken.nested_irq.pop();
-    cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
-}
-
-#[verus_spec(r =>
-    with
-        Tracked(hvdb_perm): Tracked<&mut HvDoorbellPtrPermission>,
-        Tracked(cpu_perm): Tracked<&mut DekoCpuCtxPermission>,
-    requires
-        old(hvdb_perm).ptr_perm.pptr() == hvdb_ptr@,
-        old(hvdb_perm).ptr_perm.is_init(),
-        old(hvdb_perm).ptr_perm.wf(),
-        old(hvdb_perm).hv_perm.vector_perm.is_for(old(hvdb_perm).ptr_perm.value().vector),
-        old(hvdb_perm).hv_perm.flags_perm.is_for(old(hvdb_perm).ptr_perm.value().flags),
-        old(hvdb_perm).hv_perm.no_eoi_required_perm.is_for(old(hvdb_perm).ptr_perm.value().no_eoi_required),
-        old(hvdb_perm).hv_perm.per_vmpl_events_perm.is_for(old(hvdb_perm).ptr_perm.value().per_vmpl_events),
-    ensures
-        hvdb_perm.ptr_perm == old(hvdb_perm).ptr_perm,
-        hvdb_perm.hv_perm.vector_perm.is_for(hvdb_perm.ptr_perm.value().vector),
-        hvdb_perm.hv_perm.flags_perm.is_for(hvdb_perm.ptr_perm.value().flags),
-        hvdb_perm.hv_perm.no_eoi_required_perm.is_for(hvdb_perm.ptr_perm.value().no_eoi_required),
-        hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb_perm.ptr_perm.value().per_vmpl_events),
-        cpu_perm.wf_with(cpu),
-)]
-#[verifier::exec_allows_no_decreases_clause]
-#[verifier::external_body]  // the loop invariant is overly complicated so skip now.
-fn handle_hv_doorbell_common(
-    hvdb_ptr: DekoPPtr<HVDoorbell>,
-    cpu: DekoPPtr<DekoCpuCtx>,
-    mut cpu_taken: DekoCpuCtx,
-) {
-    let hvdb: &HVDoorbell = hvdb_ptr.borrow(Tracked(&hvdb_perm.ptr_perm));
+    let hvdb = hvdb_ptr.borrow(Tracked(&hvdb_perm.ptr_perm));
     let flags = hvdb.flags.fetch_and(
         Tracked(&mut hvdb_perm.hv_perm.flags_perm),
         !(HV_DOORBELL_NO_FURTHER_SIGNAL_FLAG),
     );
     let mut vector = hvdb.vector.load(Tracked(&mut hvdb_perm.hv_perm.vector_perm));
-    // Some hosts may transiently expose a non-zero vector before/without
-    // NoFurtherSignal set; process either signal to avoid losing events.
-    if flags & HV_DOORBELL_NO_FURTHER_SIGNAL_FLAG != 0 || vector != 0 {
-        #[verus_spec(
-            invariant_except_break
+    if flags & HV_DOORBELL_NO_FURTHER_SIGNAL_FLAG != 0 {
+        loop
+            invariant
                 hvdb_perm.hv_perm.vector_perm.is_for(hvdb.vector),
                 hvdb_perm.hv_perm.flags_perm.is_for(hvdb.flags),
                 hvdb_perm.hv_perm.no_eoi_required_perm.is_for(hvdb.no_eoi_required),
                 hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb.per_vmpl_events),
                 hvdb_perm.ptr_perm == old(hvdb_perm).ptr_perm,
-                cpu_perm.pgtable_perm == old(cpu_perm).pgtable_perm,
-                cpu_taken.wf(),
-                cpu_perm.ptr_perm.pptr() == cpu@,
-                cpu_perm.ptr_perm.mem_wf(),
-                cpu_perm.wf_with(cpu),
-            ensures
-                cpu_perm.ptr_perm.is_init()
-        )]
-        loop {
+        {
             match hvdb.vector.compare_exchange_weak(
                 Tracked(&mut hvdb_perm.hv_perm.vector_perm),
                 vector,
@@ -884,17 +461,15 @@ fn handle_hv_doorbell_common(
             ) {
                 Ok(_) => match vector as usize {
                     IPI_VECTOR => {
-                        hv_trace_event(hvdb_ptr, 1, vector as u64, flags as u64);
                         cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
 
-                        proof_with!(Tracked(cpu_perm));
+                        proof_with!(Tracked(&cpu_perm));
                         DekoCpuCtx::handle_ipi_req(cpu);
 
                         cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
                     },
                     TIMER_VECTOR => {
-                        hv_trace_event(hvdb_ptr, 2, vector as u64, flags as u64);
-
+                        ktrace!("Received HV timer doorbell");
                         let apic = cpu_taken.apic();
 
                         // The trick here is that the physical APIC
@@ -910,7 +485,7 @@ fn handle_hv_doorbell_common(
                         apic.eoi();
                     },
                     _ => {
-                        hv_trace_event(hvdb_ptr, 3, vector as u64, flags as u64);
+                        // ignore all
                         break ;
                     },
                 },
@@ -920,32 +495,9 @@ fn handle_hv_doorbell_common(
             }
         }
     }
+    proof_with!(Tracked(&mut cpu_perm.irq_state_perm));
+    cpu_taken.nested_irq.pop();
     cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
-}
-
-#[inline]
-#[verus_spec(r =>
-)]
-#[verifier::exec_allows_no_decreases_clause]
-pub fn process_pending_hv_events() {
-    if is_vmpl1() {
-        process_pending_hv_events_vmpl1();
-    } else {
-        process_pending_hv_events_vmpl0();
-    }
-}
-
-#[verus_spec(r =>
-)]
-#[verifier::exec_allows_no_decreases_clause]
-fn process_pending_hv_events_vmpl1() {
-    // For VMPL1, we can directly call the handler as we will never lose the doorbell notification.
-    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
-    let cpu_borrowed = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
-
-    if let Some(ref ext_vmpl) = cpu_borrowed.ext_vmpl1 {
-        do_processing_hv_events(&ext_vmpl.doorbell);
-    }
 }
 
 /// Process any pending hypervisor events signaled via the doorbell page.
@@ -958,82 +510,32 @@ fn process_pending_hv_events_vmpl1() {
 /// it is ready to process pending events.
 #[verus_spec()]
 #[verifier::exec_allows_no_decreases_clause]
-fn process_pending_hv_events_vmpl0() {
+pub fn process_pending_hv_events() {
     let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
     let cpu_borrowed = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
 
     if let Some(doorbell) = &cpu_borrowed.doorbell {
-        do_processing_hv_events(doorbell);
-    }
-}
-
-#[verus_spec(
-    requires
-        doorbell.wf(),
-)]
-#[verifier::exec_allows_no_decreases_clause]
-fn do_processing_hv_events(
-    doorbell: &RwLock<
-        DekoAtomicData<DekoPPtr<HVDoorbell>, HvDoorbellPtrPermission>,
-        IrqUnSafeLockGuard,
-        HvDoorbellPtrPred,
-    >,
-) {
-    // This path toggles IF with raw cli/sti while draining pending events.
-    // If IF is already 0 at entry, running this would incorrectly force-enable
-    // interrupts at the end of a drain round.
-    if !irq_enabled() {
-        return ;
-    }
-    #[verus_spec(
-        invariant_except_break
-            doorbell.wf(),
-    )]
-    loop {
-        if !has_pending_hv_events(doorbell) {
-            break ;
-        }
-        // Keep this as raw IF toggling only. Using irq_disable()/irq_enable()
-        // here would recurse into after_irq_enable() and unbound nesting.
-
-        raw_irq_disable();
-
         deko_rwlock_write_atomic_data! {
             doorbell,
             doorbell_ptr,
             doorbell_perm,
             {
-                #[verus_spec(with Tracked(doorbell_perm.borrow_mut()))]
-                handle_hv_doorbell_pending(doorbell_ptr);
+                let doorbell = doorbell_ptr.borrow(Tracked(&doorbell_perm.borrow().ptr_perm));
+                let flags = doorbell.flags.load(Tracked(&doorbell_perm.borrow().hv_perm.flags_perm));
+                let vector = doorbell.vector.load(Tracked(&doorbell_perm.borrow().hv_perm.vector_perm));
+
+                if flags & HV_DOORBELL_NO_FURTHER_SIGNAL_FLAG != 0 || vector != 0 {
+                    // No further signal.
+                    irq_disable();
+
+                    unsafe {
+                        #[verus_spec(with Tracked(doorbell_perm.borrow_mut()))]
+                        handle_hv_doorbell(doorbell_ptr);
+                    }
+
+                    raw_irq_enable();
+                }
             }
-        }
-
-        raw_irq_enable();
-    }
-}
-
-#[inline]
-#[verus_spec(
-    requires
-        doorbell.wf(),
-)]
-fn has_pending_hv_events(
-    doorbell: &RwLock<
-        DekoAtomicData<DekoPPtr<HVDoorbell>, HvDoorbellPtrPermission>,
-        IrqUnSafeLockGuard,
-        HvDoorbellPtrPred,
-    >,
-) -> bool {
-    deko_rwlock_read_atomic_data! {
-        doorbell,
-        doorbell_ptr,
-        doorbell_perm,
-        {
-            let doorbell = doorbell_ptr.borrow(Tracked(&doorbell_perm.borrow().ptr_perm));
-            let flags = doorbell.flags.load(Tracked(&doorbell_perm.borrow().hv_perm.flags_perm));
-            let vector = doorbell.vector.load(Tracked(&doorbell_perm.borrow().hv_perm.vector_perm));
-
-            (flags & HV_DOORBELL_NO_FURTHER_SIGNAL_FLAG != 0) || (vector != 0)
         }
     }
 }

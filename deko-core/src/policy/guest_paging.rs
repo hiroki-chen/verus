@@ -453,4 +453,25 @@ impl PageTable {
     }
 }
 
+// /// Converts a guest physical address to virtual address accessible to us.
+// #[verus_spec(
+//     requires
+//         guest_cr3.wf(),
+// )]
+// pub fn guest_raw_pa_to_va(guest_cr3: &TempMapping, pa: u64) -> DekoGuestServResult<GuestMapping> {
+//     let pa = PhysAddr(pa % PAGE_SIZE);
+//     if core::hint::unlikely(!check_within_guest_mmap(pa)) {
+//         kerror!("Guest provided invalid physical address", pa);
+//         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
+//     }
+//     guest_pa_to_va(guest_cr3, pa)
+// }
+// #[verus_spec(
+//     requires
+//         guest_cr3.wf(),
+//         pa.wf(),
+//         pa@ % PAGE_SIZE == 0,
+// )]
+// pub fn guest_pa_to_va(guest_cr3: &TempMapping, pa: PhysAddr) -> DekoGuestServResult<GuestMapping> {
+// }
 } // verus!

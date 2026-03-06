@@ -25,7 +25,7 @@ use crate::mm::{
     DEKO_FRAME_ALLOCATOR, FEATURE_MASK, MAX_PHYS_ADDR, PHYS_ADDR_SIZE, PTE_MASK_PRIVATE,
     PTE_MASK_SHARED,
 };
-use crate::snp::doorbell::{init_hv_doorbell, HvDoorbellPtrPred};
+use crate::snp::doorbell::init_hv_doorbell;
 use crate::snp::ghcb::{current_ghcb, msr_register_ghcb_gpa, GuestHostCommunicationBlock};
 use crate::snp::vmsa::VMSA;
 use crate::{
@@ -847,34 +847,14 @@ pub fn setup_apic(ctx: DekoPPtr<DekoCpuCtx>, Tracked(ctx_perm): Tracked<&mut Dek
         old(ctx_perm).wf_with(ctx),
     ensures
         ctx_perm.wf_with(ctx),
-        ctx_perm.ptr_perm.value().vm_region == old(ctx_perm).ptr_perm.value().vm_region,
-        ctx_perm.ptr_perm.value().run_queue == old(ctx_perm).ptr_perm.value().run_queue,
-        ctx_perm.ptr_perm.value().shared_bit == old(ctx_perm).ptr_perm.value().shared_bit,
-        ctx_perm.ptr_perm.value().private_bit == old(ctx_perm).ptr_perm.value().private_bit,
-        ctx_perm.ptr_perm.value().pgtable == old(ctx_perm).ptr_perm.value().pgtable,
+        ctx_perm.ptr_perm == old(ctx_perm).ptr_perm,
 {
     broadcast use SnpStatusFlags::lemma_each_bit_is_valid;
     // Use the restricted interrupt mode.
 
     if SnpStatusFlags::get_status().contains(REST_INJ) {
         kinfo!("SNP: Using restricted interrupt mode");
-
-        #[verus_spec(with => Tracked(db_perm))]
-        let (db_ptr, _) = doorbell::HVDoorbell::allocate(false);
-        let db = DekoRwLock::new(
-            DekoAtomicData::new_with(db_ptr, Tracked(db_perm)),
-            IrqUnSafeLockGuard {  },
-            Ghost(HvDoorbellPtrPred {  }),
-        );
-
-        proof {
-            use_type_invariant(&db);
-        }
-
-        let mut cpu_taken = ctx.take(Tracked(&mut ctx_perm.ptr_perm));
-        cpu_taken.doorbell = Some(db);
-
-        ctx.write(Tracked(&mut ctx_perm.ptr_perm), cpu_taken);
+        doorbell::HVDoorbell::allocate();
     }
     let apic = ctx.borrow(Tracked(&ctx_perm.ptr_perm)).apic();
 
@@ -1743,8 +1723,8 @@ pub fn after_irq_enable() {
 /// hypervisor when doing VM-Entry. The VMPL 0 monitor will set the high
 /// bit of the TSC_AUX to `0xDE` so that we can identify if we are running
 /// at VMPL1 or VMPL2.
-#[no_mangle]
-pub extern "C" fn is_vmpl1() -> bool {
+#[inline]
+pub fn is_vmpl1() -> bool {
     let tsc_aux = rdtscp();
 
     (tsc_aux >> 24) == VMPL1_MAGIC_KERN || (tsc_aux >> 24) == VMPL1_MAGIC_USER
