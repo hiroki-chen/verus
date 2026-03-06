@@ -8,7 +8,7 @@ use deko_std::wf::WellFormed;
 use deko_std::TrivialPredicate;
 use vstd::prelude::*;
 
-use crate::cpu::irq::no_irq_zone;
+use crate::cpu::irq::{irq_enable, raw_irq_enable};
 use crate::cpu::DekoCpuCtx;
 use crate::guest::{request_vmpl2_syscall_handler, DekoGuestServResult};
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
@@ -62,6 +62,11 @@ fn replace_stack(syscall_body: DekoPPtr<DekoSyscallBody>) -> u64 {
             syscall_perm.pptr() == syscall_body@,
     )]
 pub extern "C" fn deko_ifc_entry(syscall_body: DekoPPtr<DekoSyscallBody>) {
+    // IFC enters from assembly without a matching irq_disable() bookkeeping.
+    // Keep raw IF enable here, but still run the post-enable #HV drain hook.
+    raw_irq_enable();
+    crate::imp::after_irq_enable();
+
     if is_vmpl1_user() {
         // Swap the current stack to the per-CPU large stack.
         replace_stack(syscall_body);
@@ -89,14 +94,21 @@ fn deko_ifc_entry_vmpl1(syscall_body_ptr: DekoPPtr<DekoSyscallBody>) -> u64 {
     }
     // Then request VMPL2 to handle the syscall.
 
+    kinfo!("ifc: before request_vmpl2_syscall_handler");
+
     if let Err(e) = request_vmpl2_syscall_handler() {
+        kerror!("ifc: request_vmpl2_syscall_handler failed");
         return e.into_result_code();
     }
+    kinfo!("ifc: after request_vmpl2_syscall_handler");
     // Check the syscall return value and prepare for returning to the guest.
+    kinfo!("ifc: before sysret_epilogue");
 
     if let Err(e) = sysret_epilogue(&mut syscall_body) {
+        kerror!("ifc: sysret_epilogue failed");
         return e.into_result_code();
     }
+    kinfo!("ifc: after sysret_epilogue");
     syscall_body_ptr.write(Tracked(&mut syscall_perm), syscall_body);
 
     0

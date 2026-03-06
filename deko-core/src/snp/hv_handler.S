@@ -1,18 +1,80 @@
 // SPDX-License-Identifier: MIT
 //
 // Copyright (c) 2024 SUSE LLC
+// Copyright (c) 2025-2026 Hiroki Chen
 //
 // Author: Joerg Roedel <jroedel@suse.de>
 //         Hiroki Chen <haobchen@iu.edu>
 
 .equ USER_CS, 0x1b
 .equ USER_SS, 0x23
+.equ DEKO_VMPL1_KERN, 0xde
+.equ DEKO_VMPL1_USER, 0xdf
+.equ HV_DB_TRACE_SLOT0_OFF, 8
+.equ HV_DB_TRACE_SLOT1_OFF, 16
+.equ HV_DB_TRACE_SLOT2_OFF, 24
+.equ HV_DB_TRACE_SLOT3_OFF, 32
+.equ HV_DB_TRACE_SLOT4_OFF, 40
+.equ HV_DB_TRACE_SLOT5_OFF, 48
+.equ HV_DB_TRACE_SLOT6_OFF, 56
+
+.macro LOAD_HV_DOORBELL_ADDR dest_reg
+
+	rdtscp
+	movq %rcx, %rax
+	shrl $24, %ecx
+	cmpl $DEKO_VMPL1_KERN, %ecx
+	je 1f
+	cmpl $DEKO_VMPL1_USER, %ecx
+	je 1f
+
+	movq HV_DOORBELL_ADDR(%rip), \dest_reg
+
+	jmp 2f
+
+1:
+	// Calculate the address of this base addr.
+	andl $0xFFF, %eax
+
+	shlq $21, %rax    // %rax = id * 0x200000
+	movq HV_DOORBELL_ADDR_VMPL1(%rip), \dest_reg
+	addq %rax, \dest_reg
+	addq ${DEKO_DOORBELL_CTX_OFFSET}, \dest_reg
+
+2:
+
+.endm
 
 .code64
 
 .section .data
 .globl HV_DOORBELL_ADDR
+.globl HV_DOORBELL_ADDR_VMPL1
 HV_DOORBELL_ADDR:
+	.quad 0
+HV_DOORBELL_ADDR_VMPL1:
+	.quad 0
+
+.globl HV_TRACE_IRET_HITS
+.globl HV_TRACE_IRET_FRAME_RSP
+.globl HV_TRACE_IRET_FRAME_RIP
+.globl HV_TRACE_RESTART_HITS
+.globl HV_TRACE_RESTART_OLD_FRAME_RSP
+.globl HV_TRACE_RESTART_NEW_FRAME_RSP
+.globl HV_TRACE_RESTART_FRAME_RIP
+HV_TRACE_IRET_HITS:
+	.quad 0
+HV_TRACE_IRET_FRAME_RSP:
+	.quad 0
+HV_TRACE_IRET_FRAME_RIP:
+	.quad 0
+HV_TRACE_RESTART_HITS:
+	.quad 0
+HV_TRACE_RESTART_OLD_FRAME_RSP:
+	.quad 0
+HV_TRACE_RESTART_NEW_FRAME_RSP:
+	.quad 0
+HV_TRACE_RESTART_FRAME_RIP:
 	.quad 0
 
 .globl DEBUG
@@ -150,7 +212,7 @@ postpone_hv:
 	addq	$8, %rsp
 	iretq
 
-restart_hv:
+restart_hv: 
 	// The previous RIP was on an IRET instruction.  Before moving forward
 	// with #HV processing, check to see whether interrupts were enabled at
 	// the time the previous exception was taken.  If not, no further
@@ -164,6 +226,13 @@ restart_hv:
 	// &X86ExceptionContext.frame.
 	testl	$0x200, ({EXCEP_FLAGS_OFF} - {EXCEP_FRAME_OFF})(%rcx)
 	jz	postpone_hv
+	incq	HV_TRACE_RESTART_HITS(%rip)
+	movq	({EXCEP_RSP_OFF} - {EXCEP_FRAME_OFF})(%rcx), %rax
+	movq	%rax, HV_TRACE_RESTART_OLD_FRAME_RSP(%rip)
+	leaq	-4*8(%rcx), %rax
+	movq	%rax, HV_TRACE_RESTART_NEW_FRAME_RSP(%rip)
+	movq	({EXCEP_RIP_OFF} - {EXCEP_FRAME_OFF})(%rcx), %rax
+	movq	%rax, HV_TRACE_RESTART_FRAME_RIP(%rip)
 	// Since interrupts were enabled in the previous exception frame,
 	// #HV processing is now required.  The previous RSP points to the
 	// exception frame (minus error code) as it would be consumed by
@@ -232,24 +301,30 @@ continue_hv:
 	rdsspq	%rdx
 	pushq	%rdx
 handle_as_hv:
-	// Load the address of the #HV doorbell page.  The global address
-	// might not yet be configured, and the per-CPU page might also not
-	// yet be configured, so only process events if there is a valid
-	// doorbell page.
-	movq	HV_DOORBELL_ADDR(%rip), %rsi
+	LOAD_HV_DOORBELL_ADDR %rsi
+
 	testq	%rsi, %rsi
 	jz	default_return
 	movq	(%rsi), %rdi
 	testq	%rdi, %rdi
 	jz	default_return
-handle_as_hv_with_doorbell:
-//   cmpb $0x1, DEBUG(%rip)
-//   jne  no_debug
-//   // Debug output
-//   ud2
 
-// no_debug:
-	call	handle_hv_doorbell
+handle_as_hv_with_doorbell:
+	movq	HV_TRACE_IRET_HITS(%rip), %rax
+	movq	%rax, HV_DB_TRACE_SLOT0_OFF(%rdi)
+	movq	HV_TRACE_RESTART_HITS(%rip), %rax
+	movq	%rax, HV_DB_TRACE_SLOT1_OFF(%rdi)
+	movq	HV_TRACE_IRET_FRAME_RSP(%rip), %rax
+	movq	%rax, HV_DB_TRACE_SLOT2_OFF(%rdi)
+	movq	HV_TRACE_IRET_FRAME_RIP(%rip), %rax
+	movq	%rax, HV_DB_TRACE_SLOT3_OFF(%rdi)
+	movq	HV_TRACE_RESTART_OLD_FRAME_RSP(%rip), %rax
+	movq	%rax, HV_DB_TRACE_SLOT4_OFF(%rdi)
+	movq	HV_TRACE_RESTART_NEW_FRAME_RSP(%rip), %rax
+	movq	%rax, HV_DB_TRACE_SLOT5_OFF(%rdi)
+	movq	HV_TRACE_RESTART_FRAME_RIP(%rip), %rax
+	movq	%rax, HV_DB_TRACE_SLOT6_OFF(%rdi)
+	callq	handle_hv_doorbell
 	// fall through to default_return
 
 .globl default_return
@@ -265,27 +340,28 @@ return_all_paths:
 	testl	$0x200, {EXCEP_FLAGS_OFF}(%rsp) // check EFLAGS.IF in exception frame
 	jz	begin_iret_return
 
-	rdtscp
-	shrl $24, %ecx
-	cmpl $0xde, %ecx
-	je   begin_iret_return
-	cmpl $0xdf, %ecx
-	je   begin_iret_return
+	LOAD_HV_DOORBELL_ADDR %rsi
 
-	movq	HV_DOORBELL_ADDR(%rip), %rdi
+	test	%rsi, %rsi
+	jz	begin_iret_return
+	movq	(%rsi), %rdi
 	test	%rdi, %rdi
 	jz	begin_iret_return
-	movq	(%rdi), %rdi
-	test	%rdi, %rdi
-	jz	begin_iret_return
-	testw	$0x8000, (%rdi)
-	// The memory access to the NoFurtherSignal bit must be the last
-	// instruction prior to the IRET RIP window checked by the #HV entry
-	// code above.  After this point, all code must execute within this
-	// instruction range to ensure that the #HV handler will be able to
-	// detect any #HV that arrives after the check above, except for
-	// the specific case of processing pending #HV events.
+	testb	$0xff, (%rdi)          // vector != 0
+	jnz	iret_return_window
+	testw	$0x8000, (%rdi)        // NoFurtherSignal set
+	// Pending is signaled by either vector!=0 or NoFurtherSignal.
+	// After this point, all code must execute within this instruction
+	// range to ensure that the #HV handler will detect arrivals that
+	// race with the return path.
 iret_return_window:
+	setnz	%bl
+	incq	HV_TRACE_IRET_HITS(%rip)
+	movq	{EXCEP_RSP_OFF}(%rsp), %rax
+	movq	%rax, HV_TRACE_IRET_FRAME_RSP(%rip)
+	movq	{EXCEP_RIP_OFF}(%rsp), %rax
+	movq	%rax, HV_TRACE_IRET_FRAME_RIP(%rip)
+	testb	%bl, %bl
 	jnz	handle_as_hv_with_doorbell
 begin_iret_return:
 	// Reload registers without modifying the stack pointer so that if #HV
