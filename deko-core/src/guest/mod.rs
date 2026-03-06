@@ -8,6 +8,7 @@ use deko_std::wf::WellFormed;
 use deko_std::{deko_rwlock_read_atomic_data, trace_is_enabled, TrivialPredicate};
 use vstd::prelude::*;
 
+use crate::cpu::irq::no_irq_zone;
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission, PERCPU_AREAS};
 use crate::guest::service::{
     handle_guest_exit_deko_service, DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER,
@@ -144,6 +145,18 @@ impl CaaArea {
     }
 }
 
+#[repr(u32)]
+#[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
+pub enum DekoVmplSwitchErr {
+    Ok = 0,
+    /// The VMPL switch operation was cancelled, likely due to an interrupt or other
+    /// asynchronous event that occurred during the switch.
+    Cancelled = 1,
+    /// The VMPL switch operation failed either because the GHCB MSR protocol didn't
+    /// honor our request or some other fatal error occurred during the switch.
+    Failed = 2,
+}
+
 #[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
 pub enum DekoGuestServResultCode {
     Success,
@@ -160,6 +173,7 @@ pub enum DekoGuestServResultCode {
     /// The guest retry the request later; be sure this will
     /// not trigger a livelock.
     Busy,
+    VmplSwitchErr(DekoVmplSwitchErr),
     Other(u64),
 }
 
@@ -194,6 +208,7 @@ impl DekoGuestServResultCode {
             DekoGuestServResultCode::InvalidParam => 0x8000_0005,
             DekoGuestServResultCode::InvalidReq => 0x8000_0006,
             DekoGuestServResultCode::Busy => 0x8000_0007,
+            DekoGuestServResultCode::VmplSwitchErr(err) => 0x9000_0000u64.wrapping_add(*err as u64),
             DekoGuestServResultCode::Other(code) => 0x8000_1000u64.wrapping_add(*code),
         }
     }
@@ -483,27 +498,32 @@ pub fn request_vmpl2_syscall_handler() -> DekoGuestServResult<()> {
 
         return Err(DekoGuestServError::FatalError);
     }
-    unsafe {
-        core::arch::asm!(
-            "
-                movl $0xc0010130, %ecx
-                movl $0x16, %eax
-                movl {vmpl_level:e}, %edx
-                wrmsr
+    no_irq_zone(
+        ||
+            {
+                unsafe {
+                    core::arch::asm!(
+                "
+                    movl $0xc0010130, %ecx
+                    movl $0x16, %eax
+                    movl {vmpl_level:e}, %edx
+                    wrmsr
 
-                movq {extend_service}, %rax
+                    movq {extend_service}, %rax
 
-                rep; vmmcall
-            ",
-            vmpl_level = in(reg) VMPL_GUEST_DEKO_MONITOR,
-            extend_service = in(reg)
-                ((DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE as u64) << 32 | DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER as u64),
-            out("rax") _,
-            out("rcx") _,
-            out("rdx") _,
-            options(att_syntax)
-        );
-    }
+                    rep; vmmcall
+                ",
+                vmpl_level = in(reg) VMPL_GUEST_DEKO_MONITOR,
+                extend_service = in(reg)
+                    ((DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE as u64) << 32 | DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER as u64),
+                out("rax") _,
+                out("rcx") _,
+                out("rdx") _,
+                options(att_syntax)
+            );
+                }
+            },
+    );
 
     Ok(())
 }

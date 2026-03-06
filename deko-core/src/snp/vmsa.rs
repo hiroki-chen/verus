@@ -1052,12 +1052,9 @@ impl VmsaPage {
         this.vtom = 0;  // unsupported.
 
         if vmpl != VMPL_GUEST_DEKO_MONITOR as u8 {
-            this.sev_features = (SnpStatusFlags::get_status().bits() & !REST_INJ) >> 2;
             this.tsc_aux |= VMPL1_MAGIC_KERN << 24;
-        } else {
-            this.sev_features = (SnpStatusFlags::get_status().bits()) >> 2;
         }
-
+        this.sev_features = (SnpStatusFlags::get_status().bits()) >> 2;
         // Being lazy
         this.sev_features
     }

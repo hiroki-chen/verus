@@ -35,14 +35,19 @@ use crate::guest::service::{
 };
 use crate::guest::{
     guest_page_table, handle_guest_exit, DekoGuestExitInformation, DekoGuestRequestParams,
-    DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode, PtRegs,
+    DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode, DekoVmplSwitchErr, PtRegs,
     DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE,
+};
+use crate::imp::doorbell::{
+    dump_hv_doorbell_trace_and_reset, dump_vmpl1_doorbell_snapshot_current_cpu, init_hv_doorbell,
+    init_hv_doorbell_vmpl1,
 };
 use crate::imp::ghcb::{vmpl_switch, GuestHostCommunicationBlock};
 use crate::imp::logging::init_ghcb_logging;
 use crate::imp::vmsa::{GuestVMExit, VMSASegment};
 use crate::imp::{
-    flush_tlb_global_sync, RmpFlags, VMPL1_MAGIC_KERN, VMPL1_MAGIC_USER, VMPL_GUEST_SECURE_APP,
+    flush_tlb_global_sync, RmpFlags, REST_INJ, VMPL1_MAGIC_KERN, VMPL1_MAGIC_USER,
+    VMPL_GUEST_SECURE_APP,
 };
 use crate::mm::frame_allocator::DekoAllocatorApi;
 use crate::mm::paging::{
@@ -52,7 +57,7 @@ use crate::mm::vm::TempMapping;
 use crate::mm::{check_within_guest_mmap, virt_to_phys, virt_to_phys_checked};
 use crate::policy::syscall::{SYS_exit, SYS_exit_group, DEKO_VMPL1_SYSCALL_TRAMPOLINE};
 use crate::policy::DekoSyscallBody;
-use crate::snp::ghcb::{msr_register_ghcb_gpa, validate_ghcb};
+use crate::snp::ghcb::{current_ghcb, msr_register_ghcb_gpa, validate_ghcb};
 use crate::snp::vmsa::{
     guest_user_code_segment, guest_user_stack_segment, VmsaPage, VmsaPagePermission, VMSA,
 };
@@ -254,6 +259,21 @@ impl VmsaPage {
     }
 
     #[verifier::external_body]
+    #[verus_spec(r =>
+        requires
+            old(vmsa).wf(),
+        ensures
+            vmsa.wf(),
+    )]
+    fn do_prepare_app_resume(vmsa: &mut VMSA) {
+        // We need to set the GuestVMExit code to a special value so that when the guest VM resumes and hits the first VMRUN, it will trigger a VM exit with this code, which can be used by the VMPL2 kernel to detect that the app is resuming and do some necessary preparation (e.g., setting up the shared buffer).
+        // unsafe {
+        //     let rflags = core::ptr::read_unaligned(core::ptr::addr_of!(vmsa.rflags));
+        //     core::ptr::write_unaligned(core::ptr::addr_of_mut!(vmsa.rflags), rflags | 0x200);
+        // }
+    }
+
+    #[verifier::external_body]
     #[verus_spec(
         requires
             old(vmsa_app).wf(),
@@ -263,6 +283,12 @@ impl VmsaPage {
     )]
     fn copy_from_user_context(vmsa_app: &mut VMSA, vmsa_user: &PtRegs) {
         kdebug!("Copying from user context", vmsa_user);
+
+        // VMPL1 GDT layout (see GlobalDescriptorTable::new_vmpl1):
+        //   0x28 = user data, 0x30 = user code.
+        // Selectors used in CS/SS must carry RPL=3 for user mode.
+        const VMPL1_USER_DS_SEL: u16 = 0x2b;
+        const VMPL1_USER_CS_SEL: u16 = 0x33;
 
         unsafe {
             let dst = vmsa_app as *mut VMSA;
@@ -292,6 +318,33 @@ impl VmsaPage {
             core::ptr::write_unaligned(
                 core::ptr::addr_of_mut!((*dst).rflags),
                 vmsa_user.flags | 0x200,
+            );
+
+            // Make segment selectors explicit for VMPL1 user return path.
+            // This avoids inheriting stale kernel/TSS selectors from copied VMSA.
+            core::ptr::write_unaligned(
+                core::ptr::addr_of_mut!((*dst).cs.selector),
+                VMPL1_USER_CS_SEL,
+            );
+            core::ptr::write_unaligned(
+                core::ptr::addr_of_mut!((*dst).ss.selector),
+                VMPL1_USER_DS_SEL,
+            );
+            core::ptr::write_unaligned(
+                core::ptr::addr_of_mut!((*dst).ds.selector),
+                VMPL1_USER_DS_SEL,
+            );
+            core::ptr::write_unaligned(
+                core::ptr::addr_of_mut!((*dst).es.selector),
+                VMPL1_USER_DS_SEL,
+            );
+            core::ptr::write_unaligned(
+                core::ptr::addr_of_mut!((*dst).fs.selector),
+                VMPL1_USER_DS_SEL,
+            );
+            core::ptr::write_unaligned(
+                core::ptr::addr_of_mut!((*dst).gs.selector),
+                VMPL1_USER_DS_SEL,
             );
 
             // Set back the cpl.
@@ -351,6 +404,11 @@ impl VmsaPage {
         vmsa_guest_kernel: &VMSA,
         syscall_trampoline_base: VirtAddr,
     ) {
+        const STAR_SYSCALL_CS_SHIFT: u64 = 32;
+        const STAR_SYSRET_CS_SHIFT: u64 = 48;
+        const STAR_CS_FIELD_MASK: u64 = 0xffff;
+        const VMPL1_KERNEL_SYSCALL_CS: u64 = 0x8;
+
         let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
         let id = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).cpu_id;
         let syscall_trampoline_addr = syscall_trampoline_base.0.wrapping_add(
@@ -368,6 +426,16 @@ impl VmsaPage {
                 syscall_trampoline_addr,
             );
 
+            // Keep SYSRET selectors from the guest but force SYSCALL kernel CS to
+            // the VMPL1 GDT kernel code selector (0x8). Otherwise SYSCALL enters
+            // with CS=0x10 (Linux layout), which conflicts with our VMPL1 GDT and
+            // can make #HV postpone iretq fail with #GP(selector=0x10).
+            let old_star = core::ptr::read_unaligned(core::ptr::addr_of!((*dst).star));
+            let sysret_cs = (old_star >> STAR_SYSRET_CS_SHIFT) & STAR_CS_FIELD_MASK;
+            let new_star = (sysret_cs << STAR_SYSRET_CS_SHIFT) | (VMPL1_KERNEL_SYSCALL_CS
+                << STAR_SYSCALL_CS_SHIFT);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).star), new_star);
+
             core::ptr::write_bytes(core::ptr::addr_of_mut!((*dst).intercept_vecs), 0, 0x20);
             core::ptr::write_bytes(core::ptr::addr_of_mut!((*dst).intercept_msr_vecs), 0, 0x20);
 
@@ -377,6 +445,13 @@ impl VmsaPage {
                 core::ptr::addr_of_mut!((*dst).tsc_aux),
                 tsc_aux | (VMPL1_MAGIC_USER << 24),
             );
+
+            // Enable REST_INJ.
+            let mut sev_features = core::ptr::read_unaligned(
+                core::ptr::addr_of!((*dst).sev_features),
+            );
+            sev_features |= (REST_INJ >> 2);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).sev_features), sev_features);
         }
     }
 
@@ -403,6 +478,28 @@ impl VmsaPage {
         let vmsa = &mut unsafe { &mut *(self.page.addr() as *mut [VMSA; 2]) }[self.idx as usize];
 
         Self::do_init_for_app(vmsa, linux_pt_regs)
+    }
+
+    #[inline]
+    #[verifier::external_body]
+    #[verus_spec(r =>
+        with
+            Tracked(vmsa_page_perm): Tracked<&mut VmsaPagePermission>,
+        requires
+            old(self).wf(),
+            old(vmsa_page_perm).ptr_perm.wf(),
+            old(vmsa_page_perm).ptr_perm.is_init(),
+            old(vmsa_page_perm).ptr_perm.pptr() == old(self).page@,
+        ensures
+            self.wf(),
+            vmsa_page_perm.ptr_perm.wf(),
+            vmsa_page_perm.ptr_perm.is_init(),
+            vmsa_page_perm.ptr_perm.pptr() == self.page@,
+    )]
+    pub fn prepare_app_resume(&mut self) {
+        let vmsa = &mut unsafe { &mut *(self.page.addr() as *mut [VMSA; 2]) }[self.idx as usize];
+
+        Self::do_prepare_app_resume(vmsa);
     }
 }
 
@@ -1088,27 +1185,28 @@ pub fn try_kick_app(
         kerror!("try_kick_app: no VMPL1 context allocated for this CPU");
         return Err(DekoGuestServError::FatalError);
     }
+    let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
+    let mut ctx_vmpl1 = cpu_taken.ext_vmpl1.take().unwrap();
+
+    let tracked mut vmpl1_perm = cpu_perm.ext_vmpl1_perm.tracked_take();
+
     match app_status {
         DekoUserAppState::Created => {
-            let original_entry = regs.bx;
-            let guest_stack = regs.sp;
-            let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
-            let mut ctx_vmpl1 = cpu_taken.ext_vmpl1.take().unwrap();
-
-            let tracked mut vmpl1_perm = cpu_perm.ext_vmpl1_perm.tracked_take();
-
             proof_with!(Tracked(&mut vmpl1_perm.vmsa_perm));
             ctx_vmpl1.vmsa.init_for_app(regs)?;
-
-            proof {
-                cpu_perm.ext_vmpl1_perm = Some(vmpl1_perm);
-            }
-            cpu_taken.ext_vmpl1 = Some(ctx_vmpl1);
-            cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
         },
-        DekoUserAppState::Running => {},
+        DekoUserAppState::Running => {
+            proof_with!(Tracked(&mut vmpl1_perm.vmsa_perm));
+            ctx_vmpl1.vmsa.prepare_app_resume();
+        },
         _ => return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam)),
     }
+
+    proof {
+        cpu_perm.ext_vmpl1_perm = Some(vmpl1_perm);
+    }
+    cpu_taken.ext_vmpl1 = Some(ctx_vmpl1);
+    cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
 
     proof_with!(Tracked(&mut cpu_perm));
     run_userapp(cpu)
@@ -1123,14 +1221,14 @@ pub fn try_kick_app(
         old(cpu_perm).ptr_perm.value().ext_vmpl1 is Some,
 )]
 fn run_userapp(cpu: DekoPPtr<DekoCpuCtx>) -> DekoGuestServResult<()> {
-    kinfo!("try_kick_app: prepared VMSA for the app, now switching to VMPL1");
-
     #[verus_spec(
         invariant
             cpu_perm.wf_with(cpu),
             cpu_perm.ptr_perm.value().ext_vmpl1 is Some,
     )]
     loop {
+        kinfo!("Attempting to enter guest app in VMPL1");
+        dump_vmpl1_doorbell_snapshot_current_cpu();
         // WARNING: CRITICAL SECTION
         //
         // This requires VMPL switch so we should NEVER enable interrupts here
@@ -1145,15 +1243,29 @@ fn run_userapp(cpu: DekoPPtr<DekoCpuCtx>) -> DekoGuestServResult<()> {
         // to inject another interrupt until we re-enable interrupts at the end,
         // which then checks if there is any pending doorbells and processes them.
         // Now copy the information to the VMSA and prepare for the VMPL switch.
-        if !no_irq_zone(
+        let switch_ret = no_irq_zone(
             ||
                 {
                     flush_tlb_global_sync();
                     vmpl_switch(VMPL_GUEST_SECURE_APP)
                 },
-        ) {
-            continue ;
+        );
+
+        match switch_ret {
+            DekoVmplSwitchErr::Ok => {},
+            DekoVmplSwitchErr::Cancelled => {
+                kinfo!("VMPL switch cancelled; retrying guest entry");
+                continue ;
+            },
+            DekoVmplSwitchErr::Failed => {
+                kerror!("VMPL switch failed; retrying guest entry");
+                continue ;
+            },
         }
+
+        kinfo!("Entered guest app in VMPL1, now processing the request");
+        dump_hv_doorbell_trace_and_reset();
+
         let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
         let cpu_idx = cpu_borrow.cpu_id;
         let vmsa = &cpu_borrow.ext_vmpl1.as_ref().unwrap().vmsa;
@@ -1212,16 +1324,37 @@ pub fn setup_vmpl1() {
 
     kinfo!("setup_vmpl1: GHCB registered @", ghcb_gpa=>hex);
 
+    // Register the doorbell.
+    let (ghcb, Tracked(ghcb_perm), pa) = current_ghcb();
+    GuestHostCommunicationBlock::register_hv_doorbell(
+        ghcb,
+        Tracked(ghcb_perm),
+        ext.doorbell_pa,
+        pa,
+    );
+
+    kinfo!("setup_vmpl1: #HV doorbell registered @", ext.doorbell_pa=>hex);
+
+    let db_ptr = ext.doorbell.acquire_read();
+    init_hv_doorbell_vmpl1();
+
+    db_ptr.release_read();
+
     wait_ipi_blocking();  // ensure all cores are synchronized.
 
-    // We have finished the VMPL1 setup. Now we switch context to the target payload
-    // (e.g., the actual Guest OS or the Monitor loop).
-    //
-    // This is typically a one-way transition.
-    //
-    // Do not need to guard this with `no_irq_zone` because we will not setup the
-    // #HV doorbell for that so no one is going to interrupt us in the middle.
-    vmpl_switch(VMPL_GUEST_DEKO_MONITOR);
+    loop {
+        // As this function never returns we place the loop here.
+        no_irq_zone(
+            ||
+                {
+                    // We have finished the VMPL1 setup. Now we switch context to the target payload
+                    // (e.g., the actual Guest OS or the Monitor loop).
+                    //
+                    // This is typically a one-way transition.
+                    vmpl_switch(VMPL_GUEST_DEKO_MONITOR)
+                },
+        );
+    }
 
     die("setup_vmpl1: this should never return");
 }

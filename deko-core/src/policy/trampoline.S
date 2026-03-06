@@ -68,6 +68,7 @@ prepare_syscall_body:
   leaq     deko_syscall_body(%rip), %rdi  // Pointer to syscall body
   movq     $0x0, %rax
   movq     $SYSCALL_BODY_SIZE, %rcx               // Size of syscall body (80 bytes)
+  cld
   rep stosb
 
   leaq     deko_syscall_body(%rip), %rdi

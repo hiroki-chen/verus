@@ -531,8 +531,8 @@ unsafe fn patch_trampoline(
     trampoline_gva: VirtAddr,
     g_trampoline: &TempMapping,
 ) -> DekoGuestServResult<()> {
-    let trampoline_start = deko_trampoline_start as usize;
-    let trampoline_end = deko_trampoline_end as usize;
+    let trampoline_start = deko_trampoline_start as *const () as usize;
+    let trampoline_end = deko_trampoline_end as *const () as usize;
     let trampoline_size = trampoline_end - trampoline_start;
     if trampoline_size > PAGE_SIZE as usize {
         // Trampoline code should fit within a single page for

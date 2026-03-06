@@ -12,13 +12,16 @@ use core::ops::RangeBounds;
 use deko_macros::DekoDebug;
 use deko_std::address::{VaddrRange, VirtAddr};
 use deko_std::cpu::X86GeneralRegs;
+use deko_std::deko_rwlock_read_atomic_data;
 use deko_std::mem::STACK_SIZE;
 use vstd::prelude::*;
 
 use crate::cpu::task::{DekoRunnableCtx, X86ExceptionContext};
 use crate::cpu::DekoCpuCtx;
+use crate::imp::doorbell::HVDoorbell;
 use crate::kinfo;
 use crate::logging::{print_str, CONSOLE, CONSOLE_LOCK};
+use crate::snp::is_vmpl1;
 
 verus! {
 
@@ -259,5 +262,38 @@ pub fn print_stack(skip: usize) {
     guard.release_write_no_val();
 }
 
+#[verifier::external_body]
+pub fn print_stack_raw(addr: u64, n: usize) {
+    let data = unsafe { core::slice::from_raw_parts(addr as *const u8, n) };
+
+    kinfo!("stack is", data);
+}
+
+#[verifier::external_body]
+pub fn debug_doorbell() {
+    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpu_borrowed = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+
+    let db_ptr = if !is_vmpl1() {
+        cpu_borrowed.doorbell.as_ref().unwrap()
+    } else {
+        &cpu_borrowed.ext_vmpl1.as_ref().unwrap().doorbell
+    };
+
+    let db = deko_rwlock_read_atomic_data! {
+        db_ptr,
+        db,
+        __,
+        {
+            *db
+        }
+    };
+
+    let db_bytes = unsafe {
+        core::slice::from_raw_parts(db.addr() as *const u8, core::mem::size_of::<HVDoorbell>())
+    };
+
+    kinfo!("doorbell is", db_bytes);
+}
 
 } // verus!
