@@ -61,6 +61,8 @@ pub const DEKO_SERVICE_APP_ENTER_OK: u64 = 0x9000_0000;
 
 pub const DEKO_SERVICE_APP_EXIT: u64 = 0x9000_0001;
 
+pub const DEKO_SERVICE_TIMER: u64 = 0x7000_0001;
+
 /// Represents a request structure for page validation operations.
 ///
 /// The guest must place this request at the given physical address
@@ -197,6 +199,8 @@ pub const DEKO_SERVICE_EXTEND_LAUNCH_APP: u32 = 0x3;
 pub const DEKO_SERVICE_EXTEND_MAP_IFC: u32 = 0x4;
 
 pub const DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER: u32 = 0x5;
+
+pub const DEKO_SERVICE_EXTEND_TIMER_EVENT: u32 = 0x6;
 
 with_atomic_pred! {
     PhysAddr,
@@ -1085,7 +1089,7 @@ fn handle_deko_service_map_ifc(params: &mut DekoGuestRequestParams) -> DekoGuest
         cpu_perm.wf(),
         cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
 )]
-fn handle_deko_service_launch_app(params: &mut DekoGuestRequestParams) -> DekoGuestServResult<()> {
+fn handle_deko_service_launch_app(params: &mut DekoGuestRequestParams) -> DekoGuestServResult<u64> {
     let r9 = params.r9;
     let r9_offset = r9 % PAGE_SIZE as u64;
     let req_body = r9 & !0xfff;
@@ -1307,17 +1311,19 @@ pub(super) fn handle_guest_exit_extend_service(
     req: u32,
     params: &mut DekoGuestRequestParams,
     cpu_idx: u64,
-) -> DekoGuestServResult<()> {
+) -> DekoGuestServResult<u64> {
     match req {
         DEKO_SERVICE_EXTEND_MSR_INTERCEPT => {
             kdebug!("MSR intercept:", params);
 
             proof_with!(Tracked(cpu_perm));
-            handle_deko_service_msr_intercepts(params)
+            handle_deko_service_msr_intercepts(params)?;
+            Ok(0)
         },
         DEKO_SERVICE_EXTEND_REPORT_APP => {
             proof_with!(Tracked(cpu_perm));
-            handle_deko_service_report_app(params)
+            handle_deko_service_report_app(params)?;
+            Ok(0)
         },
         DEKO_SERVICE_EXTEND_LAUNCH_APP => {
             proof_with!(Tracked(cpu_perm));
@@ -1325,8 +1331,10 @@ pub(super) fn handle_guest_exit_extend_service(
         },
         DEKO_SERVICE_EXTEND_MAP_IFC => {
             proof_with!(Tracked(cpu_perm));
-            handle_deko_service_map_ifc(params)
+            handle_deko_service_map_ifc(params)?;
+            Ok(0)
         },
+        DEKO_SERVICE_EXTEND_TIMER_EVENT => Ok(DEKO_SERVICE_TIMER),
         _ => {
             kerror!("Unsupported extend service request: ", req);
 

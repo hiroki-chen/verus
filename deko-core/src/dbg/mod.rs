@@ -14,6 +14,7 @@ use deko_std::address::{VaddrRange, VirtAddr};
 use deko_std::cpu::X86GeneralRegs;
 use deko_std::deko_rwlock_read_atomic_data;
 use deko_std::mem::STACK_SIZE;
+use deko_std::ptr::DekoPPtr;
 use vstd::prelude::*;
 
 use crate::cpu::task::{DekoRunnableCtx, X86ExceptionContext};
@@ -294,6 +295,202 @@ pub fn debug_doorbell() {
     };
 
     kinfo!("doorbell is", db_bytes);
+}
+
+#[inline]
+#[verifier::external_body]
+pub fn hv_trace_event(hv_ptr: DekoPPtr<HVDoorbell>, event: u8, arg0: u64, arg1: u64) {
+    const TRACE_EVT_SEQ_OFF: usize = 4;
+    const TRACE_EVT_TIMER_HITS_OFF: usize = 5;
+    const TRACE_EVT_LAST_VEC_OFF: usize = 6;
+    const TRACE_EVT_LAST_FLAGS_OFF: usize = 7;
+
+    unsafe {
+        let db_addr = hv_ptr.addr() as usize;
+        if db_addr == 0 {
+            return ;
+        }
+        let seq_ptr = (db_addr + TRACE_EVT_SEQ_OFF) as *mut u8;
+        let seq = core::ptr::read_volatile(seq_ptr);
+        core::ptr::write_volatile(seq_ptr, seq.wrapping_add(1));
+        if event == 2 {
+            let hits_ptr = (db_addr + TRACE_EVT_TIMER_HITS_OFF) as *mut u8;
+            let hits = core::ptr::read_volatile(hits_ptr);
+            core::ptr::write_volatile(hits_ptr, hits.wrapping_add(1));
+        }
+        core::ptr::write_volatile((db_addr + TRACE_EVT_LAST_VEC_OFF) as *mut u8, arg0 as u8);
+        core::ptr::write_volatile((db_addr + TRACE_EVT_LAST_FLAGS_OFF) as *mut u8, arg1 as u8);
+    }
+}
+
+#[verifier::external_body]
+#[inline]
+pub fn dump_hv_doorbell_trace_and_reset() {
+    const TRACE_EVT_SEQ_OFF: usize = 4;
+    const TRACE_EVT_TIMER_HITS_OFF: usize = 5;
+    const TRACE_EVT_LAST_VEC_OFF: usize = 6;
+    const TRACE_EVT_LAST_FLAGS_OFF: usize = 7;
+    const TRACE_RESERVED_OFF: usize = 8;
+    const TRACE_SLOT0_OFF: usize = TRACE_RESERVED_OFF + 0 * 8;
+    const TRACE_SLOT1_OFF: usize = TRACE_RESERVED_OFF + 1 * 8;
+    const TRACE_SLOT2_OFF: usize = TRACE_RESERVED_OFF + 2 * 8;
+    const TRACE_SLOT3_OFF: usize = TRACE_RESERVED_OFF + 3 * 8;
+    const TRACE_SLOT4_OFF: usize = TRACE_RESERVED_OFF + 4 * 8;
+    const TRACE_SLOT5_OFF: usize = TRACE_RESERVED_OFF + 5 * 8;
+    const TRACE_SLOT6_OFF: usize = TRACE_RESERVED_OFF + 6 * 8;
+
+    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpu_borrowed = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+    let db_ptr = if !is_vmpl1() {
+        cpu_borrowed.doorbell.as_ref()
+    } else {
+        cpu_borrowed.ext_vmpl1.as_ref().map(|ext| &ext.doorbell)
+    };
+    let Some(db_ptr) = db_ptr else {
+        return ;
+    };
+
+    let db_addr = deko_rwlock_read_atomic_data! {
+        db_ptr,
+        db,
+        __,
+        {
+            db.addr() as usize
+        }
+    };
+    if db_addr == 0 {
+        return ;
+    }
+
+    unsafe {
+        let evt_seq = core::ptr::read_volatile((db_addr + TRACE_EVT_SEQ_OFF) as *const u8);
+        let evt_timer_hits = core::ptr::read_volatile((db_addr + TRACE_EVT_TIMER_HITS_OFF) as *const u8);
+        let evt_last_vec = core::ptr::read_volatile((db_addr + TRACE_EVT_LAST_VEC_OFF) as *const u8);
+        let evt_last_flags = core::ptr::read_volatile((db_addr + TRACE_EVT_LAST_FLAGS_OFF) as *const u8);
+
+        let slot0 = core::ptr::read_volatile((db_addr + TRACE_SLOT0_OFF) as *const u64);
+        let slot1 = core::ptr::read_volatile((db_addr + TRACE_SLOT1_OFF) as *const u64);
+        if slot0 == 0 && slot1 == 0 && evt_seq == 0 {
+            return ;
+        }
+        let slot2 = core::ptr::read_volatile((db_addr + TRACE_SLOT2_OFF) as *const u64);
+        let slot3 = core::ptr::read_volatile((db_addr + TRACE_SLOT3_OFF) as *const u64);
+        let slot4 = core::ptr::read_volatile((db_addr + TRACE_SLOT4_OFF) as *const u64);
+        let slot5 = core::ptr::read_volatile((db_addr + TRACE_SLOT5_OFF) as *const u64);
+        let slot6 = core::ptr::read_volatile((db_addr + TRACE_SLOT6_OFF) as *const u64);
+
+        kinfo!(
+            "HV doorbell trace iret_hits=",
+            slot0,
+            " restart_hits=",
+            slot1,
+            " iret_frame_rsp=",
+            slot2 => hex,
+            " iret_frame_rip=",
+            slot3 => hex,
+        );
+        kinfo!(
+            "HV doorbell trace restart_old_rsp=",
+            slot4 => hex,
+            " restart_new_rsp=",
+            slot5 => hex,
+            " restart_frame_rip=",
+            slot6 => hex,
+        );
+        kinfo!(
+            "HV doorbell event seq=",
+            evt_seq,
+            " timer_hits=",
+            evt_timer_hits,
+            " last_vec=",
+            evt_last_vec,
+            " last_flags=",
+            evt_last_flags,
+        );
+
+        core::ptr::write_volatile((db_addr + TRACE_EVT_SEQ_OFF) as *mut u8, 0);
+        core::ptr::write_volatile((db_addr + TRACE_EVT_TIMER_HITS_OFF) as *mut u8, 0);
+        core::ptr::write_volatile((db_addr + TRACE_EVT_LAST_VEC_OFF) as *mut u8, 0);
+        core::ptr::write_volatile((db_addr + TRACE_EVT_LAST_FLAGS_OFF) as *mut u8, 0);
+        core::ptr::write_volatile((db_addr + TRACE_SLOT0_OFF) as *mut u64, 0);
+        core::ptr::write_volatile((db_addr + TRACE_SLOT1_OFF) as *mut u64, 0);
+        core::ptr::write_volatile((db_addr + TRACE_SLOT2_OFF) as *mut u64, 0);
+        core::ptr::write_volatile((db_addr + TRACE_SLOT3_OFF) as *mut u64, 0);
+        core::ptr::write_volatile((db_addr + TRACE_SLOT4_OFF) as *mut u64, 0);
+        core::ptr::write_volatile((db_addr + TRACE_SLOT5_OFF) as *mut u64, 0);
+        core::ptr::write_volatile((db_addr + TRACE_SLOT6_OFF) as *mut u64, 0);
+    }
+}
+
+#[verifier::external_body]
+#[inline]
+pub fn dump_vmpl1_doorbell_snapshot_current_cpu() {
+    const TRACE_EVT_SEQ_OFF: usize = 4;
+    const TRACE_EVT_TIMER_HITS_OFF: usize = 5;
+    const TRACE_EVT_LAST_VEC_OFF: usize = 6;
+    const TRACE_EVT_LAST_FLAGS_OFF: usize = 7;
+
+    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+    let ext = match cpu_borrow.ext_vmpl1.as_ref() {
+        Some(e) => e,
+        None => return ,
+    };
+
+    let cpu_id = cpu_borrow.cpu_id;
+    let mut db_addr: usize = 0;
+    let mut vector: u8 = 0;
+    let mut flags: u8 = 0;
+    let mut no_eoi: u8 = 0;
+    let mut per_vmpl_events: u8 = 0;
+    let mut evt_seq: u8 = 0;
+    let mut evt_timer_hits: u8 = 0;
+    let mut evt_last_vec: u8 = 0;
+    let mut evt_last_flags: u8 = 0;
+
+    deko_rwlock_read_atomic_data! {
+        &ext.doorbell,
+        doorbell_ptr,
+        doorbell_perm,
+        {
+            db_addr = doorbell_ptr.addr() as usize;
+            let doorbell = doorbell_ptr.borrow(Tracked(&doorbell_perm.borrow().ptr_perm));
+            vector = doorbell.vector.load(Tracked(&doorbell_perm.borrow().hv_perm.vector_perm));
+            flags = doorbell.flags.load(Tracked(&doorbell_perm.borrow().hv_perm.flags_perm));
+            no_eoi = doorbell.no_eoi_required.load(Tracked(&doorbell_perm.borrow().hv_perm.no_eoi_required_perm));
+            per_vmpl_events = doorbell.per_vmpl_events.load(Tracked(&doorbell_perm.borrow().hv_perm.per_vmpl_events_perm));
+            unsafe {
+                let base = doorbell_ptr.addr() as usize;
+                evt_seq = core::ptr::read_volatile((base + TRACE_EVT_SEQ_OFF) as *const u8);
+                evt_timer_hits = core::ptr::read_volatile((base + TRACE_EVT_TIMER_HITS_OFF) as *const u8);
+                evt_last_vec = core::ptr::read_volatile((base + TRACE_EVT_LAST_VEC_OFF) as *const u8);
+                evt_last_flags = core::ptr::read_volatile((base + TRACE_EVT_LAST_FLAGS_OFF) as *const u8);
+            }
+        }
+    }
+
+    kinfo!(
+        "VMPL1 doorbell snapshot cpu=",
+        cpu_id,
+        " db=",
+        db_addr => hex,
+        " vector=",
+        vector,
+        " flags=",
+        flags,
+        " no_eoi=",
+        no_eoi,
+        " per_vmpl_events=",
+        per_vmpl_events,
+        " trace_seq=",
+        evt_seq,
+        " trace_timer_hits=",
+        evt_timer_hits,
+        " trace_last_vec=",
+        evt_last_vec,
+        " trace_last_flags=",
+        evt_last_flags,
+    );
 }
 
 } // verus!

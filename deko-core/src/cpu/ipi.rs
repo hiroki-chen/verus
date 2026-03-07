@@ -548,7 +548,6 @@ pub fn handle_set_affinity(ptr: DekoPPtr<DekoIpIMessage>) {
 
             kdebug!("handle_set_affinity: setting task affinity... acquiring lock...");
 
-            // BUG: Someone holds the lock and deadlocked.
             deko_rwlock_write_atomic_data! {
                 rq.as_ref().unwrap(),
                 rq,

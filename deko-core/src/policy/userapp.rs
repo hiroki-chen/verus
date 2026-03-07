@@ -29,19 +29,18 @@ use crate::cpu::task::{generate_id, DekoRunnableState};
 use crate::cpu::{self, DekoCpuCtx, DekoCpuCtxPermission, X86Tss};
 use crate::crypto::aes::aes_gcm_256_key_gen;
 use crate::crypto::uuid::{generate_secure_uuid, uuid_print};
+use crate::dbg::{dump_hv_doorbell_trace_and_reset, dump_vmpl1_doorbell_snapshot_current_cpu};
 use crate::guest::service::{
     DekoNewAppReq, DekoNewAppType, DEKO_SERVICE_APP_ENTER_OK, DEKO_SERVICE_APP_EXIT,
-    DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER,
+    DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER, DEKO_SERVICE_EXTEND_TIMER_EVENT,
+    DEKO_SERVICE_TIMER,
 };
 use crate::guest::{
     guest_page_table, handle_guest_exit, DekoGuestExitInformation, DekoGuestRequestParams,
     DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode, DekoVmplSwitchErr, PtRegs,
     DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE,
 };
-use crate::imp::doorbell::{
-    dump_hv_doorbell_trace_and_reset, dump_vmpl1_doorbell_snapshot_current_cpu, init_hv_doorbell,
-    init_hv_doorbell_vmpl1,
-};
+use crate::imp::doorbell::{init_hv_doorbell, init_hv_doorbell_vmpl1};
 use crate::imp::ghcb::{vmpl_switch, GuestHostCommunicationBlock};
 use crate::imp::logging::init_ghcb_logging;
 use crate::imp::vmsa::{GuestVMExit, VMSASegment};
@@ -1110,7 +1109,7 @@ pub fn try_kick_app(
     guest_cr3: PhysAddr,
     pid: u32,
     shared_buf: VirtAddr,
-) -> DekoGuestServResult<()> {
+) -> DekoGuestServResult<u64> {
     let (cpu_ptr, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
     if core::hint::unlikely(cpu_ptr.borrow(Tracked(&cpu_perm.ptr_perm)).ext_vmpl1.is_none()) {
         kerror!("try_kick_app: no VMPL1 context allocated for this CPU");
@@ -1220,15 +1219,15 @@ pub fn try_kick_app(
         old(cpu_perm).wf_with(cpu),
         old(cpu_perm).ptr_perm.value().ext_vmpl1 is Some,
 )]
-fn run_userapp(cpu: DekoPPtr<DekoCpuCtx>) -> DekoGuestServResult<()> {
+fn run_userapp(cpu: DekoPPtr<DekoCpuCtx>) -> DekoGuestServResult<u64> {
     #[verus_spec(
         invariant
             cpu_perm.wf_with(cpu),
             cpu_perm.ptr_perm.value().ext_vmpl1 is Some,
     )]
     loop {
-        kinfo!("Attempting to enter guest app in VMPL1");
-        dump_vmpl1_doorbell_snapshot_current_cpu();
+        // kinfo!("Attempting to enter guest app in VMPL1");
+        // dump_vmpl1_doorbell_snapshot_current_cpu();
         // WARNING: CRITICAL SECTION
         //
         // This requires VMPL switch so we should NEVER enable interrupts here
@@ -1263,8 +1262,8 @@ fn run_userapp(cpu: DekoPPtr<DekoCpuCtx>) -> DekoGuestServResult<()> {
             },
         }
 
-        kinfo!("Entered guest app in VMPL1, now processing the request");
-        dump_hv_doorbell_trace_and_reset();
+        // kinfo!("Entered guest app in VMPL1, now processing the request");
+        // dump_hv_doorbell_trace_and_reset();
 
         let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
         let cpu_idx = cpu_borrow.cpu_id;
@@ -1276,21 +1275,35 @@ fn run_userapp(cpu: DekoPPtr<DekoCpuCtx>) -> DekoGuestServResult<()> {
         proof_with!(Tracked(&vmsa_perm));
         let info = DekoGuestExitInformation::try_parse_vmsa(vmsa_ptr, true);
 
-        match info {
-            Some(DekoGuestExitInformation::ServiceRequest { protocol, req, mut params }) if protocol
-                == DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE && req
-                == DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER
-                && params.additional_data.is_some() => {},
-            info => {
+        let ret_rax = match get_guest_app_extend_exit_rax(&info) {
+            Some(rax) => rax,
+            None => {
                 kerror!("Unexpected exit from guest app", cpu_idx, info);
-
                 die("");
             },
-        }
+        };
 
         // Attempt to enter the guest only once and if it succeeds, we immediately
         // forward the request to the syscall handler in VMPL2.
-        return Ok(());
+        return Ok(ret_rax);
+    }
+}
+
+#[inline]
+fn get_guest_app_extend_exit_rax(info: &Option<DekoGuestExitInformation>) -> Option<u64> {
+    match info {
+        Some(DekoGuestExitInformation::ServiceRequest { protocol, req, params }) if *protocol
+            == DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE => {
+            if *req == DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER
+                && params.additional_data.is_some() {
+                Some(0)
+            } else if *req == DEKO_SERVICE_EXTEND_TIMER_EVENT {
+                Some(DEKO_SERVICE_TIMER)
+            } else {
+                None
+            }
+        },
+        _ => None,
     }
 }
 

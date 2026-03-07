@@ -2237,8 +2237,8 @@ fn serv_main_loop(cpu_index: usize) -> ! {
 
                 match #[verus_spec(with Tracked(&mut perm))]
                 crate::guest::handle_guest_exit(protocol, req, &mut params, cpu_index as u64) {
-                    Ok(()) => {
-                        r = 0;
+                    Ok(rax_out) => {
+                        r = rax_out;
                     },
                     Err(e) => {
                         match e {

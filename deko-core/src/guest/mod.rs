@@ -12,7 +12,7 @@ use crate::cpu::irq::no_irq_zone;
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission, PERCPU_AREAS};
 use crate::guest::service::{
     handle_guest_exit_deko_service, DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER,
-    DEKO_SERVICE_REMAP_CA,
+    DEKO_SERVICE_EXTEND_TIMER_EVENT, DEKO_SERVICE_REMAP_CA,
 };
 use crate::imp::vmsa::{GuestVMExit, VMSA};
 use crate::imp::VMPL_GUEST_DEKO_MONITOR;
@@ -434,17 +434,19 @@ pub fn handle_guest_exit(
     req: u32,
     params: &mut DekoGuestRequestParams,
     cpu_idx: u64,
-) -> DekoGuestServResult<()> {
+) -> DekoGuestServResult<u64> {
     kdebug!("Handling guest exit request: protocol=", protocol, ", req=", req, ", cpu_idx=", cpu_idx);
 
     match protocol {
         DEKO_GUEST_EXIT_PROTOCOL_DEKO_SERVICE => {
             proof_with!(Tracked(cpu_perm));
-            service::handle_guest_exit_deko_service(req, params, cpu_idx)
+            service::handle_guest_exit_deko_service(req, params, cpu_idx)?;
+            Ok(0)
         },
         DEKO_GUEST_EXIT_PROTOCOL_ATTEST_SERVICE => {
             proof_with!(Tracked(cpu_perm));
-            service::handle_guest_exit_attest_service(req, params, cpu_idx)
+            service::handle_guest_exit_attest_service(req, params, cpu_idx)?;
+            Ok(0)
         },
         DEKO_GUEST_EXIT_PROTOCOL_TPM_SERVICE => {
             // NO vTPM now.
@@ -516,6 +518,44 @@ pub fn request_vmpl2_syscall_handler() -> DekoGuestServResult<()> {
                 vmpl_level = in(reg) VMPL_GUEST_DEKO_MONITOR,
                 extend_service = in(reg)
                     ((DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE as u64) << 32 | DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER as u64),
+                out("rax") _,
+                out("rcx") _,
+                out("rdx") _,
+                options(att_syntax)
+            );
+                }
+            },
+    );
+
+    Ok(())
+}
+
+/// Used by the VMPL1 guest to notify VMPL0 monitor of a timer event.
+#[verifier::external_body]
+pub fn request_vmpl2_timer_event() -> DekoGuestServResult<()> {
+    if !is_vmpl1() {
+        kerror!("request_deko_service called outside of VMPL1");
+
+        return Err(DekoGuestServError::FatalError);
+    }
+    no_irq_zone(
+        ||
+            {
+                unsafe {
+                    core::arch::asm!(
+                "
+                    movl $0xc0010130, %ecx
+                    movl $0x16, %eax
+                    movl {vmpl_level:e}, %edx
+                    wrmsr
+
+                    movq {extend_service}, %rax
+
+                    rep; vmmcall
+                ",
+                vmpl_level = in(reg) VMPL_GUEST_DEKO_MONITOR,
+                extend_service = in(reg)
+                    ((DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE as u64) << 32 | DEKO_SERVICE_EXTEND_TIMER_EVENT as u64),
                 out("rax") _,
                 out("rcx") _,
                 out("rdx") _,
