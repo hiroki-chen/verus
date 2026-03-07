@@ -8,7 +8,7 @@ use deko_std::wf::WellFormed;
 use deko_std::TrivialPredicate;
 use vstd::prelude::*;
 
-use crate::cpu::irq::{irq_enable, raw_irq_enable};
+use crate::cpu::irq::raw_irq_enable;
 use crate::cpu::DekoCpuCtx;
 use crate::guest::{request_vmpl2_syscall_handler, DekoGuestServResult};
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
@@ -62,11 +62,6 @@ fn replace_stack(syscall_body: DekoPPtr<DekoSyscallBody>) -> u64 {
             syscall_perm.pptr() == syscall_body@,
     )]
 pub extern "C" fn deko_ifc_entry(syscall_body: DekoPPtr<DekoSyscallBody>) {
-    // IFC enters from assembly without a matching irq_disable() bookkeeping.
-    // Keep raw IF enable here, but still run the post-enable #HV drain hook.
-    raw_irq_enable();
-    crate::imp::after_irq_enable();
-
     if is_vmpl1_user() {
         // Swap the current stack to the per-CPU large stack.
         replace_stack(syscall_body);
@@ -85,6 +80,11 @@ pub extern "C" fn deko_ifc_entry(syscall_body: DekoPPtr<DekoSyscallBody>) {
         syscall_perm.pptr() == syscall_body_ptr@,
 )]
 fn deko_ifc_entry_vmpl1(syscall_body_ptr: DekoPPtr<DekoSyscallBody>) -> u64 {
+    // IFC enters from assembly without a matching irq_disable() bookkeeping.
+    // Enable IF only after switching to the per-CPU VMPL1 stack.
+    raw_irq_enable();
+    crate::imp::after_irq_enable();
+
     let tracked mut syscall_perm = syscall_perm;
     let mut syscall_body = syscall_body_ptr.take(Tracked(&mut syscall_perm));
 
