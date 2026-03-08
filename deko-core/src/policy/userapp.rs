@@ -252,7 +252,7 @@ impl VmsaPage {
         Self::copy_from_guest_context(vmsa, active_vmsa_borrow, *syscall_trampoline);
         Self::copy_from_user_context(vmsa, linux_pt_regs);
 
-        kinfo!("Now vmsa is ", vmsa);
+        kdebug!("Now vmsa is ", vmsa);
 
         Ok(())
     }
@@ -319,32 +319,20 @@ impl VmsaPage {
                 vmsa_user.flags | 0x200,
             );
 
-            // Make segment selectors explicit for VMPL1 user return path.
-            // This avoids inheriting stale kernel/TSS selectors from copied VMSA.
-            core::ptr::write_unaligned(
-                core::ptr::addr_of_mut!((*dst).cs.selector),
-                VMPL1_USER_CS_SEL,
-            );
-            core::ptr::write_unaligned(
-                core::ptr::addr_of_mut!((*dst).ss.selector),
-                VMPL1_USER_DS_SEL,
-            );
-            core::ptr::write_unaligned(
-                core::ptr::addr_of_mut!((*dst).ds.selector),
-                VMPL1_USER_DS_SEL,
-            );
-            core::ptr::write_unaligned(
-                core::ptr::addr_of_mut!((*dst).es.selector),
-                VMPL1_USER_DS_SEL,
-            );
-            core::ptr::write_unaligned(
-                core::ptr::addr_of_mut!((*dst).fs.selector),
-                VMPL1_USER_DS_SEL,
-            );
-            core::ptr::write_unaligned(
-                core::ptr::addr_of_mut!((*dst).gs.selector),
-                VMPL1_USER_DS_SEL,
-            );
+            // Make user segments explicit for VMPL1 user return path. We must
+            // update the whole segment descriptors (not only selectors), otherwise
+            // we may keep stale DPL=0 flags from copied kernel VMSA.
+            let mut user_cs = guest_user_code_segment();
+            user_cs.selector = VMPL1_USER_CS_SEL;
+            let mut user_ds = guest_user_stack_segment();
+            user_ds.selector = VMPL1_USER_DS_SEL;
+
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).cs), user_cs);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).ss), user_ds);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).ds), user_ds);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).es), user_ds);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).fs), user_ds);
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).gs), user_ds);
 
             // Set back the cpl.
             core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).cpl), 3);
