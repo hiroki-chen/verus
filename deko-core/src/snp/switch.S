@@ -16,12 +16,19 @@ switch_to_vmpl_unsafe:
     /* Upon entry,
       * rdi = pointer to the HV doorbell page
       * esi = target VMPL
+      * rdx = value to place in rax before vmmcall
       */
     /* Check if NoFurtherSignal is set (bit 15 of the first word of the
-      * #HV doorbell page).  If so, abort the transition. */
+      * #HV doorbell page).  If so, abort unless the pending vector is
+      * timer (0xEC), which is coalescible. */
     test %rdi, %rdi
     jz switch_vmpl_proceed
     testw $0x8000, (%rdi)
+    jz switch_vmpl_proceed
+    /* Timer doorbell (vector 0xEC) is coalescible; allow VMPL switch and
+      * process it after returning from the switch path. */
+    cmpb $0xEC, (%rdi)
+    je switch_vmpl_proceed
 
     /* From this point until the vmgexit, if a #HV arrives, the #HV handler
       * must prevent the VMPL transition. */
@@ -32,10 +39,12 @@ switch_vmpl_window_start:
 switch_vmpl_proceed:
     /* Use the MSR-based VMPL switch request to avoid any need to use the
       * GHCB page.  Run VMPL request is 0x16 and response is 0x17. */
+    movq %rdx, %r11
     movl $0x16, %eax
     movl %esi, %edx
     movl $0xc0010130, %ecx
     wrmsr
+    movq %r11, %rax
     rep; vmmcall
 
     /* Verify that the request was honored.  ECX still contains the MSR
