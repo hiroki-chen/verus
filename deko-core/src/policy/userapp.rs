@@ -36,8 +36,8 @@ use crate::guest::service::{
     DEKO_SERVICE_TIMER,
 };
 use crate::guest::{
-    guest_page_table, handle_guest_exit, DekoGuestExitInformation, DekoGuestRequestParams,
-    DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode, DekoVmplSwitchErr, PtRegs,
+    guest_page_table, DekoGuestExitInformation, DekoGuestRequestParams, DekoGuestServError,
+    DekoGuestServResult, DekoGuestServResultCode, DekoVmplSwitchErr, PtRegs,
     DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE,
 };
 use crate::imp::doorbell::{init_hv_doorbell, init_hv_doorbell_vmpl1};

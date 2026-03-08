@@ -198,9 +198,14 @@ pub const DEKO_SERVICE_EXTEND_LAUNCH_APP: u32 = 0x3;
 
 pub const DEKO_SERVICE_EXTEND_MAP_IFC: u32 = 0x4;
 
-pub const DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER: u32 = 0x5;
+// Keep 0x5 aligned with Linux SVSM_EXTEND_TASK_MIGRATE.
+pub const DEKO_SERVICE_EXTEND_TASK_MIGRATE: u32 = 0x5;
 
 pub const DEKO_SERVICE_EXTEND_TIMER_EVENT: u32 = 0x6;
+
+// VMPL1 -> VMPL0 syscall-forward request. Keep it distinct from VMPL2
+// migration request (0x5) to avoid protocol collision.
+pub const DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER: u32 = 0x7;
 
 with_atomic_pred! {
     PhysAddr,
@@ -1334,6 +1339,11 @@ pub(super) fn handle_guest_exit_extend_service(
             handle_deko_service_map_ifc(params)?;
             Ok(0)
         },
+        // VMPL2 task migration notification. Current monitor behavior is no-op
+        // acknowledge to keep proxy loop progress.
+        DEKO_SERVICE_EXTEND_TASK_MIGRATE => Ok(0),
+        // VMPL1 forwards syscall requests through this extend-service code.
+        DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER => Ok(0),
         DEKO_SERVICE_EXTEND_TIMER_EVENT => Ok(DEKO_SERVICE_TIMER),
         _ => {
             kerror!("Unsupported extend service request: ", req);
