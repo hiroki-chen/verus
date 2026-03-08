@@ -8,18 +8,19 @@ use deko_std::wf::WellFormed;
 use deko_std::{deko_rwlock_read_atomic_data, trace_is_enabled, TrivialPredicate};
 use vstd::prelude::*;
 
-use crate::cpu::irq::no_irq_zone;
+use crate::cpu::irq::{log_nested_irq_state, no_irq_zone};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission, PERCPU_AREAS};
 use crate::guest::service::{
     handle_guest_exit_deko_service, DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER,
     DEKO_SERVICE_EXTEND_TIMER_EVENT, DEKO_SERVICE_REMAP_CA,
 };
+use crate::imp::ghcb::vmpl_switch_with_rax;
 use crate::imp::vmsa::{GuestVMExit, VMSA};
 use crate::imp::VMPL_GUEST_DEKO_MONITOR;
 use crate::mm::paging::{PageTable, PageTablePermission};
 use crate::mm::vm::TempMapping;
 use crate::policy::DekoSyscallBody;
-use crate::snp::{is_vmpl1, is_vmpl1_kernel, is_vmpl1_user};
+use crate::snp::{doorbell, is_vmpl1, is_vmpl1_kernel, is_vmpl1_user};
 use crate::{kdebug, kerror, kinfo, kwarn};
 
 pub(crate) mod service;
@@ -500,34 +501,35 @@ pub fn request_vmpl2_syscall_handler() -> DekoGuestServResult<()> {
 
         return Err(DekoGuestServError::FatalError);
     }
-    no_irq_zone(
-        ||
-            {
-                unsafe {
-                    core::arch::asm!(
-                "
-                    movl $0xc0010130, %ecx
-                    movl $0x16, %eax
-                    movl {vmpl_level:e}, %edx
-                    wrmsr
+    let extend_service = ((DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE as u64) << 32)
+        | DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER as u64;
 
-                    movq {extend_service}, %rax
-
-                    rep; vmmcall
-                ",
-                vmpl_level = in(reg) VMPL_GUEST_DEKO_MONITOR,
-                extend_service = in(reg)
-                    ((DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE as u64) << 32 | DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER as u64),
-                out("rax") _,
-                out("rcx") _,
-                out("rdx") _,
-                options(att_syntax)
-            );
-                }
+    const VMPL_SWITCH_RETRY_LIMIT: usize = 0x1000;
+    for attempt in 0..VMPL_SWITCH_RETRY_LIMIT {
+        let switch_res = no_irq_zone(
+            || { vmpl_switch_with_rax(VMPL_GUEST_DEKO_MONITOR, extend_service) },
+        );
+        match switch_res {
+            DekoVmplSwitchErr::Ok => return Ok(()),
+            DekoVmplSwitchErr::Cancelled => {
+                core::hint::spin_loop();
+                continue ;
             },
-    );
+            DekoVmplSwitchErr::Failed => {
+                return Err(
+                    DekoGuestServError::SoftError(
+                        DekoGuestServResultCode::VmplSwitchErr(DekoVmplSwitchErr::Failed),
+                    ),
+                );
+            },
+        }
+    }
 
-    Ok(())
+    Err(
+        DekoGuestServError::SoftError(
+            DekoGuestServResultCode::VmplSwitchErr(DekoVmplSwitchErr::Cancelled),
+        ),
+    )
 }
 
 /// Used by the VMPL1 guest to notify VMPL0 monitor of a timer event.
@@ -538,34 +540,33 @@ pub fn request_vmpl2_timer_event() -> DekoGuestServResult<()> {
 
         return Err(DekoGuestServError::FatalError);
     }
-    no_irq_zone(
-        ||
-            {
-                unsafe {
-                    core::arch::asm!(
-                "
-                    movl $0xc0010130, %ecx
-                    movl $0x16, %eax
-                    movl {vmpl_level:e}, %edx
-                    wrmsr
-
-                    movq {extend_service}, %rax
-
-                    rep; vmmcall
-                ",
-                vmpl_level = in(reg) VMPL_GUEST_DEKO_MONITOR,
-                extend_service = in(reg)
-                    ((DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE as u64) << 32 | DEKO_SERVICE_EXTEND_TIMER_EVENT as u64),
-                out("rax") _,
-                out("rcx") _,
-                out("rdx") _,
-                options(att_syntax)
-            );
-                }
+    let extend_service = ((DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE as u64) << 32)
+        | DEKO_SERVICE_EXTEND_TIMER_EVENT as u64;
+    const VMPL_SWITCH_RETRY_LIMIT: usize = 0x1000;
+    for attempt in 0..VMPL_SWITCH_RETRY_LIMIT {
+        let switch_res = no_irq_zone(
+            || vmpl_switch_with_rax(VMPL_GUEST_DEKO_MONITOR, extend_service),
+        );
+        match switch_res {
+            DekoVmplSwitchErr::Ok => return Ok(()),
+            DekoVmplSwitchErr::Cancelled => {
+                core::hint::spin_loop();
+                continue ;
             },
-    );
-
-    Ok(())
+            DekoVmplSwitchErr::Failed => {
+                return Err(
+                    DekoGuestServError::SoftError(
+                        DekoGuestServResultCode::VmplSwitchErr(DekoVmplSwitchErr::Failed),
+                    ),
+                );
+            },
+        }
+    }
+    Err(
+        DekoGuestServError::SoftError(
+            DekoGuestServResultCode::VmplSwitchErr(DekoVmplSwitchErr::Cancelled),
+        ),
+    )
 }
 
 } // verus!

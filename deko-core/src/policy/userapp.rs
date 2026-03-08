@@ -23,7 +23,7 @@ use crate::collections::{update_vec, Vec};
 use crate::cpu::gdt::{GlobalDescriptorTable, GLOBAL_GDT};
 use crate::cpu::idt::GLOBAL_IDT;
 use crate::cpu::ipi::wait_ipi_blocking;
-use crate::cpu::irq::{no_irq_zone, raw_irq_enable, IrqSafeLockGuard};
+use crate::cpu::irq::{log_nested_irq_state, no_irq_zone, raw_irq_enable, IrqSafeLockGuard};
 use crate::cpu::regs::{no_smap_zone, DEKO_TR_ATTRIBUTES, DEKO_TSS};
 use crate::cpu::task::{generate_id, DekoRunnableState};
 use crate::cpu::{self, DekoCpuCtx, DekoCpuCtxPermission, X86Tss};
@@ -60,7 +60,9 @@ use crate::snp::ghcb::{current_ghcb, msr_register_ghcb_gpa, validate_ghcb};
 use crate::snp::vmsa::{
     guest_user_code_segment, guest_user_stack_segment, VmsaPage, VmsaPagePermission, VMSA,
 };
-use crate::snp::{init_guest_host, is_vmpl1, rmpadjust, rmpquery, VMPL_GUEST_DEKO_MONITOR};
+use crate::snp::{
+    doorbell, init_guest_host, is_vmpl1, rmpadjust, rmpquery, VMPL_GUEST_DEKO_MONITOR,
+};
 use crate::{die, kdebug, kerror, kinfo, kpanic_if, kwarn, vec};
 
 deko_bitflags! {
@@ -1237,7 +1239,6 @@ fn run_userapp(cpu: DekoPPtr<DekoCpuCtx>) -> DekoGuestServResult<u64> {
                     vmpl_switch(VMPL_GUEST_SECURE_APP)
                 },
         );
-
         match switch_ret {
             DekoVmplSwitchErr::Ok => {},
             DekoVmplSwitchErr::Cancelled => {

@@ -58,6 +58,7 @@ extern "C" {
     fn switch_to_vmpl_unsafe(
         hv_doorbell: *const doorbell::HVDoorbell,
         target_vmpl: u32,
+        vmmcall_rax: u64,
     ) -> DekoVmplSwitchErr;
 }
 
@@ -114,7 +115,57 @@ pub fn vmpl_switch(target_vmpl: u32) -> DekoVmplSwitchErr {
     };
 
     let r = unsafe {
-        switch_to_vmpl_unsafe(doorbell_ptr.addr() as *const doorbell::HVDoorbell, target_vmpl)
+        switch_to_vmpl_unsafe(doorbell_ptr.addr() as *const doorbell::HVDoorbell, target_vmpl, 0)
+    };
+
+    r
+}
+
+/// Performs a VMPL switch and writes `vmmcall_rax` into RAX before executing
+/// `vmmcall`.
+#[verifier::external_body]
+#[verus_spec(
+    requires
+        target_vmpl <= 3,
+)]
+pub fn vmpl_switch_with_rax(target_vmpl: u32, vmmcall_rax: u64) -> DekoVmplSwitchErr {
+    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+    kpanic_if!(
+        cpu_borrow.doorbell.is_none(),
+        "GHCB doorbell pointer is None",
+    );
+
+    let doorbell_ptr = if !is_vmpl1() {
+        deko_rwlock_read_atomic_data! {
+        cpu_borrow.doorbell.as_ref().unwrap(),
+        ptr,
+        __,
+        {
+            *ptr
+        }
+    }
+    } else {
+        if core::hint::unlikely(cpu_borrow.ext_vmpl1.is_none()) {
+            return DekoVmplSwitchErr::Failed;
+        }
+        let ext_vmpl1 = cpu_borrow.ext_vmpl1.as_ref().unwrap();
+        deko_rwlock_read_atomic_data! {
+            ext_vmpl1.doorbell,
+            ptr,
+            __,
+            {
+                *ptr
+            }
+        }
+    };
+
+    let r = unsafe {
+        switch_to_vmpl_unsafe(
+            doorbell_ptr.addr() as *const doorbell::HVDoorbell,
+            target_vmpl,
+            vmmcall_rax,
+        )
     };
 
     r

@@ -14,13 +14,17 @@ hv_redirect_window_start:
 switch_to_vmpl_unsafe:
 
     /* Upon entry,
-      * rdi = pointer to the HV doorbell page
-      * esi = target VMPL
-      * rdx = value to place in rax before vmmcall
-      */
+     * rdi = pointer to the HV doorbell page
+     * esi = target VMPL
+     * rdx = value to place in rax before vmmcall
+     */
     /* Check if NoFurtherSignal is set (bit 15 of the first word of the
       * #HV doorbell page).  If so, abort unless the pending vector is
-      * timer (0xEC), which is coalescible. */
+      * timer (0xEC), which is coalescible.
+      *
+      * For timer coalescing, clear NoFurtherSignal before switching so
+      * host can raise subsequent timer doorbells while the switch path
+      * is in flight. */
     test %rdi, %rdi
     jz switch_vmpl_proceed
     testw $0x8000, (%rdi)
@@ -28,7 +32,9 @@ switch_to_vmpl_unsafe:
     /* Timer doorbell (vector 0xEC) is coalescible; allow VMPL switch and
       * process it after returning from the switch path. */
     cmpb $0xEC, (%rdi)
-    je switch_vmpl_proceed
+    jne switch_vmpl_cancel
+    andb $0x7f, 1(%rdi)
+    jmp switch_vmpl_proceed
 
     /* From this point until the vmgexit, if a #HV arrives, the #HV handler
       * must prevent the VMPL transition. */

@@ -904,7 +904,7 @@ fn handle_deko_service_lstar_intercept(
             kerror!("MSR intercept: invalid syscall enter address:", syscall_enter_addr => hex);
             return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
         }
-        kinfo!("Request:", req);
+        kdebug!("Request:", req);
 
         let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
         let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
@@ -954,7 +954,7 @@ fn handle_deko_service_lstar_intercept(
         );
         lstar_req_mapping.write_ref_at::<DekoGuestLstarWriteReq>(offset as usize, &req);
 
-        kinfo!("MSR intercept: LSTAR MSR intercept handled successfully");
+        kdebug!("MSR intercept: LSTAR MSR intercept handled successfully");
 
         if TRAMPOLINE_PA.get().is_none() {
             TRAMPOLINE_PA.init(DekoAtomicData::new(req.trampoline_gpa));
@@ -1222,6 +1222,63 @@ fn handle_deko_service_msr_intercepts(params: &mut DekoGuestRequestParams) -> De
     }
 }
 
+#[verus_spec(r =>
+    with
+        Tracked(cpu_perm): Tracked<&mut DekoCpuCtxPermission>,
+    requires
+        old(cpu_perm).wf(),
+    ensures
+        cpu_perm.wf(),
+        cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
+)]
+fn handle_deko_service_task_migrate(params: &DekoGuestRequestParams) -> DekoGuestServResult<u64> {
+    let old_cpu = params.rdx as u32;
+    let new_cpu = params.rcx as u32;
+    let pid = params.r9 as u32;
+
+    let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
+    let this_cpu_id = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).cpu_id as u32;
+
+    if core::hint::unlikely(this_cpu_id != new_cpu) {
+        kwarn!(
+            "Task migrate cpu mismatch: this_cpu=",
+            this_cpu_id,
+            " old_cpu=",
+            old_cpu,
+            " new_cpu=",
+            new_cpu,
+            " pid=",
+            pid
+        );
+        return Ok(0);
+    }
+    if core::hint::unlikely(cpu.borrow(Tracked(&cpu_perm.ptr_perm)).ext_vmpl1.is_none()) {
+        kwarn!(
+            "Task migrate on cpu without VMPL1 context: cpu=",
+            this_cpu_id,
+            " pid=",
+            pid
+        );
+        return Ok(0);
+    }
+    let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
+    let mut ctx_vmpl1 = cpu_taken.ext_vmpl1.take().unwrap();
+    ctx_vmpl1.pid = Some(pid);
+    cpu_taken.ext_vmpl1 = Some(ctx_vmpl1);
+    cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
+
+    kdebug!(
+        "Task migrate: rebound VMPL1 pid on cpu",
+        this_cpu_id,
+        " old_cpu=",
+        old_cpu,
+        " pid=",
+        pid
+    );
+
+    Ok(0)
+}
+
 /// Subroutine for handling DEKO service requests from the guest.
 ///
 /// Note during process handling there would be lock held so obtaining
@@ -1339,9 +1396,11 @@ pub(super) fn handle_guest_exit_extend_service(
             handle_deko_service_map_ifc(params)?;
             Ok(0)
         },
-        // VMPL2 task migration notification. Current monitor behavior is no-op
-        // acknowledge to keep proxy loop progress.
-        DEKO_SERVICE_EXTEND_TASK_MIGRATE => Ok(0),
+        // VMPL2 task migration notification.
+        DEKO_SERVICE_EXTEND_TASK_MIGRATE => {
+            proof_with!(Tracked(cpu_perm));
+            handle_deko_service_task_migrate(params)
+        },
         // VMPL1 forwards syscall requests through this extend-service code.
         DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER => Ok(0),
         DEKO_SERVICE_EXTEND_TIMER_EVENT => Ok(DEKO_SERVICE_TIMER),

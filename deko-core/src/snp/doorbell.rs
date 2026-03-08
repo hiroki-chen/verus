@@ -52,11 +52,13 @@ use crate::cpu::idt::{IPI_VECTOR, TIMER_VECTOR};
 use crate::cpu::irq::{irq_enabled, raw_irq_disable, raw_irq_enable, IrqUnSafeLockGuard};
 use crate::cpu::task::{debug_hv, X86ExceptionContext};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPerVmpl, DekoCpuCtxPermission};
-use crate::guest::request_vmpl2_timer_event;
+use crate::guest::service::DEKO_SERVICE_EXTEND_TIMER_EVENT;
+use crate::guest::{DekoVmplSwitchErr, DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE};
+use crate::imp::VMPL_GUEST_DEKO_MONITOR;
 use crate::mm::frame_allocator::DekoPageFrameBox;
 use crate::mm::paging::PageTable;
 use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR_FULL};
-use crate::snp::ghcb::{current_ghcb, GuestHostCommunicationBlock};
+use crate::snp::ghcb::{current_ghcb, vmpl_switch_with_rax, GuestHostCommunicationBlock};
 use crate::snp::{doorbell, is_vmpl1};
 use crate::{die, kdebug, kerror, kinfo, kpanic_if, ktrace, kwarn};
 
@@ -571,6 +573,11 @@ fn handle_hv_doorbell_vmpl1(hvdb_ptr: DekoPPtr<HVDoorbell>) {
 
     kpanic_if!(core::hint::unlikely(cpu_taken.ext_vmpl1.is_none()), "VMPL1 CPU context not initialized");
 
+    // Update the IRQ nesting state of the current CPU so calls to common
+    // code recognize that interrupts have been disabled.  Proceed as if
+    // interrupts were previously enabled, so that any code that deals with
+    // maskable interrupts knows that interrupts were enabled prior to reaching
+    // this point.
     let mut ext_vmpl1 = cpu_taken.ext_vmpl1.take().unwrap();
     let tracked mut ext_vmpl1_perm = cpu_perm.ext_vmpl1_perm.tracked_take();
     proof_with!(Tracked(&mut ext_vmpl1_perm.nested_irq_perm));
@@ -619,6 +626,11 @@ fn handle_hv_doorbell_vmpl0(hvdb_ptr: DekoPPtr<HVDoorbell>) {
     let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
     let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
 
+    // Update the IRQ nesting state of the current CPU so calls to common
+    // code recognize that interrupts have been disabled.  Proceed as if
+    // interrupts were previously enabled, so that any code that deals with
+    // maskable interrupts knows that interrupts were enabled prior to reaching
+    // this point.
     proof_with!(Tracked(&mut cpu_perm.irq_state_perm));
     cpu_taken.nested_irq.push(true);
 
@@ -703,8 +715,21 @@ fn handle_hv_doorbell_common(
                         crate::dbg::hv_trace_event(hvdb_ptr, 2, vector as u64, flags as u64);
 
                         if is_vmpl1() {
-                            if let Err(e) = request_vmpl2_timer_event() {
-                                kerror!("VMPL1 timer event request to VMPL0 failed:", e);
+                            let extend_service = ((DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE as u64)
+                                << 32) | DEKO_SERVICE_EXTEND_TIMER_EVENT as u64;
+                            const VMPL_SWITCH_RETRY_LIMIT_IN_HV: usize = 0x100;
+                            for _ in 0..VMPL_SWITCH_RETRY_LIMIT_IN_HV {
+                                match vmpl_switch_with_rax(
+                                    VMPL_GUEST_DEKO_MONITOR,
+                                    extend_service,
+                                ) {
+                                    DekoVmplSwitchErr::Ok => break ,
+                                    DekoVmplSwitchErr::Cancelled => {
+                                        core::hint::spin_loop();
+                                        continue ;
+                                    },
+                                    DekoVmplSwitchErr::Failed => break ,
+                                }
                             }
                         }
                         let apic = cpu_taken.apic();
@@ -744,6 +769,46 @@ pub fn process_pending_hv_events() {
         process_pending_hv_events_vmpl1();
     } else {
         process_pending_hv_events_vmpl0();
+    }
+}
+
+#[verifier::exec_allows_no_decreases_clause]
+pub fn current_doorbell_pending() -> bool {
+    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpu_borrowed = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+
+    if is_vmpl1() {
+        if let Some(ref ext_vmpl) = cpu_borrowed.ext_vmpl1 {
+            deko_rwlock_read_atomic_data! {
+                ext_vmpl.doorbell,
+                doorbell_ptr,
+                doorbell_perm,
+                {
+                    let doorbell = doorbell_ptr.borrow(Tracked(&doorbell_perm.borrow().ptr_perm));
+                    let flags = doorbell.flags.load(Tracked(&doorbell_perm.borrow().hv_perm.flags_perm));
+                    let vector = doorbell.vector.load(Tracked(&doorbell_perm.borrow().hv_perm.vector_perm));
+                    (flags & HV_DOORBELL_NO_FURTHER_SIGNAL_FLAG != 0) || (vector != 0)
+                }
+            }
+        } else {
+            false
+        }
+    } else {
+        if let Some(doorbell_lock) = &cpu_borrowed.doorbell {
+            deko_rwlock_read_atomic_data! {
+                doorbell_lock,
+                doorbell_ptr,
+                doorbell_perm,
+                {
+                    let doorbell = doorbell_ptr.borrow(Tracked(&doorbell_perm.borrow().ptr_perm));
+                    let flags = doorbell.flags.load(Tracked(&doorbell_perm.borrow().hv_perm.flags_perm));
+                    let vector = doorbell.vector.load(Tracked(&doorbell_perm.borrow().hv_perm.vector_perm));
+                    (flags & HV_DOORBELL_NO_FURTHER_SIGNAL_FLAG != 0) || (vector != 0)
+                }
+            }
+        } else {
+            false
+        }
     }
 }
 
@@ -791,12 +856,6 @@ fn do_processing_hv_events(
         HvDoorbellPtrPred,
     >,
 ) {
-    // This path toggles IF with raw cli/sti while draining pending events.
-    // If IF is already 0 at entry, running this would incorrectly force-enable
-    // interrupts at the end of a drain round.
-    if !irq_enabled() {
-        return ;
-    }
     #[verus_spec(
         invariant_except_break
             doorbell.wf(),

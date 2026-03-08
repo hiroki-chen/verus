@@ -22,6 +22,7 @@ use crate::cpu::DekoCpuCtx;
 use crate::imp::doorbell::HVDoorbell;
 use crate::kinfo;
 use crate::logging::{print_str, CONSOLE, CONSOLE_LOCK};
+use crate::snp::doorbell::HV_DOORBELL_NO_FURTHER_SIGNAL_FLAG;
 use crate::snp::is_vmpl1;
 
 verus! {
@@ -295,6 +296,63 @@ pub fn debug_doorbell() {
     };
 
     kinfo!("doorbell is", db_bytes);
+}
+
+#[verifier::external_body]
+pub fn log_current_doorbell_state(marker: u64) {
+    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpu_borrowed = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+    let vmpl = if is_vmpl1() { 1u64 } else { 0u64 };
+
+    if is_vmpl1() {
+        if let Some(ref ext_vmpl) = cpu_borrowed.ext_vmpl1 {
+            deko_rwlock_read_atomic_data! {
+                ext_vmpl.doorbell,
+                doorbell_ptr,
+                doorbell_perm,
+                {
+                    let doorbell = doorbell_ptr.borrow(Tracked(&doorbell_perm.borrow().ptr_perm));
+                    let flags = doorbell.flags.load(Tracked(&doorbell_perm.borrow().hv_perm.flags_perm));
+                    let vector = doorbell.vector.load(Tracked(&doorbell_perm.borrow().hv_perm.vector_perm));
+                    let pending = (flags & HV_DOORBELL_NO_FURTHER_SIGNAL_FLAG != 0) || (vector != 0);
+                    kinfo!(
+                        "doorbell_state",
+                        "marker", marker => hex,
+                        "vmpl", vmpl,
+                        "flags", flags as u64 => hex,
+                        "vector", vector as u64 => hex,
+                        "pending", if pending { "1" } else { "0" }
+                    );
+                }
+            }
+        } else {
+            kinfo!("doorbell_state", "marker", marker => hex, "vmpl", vmpl, "ext_vmpl1", "none");
+        }
+    } else {
+        if let Some(doorbell_lock) = &cpu_borrowed.doorbell {
+            deko_rwlock_read_atomic_data! {
+                doorbell_lock,
+                doorbell_ptr,
+                doorbell_perm,
+                {
+                    let doorbell = doorbell_ptr.borrow(Tracked(&doorbell_perm.borrow().ptr_perm));
+                    let flags = doorbell.flags.load(Tracked(&doorbell_perm.borrow().hv_perm.flags_perm));
+                    let vector = doorbell.vector.load(Tracked(&doorbell_perm.borrow().hv_perm.vector_perm));
+                    let pending = (flags & HV_DOORBELL_NO_FURTHER_SIGNAL_FLAG != 0) || (vector != 0);
+                    kinfo!(
+                        "doorbell_state",
+                        "marker", marker => hex,
+                        "vmpl", vmpl,
+                        "flags", flags as u64 => hex,
+                        "vector", vector as u64 => hex,
+                        "pending", if pending { "1" } else { "0" }
+                    );
+                }
+            }
+        } else {
+            kinfo!("doorbell_state", "marker", marker => hex, "vmpl", vmpl, "doorbell", "none");
+        }
+    }
 }
 
 #[inline]

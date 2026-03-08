@@ -510,6 +510,9 @@ pub struct DekoCpuCtxPerVmpl {
     /// The nested IRQ.
     #[deko(skip)]
     pub nested_irq: IrqState,
+    /// Deferred VMPL1 timer event request. Set in doorbell handling and
+    /// consumed from non-IRQ context.
+    pub deferred_timer_event: bool,
 }
 
 with_permission! {
@@ -641,6 +644,7 @@ impl DekoCpuCtxPerVmpl {
             gdt: gdt_ptr,
             pid: None,
             nested_irq,
+            deferred_timer_event: false,
         }
     }
 

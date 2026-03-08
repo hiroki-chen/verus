@@ -8,7 +8,7 @@ use deko_std::wf::WellFormed;
 use deko_std::TrivialPredicate;
 use vstd::prelude::*;
 
-use crate::cpu::irq::raw_irq_enable;
+use crate::cpu::irq::{irq_enable, irq_enabled, log_nested_irq_state, raw_irq_enable};
 use crate::cpu::DekoCpuCtx;
 use crate::guest::{request_vmpl2_syscall_handler, DekoGuestServResult};
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
@@ -16,7 +16,7 @@ use crate::mm::DEKO_IFC_FRAME_ALLOCATOR;
 use crate::policy::syscall::{analyze_and_prepare_syscall, sysret_epilogue};
 use crate::policy::{syscall, DekoSyscallBody};
 use crate::snp::ghcb::{current_ghcb, GuestHostCommunicationBlock};
-use crate::snp::{is_vmpl1, is_vmpl1_user, MSR_AMD64_SEV_ES_GHCB};
+use crate::snp::{doorbell, is_vmpl1, is_vmpl1_user, MSR_AMD64_SEV_ES_GHCB};
 use crate::{die, kerror, kinfo};
 
 verus! {
@@ -80,8 +80,11 @@ pub extern "C" fn deko_ifc_entry(syscall_body: DekoPPtr<DekoSyscallBody>) {
         syscall_perm.pptr() == syscall_body_ptr@,
 )]
 fn deko_ifc_entry_vmpl1(syscall_body_ptr: DekoPPtr<DekoSyscallBody>) -> u64 {
-    // IFC enters from assembly without a matching irq_disable() bookkeeping.
-    // Enable IF only after switching to the per-CPU VMPL1 stack.
+    // From now, this is the bottom half of the system call handler, and
+    // we are safe to re-enable interrupts and call other functions.
+    //
+    // Thus we enable IRQs and check if if there is nested IRQs and
+    // now we keep it in sync with the per-CPU IRQ state in `DekoCpuCtx`.
     raw_irq_enable();
     crate::imp::after_irq_enable();
 
