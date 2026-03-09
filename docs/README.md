@@ -1,82 +1,53 @@
-# CAGE-SEV Documentation
+# Deko Documentation Index
 
-Welcome to the CAGE-SEV documentation. This directory contains comprehensive guides for setting up, building, and understanding the CAGE-SEV confidential computing kernel.
+This folder contains setup, build, debug, and architecture notes for `cage-sev`.
 
-## 📚 Table of Contents
+## Getting Started
 
-### Getting Started
-- **[Preparation Guide](Preparation.md)** - Complete setup guide for development environment
-- **[Build Guide](Build.md)** - Building the kernel and components
-- **[SEV Installation](install-sev.md)** - SEV-specific setup instructions
+1. [Preparation Guide](Preparation.md)
+2. [Build Guide](Build.md)
+3. [Debug Guide](Debug.md)
 
-### Development
-- **[Debug Guide](Debug.md)** - Debugging techniques and tools
-- **[Logging Usage](logging-usage.md)** - Using the logging system
+## Core Docs
 
-### Architecture & Design
-- **[Memory Layout](mem-layout.png)** - Visual memory layout diagram
-- **[Paging](Paging.md)** - Memory paging implementation
-- **[Address Management](address.md)** - Address space management
+- [Preparation.md](Preparation.md): host setup, bootstrap, and first run
+- [Build.md](Build.md): current `xtask` command reference
+- [Debug.md](Debug.md): debugging and logging primitives
+- [logging-usage.md](logging-usage.md): ergonomic logging macros and patterns
+- [install-sev.md](install-sev.md): AMD SEV-SNP host-side compatibility notes
 
-## 🚀 Quick Start
+## Architecture Notes
 
-For new developers, follow this recommended reading order:
+- [Paging.md](Paging.md)
+- [address.md](address.md)
+- [mem-layout.png](mem-layout.png)
 
-1. **[Preparation Guide](Preparation.md)** - Set up your development environment
-2. **[Build Guide](Build.md)** - Build and test the kernel
-3. **[Debug Guide](Debug.md)** - Learn debugging workflows
+## Quick Commands
 
-## 📋 Documentation Categories
+```bash
+# Bootstrap verifier tools
+cargo run --bin xtask -- bootstrap-verus
 
-### 🛠️ Setup & Installation
-| Document | Description | Audience |
-|----------|-------------|----------|
-| [Preparation](Preparation.md) | Complete environment setup | New developers |
-| [SEV Installation](install-sev.md) | SEV-specific configuration | AMD SNP users |
+# Build SNP artifacts
+cargo run --bin xtask -- --target-arch snp build --target all --release
 
-### 🔨 Development
-| Document | Description | Audience |
-|----------|-------------|----------|
-| [Build Guide](Build.md) | Building components | All developers |
-| [Debug Guide](Debug.md) | Debugging techniques | All developers |
-| [Logging](logging-usage.md) | Logging system usage | All developers |
+# Run SNP with config
+cargo run --bin xtask -- --target-arch snp qemu --config-path .config/qemu.snp.config.toml
+```
 
-### 🏗️ Architecture
-| Document | Description | Audience |
-|----------|-------------|----------|
-| [Paging](Paging.md) | Memory paging design | Kernel developers |
-| [Address Management](address.md) | Address space handling | Kernel developers |
-| [Memory Layout](mem-layout.png) | System memory organization | All developers |
+Or use aliases in `.cargo/config.toml`:
 
-## 🎯 Target Architectures
+```bash
+cargo qemu-snp
+cargo qemu-tdx
+```
 
-CAGE-SEV supports two confidential computing architectures:
+## Maintenance Notes
 
-- **Intel TDX** (Trust Domain Extensions)
-- **AMD SNP** (Secure Nested Paging)
-
-Architecture-specific instructions are clearly marked throughout the documentation.
-
-## 🤝 Contributing to Documentation
-
-When adding new documentation:
-
-1. Place files in the appropriate category subdirectory
-2. Update this README.md index
-3. Follow the existing documentation style
-4. Include code examples where applicable
-5. Test all instructions on a clean environment
-
-## 📞 Getting Help
-
-- **Issues**: Open an issue on the GitHub repository
-- **Discussions**: Use GitHub Discussions for questions
-- **Documentation bugs**: File issues with the "documentation" label
-
-## 📄 License
-
-This documentation is part of the CAGE-SEV project and follows the same license terms.
+- Keep command examples in sync with `xtask/src/main.rs`
+- Prefer explicit `--target-arch` in all monitor/QEMU examples
+- Update this index whenever adding/removing docs
 
 ---
 
-*Last updated: November 2025*
+Last updated: 2026-03-09
