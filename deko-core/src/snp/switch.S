@@ -53,6 +53,8 @@ switch_vmpl_proceed:
     movq %r11, %rax
     rep; vmmcall
 
+.globl switch_vmpl_window_end
+switch_vmpl_window_end:
     /* Verify that the request was honored.  ECX still contains the MSR
       * number. */
     rdmsr
@@ -62,8 +64,6 @@ switch_vmpl_proceed:
     xorl %eax, %eax
     ret
 
-.globl switch_vmpl_window_end
-switch_vmpl_window_end:
 switch_vmpl_failed:
     movl $2, %eax
     ret
