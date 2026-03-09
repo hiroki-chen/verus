@@ -12,7 +12,7 @@ use deko_std::wf::WellFormed;
 use deko_std::{deko_rwlock_read_atomic_data, with_permission};
 use vstd::prelude::*;
 
-use crate::cpu::{DekoCpuCtx, PERCPU_AREAS};
+use crate::cpu::{DekoCpuCtx, DekoCpuCtxPerVmpl, PERCPU_AREAS};
 use crate::guest::service::DekoGuestLstarWriteReq;
 use crate::guest::{DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode};
 use crate::imp::{RmpFlags, SnpStatusFlags, GUEST_MSR_INTERCEPT, MSR_SEV_STATUS};
@@ -38,14 +38,23 @@ pub(crate) mod msr;
 pub(crate) mod syscall;
 pub(crate) mod userapp;
 
-core::arch::global_asm!(include_str!("trampoline.S"), options(att_syntax));
+core::arch::global_asm!(
+    include_str!("trampoline.S"),
+    DEKO_DOORBELL_CTX_OFFSET = const core::mem::offset_of!(DekoCpuCtx, ext_vmpl1)
+        + core::mem::offset_of!(DekoCpuCtxPerVmpl, doorbell),
+    options(att_syntax)
+);
 
 extern "C" {
     fn deko_trampoline_start();
     fn deko_sysret_trampoline();
+    fn deko_sysret_window_start();
+    fn deko_sysret_window_end();
     fn deko_trampoline_end();
     static mut deko_trampoline_data_entry: u64;
     static mut deko_ifc_engine_entry: u64;
+    static mut HV_SYSRET_WINDOW_START: u64;
+    static mut HV_SYSRET_WINDOW_END: u64;
 }
 
 verus! {
@@ -550,6 +559,18 @@ unsafe fn patch_trampoline(
     }
     update_syscall_entry(syscall_enter_addr.0 as u64);
     update_ifc_engine_entry(deko_ifc_entry_func_ptr() as u64);
+
+    let sysret_window_start_off = (deko_sysret_window_start as *const () as usize).wrapping_sub(
+        trampoline_start,
+    );
+    let sysret_window_end_off = (deko_sysret_window_end as *const () as usize).wrapping_sub(
+        trampoline_start,
+    );
+
+    unsafe {
+        HV_SYSRET_WINDOW_START = trampoline_gva.0.wrapping_add(sysret_window_start_off as u64);
+        HV_SYSRET_WINDOW_END = trampoline_gva.0.wrapping_add(sysret_window_end_off as u64);
+    }
 
     // Make it a wrapper.
     core::ptr::copy_nonoverlapping(

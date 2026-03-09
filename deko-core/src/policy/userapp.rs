@@ -1,3 +1,5 @@
+use core::borrow::Borrow;
+
 use deko_macros::DekoDebug;
 use deko_std::address::{create_paddr_range, PhysAddr, VaddrRange};
 use deko_std::bits::{bit_u32_and_auto, bit_u64_and_auto};
@@ -1216,7 +1218,9 @@ fn run_userapp(cpu: DekoPPtr<DekoCpuCtx>) -> DekoGuestServResult<u64> {
             cpu_perm.ptr_perm.value().ext_vmpl1 is Some,
     )]
     loop {
-        // kinfo!("Attempting to enter guest app in VMPL1");
+        kinfo!("Attempting to enter guest app in VMPL1");
+        let switch_tsc_begin = read_tsc();
+        kinfo!("run_userapp: before vmpl_switch, tsc=", switch_tsc_begin => hex);
         // dump_vmpl1_doorbell_snapshot_current_cpu();
         // WARNING: CRITICAL SECTION
         //
@@ -1232,12 +1236,19 @@ fn run_userapp(cpu: DekoPPtr<DekoCpuCtx>) -> DekoGuestServResult<u64> {
         // to inject another interrupt until we re-enable interrupts at the end,
         // which then checks if there is any pending doorbells and processes them.
         // Now copy the information to the VMSA and prepare for the VMPL switch.
-        let switch_ret = no_irq_zone(
-            ||
-                {
-                    flush_tlb_global_sync();
-                    vmpl_switch(VMPL_GUEST_SECURE_APP)
-                },
+        let switch_ret = no_irq_zone(|| { vmpl_switch(VMPL_GUEST_SECURE_APP) });
+        let switch_tsc_end = read_tsc();
+        let switch_ret_code = match switch_ret {
+            DekoVmplSwitchErr::Ok => 0u64,
+            DekoVmplSwitchErr::Cancelled => 1u64,
+            DekoVmplSwitchErr::Failed => 2u64,
+        };
+        kinfo!(
+            "run_userapp: after vmpl_switch",
+            "ret", switch_ret_code,
+            "tsc_begin", switch_tsc_begin => hex,
+            "tsc_end", switch_tsc_end => hex,
+            "delta", switch_tsc_end.wrapping_sub(switch_tsc_begin) => hex
         );
         match switch_ret {
             DekoVmplSwitchErr::Ok => {},
@@ -1251,9 +1262,6 @@ fn run_userapp(cpu: DekoPPtr<DekoCpuCtx>) -> DekoGuestServResult<u64> {
             },
         }
 
-        // kinfo!("Entered guest app in VMPL1, now processing the request");
-        // dump_hv_doorbell_trace_and_reset();
-
         let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
         let cpu_idx = cpu_borrow.cpu_id;
         let vmsa = &cpu_borrow.ext_vmpl1.as_ref().unwrap().vmsa;
@@ -1264,6 +1272,11 @@ fn run_userapp(cpu: DekoPPtr<DekoCpuCtx>) -> DekoGuestServResult<u64> {
         proof_with!(Tracked(&vmsa_perm));
         let info = DekoGuestExitInformation::try_parse_vmsa(vmsa_ptr, true);
 
+        let vmsa = vmsa_ptr.borrow(Tracked(&vmsa_perm));
+        kinfo!("debg vmsa:", vmsa);
+
+        kinfo!("Entered guest app in VMPL1, now processing the request: ", info);
+
         let ret_rax = match get_guest_app_extend_exit_rax(&info) {
             Some(rax) => rax,
             None => {
@@ -1272,10 +1285,17 @@ fn run_userapp(cpu: DekoPPtr<DekoCpuCtx>) -> DekoGuestServResult<u64> {
             },
         };
 
+        kinfo!("Guest app exit with extended exit information, returning to VMPL2 with rax=", ret_rax=>hex);
         // Attempt to enter the guest only once and if it succeeds, we immediately
         // forward the request to the syscall handler in VMPL2.
         return Ok(ret_rax);
     }
+}
+
+#[verifier::external_body]
+#[inline]
+fn read_tsc() -> u64 {
+    unsafe { core::arch::x86_64::_rdtsc() }
 }
 
 #[inline]

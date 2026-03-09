@@ -33,14 +33,16 @@ switch_to_vmpl_unsafe:
       * process it after returning from the switch path. */
     cmpb $0xEC, (%rdi)
     jne switch_vmpl_cancel
-    andb $0x7f, 1(%rdi)
-    jmp switch_vmpl_proceed
+    jmp switch_vmpl_window_start_timer_clear
 
     /* From this point until the vmgexit, if a #HV arrives, the #HV handler
       * must prevent the VMPL transition. */
 .globl switch_vmpl_window_start
 switch_vmpl_window_start:
     jnz switch_vmpl_cancel
+
+switch_vmpl_window_start_timer_clear:
+    movb $0x0, 1(%rdi)
 
 switch_vmpl_proceed:
     /* Use the MSR-based VMPL switch request to avoid any need to use the

@@ -83,6 +83,10 @@ verus! {
         target_vmpl <= 3,
 )]
 pub fn vmpl_switch(target_vmpl: u32) -> DekoVmplSwitchErr {
+    let vmpl1_call = is_vmpl1();
+    if vmpl1_call {
+        kinfo!("vmpl_switch(vmpl1): before", "target_vmpl", target_vmpl as u64);
+    }
     let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
     let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
     kpanic_if!(
@@ -118,6 +122,18 @@ pub fn vmpl_switch(target_vmpl: u32) -> DekoVmplSwitchErr {
         switch_to_vmpl_unsafe(doorbell_ptr.addr() as *const doorbell::HVDoorbell, target_vmpl, 0)
     };
 
+    if vmpl1_call {
+        let ret_code = match r {
+            DekoVmplSwitchErr::Ok => 0u64,
+            DekoVmplSwitchErr::Cancelled => 1u64,
+            DekoVmplSwitchErr::Failed => 2u64,
+        };
+        kinfo!(
+            "vmpl_switch(vmpl1): after",
+            "target_vmpl", target_vmpl as u64,
+            "ret", ret_code
+        );
+    }
     r
 }
 

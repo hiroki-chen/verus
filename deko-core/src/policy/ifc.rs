@@ -5,18 +5,22 @@ use deko_std::prelude::{func_ptr, PhysAddr};
 use deko_std::ptr::{DekoPPtr, DekoPointsTo};
 use deko_std::sync::DekoSimpleOnceCell;
 use deko_std::wf::WellFormed;
-use deko_std::TrivialPredicate;
+use deko_std::{deko_rwlock_write_atomic_data, TrivialPredicate};
 use vstd::prelude::*;
 
-use crate::cpu::irq::{irq_enable, irq_enabled, log_nested_irq_state, raw_irq_enable};
+use crate::cpu::idt::TIMER_VECTOR;
+use crate::cpu::irq::{
+    irq_enable, irq_enabled, log_nested_irq_state, raw_irq_disable, raw_irq_enable,
+};
 use crate::cpu::DekoCpuCtx;
 use crate::guest::{request_vmpl2_syscall_handler, DekoGuestServResult};
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
 use crate::mm::DEKO_IFC_FRAME_ALLOCATOR;
 use crate::policy::syscall::{analyze_and_prepare_syscall, sysret_epilogue};
 use crate::policy::{syscall, DekoSyscallBody};
+use crate::snp::doorbell::HV_DOORBELL_NO_FURTHER_SIGNAL_FLAG;
 use crate::snp::ghcb::{current_ghcb, GuestHostCommunicationBlock};
-use crate::snp::{doorbell, is_vmpl1, is_vmpl1_user, MSR_AMD64_SEV_ES_GHCB};
+use crate::snp::{is_vmpl1_user, MSR_AMD64_SEV_ES_GHCB};
 use crate::{die, kerror, kinfo};
 
 verus! {
@@ -50,6 +54,31 @@ fn replace_stack(syscall_body: DekoPPtr<DekoSyscallBody>) -> u64 {
     ret
 }
 
+#[verifier::external_body]
+fn clear_timer_no_further_signal_if_pending() {
+    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+
+    if let Some(ext_vmpl1) = cpu_borrow.ext_vmpl1.as_ref() {
+        deko_rwlock_write_atomic_data! {
+            ext_vmpl1.doorbell,
+            doorbell_ptr,
+            doorbell_perm,
+            {
+                let doorbell = doorbell_ptr.borrow(Tracked(&doorbell_perm.borrow().ptr_perm));
+                let vector = doorbell.vector.load(Tracked(&doorbell_perm.borrow().hv_perm.vector_perm));
+
+                if vector as usize == TIMER_VECTOR {
+                    let _ = doorbell.flags.fetch_and(
+                        Tracked(&mut doorbell_perm.borrow_mut().hv_perm.flags_perm),
+                        !HV_DOORBELL_NO_FURTHER_SIGNAL_FLAG,
+                    );
+                }
+            }
+        }
+    }
+}
+
 // Need to switch to a large stack here.
 #[allow(improper_ctypes_definitions)]
 #[no_mangle]
@@ -80,13 +109,7 @@ pub extern "C" fn deko_ifc_entry(syscall_body: DekoPPtr<DekoSyscallBody>) {
         syscall_perm.pptr() == syscall_body_ptr@,
 )]
 fn deko_ifc_entry_vmpl1(syscall_body_ptr: DekoPPtr<DekoSyscallBody>) -> u64 {
-    // From now, this is the bottom half of the system call handler, and
-    // we are safe to re-enable interrupts and call other functions.
-    //
-    // Thus we enable IRQs and check if if there is nested IRQs and
-    // now we keep it in sync with the per-CPU IRQ state in `DekoCpuCtx`.
     raw_irq_enable();
-    crate::imp::after_irq_enable();
 
     let tracked mut syscall_perm = syscall_perm;
     let mut syscall_body = syscall_body_ptr.take(Tracked(&mut syscall_perm));
@@ -100,7 +123,7 @@ fn deko_ifc_entry_vmpl1(syscall_body_ptr: DekoPPtr<DekoSyscallBody>) -> u64 {
     kinfo!("ifc: before request_vmpl2_syscall_handler");
 
     if let Err(e) = request_vmpl2_syscall_handler() {
-        kerror!("ifc: request_vmpl2_syscall_handler failed");
+        kerror!("ifc: request_vmpl2_syscall_handler failed: ", e);
         return e.into_result_code();
     }
     kinfo!("ifc: after request_vmpl2_syscall_handler");
@@ -111,8 +134,12 @@ fn deko_ifc_entry_vmpl1(syscall_body_ptr: DekoPPtr<DekoSyscallBody>) -> u64 {
         kerror!("ifc: sysret_epilogue failed");
         return e.into_result_code();
     }
-    kinfo!("ifc: after sysret_epilogue");
     syscall_body_ptr.write(Tracked(&mut syscall_perm), syscall_body);
+
+    raw_irq_disable();
+    clear_timer_no_further_signal_if_pending();
+
+    kinfo!("ifc: after sysret_epilogue");
 
     0
 }

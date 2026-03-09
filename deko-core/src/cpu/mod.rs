@@ -513,6 +513,10 @@ pub struct DekoCpuCtxPerVmpl {
     /// Deferred VMPL1 timer event request. Set in doorbell handling and
     /// consumed from non-IRQ context.
     pub deferred_timer_event: bool,
+    /// Guard bit set while VMPL1 is issuing a syscall VMPL switch.
+    pub syscall_switch_in_progress: bool,
+    /// Last TSC when VMPL1 timer notification was forwarded to VMPL0.
+    pub last_timer_notify_tsc: u64,
 }
 
 with_permission! {
@@ -645,6 +649,8 @@ impl DekoCpuCtxPerVmpl {
             pid: None,
             nested_irq,
             deferred_timer_event: false,
+            syscall_switch_in_progress: false,
+            last_timer_notify_tsc: 0,
         }
     }
 

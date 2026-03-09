@@ -1310,6 +1310,7 @@ pub fn analyze_and_prepare_syscall(syscall_body: &mut DekoSyscallBody) -> DekoGu
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
     kinfo!("Syscall invoked: ", SYS_CALL_NAME[syscall_body.rax as usize]);
+    kinfo!("Syscall body", syscall_body);
 
     match syscall_body.rax {
         SYS_read => { analyze_syscall_read(syscall_body)? },

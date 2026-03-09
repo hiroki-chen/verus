@@ -53,7 +53,7 @@ use crate::cpu::irq::{irq_enabled, raw_irq_disable, raw_irq_enable, IrqUnSafeLoc
 use crate::cpu::task::{debug_hv, X86ExceptionContext};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPerVmpl, DekoCpuCtxPermission};
 use crate::guest::service::DEKO_SERVICE_EXTEND_TIMER_EVENT;
-use crate::guest::{DekoVmplSwitchErr, DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE};
+use crate::guest::DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE;
 use crate::imp::VMPL_GUEST_DEKO_MONITOR;
 use crate::mm::frame_allocator::DekoPageFrameBox;
 use crate::mm::paging::PageTable;
@@ -98,6 +98,10 @@ const _: () = {
 };
 
 verus! {
+
+/// Minimum TSC delta between two VMPL1->VMPL0 timer notifications.
+/// This throttles timer-exit storms while preserving periodic progress.
+const VMPL1_TIMER_NOTIFY_MIN_DELTA_TSC: u64 = 30_000_000;
 
 global layout HVDoorbell is size == 0x100, align == 0x4;
 
@@ -714,24 +718,6 @@ fn handle_hv_doorbell_common(
                     TIMER_VECTOR => {
                         crate::dbg::hv_trace_event(hvdb_ptr, 2, vector as u64, flags as u64);
 
-                        if is_vmpl1() {
-                            let extend_service = ((DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE as u64)
-                                << 32) | DEKO_SERVICE_EXTEND_TIMER_EVENT as u64;
-                            const VMPL_SWITCH_RETRY_LIMIT_IN_HV: usize = 0x100;
-                            for _ in 0..VMPL_SWITCH_RETRY_LIMIT_IN_HV {
-                                match vmpl_switch_with_rax(
-                                    VMPL_GUEST_DEKO_MONITOR,
-                                    extend_service,
-                                ) {
-                                    DekoVmplSwitchErr::Ok => break ,
-                                    DekoVmplSwitchErr::Cancelled => {
-                                        core::hint::spin_loop();
-                                        continue ;
-                                    },
-                                    DekoVmplSwitchErr::Failed => break ,
-                                }
-                            }
-                        }
                         let apic = cpu_taken.apic();
 
                         // The trick here is that the physical APIC
@@ -745,6 +731,23 @@ fn handle_hv_doorbell_common(
                         // by the hypervisor; the guest will handle
                         // the rest.
                         apic.eoi();
+
+                        if is_vmpl1() {
+                            if let Some(ext_vmpl1) = cpu_taken.ext_vmpl1.as_mut() {
+                                let now_tsc = read_tsc();
+                                if now_tsc.wrapping_sub(ext_vmpl1.last_timer_notify_tsc)
+                                    >= VMPL1_TIMER_NOTIFY_MIN_DELTA_TSC {
+                                    ext_vmpl1.last_timer_notify_tsc = now_tsc;
+                                    let extend_service = ((
+                                    DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE as u64) << 32)
+                                        | DEKO_SERVICE_EXTEND_TIMER_EVENT as u64;
+                                    let _ = vmpl_switch_with_rax(
+                                        VMPL_GUEST_DEKO_MONITOR,
+                                        extend_service,
+                                    );
+                                }
+                            }
+                        }
                     },
                     _ => {
                         crate::dbg::hv_trace_event(hvdb_ptr, 3, vector as u64, flags as u64);
@@ -864,9 +867,13 @@ fn do_processing_hv_events(
         if !has_pending_hv_events(doorbell) {
             break ;
         }
+        // If this drain pass is triggered by a timer doorbell, handle only one
+        // timer event and return to caller to avoid timer-only livelock.
+
+        let break_after_this_round = has_pending_timer_event(doorbell);
+
         // Keep this as raw IF toggling only. Using irq_disable()/irq_enable()
         // here would recurse into after_irq_enable() and unbound nesting.
-
         raw_irq_disable();
 
         deko_rwlock_write_atomic_data! {
@@ -880,6 +887,10 @@ fn do_processing_hv_events(
         }
 
         raw_irq_enable();
+
+        if break_after_this_round {
+            break ;
+        }
     }
 }
 
@@ -907,6 +918,36 @@ fn has_pending_hv_events(
             (flags & HV_DOORBELL_NO_FURTHER_SIGNAL_FLAG != 0) || (vector != 0)
         }
     }
+}
+
+#[inline]
+#[verus_spec(
+    requires
+        doorbell.wf(),
+)]
+fn has_pending_timer_event(
+    doorbell: &RwLock<
+        DekoAtomicData<DekoPPtr<HVDoorbell>, HvDoorbellPtrPermission>,
+        IrqUnSafeLockGuard,
+        HvDoorbellPtrPred,
+    >,
+) -> bool {
+    deko_rwlock_read_atomic_data! {
+        doorbell,
+        doorbell_ptr,
+        doorbell_perm,
+        {
+            let doorbell = doorbell_ptr.borrow(Tracked(&doorbell_perm.borrow().ptr_perm));
+            let vector = doorbell.vector.load(Tracked(&doorbell_perm.borrow().hv_perm.vector_perm));
+            vector as usize == TIMER_VECTOR
+        }
+    }
+}
+
+#[inline]
+#[verifier::external_body]
+fn read_tsc() -> u64 {
+    unsafe { core::arch::x86_64::_rdtsc() }
 }
 
 } // verus!

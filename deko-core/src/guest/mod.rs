@@ -504,69 +504,39 @@ pub fn request_vmpl2_syscall_handler() -> DekoGuestServResult<()> {
     let extend_service = ((DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE as u64) << 32)
         | DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER as u64;
 
-    const VMPL_SWITCH_RETRY_LIMIT: usize = 0x1000;
-    for attempt in 0..VMPL_SWITCH_RETRY_LIMIT {
-        let switch_res = no_irq_zone(
-            || { vmpl_switch_with_rax(VMPL_GUEST_DEKO_MONITOR, extend_service) },
-        );
-        match switch_res {
-            DekoVmplSwitchErr::Ok => return Ok(()),
-            DekoVmplSwitchErr::Cancelled => {
-                core::hint::spin_loop();
-                continue ;
-            },
-            DekoVmplSwitchErr::Failed => {
-                return Err(
-                    DekoGuestServError::SoftError(
-                        DekoGuestServResultCode::VmplSwitchErr(DekoVmplSwitchErr::Failed),
-                    ),
-                );
-            },
-        }
+    match vmpl_switch_with_rax(VMPL_GUEST_DEKO_MONITOR, extend_service) {
+        DekoVmplSwitchErr::Ok => { return Ok(()) },
+        _ => {
+            return Err(
+                DekoGuestServError::SoftError(
+                    DekoGuestServResultCode::VmplSwitchErr(DekoVmplSwitchErr::Failed),
+                ),
+            );
+        },
     }
-
-    Err(
-        DekoGuestServError::SoftError(
-            DekoGuestServResultCode::VmplSwitchErr(DekoVmplSwitchErr::Cancelled),
-        ),
-    )
 }
 
 /// Used by the VMPL1 guest to notify VMPL0 monitor of a timer event.
 #[verifier::external_body]
 pub fn request_vmpl2_timer_event() -> DekoGuestServResult<()> {
-    if !is_vmpl1() {
-        kerror!("request_deko_service called outside of VMPL1");
+    Ok(())
+    // if !is_vmpl1() {
+    //     kerror!("request_deko_service called outside of VMPL1");
+    //     return Err(DekoGuestServError::FatalError);
+    // }
+    // let extend_service = ((DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE as u64) << 32)
+    //     | DEKO_SERVICE_EXTEND_TIMER_EVENT as u64;
+    // match vmpl_switch_with_rax(VMPL_GUEST_DEKO_MONITOR, extend_service) {
+    //     DekoVmplSwitchErr::Ok => return Ok(()),
+    //     _ => {
+    //         return Err(
+    //             DekoGuestServError::SoftError(
+    //                 DekoGuestServResultCode::VmplSwitchErr(DekoVmplSwitchErr::Failed),
+    //             ),
+    //         );
+    //     },
+    // }
 
-        return Err(DekoGuestServError::FatalError);
-    }
-    let extend_service = ((DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE as u64) << 32)
-        | DEKO_SERVICE_EXTEND_TIMER_EVENT as u64;
-    const VMPL_SWITCH_RETRY_LIMIT: usize = 0x1000;
-    for attempt in 0..VMPL_SWITCH_RETRY_LIMIT {
-        let switch_res = no_irq_zone(
-            || vmpl_switch_with_rax(VMPL_GUEST_DEKO_MONITOR, extend_service),
-        );
-        match switch_res {
-            DekoVmplSwitchErr::Ok => return Ok(()),
-            DekoVmplSwitchErr::Cancelled => {
-                core::hint::spin_loop();
-                continue ;
-            },
-            DekoVmplSwitchErr::Failed => {
-                return Err(
-                    DekoGuestServError::SoftError(
-                        DekoGuestServResultCode::VmplSwitchErr(DekoVmplSwitchErr::Failed),
-                    ),
-                );
-            },
-        }
-    }
-    Err(
-        DekoGuestServError::SoftError(
-            DekoGuestServResultCode::VmplSwitchErr(DekoVmplSwitchErr::Cancelled),
-        ),
-    )
 }
 
 } // verus!
