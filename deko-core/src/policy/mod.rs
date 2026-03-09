@@ -12,7 +12,7 @@ use deko_std::wf::WellFormed;
 use deko_std::{deko_rwlock_read_atomic_data, with_permission};
 use vstd::prelude::*;
 
-use crate::cpu::{DekoCpuCtx, DekoCpuCtxPerVmpl, PERCPU_AREAS};
+use crate::cpu::{DekoCpuCtx, PERCPU_AREAS};
 use crate::guest::service::DekoGuestLstarWriteReq;
 use crate::guest::{DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode};
 use crate::imp::{RmpFlags, SnpStatusFlags, GUEST_MSR_INTERCEPT, MSR_SEV_STATUS};
@@ -38,12 +38,7 @@ pub(crate) mod msr;
 pub(crate) mod syscall;
 pub(crate) mod userapp;
 
-core::arch::global_asm!(
-    include_str!("trampoline.S"),
-    DEKO_DOORBELL_CTX_OFFSET = const core::mem::offset_of!(DekoCpuCtx, ext_vmpl1)
-        + core::mem::offset_of!(DekoCpuCtxPerVmpl, doorbell),
-    options(att_syntax)
-);
+core::arch::global_asm!(include_str!("trampoline.S"), options(att_syntax));
 
 extern "C" {
     fn deko_trampoline_start();

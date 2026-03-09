@@ -17,7 +17,7 @@ extra_config = [
   "scsi-hd,drive=disk0",
   # Network device
   "-netdev",
-  "user,id=vmnic,hostfwd=tcp::10022-:22",
+  "user,id=vmnic,hostfwd=tcp::11451-:22",
   "-device",
   "e1000,netdev=vmnic,romfile=",
   "-serial",
@@ -27,7 +27,7 @@ extra_config = [
   "-kernel",
   "/home/haobchen/deko-linux/arch/x86/boot/bzImage",
   "-append",
-  "root=/dev/sda1 console=ttyS0 no5lvl nopti hugepages=0 mem_encrypt=on"
+  "root=/dev/sda1 console=ttyS0 no5lvl nopti hugepages=0 mem_encrypt=on intremap=off"
 ]
 # For debugging please reduce cores to catch early logic bugs.
-smp_cores = 16
+smp_cores = 1

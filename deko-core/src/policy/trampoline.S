@@ -24,6 +24,8 @@
 .global deko_trampoline_end
 .global deko_trampoline_data_entry
 .global deko_ifc_engine_entry
+.global deko_sysret_window_start
+.global deko_sysret_window_end
 
 deko_trampoline_start:
   // ============================================================================
@@ -117,6 +119,7 @@ call_ifc:
   // 8. Restore State
   // --------------------------------------------------------------------------
 return_to_user:
+deko_sysret_window_start:
   addq    $8, %rsp
   // Restore the syscall arguments and context we saved earlier.
   // Order is LIFO (Last-In, First-Out).
@@ -136,6 +139,7 @@ return_to_user:
   movq    0(%rax), %rax
 
   sysretq
+deko_sysret_window_end:
 
 // ============================================================================
 // Data & Stack Section
