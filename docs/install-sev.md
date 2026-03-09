@@ -1,32 +1,90 @@
-# Preparation for AMD-SEV-SNP
+# AMD SEV-SNP Host Notes
 
-This installation guide is for AMD SEV-SNP machines only. For TDX guests please refer to install-tdx.md.
+This document is a supplement for AMD SEV-SNP hosts.
 
-## System Requirements
+For the general project setup and build flow, start with:
 
-You would need to have a working AMD EPYC CPU that supports latest SNP features and has SNP firmware version > 1.51. The host kernel must also support the latest SNP features and SVSM supports.
-You can check via the following command, and the expected output is also given.
+- [Preparation.md](Preparation.md)
+- [Build.md](Build.md)
 
-```sh
-sudo dmesg | egrep "SEV|RMP|ccp"                     
-[    0.000000] SEV-SNP: RMP table physical range [0x0000000015600000 - 0x0000000075cfffff]
-[    0.003653] SEV-SNP: Reserving start/end of RMP table on a 2MB boundary [0x0000000075c00000]
-[    7.298333] ccp 0000:01:00.5: enabling device (0000 -> 0002)
-[    7.300489] ccp 0000:01:00.5: sev enabled
-[    7.300493] ccp 0000:01:00.5: psp enabled
-[    7.300731] ccp 0000:83:00.5: enabling device (0000 -> 0002)
-[    7.301616] ccp 0000:83:00.5: psp enabled
-[   11.437438] ccp 0000:01:00.5: SEV API:1.55 build:37
-[   11.437451] ccp 0000:01:00.5: SEV-SNP API:1.55 build:37
-[   11.448630] kvm_amd: SEV enabled (ASIDs 100 - 1006)
-[   11.448633] kvm_amd: SEV-ES enabled (ASIDs 1 - 99)
-[   11.448636] kvm_amd: SEV-SNP enabled (ASIDs 1 - 99)
+## Scope
+
+Use this page when:
+
+- You can build the project, but SNP VM launch fails on host capability checks.
+- You need to validate host kernel/firmware support for SEV-SNP.
+
+## Verify Host Capability
+
+Check host boot logs:
+
+```bash
+sudo dmesg | egrep "SEV|RMP|ccp|kvm_amd"
 ```
 
-You should be able to see that both SEV, SEV-ES, and SEV-SNP are supported on the host machine. We recommend that you install the required host components via coconut-svsm, including the host kernel, hypervisor, and firmware. See [this](https://github.com/coconut-svsm/svsm/blob/main/Documentation/docs/installation/INSTALL.md). For convenience we also provided several wrapper scripts for building these components:
+Expected signals include:
 
-- `scripts/qemu.sh`
-- `scripts/edk2.sh`
-- `scripts/guest.sh`
+- RMP table initialization
+- `ccp` initialized with SEV/PSP support
+- `kvm_amd` reports `SEV-SNP enabled`
 
-Also, the host system must be Ubuntu 24.04 or higher; otherwise you may need to install dependencies to avoid incompatibility with builds which can be very hard to debug.
+If these are missing, host kernel or firmware is not ready for SNP.
+
+## KVM/SEV Device Access
+
+Ensure your user can access KVM (and SEV when exposed):
+
+```bash
+groups $USER | grep kvm
+ls -l /dev/kvm
+ls -l /dev/sev
+```
+
+If `/dev/sev` exists but is not accessible, fix group/udev permissions as needed.
+
+## Kernel/QEMU Compatibility Notes
+
+SNP support depends on a compatible combination of:
+
+- Host kernel (KVM/SEV-SNP support)
+- QEMU build (IGVM/SNP features)
+- Firmware (OVMF)
+
+When the default distro stack is insufficient, use project bootstrap tooling first:
+
+```bash
+cargo run --bin xtask -- bootstrap-qemu
+cargo run --bin xtask -- bootstrap-ovmf
+```
+
+Then run with the SNP config:
+
+```bash
+cargo run --bin xtask -- --target-arch snp qemu --config-path .config/qemu.snp.config.toml
+```
+
+## Common Error Pattern
+
+Example symptom:
+
+```text
+qemu-system-x86_64: -accel kvm: check_sev_features: ... unsupported sev_features ...
+qemu-system-x86_64: -accel kvm: failed to initialize kvm: Operation not permitted
+```
+
+Usually this points to host kernel/QEMU mismatch or missing permissions.
+
+## Recommended Debug Path
+
+1. Re-check `dmesg` capability signals.
+2. Re-check `/dev/kvm` and `/dev/sev` permissions.
+3. Confirm QEMU binary (`QEMU_BIN` or `tools/bin/qemu-system-x86_64`).
+4. Re-run with `.config/qemu.snp.config.toml`.
+
+If still failing, collect:
+
+- `dmesg` SNP-related lines
+- full QEMU command
+- `qemu.log`
+
+and continue in [Debug.md](Debug.md).

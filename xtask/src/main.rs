@@ -137,7 +137,7 @@ enum TargetArch {
 struct Cli {
     #[command(subcommand)]
     command: Commands,
-    #[arg(short, long, value_enum, global = true)]
+    #[arg(long, value_enum, global = true)]
     target_arch: Option<TargetArch>,
 }
 
@@ -480,9 +480,7 @@ impl Builder {
             .arg("--features")
             .arg(&self.config.target_arch)
             .arg("--target")
-            .arg(self.config.custom_target_json())
-            .arg("--")
-            .arg("--expand-errors");
+            .arg(self.config.custom_target_json());
         // This option is unstable and some of the code
         // will break because of it since vstd is not
         // currently compatible with it; for example,
@@ -505,6 +503,7 @@ impl Builder {
         if release {
             cmd.arg("--release");
         }
+        cmd.arg("--").arg("--expand-errors");
 
         let profile = if release { "release" } else { "debug" };
         let log_file = format!("deko-stage2-build-{}-{}.log", self.config.target_arch, profile);
@@ -535,13 +534,12 @@ impl Builder {
             .arg("--features")
             .arg(&self.config.target_arch)
             .arg("--target")
-            .arg(self.config.custom_target_json())
-            .arg("--")
-            .arg("--expand-errors");
+            .arg(self.config.custom_target_json());
 
         if release {
             cmd.arg("--release");
         }
+        cmd.arg("--").arg("--expand-errors");
 
         let log_file = format!("deko-monitor-build-{}-{}.log", self.config.target_arch, profile);
         self.execute_cargo_with_json(cmd, &log_file)?;

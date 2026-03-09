@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    name: Compile Checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src,rustfmt,rustc-dev,llvm-tools-preview
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+
+      - name: Build xtask
+        run: cargo check -p xtask
+
+      - name: Build init via xtask
+        run: cargo run --bin xtask -- --target-arch init build --target init
+
+      - name: Install UEFI target
+        run: rustup target add x86_64-unknown-uefi
+
+      - name: Build stage1 (TDX)
+        run: cargo build --package deko-stage1 --target x86_64-unknown-uefi --features tdx
+
+  compile-deko:
+    name: Compile Deko (SNP)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src,rustfmt,rustc-dev,llvm-tools-preview
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build python3 git pkg-config libssl-dev curl
+
+      - name: Bootstrap Verus
+        run: cargo run --bin xtask -- bootstrap-verus
+
+      - name: Build deko for SNP
+        run: cargo run --bin xtask -- --target-arch snp build --target deko --release
