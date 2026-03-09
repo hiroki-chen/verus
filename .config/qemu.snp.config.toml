@@ -27,7 +27,7 @@ extra_config = [
   "-kernel",
   "/home/haobchen/deko-linux/arch/x86/boot/bzImage",
   "-append",
-  "root=/dev/sda1 console=ttyS0 no5lvl nopti hugepages=0 mem_encrypt=on intremap=off"
+  "root=/dev/sda1 console=ttyS0 no5lvl nopti hugepages=0 mem_encrypt=on intremap=off nox2apic"
 ]
 # For debugging please reduce cores to catch early logic bugs.
 smp_cores = 1

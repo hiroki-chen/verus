@@ -68,7 +68,7 @@ extern "C" {
 }
 
 core::arch::global_asm!(
-    include_str!("hv_handler.S"),
+    include_str!("../asm/snp/doorbell.S"),
     EXCEP_FLAGS_OFF = const offset_of!(X86ExceptionContext, frame.flags),
     EXCEP_CS_OFF = const offset_of!(X86ExceptionContext, frame.cs),
     EXCEP_RIP_OFF = const offset_of!(X86ExceptionContext, frame.rip),

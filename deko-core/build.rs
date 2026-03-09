@@ -86,7 +86,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../.git/HEAD");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/cpu/switch.S");
-    println!("cargo:rerun-if-changed=src/cpu/idt.S");
+    println!("cargo:rerun-if-changed=src/asm/idt.S");
 
     gen_idt_handler();
 }
@@ -229,5 +229,5 @@ fn gen_idt_handler() {
         body = assembly_code
     );
 
-    std::fs::write("src/cpu/idt_gen.S", final_code).expect("Unable to write IDT assembly file");
+    std::fs::write("src/asm/idt_gen.S", final_code).expect("Unable to write IDT assembly file");
 }

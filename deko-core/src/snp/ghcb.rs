@@ -62,7 +62,7 @@ extern "C" {
     ) -> DekoVmplSwitchErr;
 }
 
-core::arch::global_asm!(include_str!("switch.S"), options(att_syntax));
+core::arch::global_asm!(include_str!("../asm/snp/vmpl_switch.S"), options(att_syntax));
 
 verus! {
 

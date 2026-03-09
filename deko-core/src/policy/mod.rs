@@ -38,7 +38,7 @@ pub(crate) mod msr;
 pub(crate) mod syscall;
 pub(crate) mod userapp;
 
-core::arch::global_asm!(include_str!("trampoline.S"), options(att_syntax));
+core::arch::global_asm!(include_str!("../asm/entry_SYSCALL_64.S"), options(att_syntax));
 
 extern "C" {
     fn deko_trampoline_start();
