@@ -328,6 +328,8 @@ impl DekoGuestExitInformation {
             // If there is no call pending; then the VMPL must
             // be abort due to HV doorbell or other reasons.
             if !call_pending {
+                kerror!("VMGEXIT with no call pending, likely due to HV doorbell or other async event. Ignoring the exit.");
+
                 return None;
             }
             let ai = if protocol == DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE {

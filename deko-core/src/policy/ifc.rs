@@ -109,6 +109,8 @@ pub extern "C" fn deko_ifc_entry(syscall_body: DekoPPtr<DekoSyscallBody>) {
         syscall_perm.pptr() == syscall_body_ptr@,
 )]
 fn deko_ifc_entry_vmpl1(syscall_body_ptr: DekoPPtr<DekoSyscallBody>) -> u64 {
+    kinfo!("ifc: entered with syscall_body_ptr = ", syscall_body_ptr);
+
     raw_irq_enable();
 
     let tracked mut syscall_perm = syscall_perm;

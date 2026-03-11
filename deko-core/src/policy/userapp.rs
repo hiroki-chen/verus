@@ -492,6 +492,72 @@ impl VmsaPage {
 
         Self::do_prepare_app_resume(vmsa);
     }
+
+    #[inline]
+    #[verifier::external_body]
+    #[verus_spec(r =>
+        with
+            Tracked(vmsa_page_perm): Tracked<&mut VmsaPagePermission>,
+        requires
+            old(self).wf(),
+            old(vmsa_page_perm).ptr_perm.wf(),
+            old(vmsa_page_perm).ptr_perm.is_init(),
+            old(vmsa_page_perm).ptr_perm.pptr() == old(self).page@,
+        ensures
+            self.wf(),
+            vmsa_page_perm.ptr_perm.wf(),
+            vmsa_page_perm.ptr_perm.is_init(),
+            vmsa_page_perm.ptr_perm.pptr() == self.page@,
+    )]
+    pub fn enable_svme(&mut self) {
+        let vmsa = &mut unsafe { &mut *(self.page.addr() as *mut [VMSA; 2]) }[self.idx as usize];
+        let efer = core::ptr::addr_of_mut!(vmsa.efer);
+
+        unsafe {
+            let val = core::ptr::read_unaligned(efer) | (1 << 12);
+            core::ptr::write_unaligned(efer, val);
+        }
+    }
+
+    #[inline]
+    #[verifier::external_body]
+    #[verus_spec(r =>
+        with
+            Tracked(vmsa_page_perm): Tracked<&VmsaPagePermission>,
+        requires
+            self.wf(),
+            vmsa_page_perm.ptr_perm.wf(),
+            vmsa_page_perm.ptr_perm.is_init(),
+            vmsa_page_perm.ptr_perm.pptr() == self.page@,
+        ensures
+            r.wf(),
+    )]
+    pub fn snapshot(&self) -> VMSA {
+        unsafe { core::ptr::read(self.vaddr().0 as *const VMSA) }
+    }
+
+    #[inline]
+    #[verifier::external_body]
+    #[verus_spec(r =>
+        with
+            Tracked(vmsa_page_perm): Tracked<&mut VmsaPagePermission>,
+        requires
+            old(self).wf(),
+            snapshot.wf(),
+            old(vmsa_page_perm).ptr_perm.wf(),
+            old(vmsa_page_perm).ptr_perm.is_init(),
+            old(vmsa_page_perm).ptr_perm.pptr() == old(self).page@,
+        ensures
+            self.wf(),
+            vmsa_page_perm.ptr_perm.wf(),
+            vmsa_page_perm.ptr_perm.is_init(),
+            vmsa_page_perm.ptr_perm.pptr() == self.page@,
+    )]
+    pub fn restore_from_snapshot(&mut self, snapshot: &VMSA) {
+        unsafe {
+            core::ptr::copy_nonoverlapping(snapshot as *const VMSA, self.vaddr().0 as *mut VMSA, 1);
+        }
+    }
 }
 
 /// A regular file opened by a shadowed user application.
@@ -590,6 +656,8 @@ pub struct DekoUserAppExt {
     pub state_version: u64,
     /// Migration state for synchronous cross-core handoff.
     pub migration_state: DekoUserAppMigrationState,
+    /// Saved VMPL1 VMSA snapshot for cross-core resume.
+    pub saved_vmsa: Option<VMSA>,
     /// The shared buffer between the application and the VMPL2 kernel.
     pub shared_buf: DekoSimpleOnceCell<VirtAddr>,
 }
@@ -610,6 +678,7 @@ impl WellFormed for DekoUserAppExt {
             }&&& self.measurement.len() == 48
         &&& self.state.wf()
         &&& self.migration_state.wf()
+        &&& self.saved_vmsa is Some ==> self.saved_vmsa.unwrap().wf()
         &&& self.shared_buf.wf()
     }
 }
@@ -690,6 +759,31 @@ impl DekoUserApp {
         self.ext.state_version
     }
 
+    #[verifier::external_body]
+    #[verus_spec(
+        requires
+            old(self).wf(),
+            vmsa.wf(),
+        ensures
+            self.wf(),
+            vmsa.wf(),
+    )]
+    fn save_vmsa_snapshot(&mut self, vmsa: &VMSA) {
+        self.ext.saved_vmsa = Some(unsafe { core::ptr::read(vmsa as *const VMSA) });
+    }
+
+    #[verifier::external_body]
+    #[verus_spec(r =>
+        requires
+            vmsa.wf(),
+        ensures
+            vmsa.wf(),
+            r.wf(),
+    )]
+    fn copy_vmsa_snapshot(vmsa: &VMSA) -> VMSA {
+        unsafe { core::ptr::read(vmsa as *const VMSA) }
+    }
+
     /// Creates a new [`DekoUserApp`] with a unique id, an empty set of opened files,
     /// and a randomly generated AES-GCM-256 key.
     #[verifier::external_body]
@@ -737,6 +831,7 @@ impl DekoUserApp {
                 loaded_cpu: None,
                 state_version: 0,
                 migration_state: DekoUserAppMigrationState::Idle,
+                saved_vmsa: None,
                 shared_buf: DekoSimpleOnceCell::new(Ghost(())),
             },
         };
@@ -1238,11 +1333,18 @@ pub fn try_kick_app(
             ctx_vmpl1.vmsa.init_for_app(regs)?;
         },
         DekoUserAppState::Running => {
-            proof_with!(Tracked(&mut vmpl1_perm.vmsa_perm));
-            ctx_vmpl1.vmsa.prepare_app_resume();
+            let restored = #[verus_spec(with Tracked(&mut vmpl1_perm.vmsa_perm))]
+            restore_app_vmsa_snapshot(pid, &mut ctx_vmpl1.vmsa)?;
+            if !restored {
+                proof_with!(Tracked(&mut vmpl1_perm.vmsa_perm));
+                ctx_vmpl1.vmsa.prepare_app_resume();
+            }
         },
         _ => return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam)),
     }
+
+    proof_with!(Tracked(&mut vmpl1_perm.vmsa_perm));
+    ctx_vmpl1.vmsa.enable_svme();
 
     proof {
         cpu_perm.ext_vmpl1_perm = Some(vmpl1_perm);
@@ -1385,6 +1487,72 @@ pub(crate) fn validate_launch_migration_version(
     }
 }
 
+pub(crate) fn save_app_vmsa_snapshot(pid: u32, vmsa: &VMSA) -> DekoGuestServResult<()> {
+    deko_rwlock_write_atomic_data! {
+        DEKO_SHADOW_APP_LIST,
+        app_list,
+        __,
+        {
+            if let Some(mut app_list_inner) = app_list {
+                if !app_list_inner.contains_key(&pid) {
+                    app_list = Some(app_list_inner);
+                    Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))
+                } else {
+                    let mut app = app_list_inner.remove(&pid).unwrap();
+                    app.save_vmsa_snapshot(vmsa);
+                    app_list_inner.insert(pid, app);
+                    app_list = Some(app_list_inner);
+                    Ok(())
+                }
+            } else {
+                Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))
+            }
+        }
+    }
+}
+
+#[verus_spec(r =>
+    with
+        Tracked(vmsa_page_perm): Tracked<&mut VmsaPagePermission>,
+    requires
+        old(vmsa).wf(),
+        old(vmsa_page_perm).ptr_perm.wf(),
+        old(vmsa_page_perm).ptr_perm.is_init(),
+        old(vmsa_page_perm).ptr_perm.pptr() == old(vmsa).page@,
+    ensures
+        vmsa.wf(),
+        vmsa_page_perm.ptr_perm.wf(),
+        vmsa_page_perm.ptr_perm.is_init(),
+        vmsa_page_perm.ptr_perm.pptr() == vmsa.page@,
+        r is Ok ==> r.unwrap() ==> vmsa.wf(),
+)]
+pub(crate) fn restore_app_vmsa_snapshot(pid: u32, vmsa: &mut VmsaPage) -> DekoGuestServResult<
+    bool,
+> {
+    deko_rwlock_read_atomic_data! {
+        DEKO_SHADOW_APP_LIST,
+        app_list,
+        __,
+        {
+            if let Some(ref app_list_inner) = app_list {
+                if let Some(app) = app_list_inner.get(&pid) {
+                    if let Some(saved) = app.ext.saved_vmsa.as_ref() {
+                        #[verus_spec(with Tracked(vmsa_page_perm))]
+                        vmsa.restore_from_snapshot(saved);
+                        Ok(true)
+                    } else {
+                        Ok(false)
+                    }
+                } else {
+                    Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))
+                }
+            } else {
+                Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))
+            }
+        }
+    }
+}
+
 #[verifier::exec_allows_no_decreases_clause]
 #[verus_spec(
     with
@@ -1420,12 +1588,6 @@ fn run_userapp(
         // which then checks if there is any pending doorbells and processes them.
         // Now copy the information to the VMSA and prepare for the VMPL switch.
         let switch_ret = no_irq_zone(|| { vmpl_switch(VMPL_GUEST_SECURE_APP) });
-        let switch_tsc_end = read_tsc();
-        let switch_ret_code = match switch_ret {
-            DekoVmplSwitchErr::Ok => 0u64,
-            DekoVmplSwitchErr::Cancelled => 1u64,
-            DekoVmplSwitchErr::Failed => 2u64,
-        };
 
         match switch_ret {
             DekoVmplSwitchErr::Ok => {},
@@ -1450,6 +1612,7 @@ fn run_userapp(
         let info = DekoGuestExitInformation::try_parse_vmsa(vmsa_ptr, true);
 
         let vmsa = vmsa_ptr.borrow(Tracked(&vmsa_perm));
+        let snapshot = DekoUserApp::copy_vmsa_snapshot(vmsa);
 
         kinfo!("Entered guest app in VMPL1, now processing the request: ", info);
 
@@ -1468,9 +1631,12 @@ fn run_userapp(
                 die("");
             },
         };
-
+        if let Some(pid) = cpu_borrow.ext_vmpl1.as_ref().unwrap().current_pid {
+            save_app_vmsa_snapshot(pid, &snapshot)?;
+        }
         // Attempt to enter the guest only once and if it succeeds, we immediately
         // forward the request to the syscall handler in VMPL2.
+
         return Ok(ret_rax);
     }
 }
