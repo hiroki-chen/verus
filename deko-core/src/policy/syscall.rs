@@ -1248,7 +1248,7 @@ fn get_buf_va() -> DekoGuestServResult<VirtAddr> {
     let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
     let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
     let ext_vmpl1 = cpu_borrow.ext_vmpl1.as_ref().ok_or(DekoGuestServError::FatalError)?;
-    let active_pid = ext_vmpl1.pid.ok_or(DekoGuestServError::FatalError)?;
+    let active_pid = ext_vmpl1.current_pid.ok_or(DekoGuestServError::FatalError)?;
 
     // Check the shared buffer.
     deko_rwlock_read_atomic_data! {

@@ -505,8 +505,19 @@ pub struct DekoCpuCtxPerVmpl {
     pub tss: DekoPPtr<X86Tss>,
     /// The GDT.
     pub gdt: DekoPPtr<GlobalDescriptorTable>,
-    /// The active application id.
-    pub pid: Option<u32>,
+    /// The task currently loaded in this per-CPU VMPL1 runtime slot.
+    pub current_pid: Option<u32>,
+    /// Whether the runtime slot contains task state that has not yet been
+    /// exported back into the per-task shadow record.
+    pub slot_dirty: bool,
+    /// Pending synchronous export request issued by another CPU.
+    pub pending_export_pid: Option<u32>,
+    /// Target CPU for the pending synchronous export request.
+    pub pending_export_target_cpu: Option<u32>,
+    /// Version requested by the importing CPU for this export.
+    pub pending_export_version: u64,
+    /// Last export version acknowledged by this CPU for the current slot.
+    pub last_export_ack_version: u64,
     /// The nested IRQ.
     #[deko(skip)]
     pub nested_irq: IrqState,
@@ -532,6 +543,7 @@ impl WellFormed for DekoCpuCtxPerVmpl {
         &&& self.vmsa.wf()
         &&& self.doorbell.wf()
         &&& self.doorbell_pa@ % PAGE_SIZE == 0
+        &&& self.pending_export_pid is Some <==> self.pending_export_target_cpu is Some
     }
 }
 
@@ -563,7 +575,7 @@ impl DekoCpuCtxPerVmpl {
         ensures
             r.wf(),
             r.wf_with(perm@),
-            r.pid is None,
+            r.current_pid is None,
             pgtable_perm.wf(),
             pgtable_perm.pgtable_perm == old(pgtable_perm).pgtable_perm,
             pgtable_perm.private_bit == old(pgtable_perm).private_bit,
@@ -646,7 +658,12 @@ impl DekoCpuCtxPerVmpl {
             vmpl1_stack: VirtAddr(stack_ptr.into_vaddr().0.wrapping_add(0x8000)),
             tss: tss_ptr,
             gdt: gdt_ptr,
-            pid: None,
+            current_pid: None,
+            slot_dirty: false,
+            pending_export_pid: None,
+            pending_export_target_cpu: None,
+            pending_export_version: 0,
+            last_export_ack_version: 0,
             nested_irq,
             deferred_timer_event: false,
             syscall_switch_in_progress: false,

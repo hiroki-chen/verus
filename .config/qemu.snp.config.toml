@@ -30,4 +30,4 @@ extra_config = [
   "root=/dev/sda1 console=ttyS0 no5lvl nopti hugepages=0 mem_encrypt=on intremap=off nox2apic"
 ]
 # For debugging please reduce cores to catch early logic bugs.
-smp_cores = 1
+smp_cores = 16

@@ -613,6 +613,98 @@ impl VMSA {
         }
     }
 
+    #[inline(always)]
+    #[verifier::external_body]
+    #[verus_spec(
+        with
+            Tracked(ptr_perm): Tracked<&mut DekoPointsTo<Self>>,
+        requires
+            old(ptr_perm).wf(),
+            old(ptr_perm).is_init(),
+            old(ptr_perm).pptr() == ptr@,
+        ensures
+            ptr_perm.value().rcx == value,
+            ptr_perm.wf(),
+            ptr_perm.is_init(),
+            ptr_perm.pptr() == ptr@,
+    )]
+    pub fn set_rcx(ptr: DekoPPtr<Self>, value: u64) {
+        unsafe {
+            let struct_ptr = ptr.addr() as *mut Self;
+            let rcx_field_ptr = core::ptr::addr_of_mut!((*struct_ptr).rcx);
+            core::ptr::write_unaligned(rcx_field_ptr, value);
+        }
+    }
+
+    #[inline(always)]
+    #[verifier::external_body]
+    #[verus_spec(
+        with
+            Tracked(ptr_perm): Tracked<&mut DekoPointsTo<Self>>,
+        requires
+            old(ptr_perm).wf(),
+            old(ptr_perm).is_init(),
+            old(ptr_perm).pptr() == ptr@,
+        ensures
+            ptr_perm.value().rdx == value,
+            ptr_perm.wf(),
+            ptr_perm.is_init(),
+            ptr_perm.pptr() == ptr@,
+    )]
+    pub fn set_rdx(ptr: DekoPPtr<Self>, value: u64) {
+        unsafe {
+            let struct_ptr = ptr.addr() as *mut Self;
+            let rdx_field_ptr = core::ptr::addr_of_mut!((*struct_ptr).rdx);
+            core::ptr::write_unaligned(rdx_field_ptr, value);
+        }
+    }
+
+    #[inline(always)]
+    #[verifier::external_body]
+    #[verus_spec(
+        with
+            Tracked(ptr_perm): Tracked<&mut DekoPointsTo<Self>>,
+        requires
+            old(ptr_perm).wf(),
+            old(ptr_perm).is_init(),
+            old(ptr_perm).pptr() == ptr@,
+        ensures
+            ptr_perm.value().r8 == value,
+            ptr_perm.wf(),
+            ptr_perm.is_init(),
+            ptr_perm.pptr() == ptr@,
+    )]
+    pub fn set_r8(ptr: DekoPPtr<Self>, value: u64) {
+        unsafe {
+            let struct_ptr = ptr.addr() as *mut Self;
+            let r8_field_ptr = core::ptr::addr_of_mut!((*struct_ptr).r8);
+            core::ptr::write_unaligned(r8_field_ptr, value);
+        }
+    }
+
+    #[inline(always)]
+    #[verifier::external_body]
+    #[verus_spec(
+        with
+            Tracked(ptr_perm): Tracked<&mut DekoPointsTo<Self>>,
+        requires
+            old(ptr_perm).wf(),
+            old(ptr_perm).is_init(),
+            old(ptr_perm).pptr() == ptr@,
+        ensures
+            ptr_perm.value().r9 == value,
+            ptr_perm.wf(),
+            ptr_perm.is_init(),
+            ptr_perm.pptr() == ptr@,
+    )]
+    pub fn set_r9(ptr: DekoPPtr<Self>, value: u64) {
+        unsafe {
+            let struct_ptr = ptr.addr() as *mut Self;
+            let r9_field_ptr = core::ptr::addr_of_mut!((*struct_ptr).r9);
+            core::ptr::write_unaligned(r9_field_ptr, value);
+        }
+    }
+
     /// Prepares the VMSA for a new user application by initializing
     /// necessary fields.
     ///

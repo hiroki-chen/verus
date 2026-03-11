@@ -30,7 +30,10 @@ use crate::mm::vm::TempMapping;
 use crate::mm::{check_within_guest_mmap, virt_to_phys, zero_page};
 use crate::policy::guest_paging::{GuestPageOffsetBase, GUEST_PAGE_OFFSET_BASE};
 use crate::policy::syscall::{analyze_and_prepare_syscall, SYS_exit, SYS_exit_group};
-use crate::policy::userapp::{register_user_app, try_kick_app};
+use crate::policy::userapp::{
+    bind_current_cpu_vmpl1_slot, mark_app_fake_handoff_in_progress, register_user_app,
+    stage_fake_vmpl1_handoff_request, try_kick_app, validate_launch_migration_version,
+};
 use crate::policy::{
     self, deko_sysret_trampoline_func_ptr, deko_trampoline_start_func_ptr, enable_syscall_hook,
     inject_ifc_policy_engine, install_hook, DekoMsrIntercept, DekoMsrInterceptVec0,
@@ -1098,6 +1101,8 @@ fn handle_deko_service_launch_app(params: &mut DekoGuestRequestParams) -> DekoGu
     let r9 = params.r9;
     let r9_offset = r9 % PAGE_SIZE as u64;
     let req_body = r9 & !0xfff;
+    let expected_version = params.r8;
+    let pid = (params.rdx & 0xffff_ffffu64) as u32;
 
     broadcast use lemma_aligned_to_4k;
 
@@ -1116,11 +1121,14 @@ fn handle_deko_service_launch_app(params: &mut DekoGuestRequestParams) -> DekoGu
     )?;
     let regs = regs_mapping.read_ref_at::<PtRegs>(r9_offset as usize);
 
+    validate_launch_migration_version(pid, expected_version)?;
+
     try_kick_app(
         regs,
         PhysAddr(params.additional_data.unwrap().guest_cr3),
-        (params.rdx & 0xffff_ffffu64) as u32,
+        pid,
         VirtAddr(params.rcx),
+        params,
     )
 }
 
@@ -1231,7 +1239,9 @@ fn handle_deko_service_msr_intercepts(params: &mut DekoGuestRequestParams) -> De
         cpu_perm.wf(),
         cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
 )]
-fn handle_deko_service_task_migrate(params: &DekoGuestRequestParams) -> DekoGuestServResult<u64> {
+fn handle_deko_service_task_migrate(params: &mut DekoGuestRequestParams) -> DekoGuestServResult<
+    u64,
+> {
     let old_cpu = params.rdx as u32;
     let new_cpu = params.rcx as u32;
     let pid = params.r9 as u32;
@@ -1261,19 +1271,22 @@ fn handle_deko_service_task_migrate(params: &DekoGuestRequestParams) -> DekoGues
         );
         return Ok(0);
     }
-    let mut cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
-    let mut ctx_vmpl1 = cpu_taken.ext_vmpl1.take().unwrap();
-    ctx_vmpl1.pid = Some(pid);
-    cpu_taken.ext_vmpl1 = Some(ctx_vmpl1);
-    cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
+    let version = mark_app_fake_handoff_in_progress(pid, old_cpu)?;
+    bind_current_cpu_vmpl1_slot(cpu, Tracked(&mut cpu_perm), pid);
+    stage_fake_vmpl1_handoff_request(cpu, Tracked(&mut cpu_perm), pid, new_cpu, version);
+    params.rdx = version;
 
     kdebug!(
-        "Task migrate: rebound VMPL1 pid on cpu",
+        "Task migrate: staged fake handoff on cpu",
         this_cpu_id,
         " old_cpu=",
         old_cpu,
+        " new_cpu=",
+        new_cpu,
         " pid=",
-        pid
+        pid,
+        " version=",
+        version
     );
 
     Ok(0)

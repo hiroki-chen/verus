@@ -36,7 +36,8 @@ use crate::cpu::{
     PERCPU_AREAS,
 };
 use crate::guest::{
-    handle_guest_exit, DekoGuestExitInformation, DekoGuestServError, DekoVmplSwitchErr,
+    handle_guest_exit, DekoGuestExitInformation, DekoGuestRequestParams, DekoGuestServError,
+    DekoVmplSwitchErr,
 };
 use crate::imp::doorbell::HVDoorbell;
 use crate::imp::ghcb::{vmpl_switch, GuestHostCommunicationBlock};
@@ -2209,6 +2210,14 @@ pub fn serv_main(cpu_index: usize) {
 #[verifier::exec_allows_no_decreases_clause]
 fn serv_main_loop(cpu_index: usize) -> ! {
     let mut r = 0;
+    let mut ret_params = DekoGuestRequestParams {
+        sev_features: 0,
+        rcx: 0,
+        rdx: 0,
+        r9: 0,
+        r8: 0,
+        additional_data: None,
+    };
 
     // Try to enter the guest again.
     #[verus_spec(
@@ -2216,7 +2225,7 @@ fn serv_main_loop(cpu_index: usize) -> ! {
             cpu_index < CPUID_MAX_COUNT,
     )]
     loop {
-        match try_enter_guest(r) {
+        match try_enter_guest_with_params(r, ret_params) {
             // If there is no guest vmsa currently assigned to this core,
             // then it means the guest has not yet requested a vCPU creation
             // so we need to put the currnet AP core into idle.
@@ -2238,9 +2247,11 @@ fn serv_main_loop(cpu_index: usize) -> ! {
                 match #[verus_spec(with Tracked(&mut perm))]
                 crate::guest::handle_guest_exit(protocol, req, &mut params, cpu_index as u64) {
                     Ok(rax_out) => {
+                        ret_params = params;
                         r = rax_out;
                     },
                     Err(e) => {
+                        ret_params = params;
                         match e {
                             DekoGuestServError::FatalError => {
                                 die("Fatal error occurred when handling guest request.");
@@ -2279,6 +2290,26 @@ func_ptr!(serv_main);
         r.wf(),
 )]
 pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
+    let prev_params = DekoGuestRequestParams {
+        sev_features: 0,
+        rcx: 0,
+        rdx: 0,
+        r9: 0,
+        r8: 0,
+        additional_data: None,
+    };
+    try_enter_guest_with_params(prev_errno, prev_params)
+}
+
+#[verifier::exec_allows_no_decreases_clause]
+#[verus_spec(r =>
+    ensures
+        r.wf(),
+)]
+pub fn try_enter_guest_with_params(
+    prev_errno: u64,
+    prev_params: DekoGuestRequestParams,
+) -> DekoGuestExitInformation {
     let (this_cpu_ptr, Tracked(this_cpu_perm)) = DekoCpuCtx::this_cpu();
     let this_cpu = this_cpu_ptr.borrow(Tracked(&this_cpu_perm.ptr_perm));
     let this_cpu_index: usize = this_cpu.cpu_id as usize;
@@ -2307,6 +2338,14 @@ pub fn try_enter_guest(prev_errno: u64) -> DekoGuestExitInformation {
         // request has been served successfully.
         proof_with!(Tracked(&mut vmsa_perm));
         VMSA::set_rax(vmsa, prev_errno);
+        proof_with!(Tracked(&mut vmsa_perm));
+        VMSA::set_rcx(vmsa, prev_params.rcx);
+        proof_with!(Tracked(&mut vmsa_perm));
+        VMSA::set_rdx(vmsa, prev_params.rdx);
+        proof_with!(Tracked(&mut vmsa_perm));
+        VMSA::set_r8(vmsa, prev_params.r8);
+        proof_with!(Tracked(&mut vmsa_perm));
+        VMSA::set_r9(vmsa, prev_params.r9);
 
         proof_with!(Tracked(&mut vmsa_perm));
         VMSA::enable(vmsa);

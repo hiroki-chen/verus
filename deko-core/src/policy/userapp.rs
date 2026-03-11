@@ -551,6 +551,21 @@ impl WellFormed for DekoUserAppState {
     }
 }
 
+#[repr(u8)]
+#[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
+pub enum DekoUserAppMigrationState {
+    /// No migration is currently in progress for this task.
+    Idle = 0,
+    /// A synchronous handoff is in progress.
+    Migrating,
+}
+
+impl WellFormed for DekoUserAppMigrationState {
+    open spec fn wf(&self) -> bool {
+        true
+    }
+}
+
 /// The type of the shadowed user application.
 #[derive(DekoDebug)]
 pub struct DekoUserAppExt {
@@ -567,6 +582,14 @@ pub struct DekoUserAppExt {
     pub measurement: [u8; 48],
     /// The current state of this user application.
     pub state: DekoUserAppState,
+    /// Which CPU currently owns the authoritative VMPL1 shadow state.
+    pub owner_cpu: u32,
+    /// Which CPU currently has this task loaded in its VMPL1 runtime slot.
+    pub loaded_cpu: Option<u32>,
+    /// Monotonic counter bumped on each completed shadow-state handoff.
+    pub state_version: u64,
+    /// Migration state for synchronous cross-core handoff.
+    pub migration_state: DekoUserAppMigrationState,
     /// The shared buffer between the application and the VMPL2 kernel.
     pub shared_buf: DekoSimpleOnceCell<VirtAddr>,
 }
@@ -586,6 +609,7 @@ impl WellFormed for DekoUserAppExt {
 
             }&&& self.measurement.len() == 48
         &&& self.state.wf()
+        &&& self.migration_state.wf()
         &&& self.shared_buf.wf()
     }
 }
@@ -641,6 +665,31 @@ impl WellFormed for DekoUserApp {
 
 #[verus_verify]
 impl DekoUserApp {
+    /// Binds this user application to the given CPU for local run, and initializes
+    /// the shared buffer if provided.
+    #[verifier::external_body]
+    fn bind_for_local_run(&mut self, cpu_id: u32, shared_buf: Option<VirtAddr>) {
+        self.ext.state = DekoUserAppState::Running;
+        self.ext.owner_cpu = cpu_id;
+        self.ext.loaded_cpu = Some(cpu_id);
+        self.ext.migration_state = DekoUserAppMigrationState::Idle;
+
+        if let Some(buf) = shared_buf {
+            self.ext.shared_buf.init(buf);
+        }
+    }
+
+    /// Stage 1 CPU migration from the old CPU to the current CPU: mark the migration
+    /// in *progress* and update the owner and loaded CPU fields.
+    #[verifier::external_body]
+    fn mark_fake_handoff_in_progress(&mut self, old_cpu: u32) -> u64 {
+        self.ext.owner_cpu = old_cpu;
+        self.ext.loaded_cpu = Some(old_cpu);
+        self.ext.migration_state = DekoUserAppMigrationState::Migrating;
+        self.ext.state_version = self.ext.state_version.wrapping_add(1);
+        self.ext.state_version
+    }
+
     /// Creates a new [`DekoUserApp`] with a unique id, an empty set of opened files,
     /// and a randomly generated AES-GCM-256 key.
     #[verifier::external_body]
@@ -659,6 +708,9 @@ impl DekoUserApp {
     )]
     pub fn new(app_req: &DekoNewAppReq, guest_cr3: PhysAddr) -> DekoGuestServResult<Self> {
         kinfo!("Creating new DekoUserApp with request", app_req, guest_cr3=>hex);
+
+        let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+        let owner_cpu = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).cpu_id as u32;
 
         let start_code = VirtAddr(app_req.start_code);
         let end_code = VirtAddr(app_req.end_code);
@@ -681,15 +733,19 @@ impl DekoUserApp {
                 occupied_regions: vec![],
                 measurement: [0u8;48],
                 state: DekoUserAppState::Created,
+                owner_cpu,
+                loaded_cpu: None,
+                state_version: 0,
+                migration_state: DekoUserAppMigrationState::Idle,
                 shared_buf: DekoSimpleOnceCell::new(Ghost(())),
             },
         };
 
-        // FIXME:
+        // TODO: Add this.
         // r.add_and_measure(range)?;
 
-        kdebug!("measurement is", r.ext.measurement);
-
+        // Finally, mark the memory regions owned by this application not visible to
+        // VMPL2 by lifting the VMPL to VMPL1 in the RMP table.
         r.lift_vmpl()?;
 
         Ok(r)
@@ -1101,6 +1157,7 @@ pub fn try_kick_app(
     guest_cr3: PhysAddr,
     pid: u32,
     shared_buf: VirtAddr,
+    ret_params: &mut DekoGuestRequestParams,
 ) -> DekoGuestServResult<u64> {
     let (cpu_ptr, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
     if core::hint::unlikely(cpu_ptr.borrow(Tracked(&cpu_perm.ptr_perm)).ext_vmpl1.is_none()) {
@@ -1129,14 +1186,8 @@ pub fn try_kick_app(
                     match old_state {
                         DekoUserAppState::Created => {
                             let mut app = napp_list.remove(&pid).unwrap();
-                            let mut cpu = cpu_ptr.take(Tracked(&mut cpu_perm.ptr_perm));
-                            let mut ctx_vmpl1 = cpu.ext_vmpl1.take().unwrap();
-                            ctx_vmpl1.pid = Some(pid);
-                            cpu.ext_vmpl1 = Some(ctx_vmpl1);
-                            cpu_ptr.write(Tracked(&mut cpu_perm.ptr_perm), cpu);
-
-                            app.ext.state = DekoUserAppState::Running;
-                            app.ext.shared_buf.init(shared_buf);
+                            let current_cpu = cpu_ptr.borrow(Tracked(&cpu_perm.ptr_perm)).cpu_id as u32;
+                            app.bind_for_local_run(current_cpu, Some(shared_buf));
                             napp_list.insert(pid, app);
                             app_list = Some(napp_list);
 
@@ -1198,9 +1249,140 @@ pub fn try_kick_app(
     }
     cpu_taken.ext_vmpl1 = Some(ctx_vmpl1);
     cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
+    bind_current_cpu_vmpl1_slot(cpu, Tracked(&mut cpu_perm), pid);
 
     proof_with!(Tracked(&mut cpu_perm));
-    run_userapp(cpu)
+    run_userapp(cpu, ret_params)
+}
+
+pub(crate) fn bind_current_cpu_vmpl1_slot(
+    cpu_ptr: DekoPPtr<DekoCpuCtx>,
+    Tracked(cpu_perm0): Tracked<&mut DekoCpuCtxPermission>,
+    pid: u32,
+)
+    requires
+        old(cpu_perm0).wf_with(cpu_ptr),
+        old(cpu_perm0).ptr_perm.value().ext_vmpl1 is Some,
+    ensures
+        cpu_perm0.wf_with(cpu_ptr),
+        cpu_perm0.ptr_perm.value().ext_vmpl1 is Some,
+{
+    let cpu_id = cpu_ptr.borrow(Tracked(&cpu_perm0.ptr_perm)).cpu_id as u32;
+    let mut cpu = cpu_ptr.take(Tracked(&mut cpu_perm0.ptr_perm));
+    let mut ctx_vmpl1 = cpu.ext_vmpl1.take().unwrap();
+    ctx_vmpl1.current_pid = Some(pid);
+    ctx_vmpl1.slot_dirty = false;
+    ctx_vmpl1.pending_export_pid = None;
+    ctx_vmpl1.pending_export_target_cpu = None;
+    ctx_vmpl1.pending_export_version = 0;
+    cpu.ext_vmpl1 = Some(ctx_vmpl1);
+    cpu_ptr.write(Tracked(&mut cpu_perm0.ptr_perm), cpu);
+
+    kdebug!("Bound VMPL1 slot on cpu ", cpu_id, " to pid ", pid);
+}
+
+pub(crate) fn stage_fake_vmpl1_handoff_request(
+    cpu_ptr: DekoPPtr<DekoCpuCtx>,
+    Tracked(cpu_perm0): Tracked<&mut DekoCpuCtxPermission>,
+    pid: u32,
+    target_cpu: u32,
+    version: u64,
+)
+    requires
+        old(cpu_perm0).wf_with(cpu_ptr),
+        old(cpu_perm0).ptr_perm.value().ext_vmpl1 is Some,
+    ensures
+        cpu_perm0.wf_with(cpu_ptr),
+        cpu_perm0.ptr_perm.value().ext_vmpl1 is Some,
+{
+    let cpu_id = cpu_ptr.borrow(Tracked(&cpu_perm0.ptr_perm)).cpu_id as u32;
+    let mut cpu = cpu_ptr.take(Tracked(&mut cpu_perm0.ptr_perm));
+    let mut ctx_vmpl1 = cpu.ext_vmpl1.take().unwrap();
+    ctx_vmpl1.current_pid = Some(pid);
+    ctx_vmpl1.slot_dirty = false;
+    ctx_vmpl1.pending_export_pid = Some(pid);
+    ctx_vmpl1.pending_export_target_cpu = Some(target_cpu);
+    ctx_vmpl1.pending_export_version = version;
+    cpu.ext_vmpl1 = Some(ctx_vmpl1);
+    cpu_ptr.write(Tracked(&mut cpu_perm0.ptr_perm), cpu);
+
+    kdebug!(
+        "Staged fake VMPL1 handoff request on cpu ",
+        cpu_id,
+        " pid=",
+        pid,
+        " target_cpu=",
+        target_cpu,
+        " version=",
+        version
+    );
+}
+
+#[verifier::external_body]
+pub(crate) fn mark_app_fake_handoff_in_progress(pid: u32, old_cpu: u32) -> DekoGuestServResult<
+    u64,
+> {
+    deko_rwlock_write_atomic_data! {
+        DEKO_SHADOW_APP_LIST,
+        app_list,
+        __,
+        {
+            if let Some(mut app_list_inner) = app_list {
+                if !app_list_inner.contains_key(&pid) {
+                    app_list = Some(app_list_inner);
+                    Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))
+                } else {
+                    let mut app = app_list_inner.remove(&pid).unwrap();
+                    let version = app.mark_fake_handoff_in_progress(old_cpu);
+                    app_list_inner.insert(pid, app);
+                    app_list = Some(app_list_inner);
+                    Ok(version)
+                }
+            } else {
+                Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))
+            }
+        }
+    }
+}
+
+#[verifier::external_body]
+pub(crate) fn validate_launch_migration_version(
+    pid: u32,
+    expected_version: u64,
+) -> DekoGuestServResult<()> {
+    if expected_version == 0 {
+        return Ok(());
+    }
+    deko_rwlock_read_atomic_data! {
+        DEKO_SHADOW_APP_LIST,
+        app_list,
+        __,
+        {
+            if let Some(ref app_list_inner) = app_list {
+                if let Some(app) = app_list_inner.get(&pid) {
+                    if app.ext.state_version == expected_version {
+                        Ok(())
+                    } else {
+                        kwarn!(
+                            "Launch app version mismatch: pid=",
+                            pid,
+                            " expected_version=",
+                            expected_version,
+                            " actual_version=",
+                            app.ext.state_version,
+                            " migration_state=",
+                            app.ext.migration_state
+                        );
+                        Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy))
+                    }
+                } else {
+                    Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))
+                }
+            } else {
+                Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))
+            }
+        }
+    }
 }
 
 #[verifier::exec_allows_no_decreases_clause]
@@ -1211,16 +1393,17 @@ pub fn try_kick_app(
         old(cpu_perm).wf_with(cpu),
         old(cpu_perm).ptr_perm.value().ext_vmpl1 is Some,
 )]
-fn run_userapp(cpu: DekoPPtr<DekoCpuCtx>) -> DekoGuestServResult<u64> {
+fn run_userapp(
+    cpu: DekoPPtr<DekoCpuCtx>,
+    ret_params: &mut DekoGuestRequestParams,
+) -> DekoGuestServResult<u64> {
     #[verus_spec(
         invariant
             cpu_perm.wf_with(cpu),
             cpu_perm.ptr_perm.value().ext_vmpl1 is Some,
     )]
     loop {
-        kinfo!("Attempting to enter guest app in VMPL1");
-        let switch_tsc_begin = read_tsc();
-        kinfo!("run_userapp: before vmpl_switch, tsc=", switch_tsc_begin => hex);
+        log_vmpl1_app_binding(cpu);
         // dump_vmpl1_doorbell_snapshot_current_cpu();
         // WARNING: CRITICAL SECTION
         //
@@ -1243,13 +1426,7 @@ fn run_userapp(cpu: DekoPPtr<DekoCpuCtx>) -> DekoGuestServResult<u64> {
             DekoVmplSwitchErr::Cancelled => 1u64,
             DekoVmplSwitchErr::Failed => 2u64,
         };
-        kinfo!(
-            "run_userapp: after vmpl_switch",
-            "ret", switch_ret_code,
-            "tsc_begin", switch_tsc_begin => hex,
-            "tsc_end", switch_tsc_end => hex,
-            "delta", switch_tsc_end.wrapping_sub(switch_tsc_begin) => hex
-        );
+
         match switch_ret {
             DekoVmplSwitchErr::Ok => {},
             DekoVmplSwitchErr::Cancelled => {
@@ -1273,7 +1450,6 @@ fn run_userapp(cpu: DekoPPtr<DekoCpuCtx>) -> DekoGuestServResult<u64> {
         let info = DekoGuestExitInformation::try_parse_vmsa(vmsa_ptr, true);
 
         let vmsa = vmsa_ptr.borrow(Tracked(&vmsa_perm));
-        kinfo!("debg vmsa:", vmsa);
 
         kinfo!("Entered guest app in VMPL1, now processing the request: ", info);
 
@@ -1284,11 +1460,78 @@ fn run_userapp(cpu: DekoPPtr<DekoCpuCtx>) -> DekoGuestServResult<u64> {
                 die("");
             },
         };
+        *ret_params =
+        match get_guest_app_extend_exit_params(&info) {
+            Some(params) => params,
+            None => {
+                kerror!("Missing guest app return params", cpu_idx, info);
+                die("");
+            },
+        };
 
-        kinfo!("Guest app exit with extended exit information, returning to VMPL2 with rax=", ret_rax=>hex);
         // Attempt to enter the guest only once and if it succeeds, we immediately
         // forward the request to the syscall handler in VMPL2.
         return Ok(ret_rax);
+    }
+}
+
+fn log_vmpl1_app_binding(_cpu: DekoPPtr<DekoCpuCtx>) {
+    let (this_cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpu_borrow = this_cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+    let cpu_id = cpu_borrow.cpu_id as u32;
+    let Some(ext_vmpl1) = cpu_borrow.ext_vmpl1.as_ref() else {
+        kinfo!("run_userapp binding: cpu=", cpu_id, " no ext_vmpl1");
+        return ;
+    };
+
+    let current_pid = ext_vmpl1.current_pid;
+    kinfo!(
+        "run_userapp slot: cpu=",
+        cpu_id,
+        " pid=",
+        current_pid,
+        " slot_dirty=",
+        ext_vmpl1.slot_dirty,
+        " pending_export_pid=",
+        ext_vmpl1.pending_export_pid,
+        " pending_export_target_cpu=",
+        ext_vmpl1.pending_export_target_cpu,
+        " pending_export_version=",
+        ext_vmpl1.pending_export_version,
+        " last_export_ack_version=",
+        ext_vmpl1.last_export_ack_version
+    );
+
+    if let Some(pid) = current_pid {
+        deko_rwlock_read_atomic_data! {
+            DEKO_SHADOW_APP_LIST,
+            app_list,
+            __,
+            {
+                if let Some(ref app_list) = app_list {
+                    if let Some(app) = app_list.get(&pid) {
+                        kinfo!(
+                            "run_userapp app: pid=",
+                            pid,
+                            " owner_cpu=",
+                            app.ext.owner_cpu,
+                            " loaded_cpu=",
+                            app.ext.loaded_cpu,
+                            " state_version=",
+                            app.ext.state_version,
+                            " migration_state=",
+                            app.ext.migration_state,
+                            " state=",
+                            app.ext.state
+                        );
+                    } else {
+                        kinfo!("run_userapp app: pid=", pid, " missing from shadow app list");
+                    }
+                } else {
+                    kinfo!("run_userapp app: shadow app list not initialized");
+                }
+            }
+        }
     }
 }
 
@@ -1308,6 +1551,26 @@ fn get_guest_app_extend_exit_rax(info: &Option<DekoGuestExitInformation>) -> Opt
                 Some(0)
             } else if *req == DEKO_SERVICE_EXTEND_TIMER_EVENT {
                 Some(DEKO_SERVICE_TIMER)
+            } else {
+                None
+            }
+        },
+        _ => None,
+    }
+}
+
+#[inline]
+fn get_guest_app_extend_exit_params(info: &Option<DekoGuestExitInformation>) -> Option<
+    DekoGuestRequestParams,
+> {
+    match info {
+        Some(DekoGuestExitInformation::ServiceRequest { protocol, req, params }) if *protocol
+            == DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE => {
+            if *req == DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER
+                && params.additional_data.is_some() {
+                Some(*params)
+            } else if *req == DEKO_SERVICE_EXTEND_TIMER_EVENT {
+                Some(*params)
             } else {
                 None
             }
