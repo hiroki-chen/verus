@@ -38,11 +38,17 @@ pub(crate) mod msr;
 pub(crate) mod syscall;
 pub(crate) mod userapp;
 
-core::arch::global_asm!(include_str!("../asm/entry_SYSCALL_64.S"), options(att_syntax));
+core::arch::global_asm!(
+    concat!(
+        include_str!("../asm/PER_CPU.offset"),
+        "\n",
+        include_str!("../asm/entry_SYSCALL_64_2.S")
+    ),
+    options(att_syntax)
+);
 
 extern "C" {
     fn deko_trampoline_start();
-    fn deko_sysret_trampoline();
     fn deko_sysret_window_start();
     fn deko_sysret_window_end();
     fn deko_trampoline_end();
@@ -126,8 +132,6 @@ pub const GUEST_TRAMPOLINE_MAGIC: &'static [u8; 15] = &[
 ];
 
 func_ptr!(deko_trampoline_start);
-
-func_ptr!(deko_sysret_trampoline);
 
 func_ptr!(deko_trampoline_end);
 

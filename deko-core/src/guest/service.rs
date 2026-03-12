@@ -31,13 +31,13 @@ use crate::mm::{check_within_guest_mmap, virt_to_phys, zero_page};
 use crate::policy::guest_paging::{GuestPageOffsetBase, GUEST_PAGE_OFFSET_BASE};
 use crate::policy::syscall::{analyze_and_prepare_syscall, SYS_exit, SYS_exit_group};
 use crate::policy::userapp::{
-    bind_current_cpu_vmpl1_slot, mark_app_fake_handoff_in_progress, register_user_app,
-    stage_fake_vmpl1_handoff_request, try_kick_app, validate_launch_migration_version,
+    bind_current_cpu_vmpl1_slot, import_vmpl1_slot_vmsa_from_cpu,
+    mark_app_fake_handoff_in_progress, register_user_app, stage_fake_vmpl1_handoff_request,
+    try_kick_app, validate_launch_migration_version,
 };
 use crate::policy::{
-    self, deko_sysret_trampoline_func_ptr, deko_trampoline_start_func_ptr, enable_syscall_hook,
-    inject_ifc_policy_engine, install_hook, DekoMsrIntercept, DekoMsrInterceptVec0,
-    DekoSyscallBody,
+    self, deko_trampoline_start_func_ptr, enable_syscall_hook, inject_ifc_policy_engine,
+    install_hook, DekoMsrIntercept, DekoMsrInterceptVec0, DekoSyscallBody,
 };
 use crate::snp::vmsa::VMSA;
 use crate::snp::{pvalidate, rmpadjust, validate_vaddr_region, VMPL_GUEST_KERNEL};
@@ -45,7 +45,7 @@ use crate::{kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn, SELF_MAP};
 
 const _: () = {
     assert!(core::mem::size_of::<DekoGuestLstarWriteReq>() == 0x30);
-    assert!(core::mem::size_of::<DekoNewAppReq>() == 0x60);
+    assert!(core::mem::size_of::<DekoNewAppReq>() == 0x70);
 };
 
 verus! {
@@ -56,7 +56,7 @@ global layout DekoGuestPValidateReq is size == 8;
 
 global layout DekoGuestLstarWriteReq is size == 0x30;
 
-global layout DekoNewAppReq is size == 0x60;
+global layout DekoNewAppReq is size == 0x70;
 
 global layout DekoMapIfcReq is size == 0x298;
 
@@ -162,8 +162,14 @@ pub struct DekoNewAppReq {
     pub user_stack_size: u64,
     /// Command excluding the path.
     pub comm: [u8; 16],
-    pub token_low: u64,
-    pub token_high: u64,
+    /// Returned VMPL1 kernel rsp for the initial thread.
+    pub kernel_vmpl1_rsp: u64,
+    /// Initial FS base for the thread.
+    pub fs_base: u64,
+    /// Initial user GS base for the thread.
+    pub gs_base: u64,
+    /// Initial kernel GS base for the thread.
+    pub kernel_gs_base: u64,
     pub app_type: DekoNewAppType,
 }
 
@@ -952,9 +958,6 @@ fn handle_deko_service_lstar_intercept(
                 return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
             }
         }
-        req.sysret_trampoline = deko_sysret_trampoline_func_ptr().wrapping_sub(
-            deko_trampoline_start_func_ptr(),
-        );
         lstar_req_mapping.write_ref_at::<DekoGuestLstarWriteReq>(offset as usize, &req);
 
         kdebug!("MSR intercept: LSTAR MSR intercept handled successfully");
@@ -1271,6 +1274,7 @@ fn handle_deko_service_task_migrate(params: &mut DekoGuestRequestParams) -> Deko
         );
         return Ok(0);
     }
+    let _exported = import_vmpl1_slot_vmsa_from_cpu(pid, old_cpu)?;
     let version = mark_app_fake_handoff_in_progress(pid, old_cpu)?;
     bind_current_cpu_vmpl1_slot(cpu, Tracked(&mut cpu_perm), pid);
     stage_fake_vmpl1_handoff_request(cpu, Tracked(&mut cpu_perm), pid, new_cpu, version);

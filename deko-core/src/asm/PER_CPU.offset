@@ -1,0 +1,12 @@
+/*
+ * VMPL1 syscall trampoline offsets.
+ *
+ * Fill these from the guest Linux build's x86 offset generation so the
+ * trampoline can access per-CPU and current-thread state through %gs.
+ *
+ * See include/generated/asm-offsets.h and System.map
+ */
+
+.equ pcpu_hot,                     0x35c00
+.equ X86_user_rsp,                 0x20      /* offsetof(struct pcpu_hot, user_rsp)    0x35c20 */
+.equ X86_vmpl1_rsp,                0x28      /* offsetof(struct pcpu_hot, vmpl1_rsp)   0x35c28 */

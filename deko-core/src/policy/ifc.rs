@@ -26,32 +26,8 @@ use crate::{die, kerror, kinfo};
 verus! {
 
 #[verifier::external_body]
-fn replace_stack(syscall_body: DekoPPtr<DekoSyscallBody>) -> u64 {
-    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
-    let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
-    let vmpl1_stack = cpu_borrow.ext_vmpl1.as_ref().unwrap().vmpl1_stack;
-    let ret: u64;
-
-    unsafe {
-        core::arch::asm!(
-            "
-                pushq %r12
-                movq %rsp, %r12
-                movq {0}, %rsp
-                callq *{1}
-                movq %r12, %rsp
-                popq %r12
-            ",
-            in(reg) vmpl1_stack.0,
-            in(reg) deko_ifc_entry_vmpl1 as usize,
-            in("rdi") syscall_body.into_vaddr().0,
-            out("rax") ret,
-            clobber_abi("C"),
-            options(att_syntax)
-        );
-    }
-
-    ret
+fn deko_ifc_entry_vmpl1_wrapper(syscall_body: DekoPPtr<DekoSyscallBody>) -> u64 {
+    deko_ifc_entry_vmpl1(syscall_body)
 }
 
 #[verifier::external_body]
@@ -79,7 +55,6 @@ fn clear_timer_no_further_signal_if_pending() {
     }
 }
 
-// Need to switch to a large stack here.
 #[allow(improper_ctypes_definitions)]
 #[no_mangle]
 #[verus_spec(r =>
@@ -90,10 +65,9 @@ fn clear_timer_no_further_signal_if_pending() {
             syscall_perm.is_init(),
             syscall_perm.pptr() == syscall_body@,
     )]
-pub extern "C" fn deko_ifc_entry(syscall_body: DekoPPtr<DekoSyscallBody>) {
+pub extern "C" fn deko_ifc_entry(syscall_body: DekoPPtr<DekoSyscallBody>) -> u64 {
     if is_vmpl1_user() {
-        // Swap the current stack to the per-CPU large stack.
-        replace_stack(syscall_body);
+        deko_ifc_entry_vmpl1_wrapper(syscall_body)
     } else {
         die("Deko IFC at VMPL2 is not implemented yet");  // notify VMPL0
     }

@@ -184,6 +184,9 @@ pub struct PerCpuShared {
     pub cpu_index: usize,
     #[deko(skip)]
     pub guest_vmsa: DekoSimpleRwLock<GuestVmsaRef, IrqUnSafeLockGuard>,
+    pub vmpl1_export_pid: Option<u32>,
+    pub vmpl1_export_version: u64,
+    pub vmpl1_export_vmsa: Option<VMSA>,
     #[deko(skip)]
     pub online: PAtomicBool,
     #[deko(skip)]
@@ -212,6 +215,7 @@ impl WellFormed for PerCpuShared {
         &&& self.apic_id == self.cpu_index
         &&& self.cpu_index < CPUID_MAX_COUNT
         &&& self.guest_vmsa.wf()
+        &&& self.vmpl1_export_vmsa matches Some(v) ==> v.wf()
         &&& self.ipi_irr.wf()
         &&& forall|i: int| 0 <= i && i < 8 ==> #[trigger] self.ipi_irr@[i as int].wf()
     }
@@ -302,6 +306,9 @@ impl PerCpuShared {
                 apic_id: id,
                 cpu_index: id as usize,
                 guest_vmsa,
+                vmpl1_export_pid: None,
+                vmpl1_export_version: 0,
+                vmpl1_export_vmsa: None,
                 online,
                 ipi_irr,
                 ipi_pending,
