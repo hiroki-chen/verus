@@ -39,11 +39,7 @@ pub(crate) mod syscall;
 pub(crate) mod userapp;
 
 core::arch::global_asm!(
-    concat!(
-        include_str!("../asm/PER_CPU.offset"),
-        "\n",
-        include_str!("../asm/entry_SYSCALL_64_2.S")
-    ),
+    concat!(include_str!("../asm/PER_CPU.offset"), "\n", include_str!("../asm/entry_SYSCALL_64.S")),
     options(att_syntax)
 );
 
@@ -52,7 +48,6 @@ extern "C" {
     fn deko_sysret_window_start();
     fn deko_sysret_window_end();
     fn deko_trampoline_end();
-    static mut deko_trampoline_data_entry: u64;
     static mut deko_ifc_engine_entry: u64;
     static mut HV_SYSRET_WINDOW_START: u64;
     static mut HV_SYSRET_WINDOW_END: u64;
@@ -134,15 +129,6 @@ pub const GUEST_TRAMPOLINE_MAGIC: &'static [u8; 15] = &[
 func_ptr!(deko_trampoline_start);
 
 func_ptr!(deko_trampoline_end);
-
-#[inline(always)]
-#[verifier::external_body]
-#[doc(hidden)]
-pub fn update_syscall_entry(entry: u64) {
-    unsafe {
-        core::ptr::write_volatile(core::ptr::addr_of_mut!(deko_trampoline_data_entry), entry);
-    }
-}
 
 #[inline(always)]
 #[verifier::external_body]
@@ -556,7 +542,6 @@ unsafe fn patch_trampoline(
 
         return Err(DekoGuestServError::FatalError);
     }
-    update_syscall_entry(syscall_enter_addr.0 as u64);
     update_ifc_engine_entry(deko_ifc_entry_func_ptr() as u64);
 
     let sysret_window_start_off = (deko_sysret_window_start as *const () as usize).wrapping_sub(

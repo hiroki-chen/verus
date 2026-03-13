@@ -151,8 +151,6 @@ pub struct DekoNewAppReq {
     /// If two processes share this, they are in the same container filesystem view.
     pub mnt_ns_id: u64,
     /// The start code virtual address of the new application.
-    /// FIXME: This is problematic; need to iterate over the vma to
-    /// determine all the code and data mapped regions
     pub start_code: u64,
     /// The end code virtual address of the new application.
     pub end_code: u64,

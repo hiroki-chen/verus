@@ -1436,12 +1436,8 @@ pub fn try_kick_app(
             );
         },
         DekoUserAppState::Running => {
-            let restored = #[verus_spec(with Tracked(&mut vmpl1_perm.vmsa_perm))]
-            restore_app_vmsa_snapshot(pid, &mut ctx_vmpl1.vmsa)?;
-            if !restored {
-                proof_with!(Tracked(&mut vmpl1_perm.vmsa_perm));
-                ctx_vmpl1.vmsa.prepare_app_resume();
-            }
+            proof_with!(Tracked(&mut vmpl1_perm.vmsa_perm));
+            ctx_vmpl1.vmsa.prepare_app_resume();
         },
         _ => return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam)),
     }
@@ -1763,6 +1759,7 @@ fn run_userapp(
         // to inject another interrupt until we re-enable interrupts at the end,
         // which then checks if there is any pending doorbells and processes them.
         // Now copy the information to the VMSA and prepare for the VMPL switch.
+        dump_current_cpu_vmpl1_slot_vmsa();
         let switch_ret = no_irq_zone(|| { vmpl_switch(VMPL_GUEST_SECURE_APP) });
 
         match switch_ret {
@@ -1815,6 +1812,20 @@ fn run_userapp(
 
         return Ok(ret_rax);
     }
+}
+
+#[verifier::external_body]
+fn dump_current_cpu_vmpl1_slot_vmsa() {
+    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+    let Some(ext_vmpl1) = cpu_borrow.ext_vmpl1.as_ref() else {
+        kinfo!("VMPL1 slot VMSA dump skipped: no ext_vmpl1");
+        return ;
+    };
+
+    let vmsa = unsafe { &*(ext_vmpl1.vmsa.vaddr().0 as *const VMSA) };
+
+    kerror!("VMPL1 slot VMSA dump before enter: ", vmsa);
 }
 
 fn log_vmpl1_app_binding(_cpu: DekoPPtr<DekoCpuCtx>) {
