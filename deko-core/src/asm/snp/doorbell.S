@@ -87,6 +87,8 @@ HV_TRACE_RESTART_FRAME_RIP:
 DEBUG:
   .byte 0
 
+.extern deko_async_timer_pre_iret_hook
+
 .pushsection .entry.text, "ax"
 
 // The #HV handler is coded specially in order to deal with control flow
@@ -406,6 +408,7 @@ default_iret:
 	iretq
 
 return_user:
+	callq	deko_async_timer_pre_iret_hook
 	jmp	return_all_paths
 
 .globl return_new_task

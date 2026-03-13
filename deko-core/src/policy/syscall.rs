@@ -1348,7 +1348,7 @@ pub fn sysret_epilogue(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResul
     let handled_syscall_body = unsafe { buf_va.read::<DekoSyscallBody>() };
 
     // For some special system calls we need some extra checks and processings.
-    let result = match syscall_num {
+    match syscall_num {
         SYS_mmap => syscall_mmap_ret(syscall_body, &handled_syscall_body),
         SYS_arch_prctl => syscall_arch_prctl_ret(syscall_body, &handled_syscall_body),
         _ => {
@@ -1356,13 +1356,12 @@ pub fn sysret_epilogue(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResul
 
             Ok(())
         },
-    };
-
-    result?;
+    }?;
 
     if take_vmpl1_deferred_timer_event() {
         request_vmpl2_timer_event()?;
     }
+
     Ok(())
 }
 

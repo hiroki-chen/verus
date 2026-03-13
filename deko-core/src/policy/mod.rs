@@ -45,6 +45,7 @@ core::arch::global_asm!(
 
 extern "C" {
     fn deko_trampoline_start();
+    fn deko_async_timer_trampoline();
     fn deko_sysret_window_start();
     fn deko_sysret_window_end();
     fn deko_trampoline_end();
@@ -127,6 +128,8 @@ pub const GUEST_TRAMPOLINE_MAGIC: &'static [u8; 15] = &[
 ];
 
 func_ptr!(deko_trampoline_start);
+
+func_ptr!(deko_async_timer_trampoline);
 
 func_ptr!(deko_trampoline_end);
 

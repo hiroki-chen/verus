@@ -13,7 +13,10 @@ use crate::cpu::irq::{
     irq_enable, irq_enabled, log_nested_irq_state, raw_irq_disable, raw_irq_enable,
 };
 use crate::cpu::DekoCpuCtx;
-use crate::guest::{request_vmpl2_syscall_handler, DekoGuestServResult};
+use crate::guest::{
+    request_vmpl2_syscall_handler, request_vmpl2_timer_event, take_vmpl1_deferred_timer_event,
+    DekoGuestServResult,
+};
 use crate::imp::after_irq_enable;
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
 use crate::mm::DEKO_IFC_FRAME_ALLOCATOR;
@@ -29,6 +32,11 @@ verus! {
 #[verifier::external_body]
 fn deko_ifc_entry_vmpl1_wrapper(syscall_body: DekoPPtr<DekoSyscallBody>) -> u64 {
     deko_ifc_entry_vmpl1(syscall_body)
+}
+
+#[verifier::external_body]
+fn deko_async_timer_entry_vmpl1_wrapper() -> u64 {
+    deko_async_timer_entry_vmpl1()
 }
 
 #[verifier::external_body]
@@ -81,6 +89,29 @@ pub extern "C" fn deko_ifc_entry(syscall_body: DekoPPtr<DekoSyscallBody>) -> u64
     }
 }
 
+#[no_mangle]
+pub extern "C" fn deko_async_timer_entry() -> u64 {
+    if is_vmpl1_user() {
+        after_irq_enable();
+
+        let r = deko_async_timer_entry_vmpl1_wrapper();
+
+        raw_irq_disable();
+        clear_timer_no_further_signal_if_pending();
+
+        r
+    } else {
+        die("Deko async timer entry at VMPL2 is not implemented yet");
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn deko_async_timer_pre_iret_hook() {
+    if take_vmpl1_deferred_timer_event() {
+        let _ = request_vmpl2_timer_event();
+    }
+}
+
 #[verifier::exec_allows_no_decreases_clause]
 #[verus_spec(
     with
@@ -123,6 +154,16 @@ fn deko_ifc_entry_vmpl1(syscall_body_ptr: DekoPPtr<DekoSyscallBody>) -> u64 {
     0
 }
 
+#[verifier::exec_allows_no_decreases_clause]
+fn deko_async_timer_entry_vmpl1() -> u64 {
+    if let Err(e) = request_vmpl2_timer_event() {
+        return e.into_result_code();
+    }
+    0
+}
+
 func_ptr!(deko_ifc_entry);
+
+func_ptr!(deko_async_timer_entry);
 
 } // verus!

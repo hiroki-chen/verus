@@ -18,6 +18,7 @@
  */
 .section .data
 .global deko_trampoline_start
+.global deko_async_timer_trampoline
 .global deko_trampoline_end
 .global deko_ifc_engine_entry
 .global deko_sysret_window_start
@@ -110,6 +111,9 @@ deko_sysret_window_start:
 
   sysretq
 deko_sysret_window_end:
+
+deko_async_timer_trampoline:
+  ud2
 
 // ============================================================================
 // Data & Stack Section
