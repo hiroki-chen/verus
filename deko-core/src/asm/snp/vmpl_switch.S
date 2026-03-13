@@ -30,7 +30,7 @@ switch_to_vmpl_unsafe:
     testw $0x8000, (%rdi)
     jz switch_vmpl_proceed
     /* Timer doorbell (vector 0xEC) is coalescible; allow VMPL switch and
-      * process it after returning from the switch path. */
+     * process it after returning from the switch path. */
     cmpb $0xEC, (%rdi)
     jne switch_vmpl_cancel
     jmp switch_vmpl_window_start_timer_clear

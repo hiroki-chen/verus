@@ -101,7 +101,7 @@ verus! {
 
 /// Minimum TSC delta between two VMPL1->VMPL0 timer notifications.
 /// This throttles timer-exit storms while preserving periodic progress.
-const VMPL1_TIMER_NOTIFY_MIN_DELTA_TSC: u64 = 30_000_000;
+const VMPL1_TIMER_NOTIFY_MIN_DELTA_TSC: u64 = 300_000_000;
 
 global layout HVDoorbell is size == 0x100, align == 0x4;
 
@@ -748,6 +748,7 @@ fn handle_hv_doorbell_common(
                                 }
                             }
                         }
+                        break ;
                     },
                     _ => {
                         crate::dbg::hv_trace_event(hvdb_ptr, 3, vector as u64, flags as u64);

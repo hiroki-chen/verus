@@ -1760,7 +1760,7 @@ fn run_userapp(
         // which then checks if there is any pending doorbells and processes them.
         // Now copy the information to the VMSA and prepare for the VMPL switch.
         dump_current_cpu_vmpl1_slot_vmsa();
-        let switch_ret = no_irq_zone(|| { vmpl_switch(VMPL_GUEST_SECURE_APP) });
+        let switch_ret = vmpl_switch(VMPL_GUEST_SECURE_APP);
 
         match switch_ret {
             DekoVmplSwitchErr::Ok => {},
