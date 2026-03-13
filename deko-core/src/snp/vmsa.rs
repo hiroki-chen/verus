@@ -26,8 +26,9 @@ use crate::mm::vm::TempMapping;
 use crate::mm::DEKO_FRAME_ALLOCATOR_FULL;
 use crate::policy::{DekoMsrInterceptVec0, DekoSyscallBody};
 use crate::snp::{
-    rmpadjust, DekoCpuCtxPermission, PageTablePermission, RmpFlags, Rmp_ALL_BITS, SnpStatusFlags,
-    ALT_INJ, BIT_VMSA, GUEST_MSR_INTERCEPT, REST_INJ, VMPL1_MAGIC_KERN, VMPL_GUEST_DEKO_MONITOR,
+    rdtscp, rmpadjust, DekoCpuCtxPermission, PageTablePermission, RmpFlags, Rmp_ALL_BITS,
+    SnpStatusFlags, ALT_INJ, BIT_VMSA, GUEST_MSR_INTERCEPT, REST_INJ, VMPL1_MAGIC_KERN,
+    VMPL_GUEST_DEKO_MONITOR,
 };
 use crate::{die, kdebug, kerror, kinfo, kunimplemented, kwarn};
 
@@ -80,6 +81,7 @@ pub struct VmsaInitialContext {
     pub rip: u64,
     pub rsp: u64,
     pub rflags: u64,
+    pub tsc_aux: u32,
     pub cs: VMSASegment,
     pub ds: VMSASegment,
     pub es: VMSASegment,
@@ -888,6 +890,7 @@ impl VmsaInitialContext {
             rip,
             rsp: css_top,
             rflags: 0x2,
+            tsc_aux: rdtscp() & 0x00FF_FFFF,
             cs,
             ss: ds.clone(),
             ds: ds.clone(),
@@ -1114,6 +1117,7 @@ impl VmsaPage {
         this.rip = ctx.rip;
         this.rsp = ctx.rsp;
         this.rflags = ctx.rflags;
+        this.tsc_aux = ctx.tsc_aux;
 
         this.gdt = VMSASegment {
             selector: 0,

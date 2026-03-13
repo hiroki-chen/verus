@@ -39,8 +39,8 @@ use crate::guest::service::{
     DEKO_SERVICE_TIMER,
 };
 use crate::guest::{
-    guest_page_table, DekoGuestExitInformation, DekoGuestRequestParams, DekoGuestServError,
-    DekoGuestServResult, DekoGuestServResultCode, DekoVmplSwitchErr, PtRegs,
+    guest_page_table, take_vmpl1_call_pending, DekoGuestExitInformation, DekoGuestRequestParams,
+    DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode, DekoVmplSwitchErr, PtRegs,
     DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE,
 };
 use crate::imp::doorbell::{init_hv_doorbell, init_hv_doorbell_vmpl1};
@@ -1768,9 +1768,9 @@ fn run_userapp(
                 kinfo!("VMPL switch cancelled; retrying guest entry");
                 continue ;
             },
-            DekoVmplSwitchErr::Failed => {
-                kerror!("VMPL switch failed; retrying guest entry");
-                continue ;
+            DekoVmplSwitchErr::Failed(v) => {
+                kerror!("VMPL switch failed with error code ", v);
+                return Err(DekoGuestServError::FatalError);
             },
         }
 
@@ -1781,12 +1781,16 @@ fn run_userapp(
         proof_with!(=> Tracked(vmsa_perm));
         let vmsa_ptr = vmsa.ptr();
 
+        let call_pending = take_vmpl1_call_pending();
         proof_with!(Tracked(&vmsa_perm));
-        let info = DekoGuestExitInformation::try_parse_vmsa(vmsa_ptr, true);
+        let info = DekoGuestExitInformation::try_parse_vmsa(vmsa_ptr, call_pending);
 
         let vmsa = vmsa_ptr.borrow(Tracked(&vmsa_perm));
         let snapshot = DekoUserApp::copy_vmsa_snapshot(vmsa);
 
+        if info.is_none() {
+            continue ;
+        }
         kinfo!("Entered guest app in VMPL1, now processing the request: ", info);
 
         let ret_rax = match get_guest_app_extend_exit_rax(&info) {

@@ -5,10 +5,12 @@ use deko_std::prelude::DekoPointsTo;
 use deko_std::ptr::DekoPPtr;
 use deko_std::sync::DekoSimpleOnceCell;
 use deko_std::wf::WellFormed;
-use deko_std::{deko_rwlock_read_atomic_data, trace_is_enabled, TrivialPredicate};
+use deko_std::{
+    deko_rwlock_read_atomic_data, deko_rwlock_write_atomic_data, trace_is_enabled, TrivialPredicate,
+};
 use vstd::prelude::*;
 
-use crate::cpu::irq::{log_nested_irq_state, no_irq_zone};
+use crate::cpu::irq::log_nested_irq_state;
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission, PERCPU_AREAS};
 use crate::guest::service::{
     handle_guest_exit_deko_service, DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER,
@@ -146,16 +148,15 @@ impl CaaArea {
     }
 }
 
-#[repr(u32)]
 #[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
 pub enum DekoVmplSwitchErr {
-    Ok = 0,
+    Ok,
     /// The VMPL switch operation was cancelled, likely due to an interrupt or other
     /// asynchronous event that occurred during the switch.
-    Cancelled = 1,
+    Cancelled,
     /// The VMPL switch operation failed either because the GHCB MSR protocol didn't
     /// honor our request or some other fatal error occurred during the switch.
-    Failed = 2,
+    Failed(u32),
 }
 
 #[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
@@ -209,7 +210,7 @@ impl DekoGuestServResultCode {
             DekoGuestServResultCode::InvalidParam => 0x8000_0005,
             DekoGuestServResultCode::InvalidReq => 0x8000_0006,
             DekoGuestServResultCode::Busy => 0x8000_0007,
-            DekoGuestServResultCode::VmplSwitchErr(err) => 0x9000_0000u64.wrapping_add(*err as u64),
+            DekoGuestServResultCode::VmplSwitchErr(err) => 0x9000_0000u64,
             DekoGuestServResultCode::Other(code) => 0x8000_1000u64.wrapping_add(*code),
         }
     }
@@ -325,11 +326,10 @@ impl DekoGuestExitInformation {
             let protocol = (vmsa.rax >> 32) as u32;
             let req = (vmsa.rax & 0xFFFFFFFFu64) as u32;
 
-            // If there is no call pending; then the VMPL must
-            // be abort due to HV doorbell or other reasons.
+            // Only treat a VMGEXIT as a real service request if the caller
+            // had explicitly marked a call as pending. Otherwise this is
+            // noise from an async/accidental exit and should be ignored.
             if !call_pending {
-                kerror!("VMGEXIT with no call pending, likely due to HV doorbell or other async event. Ignoring the exit.");
-
                 return None;
             }
             let ai = if protocol == DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE {
@@ -498,22 +498,15 @@ pub fn guest_page_table(cr3: u64) -> DekoGuestServResult<TempMapping> {
 /// Used by the VMPL1 guest to request a service of the VMPL0 monitor.
 #[verifier::external_body]
 pub fn request_vmpl2_syscall_handler() -> DekoGuestServResult<()> {
-    if !is_vmpl1() {
-        kerror!("request_deko_service called outside of VMPL1");
-
-        return Err(DekoGuestServError::FatalError);
-    }
     let extend_service = ((DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE as u64) << 32)
         | DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER as u64;
 
+    set_vmpl1_call_pending(true);
     match vmpl_switch_with_rax(VMPL_GUEST_DEKO_MONITOR, extend_service) {
         DekoVmplSwitchErr::Ok => { return Ok(()) },
-        _ => {
-            return Err(
-                DekoGuestServError::SoftError(
-                    DekoGuestServResultCode::VmplSwitchErr(DekoVmplSwitchErr::Failed),
-                ),
-            );
+        e => {
+            set_vmpl1_call_pending(false);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::VmplSwitchErr(e)));
         },
     }
 }
@@ -521,24 +514,76 @@ pub fn request_vmpl2_syscall_handler() -> DekoGuestServResult<()> {
 /// Used by the VMPL1 guest to notify VMPL0 monitor of a timer event.
 #[verifier::external_body]
 pub fn request_vmpl2_timer_event() -> DekoGuestServResult<()> {
-    Ok(())
-    // if !is_vmpl1() {
-    //     kerror!("request_deko_service called outside of VMPL1");
-    //     return Err(DekoGuestServError::FatalError);
-    // }
-    // let extend_service = ((DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE as u64) << 32)
-    //     | DEKO_SERVICE_EXTEND_TIMER_EVENT as u64;
-    // match vmpl_switch_with_rax(VMPL_GUEST_DEKO_MONITOR, extend_service) {
-    //     DekoVmplSwitchErr::Ok => return Ok(()),
-    //     _ => {
-    //         return Err(
-    //             DekoGuestServError::SoftError(
-    //                 DekoGuestServResultCode::VmplSwitchErr(DekoVmplSwitchErr::Failed),
-    //             ),
-    //         );
-    //     },
-    // }
+    let extend_service = ((DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE as u64) << 32)
+        | DEKO_SERVICE_EXTEND_TIMER_EVENT as u64;
 
+    set_vmpl1_call_pending(true);
+
+    match vmpl_switch_with_rax(VMPL_GUEST_DEKO_MONITOR, extend_service) {
+        DekoVmplSwitchErr::Ok => { return Ok(()) },
+        e => {
+            set_vmpl1_call_pending(false);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::VmplSwitchErr(e)));
+        },
+    }
+}
+
+#[verifier::external_body]
+pub fn set_vmpl1_call_pending(call_pending: bool) {
+    if !is_vmpl1() {
+        return ;
+    }
+    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+    let Some(ext_vmpl1) = cpu_borrow.ext_vmpl1.as_ref() else {
+        return ;
+    };
+    deko_rwlock_write_atomic_data! {
+        ext_vmpl1.call_pending,
+        pending,
+        __,
+        {
+            pending = call_pending;
+        }
+    };
+}
+
+#[verifier::external_body]
+pub fn take_vmpl1_call_pending() -> bool {
+    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+    let Some(ext_vmpl1) = cpu_borrow.ext_vmpl1.as_ref() else {
+        return false;
+    };
+    deko_rwlock_write_atomic_data! {
+        ext_vmpl1.call_pending,
+        pending,
+        __,
+        {
+            let was_pending = pending;
+            pending = false;
+            was_pending
+        }
+    }
+}
+
+#[verifier::external_body]
+pub fn take_vmpl1_deferred_timer_event() -> bool {
+    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+    let Some(ext_vmpl1) = cpu_borrow.ext_vmpl1.as_ref() else {
+        return false;
+    };
+    deko_rwlock_write_atomic_data! {
+        ext_vmpl1.deferred_timer_event,
+        pending,
+        __,
+        {
+            let was_pending = pending;
+            pending = false;
+            was_pending
+        }
+    }
 }
 
 } // verus!

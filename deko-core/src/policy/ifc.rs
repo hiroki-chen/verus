@@ -14,6 +14,7 @@ use crate::cpu::irq::{
 };
 use crate::cpu::DekoCpuCtx;
 use crate::guest::{request_vmpl2_syscall_handler, DekoGuestServResult};
+use crate::imp::after_irq_enable;
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
 use crate::mm::DEKO_IFC_FRAME_ALLOCATOR;
 use crate::policy::syscall::{analyze_and_prepare_syscall, sysret_epilogue};
@@ -67,7 +68,14 @@ fn clear_timer_no_further_signal_if_pending() {
     )]
 pub extern "C" fn deko_ifc_entry(syscall_body: DekoPPtr<DekoSyscallBody>) -> u64 {
     if is_vmpl1_user() {
-        deko_ifc_entry_vmpl1_wrapper(syscall_body)
+        after_irq_enable();
+
+        let r = deko_ifc_entry_vmpl1_wrapper(syscall_body);
+
+        raw_irq_disable();
+        clear_timer_no_further_signal_if_pending();
+
+        r
     } else {
         die("Deko IFC at VMPL2 is not implemented yet");  // notify VMPL0
     }
@@ -84,8 +92,6 @@ pub extern "C" fn deko_ifc_entry(syscall_body: DekoPPtr<DekoSyscallBody>) -> u64
 )]
 fn deko_ifc_entry_vmpl1(syscall_body_ptr: DekoPPtr<DekoSyscallBody>) -> u64 {
     kinfo!("ifc: entered with syscall_body_ptr = ", syscall_body_ptr);
-
-    raw_irq_enable();
 
     let tracked mut syscall_perm = syscall_perm;
     let mut syscall_body = syscall_body_ptr.take(Tracked(&mut syscall_perm));
@@ -111,9 +117,6 @@ fn deko_ifc_entry_vmpl1(syscall_body_ptr: DekoPPtr<DekoSyscallBody>) -> u64 {
         return e.into_result_code();
     }
     syscall_body_ptr.write(Tracked(&mut syscall_perm), syscall_body);
-
-    raw_irq_disable();
-    clear_timer_no_further_signal_if_pending();
 
     kinfo!("ifc: after sysret_epilogue");
 

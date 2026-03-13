@@ -22,15 +22,16 @@ use super::is_vmpl1;
 use crate::cpu::irq::no_irq_zone;
 use crate::cpu::tlb::{flush_tlb_global_percpu, flush_tlb_global_sync};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
-use crate::guest::DekoVmplSwitchErr;
+use crate::guest::service::DEKO_SERVICE_EXTEND_TIMER_EVENT;
+use crate::guest::{DekoVmplSwitchErr, DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE};
 use crate::logging::CONSOLE_LOCK;
 use crate::mm::paging::{PageTable, PteFlags};
 use crate::mm::{virt_to_phys, virt_to_phys_checked};
 use crate::prelude::*;
 use crate::snp::doorbell::{self, HVDoorbell, HvDoorbellPtrPermission};
 use crate::snp::{
-    PageStateChangeOp, GHCB_BUFFER_SIZE, PSC_GFN_MASK, PSC_OP_PRIVATE, PSC_OP_PSMASH,
-    PSC_OP_SHARED, PSC_OP_UNSMASH,
+    after_irq_enable, PageStateChangeOp, GHCB_BUFFER_SIZE, PSC_GFN_MASK, PSC_OP_PRIVATE,
+    PSC_OP_PSMASH, PSC_OP_SHARED, PSC_OP_UNSMASH,
 };
 use crate::{bits, kdebug, kerror, kinfo, kpanic_if, kunimplemented};
 
@@ -59,12 +60,43 @@ extern "C" {
         hv_doorbell: *const doorbell::HVDoorbell,
         target_vmpl: u32,
         vmmcall_rax: u64,
-    ) -> DekoVmplSwitchErr;
+    ) -> u32;
 }
 
 core::arch::global_asm!(include_str!("../asm/snp/vmpl_switch.S"), options(att_syntax));
 
 verus! {
+
+#[inline]
+#[verifier::external_body]
+fn do_switch_to_vmpl_unsafe(
+    hv_doorbell: DekoPPtr<HVDoorbell>,
+    target_vmpl: u32,
+    vmmcall_rax: u64,
+) -> DekoVmplSwitchErr {
+    // Process any pending #HV events for this VMPL so that
+    // if we enter another VMPL and never come back, we won't
+    // miss processing them.
+    //
+    // Only check this if we are not processing the timer.
+    if vmmcall_rax != ((DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE as u64) << 32)
+        | DEKO_SERVICE_EXTEND_TIMER_EVENT as u64 {
+        after_irq_enable();
+    }
+    // Now we can safely switch to the target VMPL.
+
+    match unsafe {
+        switch_to_vmpl_unsafe(
+            hv_doorbell.addr() as *const doorbell::HVDoorbell,
+            target_vmpl,
+            vmmcall_rax,
+        )
+    } {
+        0 => DekoVmplSwitchErr::Ok,
+        1 => DekoVmplSwitchErr::Cancelled,  // Treated as success by design.
+        v => { DekoVmplSwitchErr::Failed(v) },
+    }
+}
 
 /// Performs a VMPL switch using assembly code (`vmmcall`). This function takes
 /// as input a pointer to the hypervisor doorbell structure and the target VMPL level.
@@ -77,7 +109,6 @@ verus! {
 /// This function is unsafe because it performs low-level operations that can affect
 /// the system's stability and security. It directly interacts with hardware and
 /// requires careful handling of pointers and VMPL levels.
-#[verifier::external_body]
 #[verus_spec(
     requires
         target_vmpl <= 3,
@@ -101,7 +132,7 @@ pub fn vmpl_switch(target_vmpl: u32) -> DekoVmplSwitchErr {
     }
     } else {
         if core::hint::unlikely(cpu_borrow.ext_vmpl1.is_none()) {
-            return DekoVmplSwitchErr::Failed;
+            return DekoVmplSwitchErr::Failed(0x8000_0000);
         }
         let ext_vmpl1 = cpu_borrow.ext_vmpl1.as_ref().unwrap();
         deko_rwlock_read_atomic_data! {
@@ -114,16 +145,11 @@ pub fn vmpl_switch(target_vmpl: u32) -> DekoVmplSwitchErr {
         }
     };
 
-    let r = unsafe {
-        switch_to_vmpl_unsafe(doorbell_ptr.addr() as *const doorbell::HVDoorbell, target_vmpl, 0)
-    };
-
-    r
+    do_switch_to_vmpl_unsafe(doorbell_ptr, target_vmpl, 0)
 }
 
 /// Performs a VMPL switch and writes `vmmcall_rax` into RAX before executing
 /// `vmmcall`.
-#[verifier::external_body]
 #[verus_spec(
     requires
         target_vmpl <= 3,
@@ -138,16 +164,16 @@ pub fn vmpl_switch_with_rax(target_vmpl: u32, vmmcall_rax: u64) -> DekoVmplSwitc
 
     let doorbell_ptr = if !is_vmpl1() {
         deko_rwlock_read_atomic_data! {
-        cpu_borrow.doorbell.as_ref().unwrap(),
-        ptr,
-        __,
-        {
-            *ptr
+            cpu_borrow.doorbell.as_ref().unwrap(),
+            ptr,
+            __,
+            {
+                *ptr
+            }
         }
-    }
     } else {
         if core::hint::unlikely(cpu_borrow.ext_vmpl1.is_none()) {
-            return DekoVmplSwitchErr::Failed;
+            return DekoVmplSwitchErr::Failed(0x8000_0000);
         }
         let ext_vmpl1 = cpu_borrow.ext_vmpl1.as_ref().unwrap();
         deko_rwlock_read_atomic_data! {
@@ -160,15 +186,7 @@ pub fn vmpl_switch_with_rax(target_vmpl: u32, vmmcall_rax: u64) -> DekoVmplSwitc
         }
     };
 
-    let r = unsafe {
-        switch_to_vmpl_unsafe(
-            doorbell_ptr.addr() as *const doorbell::HVDoorbell,
-            target_vmpl,
-            vmmcall_rax,
-        )
-    };
-
-    r
+    do_switch_to_vmpl_unsafe(doorbell_ptr, target_vmpl, vmmcall_rax)
 }
 
 pub broadcast axiom fn axiom_shared_buffer_size_wf()

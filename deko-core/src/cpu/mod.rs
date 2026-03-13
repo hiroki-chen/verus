@@ -530,7 +530,11 @@ pub struct DekoCpuCtxPerVmpl {
     pub nested_irq: IrqState,
     /// Deferred VMPL1 timer event request. Set in doorbell handling and
     /// consumed from non-IRQ context.
-    pub deferred_timer_event: bool,
+    pub deferred_timer_event: DekoSimpleRwLock<bool, IrqUnSafeLockGuard>,
+    /// VMPL1-side equivalent of the guest CAA `call_pending` bit.
+    /// This tracks whether the current VMPL1 context intentionally issued
+    /// a synchronous VMGEXIT back to the monitor.
+    pub call_pending: DekoSimpleRwLock<bool, IrqUnSafeLockGuard>,
     /// Guard bit set while VMPL1 is issuing a syscall VMPL switch.
     pub syscall_switch_in_progress: bool,
     /// Last TSC when VMPL1 timer notification was forwarded to VMPL0.
@@ -549,6 +553,8 @@ impl WellFormed for DekoCpuCtxPerVmpl {
         &&& self.vmpl < 4
         &&& self.vmsa.wf()
         &&& self.doorbell.wf()
+        &&& self.deferred_timer_event.wf()
+        &&& self.call_pending.wf()
         &&& self.doorbell_pa@ % PAGE_SIZE == 0
         &&& self.pending_export_pid is Some <==> self.pending_export_target_cpu is Some
     }
@@ -647,6 +653,13 @@ impl DekoCpuCtxPerVmpl {
         }
 
         let (nested_irq, Tracked(nested_irq_perm)) = IrqState::new();
+        let deferred_timer_event = DekoSimpleRwLock::new_simple(false, IrqUnSafeLockGuard {  });
+        let call_pending = DekoSimpleRwLock::new_simple(false, IrqUnSafeLockGuard {  });
+
+        proof {
+            use_type_invariant(&deferred_timer_event);
+            use_type_invariant(&call_pending);
+        }
 
         proof_with!(|= Tracked(
             DekoCpuCtxPerVmplPermission {
@@ -672,7 +685,8 @@ impl DekoCpuCtxPerVmpl {
             pending_export_version: 0,
             last_export_ack_version: 0,
             nested_irq,
-            deferred_timer_event: false,
+            deferred_timer_event,
+            call_pending,
             syscall_switch_in_progress: false,
             last_timer_notify_tsc: 0,
         }

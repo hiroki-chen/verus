@@ -2187,8 +2187,9 @@ pub fn serv_main(cpu_index: usize) {
                 },
         ) {
             DekoVmplSwitchErr::Ok => break ,
-            DekoVmplSwitchErr::Failed => {
-                kinfo!("VMPL switch failed on core ", cpu_index, " when entering VMPL_GUEST_SECURE_APP.");
+            DekoVmplSwitchErr::Failed(v) => {
+                kerror!("VMPL switch failed on core ", cpu_index, " when entering VMPL_GUEST_SECURE_APP.");
+                die("VMPL switch failed.");
             },
             DekoVmplSwitchErr::Cancelled => {
                 kinfo!("Invalid VMPL level when switching to VMPL_GUEST_SECURE_APP on core ", cpu_index, ".");
@@ -2387,9 +2388,11 @@ pub fn try_enter_guest_with_params(
         if let Some(info) = DekoGuestExitInformation::get_guest_exit_information() {
             return info;
         } else {
-            let vmsa = vmsa.borrow(Tracked(&this_vmsa_perm));
-            kerror!("Failed to get guest exit information on CPU ", this_cpu_index);
-            kerror!("\tLast VMSA:", vmsa);
+            kdebug!(
+                "Ignoring VMPL2 noise exit with no pending call on CPU ",
+                this_cpu_index
+            );
+            continue ;
         }
     }
 }

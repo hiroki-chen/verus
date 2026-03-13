@@ -128,6 +128,17 @@ hv_handler:
 	// commit to processing all #HV events immediately.
 	testl	$0x200, ({EXCEP_FLAGS_OFF} - {EXCEP_RCX_OFF})(%rsp)
   jnz	continue_hv
+	// If the trap RIP is within the SYSRET window, postpone #HV until
+	// the return path completes and interrupts can be handled normally.
+	movq	HV_SYSRET_WINDOW_START(%rip), %rbx
+	testq	%rbx, %rbx
+	jz	0f
+	cmpq	%rbx, %rax
+	jb	0f
+	movq	HV_SYSRET_WINDOW_END(%rip), %rcx
+	cmpq	%rcx, %rax
+	jb	postpone_hv
+0:
 	// Check whether the trap RIP is within any code that may require
 	// RIP redirection
 	leaq	hv_redirect_window_start(%rip), %rbx

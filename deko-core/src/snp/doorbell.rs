@@ -52,13 +52,10 @@ use crate::cpu::idt::{IPI_VECTOR, TIMER_VECTOR};
 use crate::cpu::irq::{irq_enabled, raw_irq_disable, raw_irq_enable, IrqUnSafeLockGuard};
 use crate::cpu::task::{debug_hv, X86ExceptionContext};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPerVmpl, DekoCpuCtxPermission};
-use crate::guest::service::DEKO_SERVICE_EXTEND_TIMER_EVENT;
-use crate::guest::DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE;
-use crate::imp::VMPL_GUEST_DEKO_MONITOR;
 use crate::mm::frame_allocator::DekoPageFrameBox;
 use crate::mm::paging::PageTable;
 use crate::mm::{virt_to_phys, virt_to_phys_checked, DEKO_FRAME_ALLOCATOR_FULL};
-use crate::snp::ghcb::{current_ghcb, vmpl_switch_with_rax, GuestHostCommunicationBlock};
+use crate::snp::ghcb::{current_ghcb, GuestHostCommunicationBlock};
 use crate::snp::{doorbell, is_vmpl1};
 use crate::{die, kdebug, kerror, kinfo, kpanic_if, ktrace, kwarn};
 
@@ -681,84 +678,70 @@ fn handle_hv_doorbell_common(
         !(HV_DOORBELL_NO_FURTHER_SIGNAL_FLAG),
     );
     let mut vector = hvdb.vector.load(Tracked(&mut hvdb_perm.hv_perm.vector_perm));
-    // Some hosts may transiently expose a non-zero vector before/without
-    // NoFurtherSignal set; process either signal to avoid losing events.
-    if flags & HV_DOORBELL_NO_FURTHER_SIGNAL_FLAG != 0 || vector != 0 {
-        #[verus_spec(
-            invariant_except_break
-                hvdb_perm.hv_perm.vector_perm.is_for(hvdb.vector),
-                hvdb_perm.hv_perm.flags_perm.is_for(hvdb.flags),
-                hvdb_perm.hv_perm.no_eoi_required_perm.is_for(hvdb.no_eoi_required),
-                hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb.per_vmpl_events),
-                hvdb_perm.ptr_perm == old(hvdb_perm).ptr_perm,
-                cpu_perm.pgtable_perm == old(cpu_perm).pgtable_perm,
-                cpu_taken.wf(),
-                cpu_perm.ptr_perm.pptr() == cpu@,
-                cpu_perm.ptr_perm.mem_wf(),
-                cpu_perm.wf_with(cpu),
-            ensures
-                cpu_perm.ptr_perm.is_init()
-        )]
-        loop {
-            match hvdb.vector.compare_exchange_weak(
-                Tracked(&mut hvdb_perm.hv_perm.vector_perm),
-                vector,
-                0,
-            ) {
-                Ok(_) => match vector as usize {
-                    IPI_VECTOR => {
-                        crate::dbg::hv_trace_event(hvdb_ptr, 1, vector as u64, flags as u64);
-                        cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
 
-                        proof_with!(Tracked(cpu_perm));
-                        DekoCpuCtx::handle_ipi_req(cpu);
+    #[verus_spec(
+        invariant_except_break
+            hvdb_perm.hv_perm.vector_perm.is_for(hvdb.vector),
+            hvdb_perm.hv_perm.flags_perm.is_for(hvdb.flags),
+            hvdb_perm.hv_perm.no_eoi_required_perm.is_for(hvdb.no_eoi_required),
+            hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb.per_vmpl_events),
+            hvdb_perm.ptr_perm == old(hvdb_perm).ptr_perm,
+            cpu_perm.pgtable_perm == old(cpu_perm).pgtable_perm,
+            cpu_taken.wf(),
+            cpu_perm.ptr_perm.pptr() == cpu@,
+            cpu_perm.ptr_perm.mem_wf(),
+            cpu_perm.wf_with(cpu),
+        ensures
+            cpu_perm.ptr_perm.is_init()
+    )]
+    loop {
+        match hvdb.vector.compare_exchange_weak(
+            Tracked(&mut hvdb_perm.hv_perm.vector_perm),
+            vector,
+            0,
+        ) {
+            Ok(_) => match vector as usize {
+                IPI_VECTOR => {
+                    cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
 
-                        cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
-                    },
-                    TIMER_VECTOR => {
-                        crate::dbg::hv_trace_event(hvdb_ptr, 2, vector as u64, flags as u64);
+                    proof_with!(Tracked(cpu_perm));
+                    DekoCpuCtx::handle_ipi_req(cpu);
 
-                        let apic = cpu_taken.apic();
+                    cpu_taken = cpu.take(Tracked(&mut cpu_perm.ptr_perm));
+                },
+                TIMER_VECTOR => {
+                    kpanic_if!(
+                        core::hint::unlikely(!is_vmpl1()),
+                        "Timer event should never be signaled in VMPL0"
+                    );
+                    kpanic_if!(
+                        core::hint::unlikely(cpu_taken.ext_vmpl1.is_none()),
+                        "VMPL1 CPU context not initialized"
+                    );
 
-                        // The trick here is that the physical APIC
-                        // is ignorant of the VMPL so anyone can attempt
-                        // to send an EOI signal to the hypervisor.
-                        //
-                        // Thus, if the timer arrives when monitor
-                        // is running the timer will be consumed by
-                        // us; and if the timer arrives when guest
-                        // is running, the interrupt will be injected
-                        // by the hypervisor; the guest will handle
-                        // the rest.
-                        apic.eoi();
+                    let ext_vmpl1 = cpu_taken.ext_vmpl1.as_mut().unwrap();
 
-                        if is_vmpl1() {
-                            if let Some(ext_vmpl1) = cpu_taken.ext_vmpl1.as_mut() {
-                                let now_tsc = read_tsc();
-                                if now_tsc.wrapping_sub(ext_vmpl1.last_timer_notify_tsc)
-                                    >= VMPL1_TIMER_NOTIFY_MIN_DELTA_TSC {
-                                    ext_vmpl1.last_timer_notify_tsc = now_tsc;
-                                    let extend_service = ((
-                                    DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE as u64) << 32)
-                                        | DEKO_SERVICE_EXTEND_TIMER_EVENT as u64;
-                                    let _ = vmpl_switch_with_rax(
-                                        VMPL_GUEST_DEKO_MONITOR,
-                                        extend_service,
-                                    );
-                                }
+                    let now_tsc = read_tsc();
+                    if now_tsc.wrapping_sub(ext_vmpl1.last_timer_notify_tsc)
+                        >= VMPL1_TIMER_NOTIFY_MIN_DELTA_TSC {
+                        ext_vmpl1.last_timer_notify_tsc = now_tsc;
+                        deko_rwlock_write_atomic_data! {
+                            ext_vmpl1.deferred_timer_event,
+                            pending,
+                            __,
+                            {
+                                pending = true;
                             }
-                        }
-                        break ;
-                    },
-                    _ => {
-                        crate::dbg::hv_trace_event(hvdb_ptr, 3, vector as u64, flags as u64);
-                        break ;
-                    },
+                        };
+                    }
                 },
-                Err(current_val) => {
-                    vector = current_val;
+                _ => {
+                    break ;
                 },
-            }
+            },
+            Err(current_val) => {
+                vector = current_val;
+            },
         }
     }
     cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);

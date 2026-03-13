@@ -12,7 +12,10 @@ use vstd::prelude::*;
 
 use crate::cpu::regs::write_fs_base;
 use crate::cpu::DekoCpuCtx;
-use crate::guest::{DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode};
+use crate::guest::{
+    request_vmpl2_timer_event, take_vmpl1_deferred_timer_event, DekoGuestServError,
+    DekoGuestServResult, DekoGuestServResultCode,
+};
 use crate::mm::frame_allocator::DekoAllocatorApi;
 use crate::policy::userapp::{
     copy_from_user, is_docker_request, DEKO_SHADOW_APP_LIST, IS_DOCKER_RUNNING,
@@ -1345,7 +1348,7 @@ pub fn sysret_epilogue(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResul
     let handled_syscall_body = unsafe { buf_va.read::<DekoSyscallBody>() };
 
     // For some special system calls we need some extra checks and processings.
-    match syscall_num {
+    let result = match syscall_num {
         SYS_mmap => syscall_mmap_ret(syscall_body, &handled_syscall_body),
         SYS_arch_prctl => syscall_arch_prctl_ret(syscall_body, &handled_syscall_body),
         _ => {
@@ -1353,7 +1356,14 @@ pub fn sysret_epilogue(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResul
 
             Ok(())
         },
+    };
+
+    result?;
+
+    if take_vmpl1_deferred_timer_event() {
+        request_vmpl2_timer_event()?;
     }
+    Ok(())
 }
 
 fn syscall_arch_prctl_ret(
