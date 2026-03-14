@@ -70,25 +70,19 @@ static LOGGER: Logger = Logger {
 
 // Get log level based on conditional compilation flags
 fn get_level_filter() -> LevelFilter {
-    #[cfg(log_level_trace)]
-    return LevelFilter::Trace;
-    #[cfg(all(log_level_debug, not(log_level_trace)))]
-    return LevelFilter::Debug;
-    #[cfg(all(log_level_info, not(log_level_debug), not(log_level_trace)))]
-    return LevelFilter::Info;
-    #[cfg(all(log_level_warn, not(log_level_info), not(log_level_debug), not(log_level_trace)))]
-    return LevelFilter::Warn;
-    #[cfg(all(
-        log_level_error,
-        not(log_level_warn),
-        not(log_level_info),
-        not(log_level_debug),
-        not(log_level_trace)
-    ))]
-    return LevelFilter::Error;
-
-    // Default to INFO if no flags are set
-    LevelFilter::Info
+    if cfg!(log_level_trace) {
+        LevelFilter::Trace
+    } else if cfg!(log_level_debug) {
+        LevelFilter::Debug
+    } else if cfg!(log_level_info) {
+        LevelFilter::Info
+    } else if cfg!(log_level_warn) {
+        LevelFilter::Warn
+    } else if cfg!(log_level_error) {
+        LevelFilter::Error
+    } else {
+        LevelFilter::Info
+    }
 }
 
 // Public function to initialize the logging system.

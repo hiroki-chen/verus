@@ -1,4 +1,14 @@
 fn main() {
+    for cfg in [
+        "log_level_error",
+        "log_level_warn",
+        "log_level_info",
+        "log_level_debug",
+        "log_level_trace",
+    ] {
+        println!("cargo:rustc-check-cfg=cfg({cfg})");
+    }
+
     // Capture log level from environment variable
     let log_level =
         std::env::var("DEKO_LOG_LEVEL").unwrap_or_else(|_| "INFO".to_string()).to_uppercase();

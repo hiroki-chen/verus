@@ -128,7 +128,7 @@ impl FwCfg {
                     forall|k: int| 0 <= k < name@.len() ==> 0 <= #[trigger] name@[k] < 128,
             {
                 let c = self.read_byte();
-                if terminated || c == 0 || (c < 0 || c >= 128) {
+                if terminated || c == 0 || c >= 128 {
                     terminated = true;
                 } else {
                     name.update(j, c);
@@ -381,7 +381,7 @@ pub fn get_fw_regions_from_igvm(igvm_params: &IgvmParams<'_>) -> Vec<PaddrRange>
         };
 
         // Check if map_region is within any existing region.
-        if map_region.start.0 >= 0 && map_region.end.0 <= LOWMEM_END as _ {
+        if map_region.end.0 <= LOWMEM_END as _ {
             v.push(map_region);
         } else if map_region.start.0 >= start && map_region.end.0 <= start + size {
             v.push(map_region);
