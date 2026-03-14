@@ -145,7 +145,8 @@ pub fn init_hv_doorbell(
 pub fn init_hv_doorbell_vmpl1() {
     unsafe {
         HV_DOORBELL_ADDR_VMPL1 = PERCPU_BASE_VMPL1.0 as usize;
-        kinfo!("Initialized VMPL1 HV_DOORBELL_ADDR at address:", HV_DOORBELL_ADDR_VMPL1 => hex);
+        let hv_doorbell_addr_vmpl1 = HV_DOORBELL_ADDR_VMPL1;
+        kinfo!("Initialized VMPL1 HV_DOORBELL_ADDR at address:", hv_doorbell_addr_vmpl1 => hex);
     }
 }
 

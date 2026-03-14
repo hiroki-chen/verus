@@ -1998,7 +1998,6 @@ pub fn setup_vmpl1() {
         );
     }
 
-    die("setup_vmpl1: this should never return");
 }
 
 func_ptr!(setup_vmpl1);

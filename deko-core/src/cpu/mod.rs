@@ -1368,6 +1368,7 @@ impl DekoCpuCtx {
 
     /// Tries to update the mapping of the guest VMSA on this CPU.
     #[verifier::spinoff_prover]
+    #[allow(non_shorthand_field_patterns)]
     pub fn update_guest_vmsa(
         ptr: DekoPPtr<Self>,
         Tracked(perm): Tracked<DekoCpuCtxPermission>,
@@ -1419,29 +1420,29 @@ impl DekoCpuCtx {
                             let mut ok = true;
                             // Now we unmap both VMSA and CAA.
                             let DekoCpuCtx {
-                                    magic,
-                                    cpu_id,
-                                    ghcb,
-                                    ghcb_gpa,
-                                    tss,
-                                    pgtable,
-                                    ctx_switch_stack,
-                                    ist_stack,
-                                    private_bit,
-                                    shared_bit,
-                                    kernel_mapping,
-                                    vm_region,
-                                    apic,
-                                    run_queue,
-                                    temp_mapping_4k,
-                                    temp_mapping_2m,
-                                    deko_vmsa,
-                                    doorbell,
-                                    nested_irq,
-                                    guest_apic,
-                                    current_stack,
-                                    ext_vmpl1,
-                                } = ptr.take(Tracked(&mut perm.ptr_perm));
+                                magic,
+                                cpu_id,
+                                ghcb,
+                                ghcb_gpa,
+                                tss,
+                                pgtable,
+                                ctx_switch_stack,
+                                ist_stack,
+                                private_bit,
+                                shared_bit,
+                                kernel_mapping,
+                                vm_region,
+                                apic,
+                                run_queue,
+                                temp_mapping_4k,
+                                temp_mapping_2m,
+                                deko_vmsa,
+                                doorbell,
+                                nested_irq,
+                                guest_apic,
+                                current_stack,
+                                ext_vmpl1,
+                            } = ptr.take(Tracked(&mut perm.ptr_perm));
 
                                 let tracked DekoCpuCtxPermission {
                                     mut ptr_perm,
@@ -2179,6 +2180,7 @@ impl DekoCpuCtx {
             perm.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
             perm.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
     )]
+    #[allow(non_shorthand_field_patterns)]
     pub fn set_idle_task(ptr: DekoPPtr<Self>, task: DekoRunnablePtr) {
         // Now insert into the runqueue.
         let cpu_ctx = ptr.borrow(Tracked(&perm.ptr_perm));
@@ -2194,7 +2196,7 @@ impl DekoCpuCtx {
             use_type_invariant(&lock);
         }
         let mut write_handle = lock.acquire_write();
-        let DekoAtomicData { data: mut runqueue, mut perm } = write_handle.get();
+        let DekoAtomicData { data: mut runqueue, perm: mut perm } = write_handle.get();
 
         kpanic_if!(core::hint::unlikely(runqueue.run_list.len() >= usize::MAX - 1),
             "Runqueue is full for CPU",

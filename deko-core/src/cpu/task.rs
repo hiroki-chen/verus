@@ -1096,6 +1096,7 @@ impl DekoRunnable {
             ctx_perm_updated@.ptr_perm.value().cpu_id == ctx_perm.ptr_perm.value().cpu_id,
             ctx_perm_updated@.ptr_perm.value().ctx_switch_stack == ctx_perm.ptr_perm.value().ctx_switch_stack,
     )]
+    #[allow(non_shorthand_field_patterns)]
     pub fn new(cpu: DekoPPtr<DekoCpuCtx>, args: DekoTaskArgs) -> DekoRunnablePtr {
         kdebug!("Creating new task with args", args);
 
@@ -1399,6 +1400,7 @@ impl PartialOrdSpecImpl for DekoRunnable {
 }
 
 #[verus_verify]
+#[allow(non_shorthand_field_patterns)]
 impl DekoRunnable {
     #[verus_spec(
         requires

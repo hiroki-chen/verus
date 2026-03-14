@@ -95,13 +95,12 @@ pub(crate) const PSC_FLAG_HUGE: u64 = 1 << PSC_FLAG_HUGE_SHIFT;
 
 pub(crate) const GHCB_BUFFER_SIZE: usize = 0x7f0;
 
-#[allow(non_snake_case)]
-pub(crate) spec const PSC_GFN_MASK_SPEC: u64 = (((1u64 << 52) - 1) as u64) & !0xfffu64;
+pub(crate) spec const psc_gfn_mask_spec: u64 = (((1u64 << 52) - 1) as u64) & !0xfffu64;
 
-#[verifier::when_used_as_spec(PSC_GFN_MASK_SPEC)]
+#[verifier::when_used_as_spec(psc_gfn_mask_spec)]
 pub(crate) exec const PSC_GFN_MASK: u64
     ensures
-        PSC_GFN_MASK == PSC_GFN_MASK_SPEC,
+        PSC_GFN_MASK == psc_gfn_mask_spec,
 {
     proof {
         assert((1u64 << 52) - 1 >= 0) by (bit_vector);
