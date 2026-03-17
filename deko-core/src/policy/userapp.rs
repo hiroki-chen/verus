@@ -70,6 +70,13 @@ use crate::snp::{
 };
 use crate::{die, kdebug, kerror, kinfo, kpanic_if, kwarn, vec};
 
+extern "C" {
+    fn deko_sysret_window_start();
+    fn deko_sysret_window_end();
+    fn switch_vmpl_window_end();
+    fn switch_vmpl_success();
+}
+
 deko_bitflags! {
     pub struct DekoFile: u32 {
         const READ = 0;
@@ -279,6 +286,59 @@ impl VmsaPage {
         //     let rflags = core::ptr::read_unaligned(core::ptr::addr_of!(vmsa.rflags));
         //     core::ptr::write_unaligned(core::ptr::addr_of_mut!(vmsa.rflags), rflags | 0x200);
         // }
+    }
+
+    #[inline]
+    #[verifier::external_body]
+    fn rip_in_vmpl1_sysret_window(rip: u64) -> bool {
+        let start = deko_sysret_window_start as *const () as u64;
+        let end = deko_sysret_window_end as *const () as u64;
+
+        start <= rip && rip < end
+    }
+
+    #[inline]
+    #[verifier::external_body]
+    fn sanitize_migrated_runtime_state(
+        vmsa: &mut VMSA,
+        target_cpu: u32,
+        user_gs_base: u64,
+        kernel_gs_base: u64,
+    ) {
+        let switch_vmpl_rdmsr = switch_vmpl_window_end as *const () as u64;
+        let switch_vmpl_resume = switch_vmpl_success as *const () as u64;
+
+        unsafe {
+            let dst = vmsa as *mut VMSA;
+            let rip = core::ptr::read_unaligned(core::ptr::addr_of!((*dst).rip));
+            let cpl = core::ptr::read_unaligned(core::ptr::addr_of!((*dst).cpl));
+            let tsc_aux = core::ptr::read_unaligned(core::ptr::addr_of!((*dst).tsc_aux));
+            let kernel_gs_active = cpl == 0 || Self::rip_in_vmpl1_sysret_window(rip);
+
+            core::ptr::write_unaligned(
+                core::ptr::addr_of_mut!((*dst).tsc_aux),
+                (tsc_aux & 0xFF00_0000) | (target_cpu & 0x00FF_FFFF),
+            );
+
+            if kernel_gs_active {
+                core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).gs.base), kernel_gs_base);
+                core::ptr::write_unaligned(
+                    core::ptr::addr_of_mut!((*dst).kernel_gs_base),
+                    user_gs_base,
+                );
+            } else {
+                core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).gs.base), user_gs_base);
+                core::ptr::write_unaligned(
+                    core::ptr::addr_of_mut!((*dst).kernel_gs_base),
+                    kernel_gs_base,
+                );
+            }
+
+            if rip == switch_vmpl_rdmsr {
+                core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rip), switch_vmpl_resume);
+                core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rax), 0);
+            }
+        }
     }
 
     #[verifier::external_body]
@@ -592,6 +652,35 @@ impl VmsaPage {
             core::ptr::copy_nonoverlapping(snapshot as *const VMSA, self.vaddr().0 as *mut VMSA, 1);
         }
     }
+
+    #[inline]
+    #[verifier::external_body]
+    #[verus_spec(r =>
+        with
+            Tracked(vmsa_page_perm): Tracked<&mut VmsaPagePermission>,
+        requires
+            old(self).wf(),
+            snapshot.wf(),
+            old(vmsa_page_perm).ptr_perm.wf(),
+            old(vmsa_page_perm).ptr_perm.is_init(),
+            old(vmsa_page_perm).ptr_perm.pptr() == old(self).page@,
+        ensures
+            self.wf(),
+            vmsa_page_perm.ptr_perm.wf(),
+            vmsa_page_perm.ptr_perm.is_init(),
+            vmsa_page_perm.ptr_perm.pptr() == self.page@,
+    )]
+    pub fn restore_migrated_snapshot(
+        &mut self,
+        snapshot: &VMSA,
+        target_cpu: u32,
+        user_gs_base: u64,
+        kernel_gs_base: u64,
+    ) {
+        self.restore_from_snapshot(snapshot);
+        let vmsa = unsafe { &mut *(self.vaddr().0 as *mut VMSA) };
+        Self::sanitize_migrated_runtime_state(vmsa, target_cpu, user_gs_base, kernel_gs_base);
+    }
 }
 
 /// A regular file opened by a shadowed user application.
@@ -819,6 +908,24 @@ impl DekoUserApp {
         self.ext.migration_state = DekoUserAppMigrationState::Migrating;
         self.ext.state_version = self.ext.state_version.wrapping_add(1);
         self.ext.state_version
+    }
+
+    #[verifier::external_body]
+    fn prepare_cpu_handoff(&mut self, old_cpu: u32, user_gs_base: u64, kernel_gs_base: u64) -> u64 {
+        self.thread.gs_base = user_gs_base;
+        self.thread.kernel_gs_base = kernel_gs_base;
+        self.ext.owner_cpu = old_cpu;
+        self.ext.loaded_cpu = Some(old_cpu);
+        self.ext.migration_state = DekoUserAppMigrationState::Migrating;
+        self.ext.state_version = self.ext.state_version.wrapping_add(1);
+        self.ext.state_version
+    }
+
+    #[verifier::external_body]
+    fn finish_cpu_handoff(&mut self, cpu_id: u32) {
+        self.ext.owner_cpu = cpu_id;
+        self.ext.loaded_cpu = Some(cpu_id);
+        self.ext.migration_state = DekoUserAppMigrationState::Idle;
     }
 
     #[verifier::external_body]
@@ -1395,8 +1502,15 @@ pub fn try_kick_app(
     )?;
 
     let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
-    let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
-    if core::hint::unlikely(cpu_borrow.ext_vmpl1.is_none()) {
+    let current_cpu = {
+        let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+        if core::hint::unlikely(cpu_borrow.ext_vmpl1.is_none()) {
+            kerror!("try_kick_app: no VMPL1 context allocated for this CPU");
+            return Err(DekoGuestServError::FatalError);
+        }
+        cpu_borrow.cpu_id as u32
+    };
+    if core::hint::unlikely(cpu.borrow(Tracked(&cpu_perm.ptr_perm)).ext_vmpl1.is_none()) {
         kerror!("try_kick_app: no VMPL1 context allocated for this CPU");
         return Err(DekoGuestServError::FatalError);
     }
@@ -1404,15 +1518,26 @@ pub fn try_kick_app(
     let mut ctx_vmpl1 = cpu_taken.ext_vmpl1.take().unwrap();
 
     let tracked mut vmpl1_perm = cpu_perm.ext_vmpl1_perm.tracked_take();
-    let created_thread_bases = match app_status {
-        DekoUserAppState::Created => deko_rwlock_read_atomic_data! {
+    let thread_resume_info = match app_status {
+        DekoUserAppState::Created
+        | DekoUserAppState::Running => deko_rwlock_read_atomic_data! {
             DEKO_SHADOW_APP_LIST,
             app_list,
             __,
             {
                 if let Some(app_list_inner) = app_list {
                     if let Some(app) = app_list_inner.get(&pid) {
-                        Ok((app.thread.fs_base, app.thread.gs_base, app.thread.kernel_gs_base))
+                        Ok((
+                            app.thread.fs_base,
+                            app.thread.gs_base,
+                            app.thread.kernel_gs_base,
+                            match app.ext.migration_state {
+                                DekoUserAppMigrationState::Migrating => true,
+                                DekoUserAppMigrationState::Idle => {
+                                    app.ext.loaded_cpu != Some(current_cpu)
+                                },
+                            },
+                        ))
                     } else {
                         Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))
                     }
@@ -1421,7 +1546,7 @@ pub fn try_kick_app(
                 }
             }
         }?,
-        _ => (0, 0, 0),
+        _ => (0, 0, 0, false),
     };
 
     match app_status {
@@ -1430,14 +1555,31 @@ pub fn try_kick_app(
             ctx_vmpl1.vmsa.init_for_app(regs)?;
             proof_with!(Tracked(&mut vmpl1_perm.vmsa_perm));
             ctx_vmpl1.vmsa.set_thread_bases(
-                created_thread_bases.0,
-                created_thread_bases.1,
-                created_thread_bases.2,
+                thread_resume_info.0,
+                thread_resume_info.1,
+                thread_resume_info.2,
             );
         },
         DekoUserAppState::Running => {
-            proof_with!(Tracked(&mut vmpl1_perm.vmsa_perm));
-            ctx_vmpl1.vmsa.prepare_app_resume();
+            if thread_resume_info.3 {
+                proof_with!(Tracked(&mut vmpl1_perm.vmsa_perm));
+                let restored = restore_app_vmsa_snapshot(
+                    pid,
+                    &mut ctx_vmpl1.vmsa,
+                    current_cpu,
+                    thread_resume_info.1,
+                    thread_resume_info.2,
+                )?;
+                if restored {
+                    finish_app_cpu_handoff(pid, current_cpu)?;
+                } else {
+                    proof_with!(Tracked(&mut vmpl1_perm.vmsa_perm));
+                    ctx_vmpl1.vmsa.prepare_app_resume();
+                }
+            } else {
+                proof_with!(Tracked(&mut vmpl1_perm.vmsa_perm));
+                ctx_vmpl1.vmsa.prepare_app_resume();
+            }
         },
         _ => return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam)),
     }
@@ -1520,9 +1662,12 @@ pub(crate) fn stage_fake_vmpl1_handoff_request(
 }
 
 #[verifier::external_body]
-pub(crate) fn mark_app_fake_handoff_in_progress(pid: u32, old_cpu: u32) -> DekoGuestServResult<
-    u64,
-> {
+pub(crate) fn mark_app_fake_handoff_in_progress(
+    pid: u32,
+    old_cpu: u32,
+    user_gs_base: u64,
+    kernel_gs_base: u64,
+) -> DekoGuestServResult<u64> {
     deko_rwlock_write_atomic_data! {
         DEKO_SHADOW_APP_LIST,
         app_list,
@@ -1534,10 +1679,35 @@ pub(crate) fn mark_app_fake_handoff_in_progress(pid: u32, old_cpu: u32) -> DekoG
                     Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))
                 } else {
                     let mut app = app_list_inner.remove(&pid).unwrap();
-                    let version = app.mark_fake_handoff_in_progress(old_cpu);
+                    let version = app.prepare_cpu_handoff(old_cpu, user_gs_base, kernel_gs_base);
                     app_list_inner.insert(pid, app);
                     app_list = Some(app_list_inner);
                     Ok(version)
+                }
+            } else {
+                Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))
+            }
+        }
+    }
+}
+
+#[verifier::external_body]
+pub(crate) fn finish_app_cpu_handoff(pid: u32, cpu_id: u32) -> DekoGuestServResult<()> {
+    deko_rwlock_write_atomic_data! {
+        DEKO_SHADOW_APP_LIST,
+        app_list,
+        __,
+        {
+            if let Some(mut app_list_inner) = app_list {
+                if !app_list_inner.contains_key(&pid) {
+                    app_list = Some(app_list_inner);
+                    Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))
+                } else {
+                    let mut app = app_list_inner.remove(&pid).unwrap();
+                    app.finish_cpu_handoff(cpu_id);
+                    app_list_inner.insert(pid, app);
+                    app_list = Some(app_list_inner);
+                    Ok(())
                 }
             } else {
                 Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))
@@ -1698,9 +1868,13 @@ pub(crate) fn publish_current_cpu_vmpl1_slot_vmsa(
         vmsa_page_perm.ptr_perm.pptr() == vmsa.page@,
         r is Ok ==> r.unwrap() ==> vmsa.wf(),
 )]
-pub(crate) fn restore_app_vmsa_snapshot(pid: u32, vmsa: &mut VmsaPage) -> DekoGuestServResult<
-    bool,
-> {
+pub(crate) fn restore_app_vmsa_snapshot(
+    pid: u32,
+    vmsa: &mut VmsaPage,
+    target_cpu: u32,
+    user_gs_base: u64,
+    kernel_gs_base: u64,
+) -> DekoGuestServResult<bool> {
     deko_rwlock_read_atomic_data! {
         DEKO_SHADOW_APP_LIST,
         app_list,
@@ -1710,7 +1884,12 @@ pub(crate) fn restore_app_vmsa_snapshot(pid: u32, vmsa: &mut VmsaPage) -> DekoGu
                 if let Some(app) = app_list_inner.get(&pid) {
                     if let Some(saved) = app.ext.saved_vmsa.as_ref() {
                         #[verus_spec(with Tracked(vmsa_page_perm))]
-                        vmsa.restore_from_snapshot(saved);
+                        vmsa.restore_migrated_snapshot(
+                            saved,
+                            target_cpu,
+                            user_gs_base,
+                            kernel_gs_base,
+                        );
                         Ok(true)
                     } else {
                         Ok(false)

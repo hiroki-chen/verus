@@ -57,6 +57,11 @@ switch_vmpl_cancel:
     movl $1, %eax
     ret
 
+.globl switch_vmpl_success
+switch_vmpl_success:
+    xorl %eax, %eax
+    ret
+
     /* Idle halt is placed here as well, because idle halt requires
       * detection in the #HV handler to determine whether the HLT should be
       * skipped.  Placing this code here means that a single quick check can

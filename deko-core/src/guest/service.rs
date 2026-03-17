@@ -46,6 +46,7 @@ use crate::{kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn, SELF_MAP};
 const _: () = {
     assert!(core::mem::size_of::<DekoGuestLstarWriteReq>() == 0x30);
     assert!(core::mem::size_of::<DekoNewAppReq>() == 0x70);
+    assert!(core::mem::size_of::<DekoTaskMigrateReq>() == 0x20);
 };
 
 verus! {
@@ -172,6 +173,23 @@ pub struct DekoNewAppReq {
 }
 
 impl WellFormed for DekoNewAppReq {
+    open spec fn wf(&self) -> bool {
+        true
+    }
+}
+
+#[repr(C, align(8))]
+#[derive(Copy, Clone, DekoDebug)]
+pub struct DekoTaskMigrateReq {
+    pub old_cpu: u32,
+    pub new_cpu: u32,
+    pub pid: u32,
+    pub _reserved: u32,
+    pub kernel_gs_base: u64,
+    pub user_gs_base: u64,
+}
+
+impl WellFormed for DekoTaskMigrateReq {
     open spec fn wf(&self) -> bool {
         true
     }
@@ -1243,9 +1261,38 @@ fn handle_deko_service_msr_intercepts(params: &mut DekoGuestRequestParams) -> De
 fn handle_deko_service_task_migrate(params: &mut DekoGuestRequestParams) -> DekoGuestServResult<
     u64,
 > {
-    let old_cpu = params.rdx as u32;
-    let new_cpu = params.rcx as u32;
-    let pid = params.r9 as u32;
+    let req_gpa = params.r9;
+    let req_offset = req_gpa % PAGE_SIZE as u64;
+    let req_body = req_gpa & !0xfff;
+
+    proof {
+        let n = params.r9;
+
+        assert(req_body % PAGE_SIZE == 0) by (bit_vector)
+            requires
+                req_body == (n & !((PAGE_SIZE as u64 - 1) as u64)),
+                PAGE_SIZE == 0x1000,
+        ;
+    }
+
+    if core::hint::unlikely(!check_within_guest_mmap(PhysAddr(req_body))) {
+        kerror!("Task migrate: request body NOT within guest mmap:", PhysAddr(req_body));
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    if core::hint::unlikely(
+        req_body >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE || core::mem::size_of::<
+            DekoTaskMigrateReq,
+        >() as u64 > PAGE_SIZE - req_offset,
+    ) {
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    let req_mapping = TempMapping::new(create_paddr_range(PhysAddr(req_body), 1)).ok_or(
+        DekoGuestServError::SoftError(DekoGuestServResultCode::Busy),
+    )?;
+    let req = *req_mapping.read_ref_at::<DekoTaskMigrateReq>(req_offset as usize);
+    let old_cpu = req.old_cpu;
+    let new_cpu = req.new_cpu;
+    let pid = req.pid;
 
     let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
     let this_cpu_id = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).cpu_id as u32;
@@ -1273,7 +1320,12 @@ fn handle_deko_service_task_migrate(params: &mut DekoGuestRequestParams) -> Deko
         return Ok(0);
     }
     let _exported = import_vmpl1_slot_vmsa_from_cpu(pid, old_cpu)?;
-    let version = mark_app_fake_handoff_in_progress(pid, old_cpu)?;
+    let version = mark_app_fake_handoff_in_progress(
+        pid,
+        old_cpu,
+        req.user_gs_base,
+        req.kernel_gs_base,
+    )?;
     bind_current_cpu_vmpl1_slot(cpu, Tracked(&mut cpu_perm), pid);
     stage_fake_vmpl1_handoff_request(cpu, Tracked(&mut cpu_perm), pid, new_cpu, version);
     params.rdx = version;
@@ -1285,7 +1337,7 @@ fn handle_deko_service_task_migrate(params: &mut DekoGuestRequestParams) -> Deko
         old_cpu,
         " new_cpu=",
         new_cpu,
-        " pid=",
+        " app_id=",
         pid,
         " version=",
         version

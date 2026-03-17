@@ -149,7 +149,7 @@ fn deko_ifc_entry_vmpl1(syscall_body_ptr: DekoPPtr<DekoSyscallBody>) -> u64 {
     }
     syscall_body_ptr.write(Tracked(&mut syscall_perm), syscall_body);
 
-    kinfo!("ifc: after sysret_epilogue");
+    kinfo!("ifc: after sysret_epilogue:", syscall_body);
 
     0
 }
