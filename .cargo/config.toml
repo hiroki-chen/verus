@@ -39,6 +39,8 @@ bootstrap-ovmf = "xtask bootstrap-ovmf"
 
 [target.x86_64-snp-deko]
 rustflags = [
+	"-Z",
+	"unstable-options",
 	"-C",
 	"force-frame-pointers",
 	"-C",
@@ -47,6 +49,18 @@ rustflags = [
 	"aes_force_soft",
 	"--cfg",
 	"polyval_force_soft",
+]
+
+[target.x86_64-tdx-deko]
+rustflags = [
+	"-Z",
+	"unstable-options",
+]
+
+[target.x86_64-init-deko]
+rustflags = [
+	"-Z",
+	"unstable-options",
 ]
 
 [profile.dev]

@@ -522,6 +522,30 @@ pub(crate) fn bootstrap_verus(
     println!("\n{} Changing to source directory: {}", "📂".bright_cyan(), source_dir.display());
     std::env::set_current_dir(&source_dir).context("Failed to change to source directory")?;
 
+    println!(
+        "\n{} Installing Rust toolchain components for Verus toolchain `{}`...",
+        "🦀".bright_yellow(),
+        rust_version.bright_white()
+    );
+    let mut cmd = Command::new("rustup");
+    cmd.arg("toolchain")
+        .arg("install")
+        .arg(&rust_version)
+        .arg("--component")
+        .arg("rust-src")
+        .arg("--component")
+        .arg("rustfmt")
+        .arg("--component")
+        .arg("rustc-dev")
+        .arg("--component")
+        .arg("llvm-tools-preview");
+    let output = cmd.output().context("Failed to install Verus Rust toolchain components")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        bail!("rustup toolchain install failed:\nSTDOUT:\n{}\nSTDERR:\n{}", stdout, stderr);
+    }
+
     let mut cmd = Command::new("rustup");
     cmd.arg("override").arg("set").arg(&rust_version);
     let output = cmd.output().context("Failed to set rustup override")?;

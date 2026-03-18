@@ -239,7 +239,8 @@ impl Builder {
             .arg("--features")
             .arg(&self.config.target_arch)
             .arg("--target")
-            .arg(self.config.custom_target_json());
+            .arg(self.config.custom_target_name());
+        cmd.env("RUST_TARGET_PATH", self.config.root.join(".cargo"));
 
         if release {
             cmd.arg("--release");
@@ -274,7 +275,8 @@ impl Builder {
             .arg("--features")
             .arg(&self.config.target_arch)
             .arg("--target")
-            .arg(self.config.custom_target_json());
+            .arg(self.config.custom_target_name());
+        cmd.env("RUST_TARGET_PATH", self.config.root.join(".cargo"));
 
         if release {
             cmd.arg("--release");
@@ -328,11 +330,16 @@ impl Builder {
             .context("Failed to change directory to bin/init")?;
 
         let mut cmd = Command::new("cargo");
-        cmd.arg("build")
+        cmd.arg("-Z")
+            .arg("build-std=core,compiler_builtins")
+            .arg("-Z")
+            .arg("build-std-features=compiler-builtins-mem")
+            .arg("build")
             .arg("--package")
             .arg("init")
             .arg("--target")
-            .arg(self.config.custom_target_json());
+            .arg(self.config.custom_target_name());
+        cmd.env("RUST_TARGET_PATH", self.config.root.join(".cargo"));
 
         if release {
             cmd.arg("--release");

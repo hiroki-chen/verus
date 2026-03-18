@@ -29,6 +29,9 @@ jobs:
         with:
           components: rust-src,rustfmt,rustc-dev,llvm-tools-preview
 
+      - name: Install Rust components
+        run: rustup component add rust-src rustfmt rustc-dev llvm-tools-preview
+
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
@@ -60,6 +63,9 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src,rustfmt,rustc-dev,llvm-tools-preview
+
+      - name: Install Rust components
+        run: rustup component add rust-src rustfmt rustc-dev llvm-tools-preview
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2

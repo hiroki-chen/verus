@@ -54,9 +54,7 @@ impl ProjectConfig {
 
     pub(crate) fn igvm_path(&self) -> PathBuf { self.target_dir(false).join("igvm.igvm") }
 
-    pub(crate) fn custom_target_json(&self) -> PathBuf {
-        self.root.join(".cargo").join(format!("{}.json", self.target_triple))
-    }
+    pub(crate) fn custom_target_name(&self) -> &str { &self.target_triple }
 
     pub(crate) fn default_ovmf_path() -> PathBuf {
         let possible_paths = vec![
