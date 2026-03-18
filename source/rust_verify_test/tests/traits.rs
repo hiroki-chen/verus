@@ -163,7 +163,10 @@ test_verify_one_file_with_options! {
                 no_method_body() // can't appear in implementation
             }
         }
-    } => Err(err) => assert_vir_error_msg(err, "no_method_body can only appear in trait method declarations")
+    } => Err(err) => assert_vir_error_msgs(err, &[
+        "no_method_body can only appear in trait method declarations",
+        "no_method_body can only appear in trait method declarations",
+    ])
 }
 
 test_verify_one_file! {
@@ -950,6 +953,41 @@ test_verify_one_file! {
             }
         }
     } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] test_termination_tuple_clone verus_code! {
+        use vstd::prelude::*;
+        fn f<A: Clone>() {
+        }
+        fn g() {
+            f::<(u8, u8)>();
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] test_termination_tuple_clone_fail verus_code! {
+        use vstd::prelude::*;
+        trait T {
+            proof fn f();
+        }
+
+        struct S<A>(A);
+        impl<A: T + Clone> Clone for S<A> {
+            fn clone(&self) -> Self {
+                S(self.0.clone())
+            }
+        }
+
+        proof fn g<A: Clone>() {}
+
+        impl T for u8 {
+            proof fn f() {
+                let _ = g::<(u8, S<u8>)>();
+            }
+        }
+    } => Err(err) => assert_vir_error_msg(err, "found a cyclic self-reference in a definition, which may result in nontermination")
 }
 
 test_verify_one_file! {
@@ -2712,7 +2750,10 @@ test_verify_one_file_with_options! {
             assert(false);
         }
         }
-    } => Err(err) => assert_vir_error_msg(err, "The verifier does not yet support the following Rust feature: foreign types")
+    } => Err(err) => assert_vir_error_msgs(err, &[
+        "The verifier does not yet support the following Rust feature: foreign types",
+        "The verifier does not yet support the following Rust feature: foreign types",
+    ])
 }
 
 test_verify_one_file! {

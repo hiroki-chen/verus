@@ -114,7 +114,6 @@ fn check_trigger_expr_arg(state: &mut State, arg: &Exp) {
             UnaryOp::Trigger(_)
             | UnaryOp::HeightTrigger
             | UnaryOp::CoerceMode { .. }
-            | UnaryOp::ToDyn
             | UnaryOp::MustBeFinalized
             | UnaryOp::MustBeElaborated => {
                 // recurse inside coercions
@@ -122,9 +121,10 @@ fn check_trigger_expr_arg(state: &mut State, arg: &Exp) {
             }
             UnaryOp::Not
             | UnaryOp::Clip { .. }
-            | UnaryOp::FloatToBits
             | UnaryOp::IntToReal
             | UnaryOp::RealToInt
+            | UnaryOp::FloatToBits
+            | UnaryOp::IeeeFloat(_)
             | UnaryOp::BitNot(_)
             | UnaryOp::StrLen
             | UnaryOp::StrIsAscii
@@ -137,7 +137,7 @@ fn check_trigger_expr_arg(state: &mut State, arg: &Exp) {
         },
         ExpX::UnaryOpr(op, arg) => match op {
             UnaryOpr::Box(_) | UnaryOpr::Unbox(_) => panic!("unexpected box"),
-            UnaryOpr::CustomErr(_) | UnaryOpr::ProofNote(_) => {
+            UnaryOpr::CustomErr(_) | UnaryOpr::ProofNote(_) | UnaryOpr::ToDyn(_) => {
                 // recurse inside coercions
                 check_trigger_expr_arg(state, arg)
             }
@@ -200,6 +200,7 @@ fn check_trigger_expr(
         ExpX::Unary(UnaryOp::BitNot(_), _) => {}
         ExpX::BinaryOpr(crate::ast::BinaryOpr::ExtEq(..), _, _) => {}
         ExpX::Unary(UnaryOp::Clip { .. }, _) | ExpX::Binary(BinaryOp::Arith(..), _, _) => {}
+        ExpX::Unary(UnaryOp::IeeeFloat(_), _) | ExpX::Binary(BinaryOp::IeeeFloat(_), _, _) => {}
         ExpX::UnaryOpr(UnaryOpr::HasResolved(_), _) => {}
         _ => {
             return Err(error(
@@ -270,16 +271,16 @@ fn check_trigger_expr(
                     Ok(())
                 }
                 UnaryOp::Clip { .. }
-                | UnaryOp::FloatToBits
                 | UnaryOp::IntToReal
-                | UnaryOp::RealToInt => {
+                | UnaryOp::RealToInt
+                | UnaryOp::FloatToBits
+                | UnaryOp::IeeeFloat(_) => {
                     check_trigger_expr_arg(state, arg);
                     Ok(())
                 }
                 UnaryOp::Trigger(_)
                 | UnaryOp::HeightTrigger
                 | UnaryOp::CoerceMode { .. }
-                | UnaryOp::ToDyn
                 | UnaryOp::MustBeFinalized
                 | UnaryOp::MustBeElaborated
                 | UnaryOp::CastToInteger => Ok(()),
@@ -293,7 +294,7 @@ fn check_trigger_expr(
             },
             ExpX::UnaryOpr(op, arg) => match op {
                 UnaryOpr::Box(_) | UnaryOpr::Unbox(_) => panic!("unexpected box"),
-                UnaryOpr::CustomErr(_) | UnaryOpr::ProofNote(_) => Ok(()),
+                UnaryOpr::CustomErr(_) | UnaryOpr::ProofNote(_) | UnaryOpr::ToDyn(_) => Ok(()),
                 UnaryOpr::IsVariant { .. } | UnaryOpr::Field { .. } => {
                     check_trigger_expr_arg(state, arg);
                     Ok(())
@@ -329,7 +330,7 @@ fn check_trigger_expr(
                         check_trigger_expr_arg(state, arg2);
                         Ok(())
                     }
-                    Arith(..) | RealArith(..) => {
+                    Arith(..) | RealArith(..) | IeeeFloat(..) => {
                         check_trigger_expr_arg(state, arg1);
                         check_trigger_expr_arg(state, arg2);
                         Ok(())

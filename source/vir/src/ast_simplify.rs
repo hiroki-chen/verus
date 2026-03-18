@@ -39,6 +39,8 @@ struct State {
     next_var: u64,
     // Rename parameters to simplify their names
     rename_vars: HashMap<VarIdent, VarIdent>,
+    // Rename parameters to simplify their names
+    rename_vars_reverse: HashMap<VarIdent, VarIdent>,
     // Name of a datatype to represent each tuple arity
     tuple_typs: HashSet<usize>,
     // Name of a datatype to represent each tuple arity
@@ -52,6 +54,7 @@ impl State {
         State {
             next_var: 0,
             rename_vars: HashMap::new(),
+            rename_vars_reverse: HashMap::new(),
             tuple_typs: HashSet::new(),
             closure_typs: HashMap::new(),
             fndef_typs: HashSet::new(),
@@ -437,6 +440,34 @@ fn simplify_one_expr(
                 _ => Ok(expr.new_x(ExprX::VarLoc(rename_var(state, scope_map, x)))),
             }
         }
+        ExprX::AssignToPlace { place, .. } => {
+            if !crate::ast_util::place_has_deref_mut(place)
+                && let Some(local) = crate::ast_util::place_get_local(place)
+            {
+                let PlaceX::Local(x) = &local.x else { unreachable!() };
+                let x = match state.rename_vars_reverse.get(x) {
+                    None => x,
+                    Some(y) => y,
+                };
+                match scope_map.get(x) {
+                    None => {
+                        return Err(error(
+                            &expr.span,
+                            "Verus Internal Error: cannot find this variable",
+                        ));
+                    }
+                    Some(entry) if entry.user_mut == Some(false) && entry.init => {
+                        let name = user_local_name(x);
+                        return Err(error(
+                            &expr.span,
+                            format!("variable `{name:}` is not marked mutable"),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            Ok(expr.clone())
+        }
         ExprX::ConstVar(x, autospec) => {
             let call = ExprX::Call(
                 CallTarget::Fun(
@@ -555,20 +586,29 @@ fn simplify_one_expr(
         }
         ExprX::Unary(UnaryOp::CoerceMode { .. }, expr0) => Ok(expr0.clone()),
         ExprX::Multi(MultiOp::Chained(ops), args) => {
+            use crate::ast::IeeeFloatBinaryOp;
             assert!(args.len() == ops.len() + 1);
             let mut stmts: Vec<Stmt> = Vec::new();
             let mut es: Vec<Expr> = Vec::new();
+            let mut is_float = false;
             // Execute each argument in order; no short-circuiting
             for i in 0..args.len() {
+                let t = crate::ast_util::undecorate_typ(&args[i].typ);
+                if matches!(*t, TypX::Float(_)) {
+                    is_float = true;
+                }
                 let (decl, e) = temp_expr(state, &args[i]);
                 stmts.push(decl);
                 es.push(e);
             }
             let mut conjunction: Expr = es[0].clone();
             for i in 0..ops.len() {
-                let op = match ops[i] {
-                    ChainedOp::Inequality(a) => BinaryOp::Inequality(a),
-                    ChainedOp::MultiEq => BinaryOp::Eq(Mode::Spec),
+                let op = match (is_float, ops[i]) {
+                    (false, ChainedOp::Inequality(a)) => BinaryOp::Inequality(a),
+                    (true, ChainedOp::Inequality(a)) => {
+                        BinaryOp::IeeeFloat(IeeeFloatBinaryOp::InEq(a))
+                    }
+                    (_, ChainedOp::MultiEq) => BinaryOp::Eq(Mode::Spec),
                 };
                 let left = es[i].clone();
                 let right = es[i + 1].clone();
@@ -1232,6 +1272,10 @@ fn simplify_function(
     } else {
         functionx.ret.x.name.clone()
     };
+
+    for (a, b) in state.rename_vars.iter() {
+        state.rename_vars_reverse.insert(b.clone(), a.clone());
+    }
 
     // To simplify the AIR/SMT encoding, add a dummy argument to any function with 0 arguments
     if functionx.typ_params.len() == 0

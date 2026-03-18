@@ -914,6 +914,18 @@ test_verify_one_file_with_options! {
 }
 
 test_verify_one_file_with_options! {
+    #[test] deref_ghost_mut_ref_is_ghost ["new-mut-ref"] => verus_code! {
+        struct X { }
+
+        proof fn g(tracked m: X) { }
+
+        proof fn f(m: &mut X) {
+            g(*m);
+        }
+    } => Err(err) => assert_vir_error_msg(err, "expression has mode spec, expected mode proof")
+}
+
+test_verify_one_file_with_options! {
     #[test] dont_resolve_ghost_field ["new-mut-ref"] => verus_code! {
         broadcast proof fn stronger_resolver_axiom<A, B>(pair: TGPair<A, B>)
             ensures #[trigger] has_resolved(pair) ==> has_resolved(pair.t)
@@ -1716,4 +1728,62 @@ test_verify_one_file_with_options! {
             x.0 = 2;
         }
     } => Err(err) => assert_vir_error_msg(err, "cannot perform operation with mode proof")
+}
+
+test_verify_one_file_with_options! {
+    #[test] write_in_proof_mode_with_decoration_1 ["new-mut-ref"] => verus_code! {
+        use vstd::prelude::*;
+        tracked struct T { }
+        proof fn test1(tracked m: &mut Box<T>) {
+            *m = Box::new(T{});
+        }
+    } => Ok(())
+}
+
+test_verify_one_file_with_options! {
+    #[test] write_in_proof_mode_with_decoration_2 ["new-mut-ref"] => verus_code! {
+        use vstd::prelude::*;
+        tracked struct T { }
+        proof fn test2(tracked m: &mut Box<T>) {
+            **m = T {};
+        }
+    } => Ok(())
+}
+
+test_verify_one_file_with_options! {
+    #[test] write_in_proof_mode_with_decoration_3 ["new-mut-ref"] => verus_code! {
+        tracked struct T { }
+        proof fn test3<'a>(tracked m: &mut &'a T, tracked t_ref: &'a T) {
+            *m = t_ref;
+        }
+    } => Ok(())
+}
+
+test_verify_one_file_with_options! {
+    #[test] write_in_proof_mode_with_decoration_4 ["new-mut-ref"] => verus_code! {
+        use vstd::prelude::*;
+        tracked struct T { }
+        proof fn test4(tracked m: &mut Box<Tracked<T>>) {
+            *m = Box::new(Tracked(T{}));
+        }
+    } => Err(err) => assert_vir_error_msg(err, "cannot mutate exec-mode place in proof-code")
+}
+
+test_verify_one_file_with_options! {
+    #[test] write_in_proof_mode_with_decoration_5 ["new-mut-ref"] => verus_code! {
+        use vstd::prelude::*;
+        tracked struct T { }
+        proof fn test5(tracked m: &mut Box<Tracked<T>>) {
+            **m = Tracked(T {});
+        }
+    } => Ok(())
+}
+
+test_verify_one_file_with_options! {
+    #[test] write_in_proof_mode_with_decoration_6 ["new-mut-ref"] => verus_code! {
+        tracked struct T { }
+        proof fn test6<'a>(tracked m: &mut &'a Tracked<T>, tracked t_ref: &'a Tracked<T>) {
+            *m = t_ref;
+        }
+    } => Err(err) => assert_vir_error_msg(err, "cannot mutate exec-mode place in proof-code")
 }

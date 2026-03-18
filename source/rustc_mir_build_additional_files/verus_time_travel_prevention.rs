@@ -93,17 +93,8 @@ artificial `mutable_reference_tie` call, not through the entire `f` call.
 We do this instead:
 
 ```
-fake_call(
-    f(&mut[two_phase] x, y),
-    &mut x_shadow,
-    ...
-)
+fake_f(&mut[two_phase] x, &mut[two_phase] x_shadow, y)
 ```
-
-where the `fake_call` wires up any lifetime variables appropriately to the output of `f`.
-Note that the mutable borrow of `x_shadow` doesn't actually occur until `f` returns, but
-this is fine because the two-phase borrow doesn't properly start until the end of the args
-to `f`.
 
 ### Patterns
 
@@ -172,13 +163,12 @@ use crate::thir::cx::ThirBuildCx;
 use crate::verus::{LocalUse, expr_id_from_kind};
 use crate::verus::{
     VarErasure, VerusErasureCtxt, erased_ghost_value, erased_ghost_value_kind_with_args,
-    make_fake_call_kind,
+    make_fake_call_kind_with_original_fn,
 };
 use rustc_hir as hir;
 use rustc_hir::{BindingMode, ByRef, HirId, Mutability, Pinnedness};
 use rustc_middle::middle::region;
 use rustc_middle::mir::{BorrowKind, MutBorrowKind};
-use rustc_middle::thir::LintLevel;
 use rustc_middle::thir::{
     Arm, ArmId, Block, BlockSafety, Expr, ExprId, ExprKind, LocalVarId, LogicalOp, Pat, PatKind,
     Stmt, StmtId, StmtKind,
@@ -550,10 +540,10 @@ fn arm_post<'tcx>(
 
     let arm = &cx.thir.arms[arm_id];
     let new_arm = Arm {
+        hir_id: arm.hir_id,
         pattern: pat,
         guard: arm.guard,
         body: new_body,
-        lint_level: arm.lint_level,
         scope: arm.scope,
         span: arm.span,
     };
@@ -605,9 +595,6 @@ fn pattern_bindings_rec<'tcx>(bindings: &mut Vec<Binding<'tcx>>, pat: &Pat<'tcx>
     match &pat.kind {
         PatKind::Missing => {}
         PatKind::Wild => {}
-        PatKind::AscribeUserType { ascription: _, subpattern } => {
-            pattern_bindings_rec(bindings, subpattern);
-        }
         PatKind::Binding { name, mode, var, ty, subpattern, is_primary: _, is_shorthand: _ } => {
             bindings.push(Binding {
                 name: *name,
@@ -634,9 +621,6 @@ fn pattern_bindings_rec<'tcx>(bindings: &mut Vec<Binding<'tcx>>, pat: &Pat<'tcx>
             pattern_bindings_rec(bindings, subpattern);
         }
         PatKind::Constant { value: _ } => {}
-        PatKind::ExpandedConstant { def_id: _, subpattern } => {
-            pattern_bindings_rec(bindings, subpattern);
-        }
         PatKind::Range(_pat_range) => {}
         PatKind::Slice { prefix, slice, suffix } | PatKind::Array { prefix, slice, suffix } => {
             for p in prefix.iter() {
@@ -683,9 +667,6 @@ fn make_half_pat_rec<'tcx>(pat: &mut Pat<'tcx>, half_kind: Half) {
     match &mut pat.kind {
         PatKind::Missing => {}
         PatKind::Wild => {}
-        PatKind::AscribeUserType { ascription: _, subpattern } => {
-            make_half_pat_rec(subpattern, half_kind);
-        }
         PatKind::Binding {
             name: _,
             mode,
@@ -730,9 +711,6 @@ fn make_half_pat_rec<'tcx>(pat: &mut Pat<'tcx>, half_kind: Half) {
             make_half_pat_rec(subpattern, half_kind);
         }
         PatKind::Constant { value: _ } => {}
-        PatKind::ExpandedConstant { def_id: _, subpattern } => {
-            make_half_pat_rec(subpattern, half_kind);
-        }
         PatKind::Range(_pat_range) => {}
         PatKind::Slice { prefix, slice, suffix } | PatKind::Array { prefix, slice, suffix } => {
             for p in prefix.iter_mut() {
@@ -768,20 +746,20 @@ fn stmt_update_pat<'tcx>(
         pattern: _,
         initializer,
         else_block,
-        lint_level,
         span,
+        hir_id,
     } = cx.thir.stmts[stmt].kind
     else {
         panic!("stmt_update_pat");
     };
     let stmt = Stmt {
         kind: StmtKind::Let {
+            hir_id,
             remainder_scope,
             init_scope,
             pattern: new_pat,
             initializer,
             else_block,
-            lint_level,
             span,
         },
     };
@@ -821,12 +799,12 @@ fn make_half_decl<'tcx>(
 
     let stmt = Stmt {
         kind: StmtKind::Let {
+            hir_id,
             remainder_scope,
             init_scope: region::Scope { local_id: hir_id.local_id, data: region::ScopeData::Node },
             pattern: pat,
             initializer: Some(shadow_rhs),
             else_block,
-            lint_level: LintLevel::Explicit(hir_id),
             span: span,
         },
     };
@@ -863,12 +841,12 @@ fn make_tie_halves_decl<'tcx>(
 
     let stmt = Stmt {
         kind: StmtKind::Let {
+            hir_id,
             remainder_scope,
             init_scope: region::Scope { local_id: hir_id.local_id, data: region::ScopeData::Node },
             pattern: pat,
             initializer: Some(tied),
             else_block: None,
-            lint_level: LintLevel::Explicit(hir_id),
             span: binding.span,
         },
     };
@@ -904,6 +882,7 @@ fn make_tie_halves_components<'tcx>(
             is_primary: true,
             is_shorthand: false,
         },
+        extra: None,
     });
 
     let e1 = expr_id_from_kind(
@@ -948,18 +927,19 @@ fn make_shadow_decl<'tcx>(
             is_primary: true,
             is_shorthand: false,
         },
+        extra: None,
     });
 
     let initializer = erased_ghost_value(cx, erasure_ctxt, hir_id, binding.span, binding.ty);
 
     let stmt = Stmt {
         kind: StmtKind::Let {
+            hir_id,
             remainder_scope,
             init_scope: region::Scope { local_id: hir_id.local_id, data: region::ScopeData::Node },
             pattern: pat,
             initializer: Some(initializer),
             else_block: None,
-            lint_level: LintLevel::Explicit(hir_id),
             span: binding.span,
         },
     };
@@ -986,6 +966,7 @@ fn make_shadow_let_expr<'tcx>(
             is_primary: true,
             is_shorthand: false,
         },
+        extra: None,
     });
 
     let initializer = erased_ghost_value(cx, erasure_ctxt, hir_id, binding.span, binding.ty);
@@ -1080,7 +1061,7 @@ fn shadow_place_rec<'tcx>(
 ) -> Option<ExprId> {
     let expr = cx.thir.exprs[arg].clone();
     let shadow_kind = match &expr.kind {
-        ExprKind::Scope { region_scope: _, lint_level: _, value } => {
+        ExprKind::Scope { hir_id: _, region_scope: _, value } => {
             return shadow_place_rec(cx, hir_id, span, *value);
         }
         ExprKind::Deref { arg } => {
@@ -1212,13 +1193,13 @@ fn tie_mut_refs<'tcx>(
 pub(crate) fn call_post<'tcx>(
     cx: &mut ThirBuildCx<'tcx>,
     hir_expr: &hir::Expr<'tcx>,
-    return_ty: Ty<'tcx>,
+    _return_ty: Ty<'tcx>,
     kind: ExprKind<'tcx>,
 ) -> ExprKind<'tcx> {
     let erasure_ctxt = cx.verus_ctxt.ctxt.clone().unwrap();
     let tcx = cx.tcx;
 
-    let ExprKind::Call { ref args, ty: fun_ty, .. } = kind else { panic!("expr_let_post") };
+    let ExprKind::Call { ref args, ty: fun_ty, fun, .. } = kind else { panic!("expr_let_post") };
 
     match fun_ty.kind() {
         TyKind::FnDef(def_id, _) if *def_id == erasure_ctxt.erased_ghost_value_fn_def_id => {
@@ -1227,41 +1208,43 @@ pub(crate) fn call_post<'tcx>(
         _ => {}
     }
 
-    let mut two_phase_args = vec![];
-    for (i, arg) in args.iter().enumerate() {
-        if let Some(two_phase_arg) = get_two_phase_arg(cx, hir_expr, *arg, i) {
-            two_phase_args.push(two_phase_arg);
+    let mut arg_transforms = vec![];
+    for arg in args.iter() {
+        if let Some(shadow) = get_two_phase_arg(cx, hir_expr, *arg) {
+            arg_transforms.push(ArgTransform::TwoPhaseShadow(shadow));
+        } else {
+            arg_transforms.push(ArgTransform::Normal);
         }
     }
 
-    if two_phase_args.len() == 0 {
+    if arg_transforms.iter().all(|arg| *arg == ArgTransform::Normal) {
         return kind;
-    }
-
-    let original_call = expr_id_from_kind(cx, kind, hir_expr.hir_id, hir_expr.span, return_ty);
-
-    // If the input type is (I_1, I_2, ..., I_n) -> Out
-    // and the subsequence of args that needs two-phase handling are T_1, ..., T_k
-    // then the fake function call is going to have type:
-    // for<...> fn(Out, T_1, ..., T_k) -> Out
-
-    let mut args = vec![original_call];
-    for two_phase_arg in two_phase_args.iter() {
-        args.push(two_phase_arg.shadow_arg);
     }
 
     let fn_sig = crate::verus::fn_sig_with_region_vars(tcx, fun_ty);
     let bound_var_kinds = fn_sig.bound_vars();
-
-    // note: we could also skip if the output ty doesn't reference the bound vars
     let output_ty = fn_sig.skip_binder().output();
-    let mut input_tys = vec![output_ty];
-    for two_phase_arg in two_phase_args.iter() {
-        input_tys.push(fn_sig.skip_binder().inputs()[two_phase_arg.idx]);
+
+    let mut new_args: Vec<ExprId> = vec![];
+    let mut new_input_tys: Vec<Ty> = vec![];
+    for (i, (arg, arg_transform)) in args.iter().zip(arg_transforms.iter()).enumerate() {
+        let ty = fn_sig.skip_binder().inputs()[i];
+        match arg_transform {
+            ArgTransform::Normal => {
+                new_args.push(*arg);
+                new_input_tys.push(ty);
+            }
+            ArgTransform::TwoPhaseShadow(shadow_id) => {
+                new_args.push(*arg);
+                new_args.push(*shadow_id);
+                new_input_tys.push(ty);
+                new_input_tys.push(ty);
+            }
+        }
     }
 
     let inputs_and_output =
-        tcx.mk_type_list_from_iter(input_tys.iter().cloned().chain(std::iter::once(output_ty)));
+        tcx.mk_type_list_from_iter(new_input_tys.iter().cloned().chain(std::iter::once(output_ty)));
     let fnty = tcx.mk_ty_from_kind(TyKind::FnPtr(
         rustc_middle::ty::Binder::bind_with_vars(
             rustc_middle::ty::FnSigTys { inputs_and_output },
@@ -1274,21 +1257,28 @@ pub(crate) fn call_post<'tcx>(
         },
     ));
 
-    make_fake_call_kind(cx, &erasure_ctxt, hir_expr.hir_id, hir_expr.span, fnty, args)
+    make_fake_call_kind_with_original_fn(
+        cx,
+        &erasure_ctxt,
+        hir_expr.hir_id,
+        hir_expr.span,
+        fnty,
+        fun,
+        new_args,
+    )
 }
 
-#[derive(Debug)]
-struct TwoPhaseArg {
-    shadow_arg: ExprId,
-    idx: usize,
+#[derive(Debug, PartialEq, Eq)]
+enum ArgTransform {
+    Normal,
+    TwoPhaseShadow(ExprId),
 }
 
 fn get_two_phase_arg<'tcx>(
     cx: &mut ThirBuildCx<'tcx>,
     hir_expr: &hir::Expr<'tcx>,
     arg: ExprId,
-    idx: usize,
-) -> Option<TwoPhaseArg> {
+) -> Option<ExprId> {
     let kind = &cx.thir.exprs[arg].kind;
     match kind {
         ExprKind::Borrow {
@@ -1299,12 +1289,12 @@ fn get_two_phase_arg<'tcx>(
                 let ty = cx.thir.exprs[arg].ty;
                 let shadow_arg =
                     expr_id_from_kind(cx, shadow_arg_kind, hir_expr.hir_id, hir_expr.span, ty);
-                Some(TwoPhaseArg { shadow_arg, idx })
+                Some(shadow_arg)
             }
             None => None,
         },
-        ExprKind::Scope { region_scope: _, lint_level: _, value } => {
-            get_two_phase_arg(cx, hir_expr, *value, idx)
+        ExprKind::Scope { hir_id: _, region_scope: _, value } => {
+            get_two_phase_arg(cx, hir_expr, *value)
         }
         _ => None,
     }
