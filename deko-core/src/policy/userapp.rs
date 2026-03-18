@@ -28,7 +28,7 @@ use crate::cpu::idt::GLOBAL_IDT;
 use crate::cpu::ipi::wait_ipi_blocking;
 use crate::cpu::irq::{log_nested_irq_state, no_irq_zone, raw_irq_enable, IrqSafeLockGuard};
 use crate::cpu::regs::{no_smap_zone, DEKO_TR_ATTRIBUTES, DEKO_TSS};
-use crate::cpu::task::{generate_id, DekoRunnableState};
+use crate::cpu::task::{generate_id, DekoRunnableState, X86ExceptionContext};
 use crate::cpu::{self, DekoCpuCtx, DekoCpuCtxPermission, X86Tss, PERCPU_AREAS};
 use crate::crypto::aes::aes_gcm_256_key_gen;
 use crate::crypto::uuid::{generate_secure_uuid, uuid_print};
@@ -73,6 +73,8 @@ use crate::{die, kdebug, kerror, kinfo, kpanic_if, kwarn, vec};
 extern "C" {
     fn deko_sysret_window_start();
     fn deko_sysret_window_end();
+    fn default_return();
+    fn return_new_task();
     fn switch_vmpl_window_end();
     fn switch_vmpl_success();
 }
@@ -299,21 +301,47 @@ impl VmsaPage {
 
     #[inline]
     #[verifier::external_body]
+    fn rip_at_switch_vmpl_rdmsr(rip: u64) -> bool {
+        let rdmsr = switch_vmpl_window_end as *const () as u64;
+
+        rip == rdmsr
+    }
+
+    #[inline]
+    #[verifier::external_body]
+    fn hv_doorbell_returns_to_user(rip: u64, rsp: u64) -> Option<bool> {
+        let start = default_return as *const () as u64;
+        let end = return_new_task as *const () as u64;
+
+        if !(start <= rip && rip < end) || rsp == 0 {
+            return None;
+        }
+        let ctx = rsp as *const X86ExceptionContext;
+        let cs = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).frame.cs)) };
+
+        Some((cs & 0x3) == 0x3)
+    }
+
+    #[inline]
+    #[verifier::external_body]
     fn sanitize_migrated_runtime_state(
         vmsa: &mut VMSA,
         target_cpu: u32,
         user_gs_base: u64,
         kernel_gs_base: u64,
     ) {
-        let switch_vmpl_rdmsr = switch_vmpl_window_end as *const () as u64;
         let switch_vmpl_resume = switch_vmpl_success as *const () as u64;
 
         unsafe {
             let dst = vmsa as *mut VMSA;
             let rip = core::ptr::read_unaligned(core::ptr::addr_of!((*dst).rip));
             let cpl = core::ptr::read_unaligned(core::ptr::addr_of!((*dst).cpl));
+            let rsp = core::ptr::read_unaligned(core::ptr::addr_of!((*dst).rsp));
             let tsc_aux = core::ptr::read_unaligned(core::ptr::addr_of!((*dst).tsc_aux));
-            let kernel_gs_active = cpl == 0 || Self::rip_in_vmpl1_sysret_window(rip);
+            let kernel_gs_active = match Self::hv_doorbell_returns_to_user(rip, rsp) {
+                Some(returns_to_user) => !returns_to_user,
+                None => cpl == 0 || Self::rip_in_vmpl1_sysret_window(rip),
+            };
 
             core::ptr::write_unaligned(
                 core::ptr::addr_of_mut!((*dst).tsc_aux),
@@ -334,7 +362,10 @@ impl VmsaPage {
                 );
             }
 
-            if rip == switch_vmpl_rdmsr {
+            // Only repair RIP for the explicit switch_vmpl rdmsr resume slot.
+            // Passive timer-driven migrations normally resume through the HV
+            // iret/sysret path and should not take this rewrite.
+            if cpl == 0 && Self::rip_at_switch_vmpl_rdmsr(rip) {
                 core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rip), switch_vmpl_resume);
                 core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rax), 0);
             }
