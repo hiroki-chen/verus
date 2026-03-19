@@ -13,13 +13,11 @@ use vstd::prelude::*;
 use crate::cpu::regs::write_fs_base;
 use crate::cpu::DekoCpuCtx;
 use crate::guest::{
-    request_vmpl2_timer_event, take_vmpl1_deferred_timer_event, DekoGuestServError,
+    copy_from_user, request_vmpl2_timer_event, take_vmpl1_deferred_timer_event, DekoGuestServError,
     DekoGuestServResult, DekoGuestServResultCode,
 };
 use crate::mm::frame_allocator::DekoAllocatorApi;
-use crate::policy::userapp::{
-    copy_from_user, is_docker_request, DEKO_SHADOW_APP_LIST, IS_DOCKER_RUNNING,
-};
+use crate::policy::userapp::{is_docker_request, DEKO_SHADOW_APP_LIST, IS_DOCKER_RUNNING};
 // use crate::policy::userapp::copy_from_guest_user;
 use crate::policy::DekoSyscallBody;
 use crate::snp::rmpadjust;

@@ -9,12 +9,20 @@ members = [
     "xtask",
     # bins
     "bin/deko-monitor",
-    "bin/deko-stage2", "bin/init", "bin/deko-ifc",
+    "bin/deko-stage2",
+    "bin/init",
+    "bin/deko-ifc",
 ]
 # Unfortunately due to `Cargo`'s default feature unification, we need to
 # exclude some crates that have conflicting default features like global
 # allocator API in tests.
-exclude = ["tools/verus", "tests/buddy", "tests/collections", "tests/elf", "deko-analysis"]
+exclude = [
+    "tools/verus",
+    "tests/buddy",
+    "tests/collections",
+    "tests/elf",
+    "deko-analysis",
+]
 
 [workspace.dependencies]
 vstd = { git = "https://github.com/hiroki-chen/verus.git", default-features = false, branch = "verus-spec-const-fix" }
@@ -35,12 +43,14 @@ deko-macros = { path = "deko-macros" }
 deko-std = { path = "deko-std", default-features = false }
 elf = { git = "https://github.com/hiroki-chen/elf-rs.git" }
 
-# the profile used for `cargo build`
+regorus = { version = "*", default-features = false, features = ["opa-no-std"] }
+
+# the profile used for cargo build
 [profile.dev]
 panic = "abort"    # disable stack unwinding on panic
 incremental = true
 
-# the profile used for `cargo build --release`
+# the profile used for cargo build --release
 [profile.release]
 panic = "abort"    # disable stack unwinding on panic
 incremental = true

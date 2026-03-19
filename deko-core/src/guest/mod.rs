@@ -12,10 +12,6 @@ use vstd::prelude::*;
 
 use crate::cpu::irq::log_nested_irq_state;
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission, PERCPU_AREAS};
-use crate::guest::service::{
-    handle_guest_exit_deko_service, DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER,
-    DEKO_SERVICE_EXTEND_TIMER_EVENT, DEKO_SERVICE_REMAP_CA,
-};
 use crate::imp::ghcb::vmpl_switch_with_rax;
 use crate::imp::vmsa::{GuestVMExit, VMSA};
 use crate::imp::VMPL_GUEST_DEKO_MONITOR;
@@ -25,7 +21,35 @@ use crate::policy::DekoSyscallBody;
 use crate::snp::{doorbell, is_vmpl1, is_vmpl1_kernel, is_vmpl1_user};
 use crate::{kdebug, kerror, kinfo, kwarn};
 
+pub(crate) mod hook;
+pub(crate) mod paging;
+pub mod protocol;
 pub(crate) mod service;
+pub(crate) mod service_extend;
+pub(crate) mod service_memory;
+pub(crate) mod service_vcpu;
+pub(crate) mod userapp_runtime;
+
+pub use hook::{install_hook, GUEST_TRAMPOLINE_MAGIC, GUEST_TRAMPOLINE_PML4_HOLE};
+pub use paging::{guest_phys_to_virt, GuestMapping, GuestPageOffsetBase, GUEST_PAGE_OFFSET_BASE};
+pub use protocol::{
+    DekoGuestLstarWriteReq, DekoGuestRequestAdditionalData, DekoGuestRequestParams,
+    DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode, DekoMapIfcReq,
+    DekoMapIfcSingleReq, DekoNewAppReq, DekoNewAppType, DekoTaskMigrateReq, DekoVmplSwitchErr,
+    DEKO_GUEST_EXIT_PROTOCOL_ATTEST_SERVICE, DEKO_GUEST_EXIT_PROTOCOL_DEKO_SERVICE,
+    DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE, DEKO_GUEST_EXIT_PROTOCOL_TPM_SERVICE,
+    DEKO_SERVICE_APP_ENTER_OK, DEKO_SERVICE_APP_EXIT, DEKO_SERVICE_ATTEST_SERVICES,
+    DEKO_SERVICE_ATTEST_SINGLE_SERVICE, DEKO_SERVICE_CREATE_VCPU, DEKO_SERVICE_DEPOSIT_MEMORY,
+    DEKO_SERVICE_DESTROY_VCPU, DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER,
+    DEKO_SERVICE_EXTEND_LAUNCH_APP, DEKO_SERVICE_EXTEND_MAP_IFC, DEKO_SERVICE_EXTEND_MSR_INTERCEPT,
+    DEKO_SERVICE_EXTEND_REPORT_APP, DEKO_SERVICE_EXTEND_SYSCALL_ANALYSIS,
+    DEKO_SERVICE_EXTEND_TASK_MIGRATE, DEKO_SERVICE_EXTEND_TIMER_EVENT, DEKO_SERVICE_PVALIDATE,
+    DEKO_SERVICE_QUERY_PROTOCOL, DEKO_SERVICE_REMAP_CA, DEKO_SERVICE_TIMER,
+    DEKO_SERVICE_WITHDRAW_MEMORY,
+};
+pub(crate) use userapp_runtime::{
+    bind_current_cpu_vmpl1_slot, copy_from_user, stage_fake_vmpl1_handoff_request,
+};
 
 verus! {
 
@@ -146,120 +170,6 @@ impl CaaArea {
         proof_with!(|= Tracked::assume_new());
         DekoPPtr(vstd::simple_pptr::PPtr(PERCPU_CAA_BASE.0 as usize, core::marker::PhantomData))
     }
-}
-
-#[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
-pub enum DekoVmplSwitchErr {
-    Ok,
-    /// The VMPL switch operation was cancelled, likely due to an interrupt or other
-    /// asynchronous event that occurred during the switch.
-    Cancelled,
-    /// The VMPL switch operation failed either because the GHCB MSR protocol didn't
-    /// honor our request or some other fatal error occurred during the switch.
-    Failed(u32),
-}
-
-#[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
-pub enum DekoGuestServResultCode {
-    Success,
-    Incomplete,
-    UnsupportedProtocol,
-    UnsupportedCall,
-    InvalidAddr,
-    InvalidFormat,
-    InvalidParam,
-    InvalidReq,
-    /// Special note on `Busy`: This indicates that the service
-    /// request could not be processed at this time because
-    /// the monitor is currently busy with another operation.
-    /// The guest retry the request later; be sure this will
-    /// not trigger a livelock.
-    Busy,
-    VmplSwitchErr(DekoVmplSwitchErr),
-    Other(u64),
-}
-
-#[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
-pub enum DekoGuestServError {
-    SoftError(DekoGuestServResultCode),
-    FatalError,
-}
-
-#[verus_verify]
-impl DekoGuestServError {
-    #[verus_spec()]
-    pub fn into_result_code(&self) -> u64 {
-        match self {
-            DekoGuestServError::SoftError(code) => code.into_error_code(),
-            DekoGuestServError::FatalError => 0xFFFF_FFFF_FFFF_FFFFu64,
-        }
-    }
-}
-
-#[verus_verify]
-impl DekoGuestServResultCode {
-    #[verus_spec()]
-    pub fn into_error_code(&self) -> u64 {
-        match self {
-            DekoGuestServResultCode::Success => 0,
-            DekoGuestServResultCode::Incomplete => 0x8000_0000,
-            DekoGuestServResultCode::UnsupportedProtocol => 0x8000_0001,
-            DekoGuestServResultCode::UnsupportedCall => 0x8000_0002,
-            DekoGuestServResultCode::InvalidAddr => 0x8000_0003,
-            DekoGuestServResultCode::InvalidFormat => 0x8000_0004,
-            DekoGuestServResultCode::InvalidParam => 0x8000_0005,
-            DekoGuestServResultCode::InvalidReq => 0x8000_0006,
-            DekoGuestServResultCode::Busy => 0x8000_0007,
-            DekoGuestServResultCode::VmplSwitchErr(err) => 0x9000_0000u64,
-            DekoGuestServResultCode::Other(code) => 0x8000_1000u64.wrapping_add(*code),
-        }
-    }
-}
-
-#[verifier::external]
-impl core::fmt::Debug for DekoGuestServError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            DekoGuestServError::SoftError(
-                code,
-            ) => write!(f, "SoftError({:?})", code.into_error_code()),
-            DekoGuestServError::FatalError => write!(f, "FatalError"),
-        }
-    }
-}
-
-pub type DekoGuestServResult<T> = core::result::Result<T, DekoGuestServError>;
-
-pub const DEKO_GUEST_EXIT_PROTOCOL_DEKO_SERVICE: u32 = 0x0;
-
-pub const DEKO_GUEST_EXIT_PROTOCOL_ATTEST_SERVICE: u32 = 0x1;
-
-pub const DEKO_GUEST_EXIT_PROTOCOL_TPM_SERVICE: u32 = 0x2;
-
-pub const DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE: u32 = 0x4;
-
-/// Additional data provided with a guest request.
-#[derive(DekoDebug, Clone, Copy)]
-pub struct DekoGuestRequestAdditionalData {
-    #[deko(hex)]
-    pub guest_cr3: u64,
-}
-
-/// Parameters associated with a guest service request.
-#[derive(DekoDebug, Clone, Copy)]
-pub struct DekoGuestRequestParams {
-    #[deko(hex)]
-    pub sev_features: u64,
-    #[deko(hex)]
-    pub rcx: u64,
-    #[deko(hex)]
-    pub rdx: u64,
-    #[deko(hex)]
-    pub r9: u64,
-    #[deko(hex)]
-    pub r8: u64,
-    #[deko(hex)]
-    pub additional_data: Option<DekoGuestRequestAdditionalData>,
 }
 
 /// Represents the reason for a guest VM exit event intercepted by the VMPL0 monitor.
@@ -457,7 +367,7 @@ pub fn handle_guest_exit(
         },
         DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE => {
             proof_with!(Tracked(cpu_perm));
-            service::handle_guest_exit_extend_service(req, params, cpu_idx)
+            service_extend::handle_guest_exit_extend_service(req, params, cpu_idx)
         },
         _ => {
             // Sometimes this will get hit by APIC setup of the

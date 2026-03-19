@@ -382,6 +382,8 @@ iret_return_window:
 	movq	%rax, HV_TRACE_IRET_FRAME_RIP(%rip)
 	testb	%bl, %bl
 	jnz	handle_as_hv_with_doorbell
+
+.globl begin_iret_return
 begin_iret_return:
 	// Reload registers without modifying the stack pointer so that if #HV
 	// occurs within this window, the saved registers are still intact.
@@ -404,6 +406,7 @@ begin_iret_return:
 	// Skip error code.
 	addq	${EXCEP_FRAME_OFF}, %rsp
 
+.globl default_iret
 default_iret:
 	iretq
 

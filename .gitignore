@@ -12,3 +12,7 @@ build
 .verus-*
 
 tools
+
+TODO*
+
+.config/qemu.snp.toml

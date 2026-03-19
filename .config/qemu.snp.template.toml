@@ -1,3 +1,5 @@
+  # Template values only. Copy this file to `.config/qemu.snp.toml`
+  # and replace the placeholder paths with your local environment.
 memory = "64G"
 debug = false
 extra_config = [
@@ -7,15 +9,12 @@ extra_config = [
   "int,cpu_reset",
   "-D",
   "qemu.log",
-  # Using this disk image for launching the Linux guest.
   "-drive",
-  "file=tools/noble-server-cloudimg-amd64.img,format=qcow2,snapshot=off,id=disk0,if=none",
+  "file=/absolute/path/to/guest-disk.qcow2,format=qcow2,snapshot=off,id=disk0,if=none",
   "-device",
   "virtio-scsi-pci,id=scsi0,disable-legacy=on,iommu_platform=on",
-  # Disk device
   "-device",
   "scsi-hd,drive=disk0",
-  # Network device
   "-netdev",
   "user,id=vmnic,hostfwd=tcp::11451-:22",
   "-device",
@@ -23,9 +22,11 @@ extra_config = [
   "-serial",
   "mon:stdio",
   "-virtfs",
-  "local,path=/home/haobchen/deko-linux,mount_tag=host_share,security_model=none,id=fs0",
+  "local,path=/absolute/path/to/host-share,mount_tag=host_share,security_model=none,id=fs0",
+  "-virtfs",
+  "local,path=/absolute/path/to/cage-sev/tests/guest,mount_tag=guest_tests,security_model=none,id=fs1",
   "-kernel",
-  "/home/haobchen/deko-linux/arch/x86/boot/bzImage",
+  "/absolute/path/to/linux/arch/x86/boot/bzImage",
   "-append",
   "root=/dev/sda1 console=ttyS0 no5lvl nopti hugepages=0 mem_encrypt=on intremap=off nox2apic"
 ]

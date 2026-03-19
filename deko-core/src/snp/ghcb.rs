@@ -22,8 +22,9 @@ use super::is_vmpl1;
 use crate::cpu::irq::no_irq_zone;
 use crate::cpu::tlb::{flush_tlb_global_percpu, flush_tlb_global_sync};
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission};
-use crate::guest::service::DEKO_SERVICE_EXTEND_TIMER_EVENT;
-use crate::guest::{DekoVmplSwitchErr, DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE};
+use crate::guest::{
+    DekoVmplSwitchErr, DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE, DEKO_SERVICE_EXTEND_TIMER_EVENT,
+};
 use crate::logging::CONSOLE_LOCK;
 use crate::mm::paging::{PageTable, PteFlags};
 use crate::mm::{virt_to_phys, virt_to_phys_checked};

@@ -13,6 +13,7 @@ This folder contains setup, build, debug, and architecture notes for `cage-sev`.
 - [Preparation.md](Preparation.md): host setup, bootstrap, and first run
 - [Build.md](Build.md): current `xtask` command reference
 - [Debug.md](Debug.md): debugging and logging primitives
+- [GuestTests.md](GuestTests.md): local SNP QEMU config and guest test workflow
 - [logging-usage.md](logging-usage.md): ergonomic logging macros and patterns
 - [install-sev.md](install-sev.md): AMD SEV-SNP host-side compatibility notes
 
@@ -31,15 +32,8 @@ cargo run --bin xtask -- bootstrap-verus
 # Build SNP artifacts
 cargo run --bin xtask -- --target-arch snp build --target all --release
 
-# Run SNP with config
-cargo run --bin xtask -- --target-arch snp qemu --config-path .config/qemu.snp.config.toml
-```
-
-Or use aliases in `.cargo/config.toml`:
-
-```bash
+# Run SNP with local config
 cargo qemu-snp
-cargo qemu-tdx
 ```
 
 ## Maintenance Notes

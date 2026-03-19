@@ -28,20 +28,18 @@ use crate::cpu::idt::GLOBAL_IDT;
 use crate::cpu::ipi::wait_ipi_blocking;
 use crate::cpu::irq::{log_nested_irq_state, no_irq_zone, raw_irq_enable, IrqSafeLockGuard};
 use crate::cpu::regs::{no_smap_zone, DEKO_TR_ATTRIBUTES, DEKO_TSS};
-use crate::cpu::task::{generate_id, DekoRunnableState, X86ExceptionContext};
+use crate::cpu::task::{generate_id, DekoRunnableState, X86ExceptionContext, X86InterruptFrame};
 use crate::cpu::{self, DekoCpuCtx, DekoCpuCtxPermission, X86Tss, PERCPU_AREAS};
 use crate::crypto::aes::aes_gcm_256_key_gen;
 use crate::crypto::uuid::{generate_secure_uuid, uuid_print};
 use crate::dbg::{dump_hv_doorbell_trace_and_reset, dump_vmpl1_doorbell_snapshot_current_cpu};
-use crate::guest::service::{
-    DekoNewAppReq, DekoNewAppType, DEKO_SERVICE_APP_ENTER_OK, DEKO_SERVICE_APP_EXIT,
+use crate::guest::{
+    bind_current_cpu_vmpl1_slot, copy_from_user, guest_page_table, take_vmpl1_call_pending,
+    DekoGuestExitInformation, DekoGuestRequestParams, DekoGuestServError, DekoGuestServResult,
+    DekoGuestServResultCode, DekoNewAppReq, DekoNewAppType, DekoVmplSwitchErr, PtRegs,
+    DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE, DEKO_SERVICE_APP_ENTER_OK, DEKO_SERVICE_APP_EXIT,
     DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER, DEKO_SERVICE_EXTEND_TIMER_EVENT,
     DEKO_SERVICE_TIMER,
-};
-use crate::guest::{
-    guest_page_table, take_vmpl1_call_pending, DekoGuestExitInformation, DekoGuestRequestParams,
-    DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode, DekoVmplSwitchErr, PtRegs,
-    DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE,
 };
 use crate::imp::doorbell::{init_hv_doorbell, init_hv_doorbell_vmpl1};
 use crate::imp::ghcb::{vmpl_switch, GuestHostCommunicationBlock};
@@ -71,9 +69,11 @@ use crate::snp::{
 use crate::{die, kdebug, kerror, kinfo, kpanic_if, kwarn, vec};
 
 extern "C" {
+    fn begin_iret_return();
     fn deko_sysret_window_start();
     fn deko_sysret_window_end();
     fn default_return();
+    fn default_iret();
     fn return_new_task();
     fn switch_vmpl_window_end();
     fn switch_vmpl_success();
@@ -311,15 +311,105 @@ impl VmsaPage {
     #[verifier::external_body]
     fn hv_doorbell_returns_to_user(rip: u64, rsp: u64) -> Option<bool> {
         let start = default_return as *const () as u64;
+        let iret_begin = begin_iret_return as *const () as u64;
+        let iret_insn = default_iret as *const () as u64;
         let end = return_new_task as *const () as u64;
 
         if !(start <= rip && rip < end) || rsp == 0 {
             return None;
         }
-        let ctx = rsp as *const X86ExceptionContext;
-        let cs = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).frame.cs)) };
+        let cs = if rip < iret_begin {
+            let ctx = rsp as *const X86ExceptionContext;
+            unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).frame.cs)) }
+        } else if rip >= iret_insn {
+            let frame = rsp as *const X86InterruptFrame;
+            unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*frame).cs)) }
+        } else {
+            let ctx = rsp as *const X86ExceptionContext;
+            unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).frame.cs)) }
+        };
 
         Some((cs & 0x3) == 0x3)
+    }
+
+    #[inline]
+    #[verifier::external_body]
+    fn log_migrated_runtime_state(tag: &str, vmsa: &VMSA) {
+        let rip = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(vmsa.rip)) };
+        let rsp = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(vmsa.rsp)) };
+        let cpl = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(vmsa.cpl)) };
+        let tsc_aux = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(vmsa.tsc_aux)) };
+        let gs_base = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(vmsa.gs.base)) };
+        let kernel_gs_base = unsafe {
+            core::ptr::read_unaligned(core::ptr::addr_of!(vmsa.kernel_gs_base))
+        };
+
+        kinfo!(
+            "migrate_vmsa",
+            tag,
+            " rip=",
+            rip => hex,
+            " rsp=",
+            rsp => hex,
+            " cpl=",
+            cpl as u64 => hex,
+            " gs=",
+            gs_base => hex,
+            " kernel_gs=",
+            kernel_gs_base => hex,
+            " tsc_aux=",
+            tsc_aux => hex,
+        );
+
+        let start = default_return as *const () as u64;
+        let iret_begin = begin_iret_return as *const () as u64;
+        let iret_insn = default_iret as *const () as u64;
+        let end = return_new_task as *const () as u64;
+        if start <= rip && rip < end && rsp != 0 {
+            let (frame_rip, frame_cs, frame_rsp, frame_ss, frame_kind) = if rip < iret_begin {
+                let ctx = rsp as *const X86ExceptionContext;
+                (
+                    unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).frame.rip)) },
+                    unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).frame.cs)) },
+                    unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).frame.rsp)) },
+                    unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).frame.ss)) },
+                    "exception_ctx",
+                )
+            } else if rip >= iret_insn {
+                let frame = rsp as *const X86InterruptFrame;
+                (
+                    unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*frame).rip)) },
+                    unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*frame).cs)) },
+                    unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*frame).rsp)) },
+                    unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*frame).ss)) },
+                    "interrupt_frame",
+                )
+            } else {
+                let ctx = rsp as *const X86ExceptionContext;
+                (
+                    unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).frame.rip)) },
+                    unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).frame.cs)) },
+                    unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).frame.rsp)) },
+                    unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).frame.ss)) },
+                    "exception_ctx_iret_window",
+                )
+            };
+
+            kinfo!(
+                "migrate_vmsa_doorbell_frame",
+                tag,
+                " kind=",
+                frame_kind,
+                " frame_rip=",
+                frame_rip => hex,
+                " frame_cs=",
+                frame_cs => hex,
+                " frame_rsp=",
+                frame_rsp => hex,
+                " frame_ss=",
+                frame_ss => hex,
+            );
+        }
     }
 
     #[inline]
@@ -331,6 +421,8 @@ impl VmsaPage {
         kernel_gs_base: u64,
     ) {
         let switch_vmpl_resume = switch_vmpl_success as *const () as u64;
+
+        Self::log_migrated_runtime_state("before", vmsa);
 
         unsafe {
             let dst = vmsa as *mut VMSA;
@@ -370,6 +462,8 @@ impl VmsaPage {
                 core::ptr::write_unaligned(core::ptr::addr_of_mut!((*dst).rax), 0);
             }
         }
+
+        Self::log_migrated_runtime_state("after", vmsa);
     }
 
     #[verifier::external_body]
@@ -1253,102 +1347,6 @@ impl DekoUserApp {
     }
 }
 
-/// Copies data from a user application's memory space into the our memory space.
-///
-/// This function should be called if our `cr3` is not the same as the guest's `cr3`;
-/// so we need to manually walk the guest page tables to read the data.
-#[verus_spec(r =>
-    requires
-        0 < from@,
-        guest_cr3.wf(),
-        guest_cr3@ % PAGE_SIZE == 0,
-        guest_cr3@ + PAGE_SIZE < 0x000f_ffff_ffff_f000u64,
-        from@ + len <= 0x8000_0000_0000,
-)]
-pub(crate) fn copy_from_user(
-    guest_cr3: PhysAddr,
-    from: VirtAddr,
-    buf: *mut u8,
-    len: usize,
-) -> DekoGuestServResult<usize> {
-    let offset_4k = from.0 & 0xfff;
-    let offset_2m = from.0 & 0x1fffff;
-    let from = VirtAddr(from.0 & (!0xfff));
-
-    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
-    let private_bit = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).private_bit;
-    let shared_bit = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).shared_bit;
-    let guest_cr3_p = strip_confidentiality_bits(guest_cr3.0, private_bit);
-
-    proof {
-        let cr3 = guest_cr3@;
-        assert(guest_cr3_p <= cr3 && guest_cr3_p % PAGE_SIZE == 0) by (bit_vector)
-            requires
-                guest_cr3_p == cr3 & !(private_bit as u64),
-                bit_not_in_addr_region(private_bit),
-                cr3 % PAGE_SIZE == 0,
-        ;
-    }
-
-    let guest_cr3 = TempMapping::new(create_paddr_range(PhysAddr(guest_cr3_p), 1)).ok_or(
-        DekoGuestServError::SoftError(DekoGuestServResultCode::Busy),
-    )?;
-
-    let mapping = PageTable::walk_lvl3_guest(&guest_cr3, from, private_bit, shared_bit)?;
-    if mapping.temp_mappings.len() <= 2 || mapping.temp_mappings.len() > 4 {
-        kinfo!(
-            "copy_from_user: unexpected number of temp mappings",
-            mapping.temp_mappings.len()
-        );
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-    }
-    let final_mapping = mapping.final_mapping().unwrap();
-    let offset = if mapping.lvl == 0 {
-        offset_4k
-    } else {
-        offset_2m
-    };
-
-    let addr = final_mapping.inner.start.0.wrapping_add(offset);
-
-    // Pre-filter the length to avoid overflow.
-    //
-    // The guest will always prepare the argument in a way such that it will
-    // never cross the mapping boundary (i.e., page boundary).
-    let len = len.min(final_mapping.inner.end.0.wrapping_sub(addr) as usize);
-
-    // SAFETY: We have established a temporary mapping to the user application's
-    // memory space; so we can safely read from it.
-    unsafe { copy_from_user_same_vmpl((final_mapping.inner.start.0.wrapping_add(offset)), buf, len)
-    }
-}
-
-/// Different from [`copy_from_user`], this function lives within the same VMPL and
-/// the same `cr3` as the user application; so we can directly read from the user
-/// application's memory space with SMAP disabled.
-///
-/// Pointers are Linux cacnonical user-space addresses.
-#[verus_spec(r =>
-)]
-#[inline(always)]
-#[verifier::external_body]
-unsafe fn copy_from_user_same_vmpl(addr: u64, buf: *mut u8, len: usize) -> DekoGuestServResult<
-    usize,
-> {
-    kdebug!("copy_from_user_same_vmpl", addr =>hex, buf as u64 =>hex, len);
-
-    no_smap_zone(
-        ||
-            {
-                let src_ptr = addr as *const u8;
-                let dst_ptr = buf;
-                core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, len);
-            },
-    );
-
-    Ok(len)
-}
-
 /// Registers a new shadowed user application inside the guest VM.
 ///
 /// The user applications can be either the container runtimes (e.g., runc, containerd)
@@ -1627,69 +1625,6 @@ pub fn try_kick_app(
 
     proof_with!(Tracked(&mut cpu_perm));
     run_userapp(cpu, ret_params)
-}
-
-pub(crate) fn bind_current_cpu_vmpl1_slot(
-    cpu_ptr: DekoPPtr<DekoCpuCtx>,
-    Tracked(cpu_perm0): Tracked<&mut DekoCpuCtxPermission>,
-    pid: u32,
-)
-    requires
-        old(cpu_perm0).wf_with(cpu_ptr),
-        old(cpu_perm0).ptr_perm.value().ext_vmpl1 is Some,
-    ensures
-        cpu_perm0.wf_with(cpu_ptr),
-        cpu_perm0.ptr_perm.value().ext_vmpl1 is Some,
-{
-    let cpu_id = cpu_ptr.borrow(Tracked(&cpu_perm0.ptr_perm)).cpu_id as u32;
-    let mut cpu = cpu_ptr.take(Tracked(&mut cpu_perm0.ptr_perm));
-    let mut ctx_vmpl1 = cpu.ext_vmpl1.take().unwrap();
-    ctx_vmpl1.current_pid = Some(pid);
-    ctx_vmpl1.slot_dirty = false;
-    ctx_vmpl1.pending_export_pid = None;
-    ctx_vmpl1.pending_export_target_cpu = None;
-    ctx_vmpl1.pending_export_version = 0;
-    cpu.ext_vmpl1 = Some(ctx_vmpl1);
-    cpu_ptr.write(Tracked(&mut cpu_perm0.ptr_perm), cpu);
-
-    kdebug!("Bound VMPL1 slot on cpu ", cpu_id, " to pid ", pid);
-}
-
-pub(crate) fn stage_fake_vmpl1_handoff_request(
-    cpu_ptr: DekoPPtr<DekoCpuCtx>,
-    Tracked(cpu_perm0): Tracked<&mut DekoCpuCtxPermission>,
-    pid: u32,
-    target_cpu: u32,
-    version: u64,
-)
-    requires
-        old(cpu_perm0).wf_with(cpu_ptr),
-        old(cpu_perm0).ptr_perm.value().ext_vmpl1 is Some,
-    ensures
-        cpu_perm0.wf_with(cpu_ptr),
-        cpu_perm0.ptr_perm.value().ext_vmpl1 is Some,
-{
-    let cpu_id = cpu_ptr.borrow(Tracked(&cpu_perm0.ptr_perm)).cpu_id as u32;
-    let mut cpu = cpu_ptr.take(Tracked(&mut cpu_perm0.ptr_perm));
-    let mut ctx_vmpl1 = cpu.ext_vmpl1.take().unwrap();
-    ctx_vmpl1.current_pid = Some(pid);
-    ctx_vmpl1.slot_dirty = false;
-    ctx_vmpl1.pending_export_pid = Some(pid);
-    ctx_vmpl1.pending_export_target_cpu = Some(target_cpu);
-    ctx_vmpl1.pending_export_version = version;
-    cpu.ext_vmpl1 = Some(ctx_vmpl1);
-    cpu_ptr.write(Tracked(&mut cpu_perm0.ptr_perm), cpu);
-
-    kdebug!(
-        "Staged fake VMPL1 handoff request on cpu ",
-        cpu_id,
-        " pid=",
-        pid,
-        " target_cpu=",
-        target_cpu,
-        " version=",
-        version
-    );
 }
 
 #[verifier::external_body]
