@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+workdir=$(mktemp -d /tmp/jq-smoke.XXXXXX)
+trap 'rm -rf "$workdir"' EXIT
+
+input_json="${workdir}/input.json"
+
+cat > "${input_json}" <<'JSON'
+{
+  "services": [
+    {"name": "frontend", "latency_ms": [12, 18, 25], "errors": 0},
+    {"name": "api", "latency_ms": [20, 24, 29], "errors": 1},
+    {"name": "worker", "latency_ms": [40, 35, 38], "errors": 0}
+  ]
+}
+JSON
+
+summary=$(jq -c '
+  .services
+  | map({
+      name,
+      max_latency: (.latency_ms | max),
+      avg_latency: ((.latency_ms | add) / (.latency_ms | length)),
+      errors
+    })
+  | {
+      service_count: length,
+      total_errors: (map(.errors) | add),
+      slowest_service: (max_by(.max_latency).name),
+      services: .
+    }
+' "${input_json}")
+
+service_count=$(jq -r '.service_count' <<<"${summary}")
+total_errors=$(jq -r '.total_errors' <<<"${summary}")
+slowest_service=$(jq -r '.slowest_service' <<<"${summary}")
+
+if [[ "${service_count}" != "3" || "${total_errors}" != "1" || "${slowest_service}" != "worker" ]]; then
+    echo "jq_smoke: unexpected summary: ${summary}" >&2
+    exit 1
+fi
+
+echo "jq_smoke ok services=${service_count} total_errors=${total_errors} slowest=${slowest_service}"

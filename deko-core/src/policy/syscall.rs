@@ -1245,11 +1245,18 @@ pub const MAP_FIXED: u64 = 0x10;
 
 pub const MAP_ANONYMOUS: u64 = 0x20;
 
-fn get_buf_va() -> DekoGuestServResult<VirtAddr> {
+pub const MAP_TYPE_MASK: u64 = 0x0f;
+
+fn get_active_pid() -> DekoGuestServResult<u32> {
     let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
     let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
     let ext_vmpl1 = cpu_borrow.ext_vmpl1.as_ref().ok_or(DekoGuestServError::FatalError)?;
-    let active_pid = ext_vmpl1.current_pid.ok_or(DekoGuestServError::FatalError)?;
+
+    ext_vmpl1.current_pid.ok_or(DekoGuestServError::FatalError)
+}
+
+fn get_buf_va() -> DekoGuestServResult<VirtAddr> {
+    let active_pid = get_active_pid()?;
 
     // Check the shared buffer.
     deko_rwlock_read_atomic_data! {
@@ -1372,8 +1379,6 @@ fn syscall_arch_prctl_ret(
     let flag = syscall_body.rdi;
     match flag {
         0x1002 => {
-            kinfo!("arch_prctl set FS base to: ", syscall_body.rsi=>hex);
-
             write_fs_base(syscall_body.rsi);
         },
         _ => {
@@ -1414,28 +1419,7 @@ fn syscall_mmap_ret(
 ) -> DekoGuestServResult<()> {
     syscall_body.rax = handled_syscall_body.rax;
 
-    kinfo!("returned from mmap: ", handled_syscall_body.rax=>hex);
-
-    // Revoke the permission for VMPL2 for the returned address.
-    let length = handled_syscall_body.rsi / PAGE_SIZE as u64;
-    let addr = syscall_body.rax;
-
-    if core::hint::unlikely(
-        length * PAGE_SIZE >= u64::MAX || addr >= u64::MAX - length * PAGE_SIZE,
-    ) {
-        kerror!("Invalid return value for mmap: ", addr=>hex, ", length: ", length=>hex);
-        return Err(DekoGuestServError::FatalError);
-    }
-    // Make this a separate function.
-    // let mut i = 0;
-    // #[verus_spec(
-    //     invariant
-    //         i <= length,
-    //     decreases
-    //         length - i
-    // )]
-    // while i <= length {
-    // }
+    kdebug!("returned from mmap: ", handled_syscall_body.rax=>hex);
 
     Ok(())
 }
@@ -1467,6 +1451,9 @@ fn analyze_syscall_mmap(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResu
     let flags = syscall_body.r10;
     let fd = syscall_body.r8 as i32;
     let offset = syscall_body.r9;
+    let is_anon = flags & MAP_ANONYMOUS != 0;
+    let is_shared = flags & MAP_SHARED != 0;
+    let is_private = flags & MAP_PRIVATE != 0;
 
     // `mmap` with zero length is invalid.
     if core::hint::unlikely(length == 0) {
@@ -1501,6 +1488,40 @@ fn analyze_syscall_mmap(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResu
             return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
         }
     }
+
+    if offset % PAGE_SIZE != 0 {
+        kerror!("mmap offset is not page aligned: ", offset=>hex);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+
+    if (prot & PROT_WRITE != 0) && (prot & PROT_EXEC != 0) {
+        kerror!("mmap W^X violation: prot=", prot=>hex);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+
+    if (flags & MAP_TYPE_MASK) == 0 || (is_shared && is_private) {
+        kerror!("mmap requires exactly one mapping type: flags=", flags=>hex);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+
+    if is_anon {
+        if fd != -1 {
+            kerror!("anonymous mmap requires fd=-1: fd=", fd as u64 => hex);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        }
+        if offset != 0 {
+            kerror!("anonymous mmap requires zero offset: ", offset=>hex);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        }
+    }
+
+    // First IFC policy for mmap: disallow writable shared mappings because
+    // they create an immediate shared mutable channel with the untrusted side.
+    if is_shared && (prot & PROT_WRITE != 0) {
+        kerror!("shared writable mmap is forbidden by IFC policy");
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+
     syscall_body.rsi = aligned_length;
 
     Ok(())

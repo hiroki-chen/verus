@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+workdir=$(mktemp -d /tmp/sqlite-smoke.XXXXXX)
+trap 'rm -rf "$workdir"' EXIT
+
+db_path="${workdir}/smoke.db"
+
+sqlite3 "${db_path}" <<'SQL'
+PRAGMA journal_mode=WAL;
+PRAGMA synchronous=FULL;
+CREATE TABLE items(id INTEGER PRIMARY KEY, name TEXT NOT NULL, value INTEGER NOT NULL);
+WITH RECURSIVE seq(x) AS (
+    SELECT 1
+    UNION ALL
+    SELECT x + 1 FROM seq WHERE x < 1000
+)
+INSERT INTO items(name, value)
+SELECT printf('item-%04d', x), x * 3 FROM seq;
+UPDATE items SET value = value + 7 WHERE id % 10 = 0;
+SQL
+
+row_count=$(sqlite3 "${db_path}" 'SELECT COUNT(*) FROM items;')
+sum_value=$(sqlite3 "${db_path}" 'SELECT SUM(value) FROM items;')
+integrity=$(sqlite3 "${db_path}" 'PRAGMA integrity_check;')
+
+if [[ "${row_count}" != "1000" ]]; then
+    echo "sqlite_smoke: unexpected row count: ${row_count}" >&2
+    exit 1
+fi
+
+if [[ "${integrity}" != "ok" ]]; then
+    echo "sqlite_smoke: integrity_check failed: ${integrity}" >&2
+    exit 1
+fi
+
+echo "sqlite_smoke ok rows=${row_count} sum=${sum_value} integrity=${integrity}"

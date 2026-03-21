@@ -25,7 +25,7 @@ use crate::policy::{syscall, DekoSyscallBody};
 use crate::snp::doorbell::HV_DOORBELL_NO_FURTHER_SIGNAL_FLAG;
 use crate::snp::ghcb::{current_ghcb, GuestHostCommunicationBlock};
 use crate::snp::{is_vmpl1_user, MSR_AMD64_SEV_ES_GHCB};
-use crate::{die, kerror, kinfo};
+use crate::{die, kdebug, kerror, kinfo};
 
 verus! {
 
@@ -122,7 +122,7 @@ pub extern "C" fn deko_async_timer_pre_iret_hook() {
         syscall_perm.pptr() == syscall_body_ptr@,
 )]
 fn deko_ifc_entry_vmpl1(syscall_body_ptr: DekoPPtr<DekoSyscallBody>) -> u64 {
-    kinfo!("ifc: entered with syscall_body_ptr = ", syscall_body_ptr);
+    kdebug!("ifc: entered with syscall_body_ptr = ", syscall_body_ptr);
 
     let tracked mut syscall_perm = syscall_perm;
     let mut syscall_body = syscall_body_ptr.take(Tracked(&mut syscall_perm));
@@ -133,15 +133,15 @@ fn deko_ifc_entry_vmpl1(syscall_body_ptr: DekoPPtr<DekoSyscallBody>) -> u64 {
     }
     // Then request VMPL2 to handle the syscall.
 
-    kinfo!("ifc: before request_vmpl2_syscall_handler");
+    kdebug!("ifc: before request_vmpl2_syscall_handler");
 
     if let Err(e) = request_vmpl2_syscall_handler() {
         kerror!("ifc: request_vmpl2_syscall_handler failed: ", e);
         return e.into_result_code();
     }
-    kinfo!("ifc: after request_vmpl2_syscall_handler");
+    kdebug!("ifc: after request_vmpl2_syscall_handler");
     // Check the syscall return value and prepare for returning to the guest.
-    kinfo!("ifc: before sysret_epilogue");
+    kdebug!("ifc: before sysret_epilogue");
 
     if let Err(e) = sysret_epilogue(&mut syscall_body) {
         kerror!("ifc: sysret_epilogue failed");
@@ -149,7 +149,7 @@ fn deko_ifc_entry_vmpl1(syscall_body_ptr: DekoPPtr<DekoSyscallBody>) -> u64 {
     }
     syscall_body_ptr.write(Tracked(&mut syscall_perm), syscall_body);
 
-    kinfo!("ifc: after sysret_epilogue:", syscall_body);
+    kdebug!("ifc: after sysret_epilogue:", syscall_body);
 
     0
 }

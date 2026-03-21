@@ -26,7 +26,7 @@ verus! {
 pub(crate) fn copy_from_user(
     guest_cr3: PhysAddr,
     from: VirtAddr,
-    buf: *mut u8,
+    buf_addr: u64,
     len: usize,
 ) -> DekoGuestServResult<usize> {
     let offset_4k = from.0 & 0xfff;
@@ -70,22 +70,24 @@ pub(crate) fn copy_from_user(
     let addr = final_mapping.inner.start.0.wrapping_add(offset);
     let len = len.min(final_mapping.inner.end.0.wrapping_sub(addr) as usize);
 
-    unsafe { copy_from_user_same_vmpl(final_mapping.inner.start.0.wrapping_add(offset), buf, len) }
+    unsafe {
+        copy_from_user_same_vmpl(final_mapping.inner.start.0.wrapping_add(offset), buf_addr, len)
+    }
 }
 
 #[verus_spec(r =>)]
 #[inline(always)]
 #[verifier::external_body]
-unsafe fn copy_from_user_same_vmpl(addr: u64, buf: *mut u8, len: usize) -> DekoGuestServResult<
+unsafe fn copy_from_user_same_vmpl(addr: u64, buf_addr: u64, len: usize) -> DekoGuestServResult<
     usize,
 > {
-    kdebug!("copy_from_user_same_vmpl", addr =>hex, buf as u64 =>hex, len);
+    kdebug!("copy_from_user_same_vmpl", addr =>hex, buf_addr =>hex, len);
 
     no_smap_zone(
         ||
             {
                 let src_ptr = addr as *const u8;
-                let dst_ptr = buf;
+                let dst_ptr = buf_addr as *mut u8;
                 core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, len);
             },
     );

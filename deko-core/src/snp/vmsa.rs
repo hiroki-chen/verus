@@ -30,7 +30,7 @@ use crate::snp::{
     SnpStatusFlags, ALT_INJ, BIT_VMSA, GUEST_MSR_INTERCEPT, REST_INJ, VMPL1_MAGIC_KERN,
     VMPL_GUEST_DEKO_MONITOR,
 };
-use crate::{die, kdebug, kerror, kinfo, kunimplemented, kwarn};
+use crate::{dbg, die, kdebug, kerror, kinfo, kunimplemented, kwarn};
 
 const _: () = {
     assert!(core::mem::size_of::<VMSASegment>() == 0x10);
@@ -472,13 +472,7 @@ impl VMSA {
 
     #[verus_spec()]
     pub fn err_dump_vmsa() {
-        let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
-        proof_with!(Tracked(&cpu_perm) => Tracked(vmsa_perm));
-        let this_vmsa = VMSA::this_vmsa(cpu);
-
-        let vmsa = this_vmsa.borrow(Tracked(&vmsa_perm));
-
-        kerror!("VMSA dump:", vmsa);
+        dbg::err_dump_vmsa();
     }
 
     #[verifier::external_body]

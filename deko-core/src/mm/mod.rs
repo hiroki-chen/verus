@@ -26,7 +26,7 @@ use crate::imp::{page_state_change, PageStateChangeOp};
 use crate::mm::frame_allocator::DekoPageFrameAllocator;
 use crate::mm::paging::{PageTable, PageTablePermission, PteFlags};
 use crate::mm::vm::TempMapping;
-use crate::{kerror, kinfo, kpanic_if, kwarn, vec, DekoKernelLaunchInfo};
+use crate::{dbg, kerror, kinfo, kpanic_if, kwarn, vec, DekoKernelLaunchInfo};
 
 verus! {
 
@@ -419,7 +419,7 @@ pub fn init_memory_map(header: &DekoKernelLaunchInfo) {
 }
 
 pub fn dump_frame_allocator_usage() -> u64 {
-    DEKO_FRAME_ALLOCATOR_FULL.0.remaining()
+    dbg::dump_frame_allocator_usage()
 }
 
 #[verifier::external_body]

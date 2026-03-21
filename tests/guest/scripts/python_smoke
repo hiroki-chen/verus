@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+python3 - <<'PY'
+import hashlib
+import json
+import mmap
+import os
+import tempfile
+
+payload = [{"id": i, "value": (i * i) % 97} for i in range(4096)]
+encoded = json.dumps(payload, separators=(",", ":")).encode()
+
+with tempfile.NamedTemporaryFile(delete=False) as f:
+    path = f.name
+    f.write(encoded)
+    f.flush()
+
+try:
+    with open(path, "r+b") as f:
+        with mmap.mmap(f.fileno(), 0) as mm:
+            prefix = mm[:64]
+            digest = hashlib.sha256(mm).hexdigest()
+            checksum = sum(prefix)
+            print(
+                f"python_smoke ok bytes={len(mm)} checksum={checksum} sha256={digest[:16]}"
+            )
+finally:
+    os.unlink(path)
+PY

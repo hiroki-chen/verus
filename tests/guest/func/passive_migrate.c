@@ -33,6 +33,8 @@ static void allow_all_cpus(void) {
 int main(int argc, char *argv[]) {
   const uint64_t spin_iters =
       argc > 1 ? strtoull(argv[1], NULL, 0) : 50000000ULL;
+  const uint64_t log_every =
+      argc > 2 ? strtoull(argv[2], NULL, 0) : 256ULL;
   uint64_t rounds = 0;
   volatile uint64_t acc = 0;
   int last_cpu;
@@ -49,8 +51,9 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  printf("pid=%d start_cpu=%d spin_iters=%llu\n", getpid(), last_cpu,
-         (unsigned long long)spin_iters);
+  printf("pid=%d start_cpu=%d spin_iters=%llu log_every=%llu\n", getpid(),
+         last_cpu, (unsigned long long)spin_iters,
+         (unsigned long long)log_every);
   fflush(stdout);
 
   for (;;) {
@@ -72,7 +75,7 @@ int main(int argc, char *argv[]) {
              (unsigned long long)acc);
       fflush(stdout);
       last_cpu = cpu;
-    } else if ((rounds & 0x3f) == 0) {
+    } else if (log_every != 0 && (rounds % log_every) == 0) {
       printf("still on cpu=%d round=%llu acc=%llu\n", cpu,
              (unsigned long long)rounds, (unsigned long long)acc);
       fflush(stdout);

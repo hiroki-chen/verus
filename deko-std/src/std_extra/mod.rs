@@ -1,3 +1,4 @@
+pub mod cell;
 pub mod cmp;
 
 #[cfg(feature = "alloc")]

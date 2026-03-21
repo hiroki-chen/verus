@@ -103,6 +103,14 @@ Run the active random migration test:
 docker run --rm guest-tests:local random_migrate
 ```
 
+Reduce log volume by passing a larger `log_every` argument:
+
+```bash
+docker run --rm guest-tests:local random_migrate 20000000 0 512
+docker run --rm guest-tests:local passive_migrate 50000000 1024
+docker run --rm guest-tests:local malloc_churn 20000 0 4096
+```
+
 Run any compiled test binary directly by name:
 
 ```bash
@@ -110,6 +118,22 @@ docker run --rm guest-tests:local sched
 docker run --rm guest-tests:local while
 docker run --rm guest-tests:local malloc_basic
 docker run --rm guest-tests:local malloc_churn
+docker run --rm guest-tests:local fs_smoke
+docker run --rm guest-tests:local mmap_file_smoke
+docker run --rm guest-tests:local stdio_sort_smoke
+docker run --rm guest-tests:local fs_json_smoke
+docker run --rm guest-tests:local concurrency_smoke
+docker run --rm guest-tests:local http_loopback_smoke
+```
+
+Run the non-trivial smoke scripts:
+
+```bash
+docker run --rm guest-tests:local sqlite_smoke
+docker run --rm guest-tests:local jq_smoke
+docker run --rm guest-tests:local python_smoke
+docker run --rm guest-tests:local tar_smoke
+docker run --rm guest-tests:local nontrivial_smoke
 ```
 
 If you want to bypass the entrypoint and execute the binary path directly:
@@ -130,8 +154,36 @@ The current C tests under `tests/guest/func` include:
   - Verifies `malloc`, `calloc`, `realloc`, and `free` with data-preservation checks.
 - `malloc_churn.c`
   - Repeatedly allocates, resizes, touches, and frees heap blocks across a wide size range.
+- `fs_smoke.c`
+  - Exercises `mkdir`, `open`, `read/write`, `rename`, `stat`, `readdir`, and recursive cleanup on a small directory tree.
+- `mmap_file_smoke.c`
+  - Exercises `mkstemp`, `ftruncate`, `mmap`, `msync`, `mprotect`, `pread`, and `munmap` on a multi-page file.
+- `stdio_sort_smoke.c`
+  - Uses stdio plus heap allocation to write, parse, sort, rewrite, and re-read a structured dataset.
 - `sched.c`
 - `while.c`
+
+The current Go tests under `tests/guest/go` include:
+
+- `fs_json_smoke.go`
+  - Exercises Go runtime startup, file I/O, JSON marshal/unmarshal, and slice growth.
+- `concurrency_smoke.go`
+  - Exercises goroutines, channels, synchronization, and heap activity across many tasks.
+- `http_loopback_smoke.go`
+  - Exercises Go networking, loopback TCP, `net/http`, JSON encoding/decoding, and request handling.
+
+The current shell-based smoke scripts under `tests/guest/scripts` include:
+
+- `sqlite_smoke`
+  - Creates a SQLite database, performs inserts and updates, and runs `PRAGMA integrity_check`.
+- `jq_smoke`
+  - Parses and transforms structured JSON with `jq` and validates the summary output.
+- `python_smoke`
+  - Exercises Python runtime startup, JSON handling, file I/O, `mmap`, and hashing.
+- `tar_smoke`
+  - Packs and unpacks a small file tree and verifies extracted contents by `sha256sum`.
+- `nontrivial_smoke`
+  - Runs the four scripts above in sequence.
 
 ## Typical Flow
 

@@ -73,6 +73,8 @@ int main(int argc, char *argv[]) {
   uint64_t rounds = 0;
   const uint64_t spin_iters =
       argc > 1 ? strtoull(argv[1], NULL, 0) : 20000000ULL;
+  const uint64_t log_every =
+      argc > 3 ? strtoull(argv[3], NULL, 0) : 64ULL;
   volatile uint64_t acc = 0;
 
   if (nr_cpus <= 0)
@@ -83,8 +85,9 @@ int main(int argc, char *argv[]) {
   if (seed == 0)
     seed = 1;
 
-  printf("pid=%d cpus=%ld seed=%llu spin_iters=%llu\n", getpid(), nr_cpus,
-         (unsigned long long)seed, (unsigned long long)spin_iters);
+  printf("pid=%d cpus=%ld seed=%llu spin_iters=%llu log_every=%llu\n",
+         getpid(), nr_cpus, (unsigned long long)seed,
+         (unsigned long long)spin_iters, (unsigned long long)log_every);
   print_allowed_cpus();
   fflush(stdout);
 
@@ -111,13 +114,16 @@ int main(int argc, char *argv[]) {
     }
     syscall_getcpu_or_die(&after_sys, &after_node);
 
-    printf(
-        "active migration round=%llu before_sched=%d before_sys=%u "
-        "target=%d after_sched=%d after_sys=%u node=%u acc=%llu\n",
-           (unsigned long long)rounds, before, before_sys, target, after,
-           after_sys, after_node,
-           (unsigned long long)acc);
-    fflush(stdout);
+    if ((log_every != 0 && (rounds % log_every) == 0) ||
+        after_sys != (unsigned)target || after != (int)after_sys) {
+      printf(
+          "active migration round=%llu before_sched=%d before_sys=%u "
+          "target=%d after_sched=%d after_sys=%u node=%u acc=%llu\n",
+             (unsigned long long)rounds, before, before_sys, target, after,
+             after_sys, after_node,
+             (unsigned long long)acc);
+      fflush(stdout);
+    }
     rounds++;
   }
 }

@@ -6,7 +6,7 @@ use vstd::prelude::*;
 
 use crate::cpu::DekoCpuCtx;
 use crate::snp::is_vmpl1;
-use crate::{kinfo, kpanic_if};
+use crate::{dbg, kinfo, kpanic_if};
 
 verus! {
 
@@ -387,61 +387,7 @@ pub fn no_irq_zone<T>(f: impl FnOnce() -> T) -> T {
 
 #[verifier::exec_allows_no_decreases_clause]
 pub fn log_nested_irq_state(marker: u64) {
-    let cur_vmpl1 = is_vmpl1();
-    let if_enabled = irq_enabled();
-
-    let (this_cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
-    let mut cpu_taken = this_cpu.take(Tracked(&mut cpu_perm.ptr_perm));
-
-    // VMPL0 irq state
-    let vmpl0_count;
-    proof_with!(Tracked(&mut cpu_perm.irq_state_perm));
-    let tracked mut vmpl0_count_perm = cpu_perm.irq_state_perm.counts_perm.tracked_remove(0);
-    vmpl0_count = cpu_taken.nested_irq.counts[0].load(Tracked(&mut vmpl0_count_perm));
-    proof {
-        cpu_perm.irq_state_perm.counts_perm.tracked_insert(0, vmpl0_count_perm);
-    }
-    let vmpl0_state = cpu_taken.nested_irq.state.load(
-        Tracked(&mut cpu_perm.irq_state_perm.state_perm),
-    );
-
-    // VMPL1 irq state
-    let mut vmpl1_present = false;
-    let mut vmpl1_count: i32 = -1;
-    let mut vmpl1_state = false;
-    if let Some(ext_vmpl1) = cpu_taken.ext_vmpl1.take() {
-        vmpl1_present = true;
-        let mut ext_vmpl1 = ext_vmpl1;
-        let tracked mut ext_vmpl1_perm = cpu_perm.ext_vmpl1_perm.tracked_take();
-
-        proof_with!(Tracked(&mut ext_vmpl1_perm.nested_irq_perm));
-        let tracked mut vmpl1_count_perm =
-            ext_vmpl1_perm.nested_irq_perm.counts_perm.tracked_remove(0);
-        vmpl1_count = ext_vmpl1.nested_irq.counts[0].load(Tracked(&mut vmpl1_count_perm));
-        proof {
-            ext_vmpl1_perm.nested_irq_perm.counts_perm.tracked_insert(0, vmpl1_count_perm);
-        }
-        vmpl1_state =
-        ext_vmpl1.nested_irq.state.load(Tracked(&mut ext_vmpl1_perm.nested_irq_perm.state_perm));
-
-        cpu_taken.ext_vmpl1.replace(ext_vmpl1);
-        proof {
-            cpu_perm.ext_vmpl1_perm = Some(ext_vmpl1_perm);
-        }
-    }
-    this_cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
-
-    kinfo!(
-        "nested_irq_state",
-        "marker", marker => hex,
-        "cur_vmpl", if cur_vmpl1 { 1 } else { 0 },
-        "if", if if_enabled { 1 } else { 0 },
-        "vmpl0_count", vmpl0_count as i64,
-        "vmpl0_state", if vmpl0_state { 1 } else { 0 },
-        "vmpl1_present", if vmpl1_present { 1 } else { 0 },
-        "vmpl1_count", vmpl1_count as i64,
-        "vmpl1_state", if vmpl1_state { 1 } else { 0 }
-    );
+    dbg::log_nested_irq_state(marker);
 }
 
 } // verus!

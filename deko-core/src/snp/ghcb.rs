@@ -34,7 +34,7 @@ use crate::snp::{
     after_irq_enable, PageStateChangeOp, GHCB_BUFFER_SIZE, PSC_GFN_MASK, PSC_OP_PRIVATE,
     PSC_OP_PSMASH, PSC_OP_SHARED, PSC_OP_UNSMASH,
 };
-use crate::{bits, kdebug, kerror, kinfo, kpanic_if, kunimplemented};
+use crate::{bits, dbg, kdebug, kerror, kinfo, kpanic_if, kunimplemented};
 
 extern "C" {
     /// Attempts to switch execution to the specified VMPL level.
@@ -1176,12 +1176,7 @@ impl GuestHostCommunicationBlock {
     fn dump_shared_buffer(
         shared_buffer: &Array<PAtomicU8, GHCB_BUFFER_SIZE>,
     ) {
-        unsafe {
-            kinfo!("GHCB Shared Buffer Dump:", core::slice::from_raw_parts(
-                shared_buffer.index_as_ptr(0).0.addr() as *const u8,
-                GHCB_BUFFER_SIZE,
-            ) => hex);
-        }
+        dbg::dump_ghcb_shared_buffer(shared_buffer);
     }
 }
 

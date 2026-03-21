@@ -1,5 +1,3 @@
-pub mod bsp;
-
 /// The current version.
 pub const DEKO_SM_VERSION: u64 = 0x1145141919510;
 

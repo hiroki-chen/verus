@@ -11,21 +11,37 @@ use core::ops::RangeBounds;
 // Author: Nicolai Stange <nstange@suse.de>
 use deko_macros::DekoDebug;
 use deko_std::address::{VaddrRange, VirtAddr};
+use deko_std::array::Array;
 use deko_std::cpu::X86GeneralRegs;
 use deko_std::deko_rwlock_read_atomic_data;
 use deko_std::mem::STACK_SIZE;
 use deko_std::ptr::DekoPPtr;
+use deko_std::wf::WellFormed;
+use vstd::atomic::PAtomicU8;
 use vstd::prelude::*;
 
-use crate::cpu::task::{DekoRunnableCtx, X86ExceptionContext};
+use crate::cpu::irq::irq_enabled;
+use crate::cpu::task::{
+    DekoRunQueue, DekoRunQueuePermission, DekoRunnableCtx, X86ExceptionContext, X86InterruptFrame,
+};
 use crate::cpu::DekoCpuCtx;
 use crate::imp::doorbell::HVDoorbell;
-use crate::kinfo;
 use crate::logging::{print_str, CONSOLE, CONSOLE_LOCK};
+use crate::mm::DEKO_FRAME_ALLOCATOR_FULL;
+use crate::policy::userapp::DEKO_SHADOW_APP_LIST;
 use crate::snp::doorbell::HV_DOORBELL_NO_FURTHER_SIGNAL_FLAG;
-use crate::snp::is_vmpl1;
+use crate::snp::vmsa::VMSA;
+use crate::snp::{is_vmpl1, GHCB_BUFFER_SIZE};
+use crate::{kdebug, kerror, kinfo};
 
 verus! {
+
+extern "C" {
+    fn begin_iret_return();
+    fn default_iret();
+    fn default_return();
+    fn return_new_task();
+}
 
 #[derive(DekoDebug, Clone, Copy)]
 struct StackFrame {
@@ -549,6 +565,298 @@ pub fn dump_vmpl1_doorbell_snapshot_current_cpu() {
         " trace_last_flags=",
         evt_last_flags,
     );
+}
+
+#[verifier::external_body]
+pub fn log_migrated_runtime_state(tag: &str, vmsa: &VMSA) {
+    let rip = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(vmsa.rip)) };
+    let rsp = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(vmsa.rsp)) };
+    let cpl = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(vmsa.cpl)) };
+    let tsc_aux = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(vmsa.tsc_aux)) };
+    let gs_base = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(vmsa.gs.base)) };
+    let kernel_gs_base = unsafe {
+        core::ptr::read_unaligned(core::ptr::addr_of!(vmsa.kernel_gs_base))
+    };
+
+    kdebug!(
+        "migrate_vmsa",
+        tag,
+        " rip=",
+        rip => hex,
+        " rsp=",
+        rsp => hex,
+        " cpl=",
+        cpl as u64 => hex,
+        " gs=",
+        gs_base => hex,
+        " kernel_gs=",
+        kernel_gs_base => hex,
+        " tsc_aux=",
+        tsc_aux => hex,
+    );
+
+    let start = default_return as *const () as u64;
+    let iret_begin = begin_iret_return as *const () as u64;
+    let iret_insn = default_iret as *const () as u64;
+    let end = return_new_task as *const () as u64;
+    if start <= rip && rip < end && rsp != 0 {
+        let (frame_rip, frame_cs, frame_rsp, frame_ss, frame_kind) = if rip < iret_begin {
+            let ctx = rsp as *const X86ExceptionContext;
+            (
+                unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).frame.rip)) },
+                unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).frame.cs)) },
+                unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).frame.rsp)) },
+                unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).frame.ss)) },
+                "exception_ctx",
+            )
+        } else if rip >= iret_insn {
+            let frame = rsp as *const X86InterruptFrame;
+            (
+                unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*frame).rip)) },
+                unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*frame).cs)) },
+                unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*frame).rsp)) },
+                unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*frame).ss)) },
+                "interrupt_frame",
+            )
+        } else {
+            let ctx = rsp as *const X86ExceptionContext;
+            (
+                unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).frame.rip)) },
+                unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).frame.cs)) },
+                unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).frame.rsp)) },
+                unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).frame.ss)) },
+                "exception_ctx_iret_window",
+            )
+        };
+
+        kdebug!(
+            "migrate_vmsa_doorbell_frame",
+            tag,
+            " kind=",
+            frame_kind,
+            " frame_rip=",
+            frame_rip => hex,
+            " frame_cs=",
+            frame_cs => hex,
+            " frame_rsp=",
+            frame_rsp => hex,
+            " frame_ss=",
+            frame_ss => hex,
+        );
+    }
+}
+
+#[verifier::external_body]
+pub fn dump_current_cpu_vmpl1_slot_vmsa() {
+    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+    let Some(ext_vmpl1) = cpu_borrow.ext_vmpl1.as_ref() else {
+        kdebug!("VMPL1 slot VMSA dump skipped: no ext_vmpl1");
+        return ;
+    };
+
+    let vmsa = unsafe { &*(ext_vmpl1.vmsa.vaddr().0 as *const VMSA) };
+
+    kdebug!("VMPL1 slot VMSA dump before enter: ", vmsa);
+}
+
+#[verifier::external_body]
+pub fn log_vmpl1_app_binding() {
+    let (this_cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+    let cpu_borrow = this_cpu.borrow(Tracked(&cpu_perm.ptr_perm));
+    let cpu_id = cpu_borrow.cpu_id as u32;
+    let Some(ext_vmpl1) = cpu_borrow.ext_vmpl1.as_ref() else {
+        kdebug!("run_userapp binding: cpu=", cpu_id, " no ext_vmpl1");
+        return ;
+    };
+
+    let current_pid = ext_vmpl1.current_pid;
+    kdebug!(
+        "run_userapp slot: cpu=",
+        cpu_id,
+        " pid=",
+        current_pid,
+        " slot_dirty=",
+        ext_vmpl1.slot_dirty,
+        " pending_export_pid=",
+        ext_vmpl1.pending_export_pid,
+        " pending_export_target_cpu=",
+        ext_vmpl1.pending_export_target_cpu,
+        " pending_export_version=",
+        ext_vmpl1.pending_export_version,
+        " last_export_ack_version=",
+        ext_vmpl1.last_export_ack_version
+    );
+
+    if let Some(pid) = current_pid {
+        deko_rwlock_read_atomic_data! {
+            DEKO_SHADOW_APP_LIST,
+            app_list,
+            __,
+            {
+                if let Some(ref app_list) = app_list {
+                    if let Some(app) = app_list.get(&pid) {
+                        kdebug!(
+                            "run_userapp app: pid=",
+                            pid,
+                            " owner_cpu=",
+                            app.ext.owner_cpu,
+                            " loaded_cpu=",
+                            app.ext.loaded_cpu,
+                            " state_version=",
+                            app.ext.state_version,
+                            " migration_state=",
+                            app.ext.migration_state,
+                            " state=",
+                            app.ext.state
+                        );
+                    } else {
+                        kdebug!("run_userapp app: pid=", pid, " missing from shadow app list");
+                    }
+                } else {
+                    kdebug!("run_userapp app: shadow app list not initialized");
+                }
+            }
+        }
+    }
+}
+
+#[verifier::exec_allows_no_decreases_clause]
+pub fn log_nested_irq_state(marker: u64) {
+    let cur_vmpl1 = is_vmpl1();
+    let if_enabled = irq_enabled();
+
+    let (this_cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
+    let mut cpu_taken = this_cpu.take(Tracked(&mut cpu_perm.ptr_perm));
+
+    let vmpl0_count;
+    proof_with!(Tracked(&mut cpu_perm.irq_state_perm));
+    let tracked mut vmpl0_count_perm = cpu_perm.irq_state_perm.counts_perm.tracked_remove(0);
+    vmpl0_count = cpu_taken.nested_irq.counts[0].load(Tracked(&mut vmpl0_count_perm));
+    proof {
+        cpu_perm.irq_state_perm.counts_perm.tracked_insert(0, vmpl0_count_perm);
+    }
+    let vmpl0_state = cpu_taken.nested_irq.state.load(
+        Tracked(&mut cpu_perm.irq_state_perm.state_perm),
+    );
+
+    let mut vmpl1_present = false;
+    let mut vmpl1_count: i32 = -1;
+    let mut vmpl1_state = false;
+    if let Some(ext_vmpl1) = cpu_taken.ext_vmpl1.take() {
+        vmpl1_present = true;
+        let mut ext_vmpl1 = ext_vmpl1;
+        let tracked mut ext_vmpl1_perm = cpu_perm.ext_vmpl1_perm.tracked_take();
+
+        proof_with!(Tracked(&mut ext_vmpl1_perm.nested_irq_perm));
+        let tracked mut vmpl1_count_perm =
+            ext_vmpl1_perm.nested_irq_perm.counts_perm.tracked_remove(0);
+        vmpl1_count = ext_vmpl1.nested_irq.counts[0].load(Tracked(&mut vmpl1_count_perm));
+        proof {
+            ext_vmpl1_perm.nested_irq_perm.counts_perm.tracked_insert(0, vmpl1_count_perm);
+        }
+        vmpl1_state =
+            ext_vmpl1.nested_irq.state.load(Tracked(&mut ext_vmpl1_perm.nested_irq_perm.state_perm));
+
+        cpu_taken.ext_vmpl1.replace(ext_vmpl1);
+        proof {
+            cpu_perm.ext_vmpl1_perm = Some(ext_vmpl1_perm);
+        }
+    }
+    this_cpu.write(Tracked(&mut cpu_perm.ptr_perm), cpu_taken);
+
+    kinfo!(
+        "nested_irq_state",
+        "marker", marker => hex,
+        "cur_vmpl", if cur_vmpl1 { 1 } else { 0 },
+        "if", if if_enabled { 1 } else { 0 },
+        "vmpl0_count", vmpl0_count as i64,
+        "vmpl0_state", if vmpl0_state { 1 } else { 0 },
+        "vmpl1_present", if vmpl1_present { 1 } else { 0 },
+        "vmpl1_count", vmpl1_count as i64,
+        "vmpl1_state", if vmpl1_state { 1 } else { 0 }
+    );
+}
+
+#[verifier::external_body]
+pub fn dump_ghcb_shared_buffer(shared_buffer: &Array<PAtomicU8, GHCB_BUFFER_SIZE>) {
+    unsafe {
+        kinfo!("GHCB Shared Buffer Dump:", core::slice::from_raw_parts(
+            shared_buffer.index_as_ptr(0).0.addr() as *const u8,
+            GHCB_BUFFER_SIZE,
+        ) => hex);
+    }
+}
+
+pub fn dump_frame_allocator_usage() -> u64 {
+    DEKO_FRAME_ALLOCATOR_FULL.0.remaining()
+}
+
+#[verifier::external_body]
+pub fn err_dump_vmsa() {
+    let (cpu, Tracked(_cpu_perm)) = DekoCpuCtx::this_cpu();
+    let this_vmsa = VMSA::this_vmsa(cpu);
+    let vmsa = unsafe { &*(this_vmsa.addr() as *const VMSA) };
+    kerror!("VMSA dump:", vmsa);
+}
+
+#[verus_spec(
+    with
+        Tracked(perm): Tracked<&DekoRunQueuePermission>,
+    requires
+        queue.wf(),
+        queue.wf_with(*perm),
+)]
+pub fn log_runqueue_info(queue: &DekoRunQueue) {
+    kinfo!("Runqueue info:");
+    if let Some(current) = &queue.current {
+        kinfo!("  Current task: ", current.as_ref().data);
+    } else {
+        kinfo!("  Current task: None");
+    }
+    if let Some(idle) = &queue.idle {
+        kinfo!("  Idle task: ", idle.as_ref().data);
+    } else {
+        kinfo!("  Idle task: None");
+    }
+    if let Some(terminated) = &queue.terminated {
+        kinfo!("  Terminated task: ", terminated.as_ref().data);
+    } else {
+        kinfo!("  Terminated task: None");
+    }
+    if let Some(wake) = &queue.wake {
+        kinfo!("  Wake task: ", wake.as_ref().data);
+    } else {
+        kinfo!("  Wake task: None");
+    }
+
+    if let Some(head) = queue.run_list.head.as_ref() {
+        let mut ptr = head;
+        let len = queue.run_list.len();
+        kinfo!("  Runlist length: ", len);
+
+        for i in 0..len
+            invariant
+                0 <= i <= queue.run_list@.len(),
+                queue.run_list.wf(),
+                len == queue.run_list@.len() == queue.run_list.inner@.ptrs.len(),
+                i < queue.run_list@.len() ==> {
+                    &&& ptr == queue.run_list.inner@.ptrs[i as int]
+                    &&& queue.run_list.node_wf_at(i as nat)
+                },
+                queue.run_list.head.is_some(),
+        {
+            let v = ptr.borrow(
+                Tracked(queue.run_list.inner.borrow().perms.tracked_borrow(i as nat)),
+            );
+
+            kinfo!("  Runlist[", i, "]: ", v.value.as_ref().data);
+
+            if i + 1 < len {
+                ptr = v.next.as_ref().unwrap();
+            }
+        }
+    }
 }
 
 } // verus!

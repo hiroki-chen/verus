@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+workdir=$(mktemp -d /tmp/tar-smoke.XXXXXX)
+trap 'rm -rf "$workdir"' EXIT
+
+src_dir="${workdir}/src"
+dst_dir="${workdir}/dst"
+archive="${workdir}/bundle.tar"
+
+mkdir -p "${src_dir}/nested"
+printf 'alpha\nbeta\ngamma\n' > "${src_dir}/root.txt"
+dd if=/dev/zero bs=4096 count=8 status=none | tr '\0' 'A' > "${src_dir}/nested/blob.bin"
+printf 'delta\nepsilon\n' > "${src_dir}/nested/leaf.txt"
+
+tar -cf "${archive}" -C "${src_dir}" .
+mkdir -p "${dst_dir}"
+tar -xf "${archive}" -C "${dst_dir}"
+
+src_hash=$(find "${src_dir}" -type f -print0 | sort -z | xargs -0 sha256sum)
+dst_hash=$(find "${dst_dir}" -type f -print0 | sort -z | xargs -0 sha256sum | sed "s#${dst_dir}#${src_dir}#g")
+
+if [[ "${src_hash}" != "${dst_hash}" ]]; then
+    echo "tar_smoke: extracted tree mismatch" >&2
+    diff -u <(printf '%s\n' "${src_hash}") <(printf '%s\n' "${dst_hash}") || true
+    exit 1
+fi
+
+file_count=$(find "${dst_dir}" -type f | wc -l | tr -d ' ')
+echo "tar_smoke ok files=${file_count} archive=$(stat -c '%s' "${archive}")"

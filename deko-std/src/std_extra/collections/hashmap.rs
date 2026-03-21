@@ -147,6 +147,22 @@ impl<K: Eq + Hash, V, A: core::alloc::Allocator> HashMap<K, V, A> {
     pub fn get(&self, key: &K) -> Option<&V> {
         self.0.get(key)
     }
+
+    #[inline]
+    #[verifier::external_body]
+    #[verus_spec(
+        requires
+            forall|k: K|
+                #[trigger] self@.contains_key(k) ==> call_requires(f, (&k, &self@[k])),
+        ensures
+            forall|k: K|
+                #[trigger] self@.contains_key(k) ==> call_ensures(f, (&k, &self@[k]), ()),
+    )]
+    pub fn for_each<F: FnMut(&K, &V)>(&self, mut f: F) {
+        for (key, value) in self.0.iter() {
+            f(key, value);
+        }
+    }
 }
 
 } // verus!

@@ -67,13 +67,16 @@ int main(int argc, char *argv[]) {
       argc > 1 ? strtoull(argv[1], NULL, 0) : 20000ULL;
   uint64_t seed = argc > 2 ? strtoull(argv[2], NULL, 0)
                            : ((uint64_t)time(NULL) << 32) ^ (uint64_t)getpid();
+  const uint64_t log_every =
+      argc > 3 ? strtoull(argv[3], NULL, 0) : 1024ULL;
   uint64_t total_bytes = 0;
 
   if (seed == 0)
     seed = 1;
 
-  printf("malloc_churn rounds=%llu seed=%llu slots=%u\n",
-         (unsigned long long)rounds, (unsigned long long)seed, SLOT_COUNT);
+  printf("malloc_churn rounds=%llu seed=%llu slots=%u log_every=%llu\n",
+         (unsigned long long)rounds, (unsigned long long)seed, SLOT_COUNT,
+         (unsigned long long)log_every);
   fflush(stdout);
 
   for (uint64_t round = 0; round < rounds; round++) {
@@ -136,7 +139,7 @@ int main(int argc, char *argv[]) {
       total_bytes = total_bytes - old_len + len;
     }
 
-    if ((round & 0xffu) == 0) {
+    if (log_every != 0 && (round % log_every) == 0) {
       printf("malloc_churn round=%llu live_bytes=%llu sample_idx=%zu len=%zu\n",
              (unsigned long long)round, (unsigned long long)total_bytes, idx,
              slot->len);
