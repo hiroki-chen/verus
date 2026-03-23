@@ -24,3 +24,7 @@ source_syscalls := [
 sink_syscalls := [
     "write", "send", "sendto", "sendmsg",
 ]
+
+allowed_shared_libs := {
+    "libc.so.6": {"label": "internal"},
+}

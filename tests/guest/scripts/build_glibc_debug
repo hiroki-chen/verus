@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="${1:-2.39}"
+PREFIX="${2:-/opt/glibc-debug/${VERSION}}"
+WORK_ROOT="${3:-/tmp/glibc-build-${VERSION}}"
+SRC_TARBALL="glibc-${VERSION}.tar.xz"
+SRC_URL="https://ftp.gnu.org/gnu/libc/${SRC_TARBALL}"
+SRC_DIR="${WORK_ROOT}/glibc-${VERSION}"
+BUILD_DIR="${WORK_ROOT}/build"
+
+echo "build_glibc_debug version=${VERSION} prefix=${PREFIX} work_root=${WORK_ROOT}"
+
+mkdir -p "${WORK_ROOT}"
+cd "${WORK_ROOT}"
+
+if [[ ! -f "${SRC_TARBALL}" ]]; then
+  echo "downloading ${SRC_URL}"
+  curl -L --fail -o "${SRC_TARBALL}" "${SRC_URL}"
+fi
+
+if [[ ! -d "${SRC_DIR}" ]]; then
+  echo "extracting ${SRC_TARBALL}"
+  tar xf "${SRC_TARBALL}"
+fi
+
+echo "patching glibc source for current toolchain"
+perl -0777 -i -pe 's/\n\s*syslog \(INTERNALLOG, "syslog: unknown facility\/priority: %x", pri\);\n/\n      __syslog (INTERNALLOG, "syslog: unknown facility\/priority: %x", pri);\n/' \
+  "${SRC_DIR}/misc/syslog.c"
+
+rm -rf "${BUILD_DIR}"
+mkdir -p "${BUILD_DIR}"
+cd "${BUILD_DIR}"
+
+echo "configuring glibc"
+"${SRC_DIR}/configure" \
+  --prefix="${PREFIX}" \
+  --disable-werror \
+  CFLAGS='-O2 -g3'
+
+echo "building glibc"
+make -j"$(nproc)"
+
+echo "installing glibc into ${PREFIX}"
+make install
+
+echo
+echo "glibc debug build complete"
+echo "loader: ${PREFIX}/lib/ld-linux-x86-64.so.2"
+echo "libdir: ${PREFIX}/lib"
+echo
+echo "example:"
+echo "${PREFIX}/lib/ld-linux-x86-64.so.2 --library-path ${PREFIX}/lib /guest-tests/bin/localtime_smoke_nopie"

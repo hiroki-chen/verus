@@ -854,6 +854,8 @@ pub struct DekoUserAppExt {
     pub migration_state: DekoUserAppMigrationState,
     /// Saved VMPL1 VMSA snapshot for cross-core resume.
     pub saved_vmsa: Option<VMSA>,
+    /// Shadowed signal actions indexed by Linux signal number.
+    pub sigactions: [DekoSignalActionShadow; 65],
     /// The shared buffer between the application and the VMPL2 kernel.
     pub shared_buf: DekoSimpleOnceCell<VirtAddr>,
 }
@@ -861,6 +863,27 @@ pub struct DekoUserAppExt {
 const DEKO_MAX_OCCUPIED_REGIONS: usize = 256;
 
 const DEKO_MEASURE_BUF_SIZE: usize = PAGE_SIZE as usize + 48;
+
+#[derive(DekoDebug, Clone, Copy)]
+pub struct DekoSignalActionShadow {
+    pub installed: bool,
+    pub handler: u64,
+    pub flags: u64,
+    pub restorer: u64,
+    pub mask: u64,
+}
+
+impl DekoSignalActionShadow {
+    pub const fn empty() -> Self {
+        Self { installed: false, handler: 0, flags: 0, restorer: 0, mask: 0 }
+    }
+}
+
+impl WellFormed for DekoSignalActionShadow {
+    open spec fn wf(&self) -> bool {
+        true
+    }
+}
 
 impl WellFormed for DekoUserAppExt {
     open spec fn wf(&self) -> bool {
@@ -879,6 +902,7 @@ impl WellFormed for DekoUserAppExt {
         &&& self.state.wf()
         &&& self.migration_state.wf()
         &&& self.saved_vmsa is Some ==> self.saved_vmsa.unwrap().wf()
+        &&& forall|i: int| 0 <= i < 65 ==> #[trigger] self.sigactions[i].wf()
         &&& self.shared_buf.wf()
     }
 }
@@ -1070,6 +1094,7 @@ impl DekoUserApp {
                 state_version: 0,
                 migration_state: DekoUserAppMigrationState::Idle,
                 saved_vmsa: None,
+                sigactions: [DekoSignalActionShadow::empty();65],
                 shared_buf: DekoSimpleOnceCell::new(Ghost(())),
             },
         };

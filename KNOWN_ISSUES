@@ -1,0 +1,22 @@
+# `TZ` and segmentation fault
+
+The default `ld-linux.so` will, mysteriously, write to its own `RELRO` field that causes segfault when `TZ` is not set or `TZ=:/etc/localtime`.
+
+The code that triggers this error is:
+
+```c
+
+void
+__tzfile_read (const char *file, size_t extra, char **extrap)
+{
+  /* ... */
+ read_again:
+  if (__builtin_expect (__fread_unlocked ((void *) &tzhead, sizeof (tzhead), /* <- __fread_unlocked */
+					  1, f) != 1, 0)
+      || memcmp (tzhead.tzh_magic, TZ_MAGIC, sizeof (tzhead.tzh_magic)) != 0)
+    goto lose;
+
+}
+```
+
+The minimal reproducible case is `tests/guest/func/stdio_seek_read_smoke.c`.

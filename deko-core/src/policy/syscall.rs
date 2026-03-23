@@ -7,7 +7,7 @@ use deko_std::prelude::{PhysAddr, VirtAddr, VADDR_LOWER_MASK, VADDR_UPPER_MASK};
 use deko_std::std_extra::allocator::AllocatorWrapper;
 use deko_std::sync::DekoOnceCell;
 use deko_std::wf::WellFormed;
-use deko_std::{deko_rwlock_read_atomic_data, deko_rwlock_write_atomic_data};
+use deko_std::{deko_bitflags, deko_rwlock_read_atomic_data, deko_rwlock_write_atomic_data};
 use vstd::prelude::*;
 
 use crate::cpu::regs::write_fs_base;
@@ -17,13 +17,22 @@ use crate::guest::{
     DekoGuestServResult, DekoGuestServResultCode,
 };
 use crate::mm::frame_allocator::DekoAllocatorApi;
-use crate::policy::userapp::{is_docker_request, DEKO_SHADOW_APP_LIST, IS_DOCKER_RUNNING};
+use crate::policy::userapp::{
+    is_docker_request, DekoSignalActionShadow, DEKO_SHADOW_APP_LIST, IS_DOCKER_RUNNING,
+};
 // use crate::policy::userapp::copy_from_guest_user;
 use crate::policy::DekoSyscallBody;
 use crate::snp::rmpadjust;
 use crate::{die, kdebug, kerror, kinfo, ktrace, kwarn, vec};
 
 verus! {
+
+pub const ARCH_SET_GS: u64 = 0x1001;
+pub const ARCH_SET_FS: u64 = 0x1002;
+pub const ARCH_GET_FS: u64 = 0x1003;
+pub const ARCH_GET_GS: u64 = 0x1004;
+pub const ARCH_MAP_VDSO_X32: u64 = 0x3001;
+pub const ARCH_MAP_VDSO_32: u64 = 0x3002;
 
 type DekoSyscall = VirtAddr;
 
@@ -1243,9 +1252,31 @@ pub const MAP_PRIVATE: u64 = 0x02;
 
 pub const MAP_FIXED: u64 = 0x10;
 
+pub const MREMAP_MAYMOVE: u64 = 0x01;
+
+pub const MREMAP_FIXED: u64 = 0x02;
+
 pub const MAP_ANONYMOUS: u64 = 0x20;
 
 pub const MAP_TYPE_MASK: u64 = 0x0f;
+
+const DEKO_LINUX_SIGSET_SIZE: u64 = 8;
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct DekoLinuxSigAction {
+    handler: u64,
+    flags: u64,
+    restorer: u64,
+    mask: u64,
+}
+
+impl DekoLinuxSigAction {
+    #[inline(always)]
+    const fn empty() -> Self {
+        Self { handler: 0, flags: 0, restorer: 0, mask: 0 }
+    }
+}
 
 fn get_active_pid() -> DekoGuestServResult<u32> {
     let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
@@ -1293,6 +1324,67 @@ fn get_buf_va() -> DekoGuestServResult<VirtAddr> {
     }
 }
 
+#[verus_spec(r =>
+    ensures
+        r is Ok ==> {
+            &&& addr == 0 || 0 < addr
+            &&& addr == 0 || (addr as int) + (len as int) <= 0x8000_0000_0000int
+        }
+)]
+#[inline]
+fn validate_user_read_ptr(addr: u64, len: usize) -> DekoGuestServResult<()> {
+    if addr == 0 {
+        return Ok(());
+    }
+
+    let end = match addr.checked_add(len as u64) {
+        Some(v) => v,
+        None => {
+            kerror!("user pointer overflow: ", addr => hex);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        },
+    };
+    if addr >= 0x8000_0000_0000 || end > 0x8000_0000_0000 || end <= addr {
+        kerror!("invalid user pointer range: ", addr => hex, end => hex);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+
+    Ok(())
+}
+
+fn shadow_rt_sigaction(
+    pid: u32,
+    signum: u32,
+    action: DekoSignalActionShadow,
+) -> DekoGuestServResult<()> {
+    if signum == 0 || signum >= 65 {
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    let sig_idx = signum as usize;
+
+    deko_rwlock_write_atomic_data! {
+        DEKO_SHADOW_APP_LIST,
+        app_list,
+        __,
+        {
+            if let Some(mut app_list_inner) = app_list {
+                if !app_list_inner.contains_key(&pid) {
+                    app_list = Some(app_list_inner);
+                    Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))
+                } else {
+                    let mut app = app_list_inner.remove(&pid).unwrap();
+                    app.ext.sigactions[sig_idx] = action;
+                    app_list_inner.insert(pid, app);
+                    app_list = Some(app_list_inner);
+                    Ok(())
+                }
+            } else {
+                Err(DekoGuestServError::FatalError)
+            }
+        }
+    }
+}
+
 /// Moves the syscall arguments to the shared buffer for the VMPL2 handler to process this request.
 #[verus_spec(
 
@@ -1324,8 +1416,10 @@ pub fn analyze_and_prepare_syscall(syscall_body: &mut DekoSyscallBody) -> DekoGu
         SYS_read => { analyze_syscall_read(syscall_body)? },
         // Memory-related system calls
         SYS_mmap => { analyze_syscall_mmap(syscall_body)? },
-        SYS_mprotect => (),
-        SYS_mremap => (),
+        SYS_mprotect => { analyze_syscall_mprotect(syscall_body)? },
+        SYS_munmap => { analyze_syscall_munmap(syscall_body)? },
+        SYS_brk => { analyze_syscall_brk(syscall_body)? },
+        SYS_mremap => { analyze_syscall_mremap(syscall_body)? },
         SYS_write => { analyze_syscall_write(syscall_body)? },
         // Filesystem.
         // In June 2023, Google's security team reported that 60% of the exploits submitted
@@ -1376,11 +1470,18 @@ fn syscall_arch_prctl_ret(
 ) -> DekoGuestServResult<()> {
     syscall_body.rax = handled_syscall_body.rax;
 
+    if handled_syscall_body.rax != 0 {
+        return Ok(());
+    }
+
     let flag = syscall_body.rdi;
     match flag {
-        0x1002 => {
+        ARCH_SET_FS => {
             write_fs_base(syscall_body.rsi);
         },
+        // These requests are handled entirely by Linux and do not require
+        // any extra VMPL1 shadow-state updates on successful return.
+        ARCH_SET_GS | ARCH_GET_FS | ARCH_GET_GS | ARCH_MAP_VDSO_X32 | ARCH_MAP_VDSO_32 => {},
         _ => {
             kerror!("`arch_prctl` called with unknown flag: ", flag=>hex);
             return Err(DekoGuestServError::FatalError);
@@ -1388,6 +1489,55 @@ fn syscall_arch_prctl_ret(
     }
 
     Ok(())
+}
+
+fn syscall_rt_sigaction_ret(
+    syscall_body: &mut DekoSyscallBody,
+    handled_syscall_body: &DekoSyscallBody,
+) -> DekoGuestServResult<()> {
+    syscall_body.rax = handled_syscall_body.rax;
+    if handled_syscall_body.rax != 0 {
+        return Ok(());
+    }
+
+    let act_addr = syscall_body.rsi;
+    if act_addr == 0 {
+        return Ok(());
+    }
+    let signum = syscall_body.rdi;
+    if signum == 0 || signum >= 65 {
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    validate_user_read_ptr(act_addr, core::mem::size_of::<DekoLinuxSigAction>())?;
+    let guest_cr3 = syscall_body.cr3;
+    let guest_cr3_end = match guest_cr3.checked_add(PAGE_SIZE) {
+        Some(v) => v,
+        None => return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam)),
+    };
+    if guest_cr3 == 0 || guest_cr3 % PAGE_SIZE != 0 || guest_cr3_end >= 0x000f_ffff_ffff_f000u64 {
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+
+    let mut action = DekoLinuxSigAction::empty();
+    copy_from_user(
+        PhysAddr(guest_cr3),
+        VirtAddr(act_addr),
+        deko_std::ptr::addr_of_ref(&action),
+        core::mem::size_of::<DekoLinuxSigAction>(),
+    )?;
+    let pid = get_active_pid()?;
+
+    shadow_rt_sigaction(
+        pid,
+        signum as u32,
+        DekoSignalActionShadow {
+            installed: true,
+            handler: action.handler,
+            flags: action.flags,
+            restorer: action.restorer,
+            mask: action.mask,
+        },
+    )
 }
 
 fn syscall_write_ret(
@@ -1523,6 +1673,189 @@ fn analyze_syscall_mmap(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResu
     }
 
     syscall_body.rsi = aligned_length;
+
+    Ok(())
+}
+
+#[verus_spec()]
+fn analyze_syscall_mprotect(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResult<()> {
+    let addr = syscall_body.rdi;
+    let length = syscall_body.rsi;
+    let prot = syscall_body.rdx;
+
+    if core::hint::unlikely(length == 0) {
+        kerror!("mprotect length is 0");
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    if addr % PAGE_SIZE != 0 {
+        kerror!("mprotect addr is not page aligned: ", addr=>hex);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    let aligned_length = match length.checked_add(PAGE_SIZE - 1) {
+        Some(l) => l & !(PAGE_SIZE as u64 - 1),
+        None => {
+            kerror!("mprotect length is too large: ", length=>hex);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        },
+    };
+    let end_addr = match addr.checked_add(aligned_length) {
+        Some(val) => val,
+        None => {
+            kerror!("mprotect addr + length overflow");
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        },
+    };
+    if end_addr > VADDR_LOWER_MASK {
+        kerror!("mprotect requested range out of user space bounds: ", end_addr=>hex);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    if (prot & PROT_WRITE != 0) && (prot & PROT_EXEC != 0) {
+        kerror!("mprotect W^X violation: prot=", prot=>hex);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+
+    syscall_body.rsi = aligned_length;
+    Ok(())
+}
+
+#[verus_spec()]
+fn analyze_syscall_munmap(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResult<()> {
+    let addr = syscall_body.rdi;
+    let length = syscall_body.rsi;
+
+    if core::hint::unlikely(length == 0) {
+        kerror!("munmap length is 0");
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    if addr % PAGE_SIZE != 0 {
+        kerror!("munmap addr is not page aligned: ", addr=>hex);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    let aligned_length = match length.checked_add(PAGE_SIZE - 1) {
+        Some(l) => l & !(PAGE_SIZE as u64 - 1),
+        None => {
+            kerror!("munmap length is too large: ", length=>hex);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        },
+    };
+    let end_addr = match addr.checked_add(aligned_length) {
+        Some(val) => val,
+        None => {
+            kerror!("munmap addr + length overflow");
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        },
+    };
+    if end_addr > VADDR_LOWER_MASK {
+        kerror!("munmap requested range out of user space bounds: ", end_addr=>hex);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+
+    syscall_body.rsi = aligned_length;
+    Ok(())
+}
+
+#[verus_spec()]
+fn analyze_syscall_brk(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResult<()> {
+    let addr = syscall_body.rdi;
+
+    if addr != 0 && addr >= VADDR_LOWER_MASK {
+        kerror!("brk requested address out of user space bounds: ", addr=>hex);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+
+    Ok(())
+}
+
+#[verus_spec()]
+fn analyze_syscall_mremap(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResult<()> {
+    let old_addr = syscall_body.rdi;
+    let old_length = syscall_body.rsi;
+    let new_length = syscall_body.rdx;
+    let flags = syscall_body.r10;
+
+    if core::hint::unlikely(old_length == 0) {
+        kerror!("mremap old_length is 0");
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    if core::hint::unlikely(new_length == 0) {
+        kerror!("mremap new_length is 0");
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    if old_addr % PAGE_SIZE != 0 {
+        kerror!("mremap old_addr is not page aligned: ", old_addr=>hex);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    let aligned_old_length = match old_length.checked_add(PAGE_SIZE - 1) {
+        Some(l) => l & !(PAGE_SIZE as u64 - 1),
+        None => {
+            kerror!("mremap old_length is too large: ", old_length=>hex);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        },
+    };
+    let aligned_new_length = match new_length.checked_add(PAGE_SIZE - 1) {
+        Some(l) => l & !(PAGE_SIZE as u64 - 1),
+        None => {
+            kerror!("mremap new_length is too large: ", new_length=>hex);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        },
+    };
+    let old_end = match old_addr.checked_add(aligned_old_length) {
+        Some(val) => val,
+        None => {
+            kerror!("mremap old_addr + old_length overflow");
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        },
+    };
+    if old_end > VADDR_LOWER_MASK {
+        kerror!("mremap old range out of user space bounds: ", old_end=>hex);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    if flags & MREMAP_FIXED != 0 {
+        let new_addr = syscall_body.r8;
+        if new_addr % PAGE_SIZE != 0 {
+            kerror!("mremap new_addr is not page aligned: ", new_addr=>hex);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        }
+        let new_end = match new_addr.checked_add(aligned_new_length) {
+            Some(val) => val,
+            None => {
+                kerror!("mremap new_addr + new_length overflow");
+                return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+            },
+        };
+        if new_end > VADDR_LOWER_MASK {
+            kerror!("mremap new range out of user space bounds: ", new_end=>hex);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        }
+        if flags & MREMAP_MAYMOVE == 0 {
+            kerror!("mremap uses MREMAP_FIXED without MREMAP_MAYMOVE: flags=", flags=>hex);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        }
+    }
+
+    syscall_body.rsi = aligned_old_length;
+    syscall_body.rdx = aligned_new_length;
+    Ok(())
+}
+
+#[verus_spec()]
+fn analyze_syscall_rt_sigaction(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResult<()> {
+    let signum = syscall_body.rdi;
+    let act = syscall_body.rsi;
+    let oldact = syscall_body.rdx;
+    let sigsetsize = syscall_body.r10;
+
+    if signum == 0 || signum >= 65 {
+        kerror!("invalid rt_sigaction signum: ", signum);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    if sigsetsize != DEKO_LINUX_SIGSET_SIZE {
+        kerror!("unexpected rt_sigaction sigsetsize: ", sigsetsize);
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+
+    validate_user_read_ptr(act, core::mem::size_of::<DekoLinuxSigAction>())?;
+    validate_user_read_ptr(oldact, core::mem::size_of::<DekoLinuxSigAction>())?;
 
     Ok(())
 }

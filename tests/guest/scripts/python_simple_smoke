@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+python3 - <<'PY'
+import hashlib
+import json
+import os
+import tempfile
+
+payload = {
+    "name": "deko-python-smoke",
+    "values": [i * 3 + 1 for i in range(32)],
+}
+
+encoded = json.dumps(payload, sort_keys=True).encode()
+
+fd, path = tempfile.mkstemp(prefix="deko-py-", suffix=".json")
+os.close(fd)
+
+try:
+    with open(path, "wb") as f:
+        f.write(encoded)
+
+    with open(path, "rb") as f:
+        data = f.read()
+
+    decoded = json.loads(data.decode())
+    digest = hashlib.sha256(data).hexdigest()
+    total = sum(decoded["values"])
+    print(
+        f"python_simple_smoke ok bytes={len(data)} total={total} sha256={digest[:16]}"
+    )
+finally:
+    os.unlink(path)
+PY
