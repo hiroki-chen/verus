@@ -207,7 +207,9 @@ pub const DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER: u32 = 0x7;
 
 pub const DEKO_SERVICE_EXTEND_LOAD_POLICY: u32 = 0x8;
 
-/// Request body for guest trampoline setup.
+/// Represents a request structure for LSTAR MSR write operations.
+/// The guest must place this request at the given physical address
+/// before invoking the LSTAR write service.
 #[repr(C, align(8))]
 #[derive(Copy, Clone, DekoDebug)]
 pub struct DekoGuestTrampolineSetupReq {

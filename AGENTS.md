@@ -21,22 +21,6 @@ This project is a secure monitor running at VMPL0 for SEV-SNP where the guest ke
 - After every code modification, run `cargo pretty`.
 - The Linux guest kernel we are using can be found inside `~/.config/qemu.snp.toml`.
 
-## Required Command Selection Policy
-
-- For build tasks, first check `.cargo/config.toml`, then use the most specific matching alias.
-- Unless the user explicitly asks for a release build, a non-SNP target, or a different workflow, use `cargo build-deko-snp-debug`.
-- Do not substitute generic commands for project aliases. For example, do not replace `cargo build-deko-snp-debug` with `cargo build`.
-- If an alias wraps required environment setup, target selection, linker configuration, or bootstrapping, you must use that alias rather than reconstructing the command manually.
-- When reporting what you ran, name the exact alias used.
-
-## Default Development Workflow
-
-- Inspect `.cargo/config.toml`.
-- Use the repository alias for the task instead of raw Cargo commands.
-- For ordinary compile checks in this repository, default to `cargo build-deko-snp-debug`.
-- After edits, run `cargo pretty`.
-- Then run the smallest relevant verification, check, or test command for the changed component, again preferring repository aliases.
-
 ## Coding and Verification Standards
 
 - Code must satisfy both idiomatic Rust conventions and Verus verification requirements.

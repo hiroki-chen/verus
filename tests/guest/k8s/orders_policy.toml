@@ -1,0 +1,80 @@
+[meta]
+name = "orders_domain_policy"
+package = "orders_domain_policy"
+version = "0.1.0"
+
+[domain]
+# The guest-side domain resolver can map this selector to one internal DomainId.
+selector_label = "data-storage"
+selector_value = "orders"
+
+[lattice]
+levels = ["public", "orders_internal", "orders_db"]
+relations = [["public", "orders_internal"], ["orders_internal", "orders_db"]]
+bot = "public"
+top = "orders_db"
+
+[[resources]]
+type = "network"
+name = "ORDERS_PUBLIC_API"
+endpoint = "0.0.0.0:8080"
+label = "public"
+
+[[resources]]
+type = "network"
+name = "ORDERS_DB"
+endpoint = "orders-db.default.svc.cluster.local:5432"
+label = "orders_db"
+
+[[resources]]
+type = "function"
+name = "orders-ingest"
+measurement = "sha256:0x11111111111111111111111111111111"
+initial_label = "public"
+
+[[resources]]
+type = "function"
+name = "orders-transform"
+measurement = "sha256:0x22222222222222222222222222222222"
+initial_label = "orders_internal"
+
+[[resources]]
+type = "function"
+name = "orders-writer"
+measurement = "sha256:0x33333333333333333333333333333333"
+initial_label = "orders_internal"
+
+[[authorities]]
+name = "orders_writer_db_release"
+holder = "orders-writer"
+kind = "declassify"
+from = "orders_db"
+to = "orders_internal"
+sources = ["ORDERS_DB"]
+sinks = ["ORDERS_PUBLIC_API"]
+
+[[interactions]]
+subject = "orders-ingest"
+action = "recv"
+source = "ORDERS_PUBLIC_API"
+from = "public"
+to = "orders_internal"
+
+[[interactions]]
+subject = "orders-writer"
+action = "recv"
+source = "ORDERS_DB"
+from = "orders_internal"
+to = "orders_db"
+
+[[interactions]]
+subject = "orders-writer"
+action = "release"
+source = "ORDERS_DB"
+sink = "ORDERS_PUBLIC_API"
+authority = "orders_writer_db_release"
+from = "orders_db"
+to = "orders_internal"
+
+[defaults]
+unmatched_action = "deny"
