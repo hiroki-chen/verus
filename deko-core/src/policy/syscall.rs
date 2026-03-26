@@ -1409,8 +1409,9 @@ pub fn analyze_and_prepare_syscall(syscall_body: &mut DekoSyscallBody) -> DekoGu
     if core::hint::unlikely(syscall_body.rax as usize >= SYS_CALL_NAME.len()) {
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
-    kinfo!("Syscall invoked: ", SYS_CALL_NAME[syscall_body.rax as usize]);
-    kinfo!("Syscall body", syscall_body);
+
+    kdebug!("Syscall invoked: ", SYS_CALL_NAME[syscall_body.rax as usize]);
+    kdebug!("Syscall body", syscall_body);
 
     match syscall_body.rax {
         SYS_read => { analyze_syscall_read(syscall_body)? },
@@ -1421,6 +1422,8 @@ pub fn analyze_and_prepare_syscall(syscall_body: &mut DekoSyscallBody) -> DekoGu
         SYS_brk => { analyze_syscall_brk(syscall_body)? },
         SYS_mremap => { analyze_syscall_mremap(syscall_body)? },
         SYS_write => { analyze_syscall_write(syscall_body)? },
+        // Thread/Process related system calls
+        SYS_clone3 | SYS_clone | SYS_fork | SYS_vfork => {},
         // Filesystem.
         // In June 2023, Google's security team reported that 60% of the exploits submitted
         // to their bug bounty program in 2022 were exploits of io_uring vulnerabilities.
@@ -1644,7 +1647,7 @@ fn analyze_syscall_mmap(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResu
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
 
-    if (prot & PROT_WRITE != 0) && (prot & PROT_EXEC != 0) {
+    if core::hint::unlikely((prot & PROT_WRITE != 0) && (prot & PROT_EXEC != 0)) {
         kerror!("mmap W^X violation: prot=", prot=>hex);
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
@@ -1668,8 +1671,9 @@ fn analyze_syscall_mmap(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResu
     // First IFC policy for mmap: disallow writable shared mappings because
     // they create an immediate shared mutable channel with the untrusted side.
     if is_shared && (prot & PROT_WRITE != 0) {
-        kerror!("shared writable mmap is forbidden by IFC policy");
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        // kerror!("shared writable mmap is forbidden by IFC policy");
+        kwarn!("shared writable mmap is forbidden by IFC policy, but allowing it for compatibility for now");
+        // return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
 
     syscall_body.rsi = aligned_length;
@@ -1871,6 +1875,11 @@ fn analyze_syscall_exit(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResu
 
 #[verus_spec()]
 fn analyze_syscall_read(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResult<()> {
+    Ok(())
+}
+
+#[verus_spec()]
+fn analyze_syscall_clone(syscall_body: &mut DekoSyscallBody) -> DekoGuestServResult<()> {
     Ok(())
 }
 

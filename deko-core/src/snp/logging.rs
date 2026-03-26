@@ -197,4 +197,7 @@ pub fn init_ghcb_logging(serial_port: u16)
 
 } // verus!
 #[cfg(not(feature = "logging"))]
-verus! {} // verus!
+verus! {
+
+
+} // verus!

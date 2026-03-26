@@ -46,6 +46,8 @@ pub const GIT_HASH: &'static str = env!("DEKO_GIT_HASH");
 
 pub const BUILD_TIME: &'static str = env!("DEKO_BUILD_TIME");
 
+pub const BUILD_PROFILE: &'static str = env!("DEKO_BUILD_PROFILE");
+
 // Log level information - populated by build.rs
 pub const LOG_LEVEL: &'static str = env!("DEKO_LOG_LEVEL");
 
@@ -218,6 +220,9 @@ pub fn print_banner() {
     print_str("Deko Secure Monitor - Verified System Monitor\n");
     print_str("Built on: ");
     print_str(BUILD_TIME);
+    print_str("\n");
+    print_str("Build profile: ");
+    print_str(BUILD_PROFILE);
     print_str("\n");
     print_str("Git commit: ");
     print_str(GIT_HASH);

@@ -43,8 +43,6 @@ deko-macros = { path = "deko-macros" }
 deko-std = { path = "deko-std", default-features = false }
 elf = { git = "https://github.com/hiroki-chen/elf-rs.git" }
 
-regorus = { version = "*", default-features = false, features = ["opa-no-std"] }
-
 # the profile used for cargo build
 [profile.dev]
 panic = "abort"    # disable stack unwinding on panic

@@ -33,6 +33,10 @@ fn main() {
         .map(|epoch| format_timestamp_from_epoch(epoch))
         .unwrap_or_else(|| format_timestamp_now());
 
+    // Capture cargo build profile so the runtime banner can distinguish
+    // between debug and release artifacts.
+    let build_profile = std::env::var("PROFILE").unwrap_or_else(|_| "unknown".to_string());
+
     // Capture log level from environment variable
     let log_level =
         std::env::var("DEKO_LOG_LEVEL").unwrap_or_else(|_| "INFO".to_string()).to_uppercase();
@@ -59,6 +63,7 @@ fn main() {
 
     println!("cargo:rustc-env=DEKO_GIT_HASH={}", git_hash);
     println!("cargo:rustc-env=DEKO_BUILD_TIME={}", build_time);
+    println!("cargo:rustc-env=DEKO_BUILD_PROFILE={}", build_profile);
     println!("cargo:rustc-env=DEKO_LOG_LEVEL={}", log_level);
     println!("cargo:rustc-env=DEKO_LOG_LEVEL_NUM={}", log_level_num);
 

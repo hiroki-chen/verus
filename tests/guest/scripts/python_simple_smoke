@@ -1,8 +1,5 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 
-set -euo pipefail
-
-python3 - <<'PY'
 import hashlib
 import json
 import os
@@ -33,4 +30,3 @@ try:
     )
 finally:
     os.unlink(path)
-PY

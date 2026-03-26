@@ -7,6 +7,7 @@ BIN_DIR=${BIN_DIR:-/guest-tests/bin}
 "${BIN_DIR}/sqlite_smoke"
 "${BIN_DIR}/jq_smoke"
 "${BIN_DIR}/python_smoke"
+"${BIN_DIR}/python_sqlite_json_smoke"
 "${BIN_DIR}/tar_smoke"
 
 echo "nontrivial_smoke ok"

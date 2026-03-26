@@ -2,6 +2,7 @@
   # and replace the placeholder paths with your local environment.
 memory = "64G"
 debug = false
+igvm_path = "/absolute/path/to/cage-sev/target/x86_64-snp-deko/release/igvm.igvm"
 extra_config = [
   "-cpu",
   "EPYC-v5",

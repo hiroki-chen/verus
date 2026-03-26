@@ -14,6 +14,9 @@ INVOKED_RE = re.compile(
 BODY_RE = re.compile(
     r"^\[INFO\]\s+\[CPU:(?P<cpu>\d+)\]\s+\[VMPL:(?P<vmpl>\d+)\]\s+.*Syscall body DekoSyscallBody \{$"
 )
+RET_BODY_RE = re.compile(
+    r"^\[INFO\]\s+\[CPU:(?P<cpu>\d+)\]\s+\[VMPL:(?P<vmpl>\d+)\]\s+.*ifc: after sysret_epilogue: DekoSyscallBody \{$"
+)
 FIELD_RE = re.compile(r"^\s*(?P<key>[a-z0-9_]+):\s+0x(?P<value>[0-9A-Fa-f]+),?\s*$")
 
 
@@ -38,35 +41,49 @@ def parse_body(lines: list[str], start: int) -> tuple[dict[str, str], int]:
 def extract_records(lines: list[str]) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     idx = 0
+    pending_idx: int | None = None
     while idx < len(lines):
         line = lines[idx]
         invoked = INVOKED_RE.match(line)
+        if invoked:
+            record: dict[str, object] = {
+                "cpu": int(invoked.group("cpu")),
+                "vmpl": int(invoked.group("vmpl")),
+                "syscall": invoked.group("name"),
+            }
+
+            if idx + 1 < len(lines):
+                body = BODY_RE.match(lines[idx + 1])
+                if body:
+                    fields, next_idx = parse_body(lines, idx + 2)
+                    record["body"] = fields
+                    idx = next_idx
+                    records.append(record)
+                    pending_idx = len(records) - 1
+                    continue
+
+            idx += 1
+            records.append(record)
+            pending_idx = len(records) - 1
+            continue
+
+        ret_body = RET_BODY_RE.match(line)
+        if ret_body and pending_idx is not None:
+            fields, next_idx = parse_body(lines, idx + 1)
+            records[pending_idx]["ret"] = fields
+            idx = next_idx
+            pending_idx = None
+            continue
+
         if not invoked:
             idx += 1
             continue
-
-        record: dict[str, object] = {
-            "cpu": int(invoked.group("cpu")),
-            "vmpl": int(invoked.group("vmpl")),
-            "syscall": invoked.group("name"),
-        }
-
-        if idx + 1 < len(lines):
-            body = BODY_RE.match(lines[idx + 1])
-            if body:
-                fields, next_idx = parse_body(lines, idx + 2)
-                record["body"] = fields
-                idx = next_idx
-                records.append(record)
-                continue
-
-        idx += 1
-        records.append(record)
     return records
 
 
 def render_plain(record: dict[str, object]) -> str:
     body = record.get("body")
+    ret = record.get("ret")
     if not isinstance(body, dict):
         return f"cpu={record['cpu']} vmpl={record['vmpl']} syscall={record['syscall']}"
 
@@ -78,6 +95,15 @@ def render_plain(record: dict[str, object]) -> str:
     for key in sorted(body.keys()):
         if key not in ordered_keys:
             rendered.append(f"{key}={body[key]}")
+    if isinstance(ret, dict):
+        if "rax" in ret:
+            rendered.append(f"ret_rax={ret['rax']}")
+        for key in ordered_keys:
+            if key != "rax" and key in ret:
+                rendered.append(f"ret_{key}={ret[key]}")
+        for key in sorted(ret.keys()):
+            if key not in ordered_keys:
+                rendered.append(f"ret_{key}={ret[key]}")
     return " ".join(rendered)
 
 

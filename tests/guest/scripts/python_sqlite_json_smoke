@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+
+import hashlib
+import json
+import pathlib
+import sqlite3
+import tempfile
+
+
+def main() -> None:
+    with tempfile.TemporaryDirectory(prefix="deko-py-sqlite-json-") as tmp:
+        root = pathlib.Path(tmp)
+        db_path = root / "smoke.db"
+        json_path = root / "summary.json"
+
+        rows = [(f"cat-{i % 7}", (i * 17 + 3) % 101) for i in range(512)]
+
+        con = sqlite3.connect(db_path)
+        try:
+            con.execute(
+                "CREATE TABLE events(id INTEGER PRIMARY KEY, category TEXT NOT NULL, value INTEGER NOT NULL)"
+            )
+            con.executemany(
+                "INSERT INTO events(category, value) VALUES(?, ?)",
+                rows,
+            )
+            con.commit()
+
+            summary_rows = list(
+                con.execute(
+                    """
+                    SELECT category, COUNT(*), SUM(value)
+                    FROM events
+                    GROUP BY category
+                    ORDER BY category
+                    """
+                )
+            )
+        finally:
+            con.close()
+
+        payload = {
+            "row_count": len(rows),
+            "total": sum(value for _, value in rows),
+            "categories": [
+                {"name": name, "count": count, "total": total}
+                for name, count, total in summary_rows
+            ],
+        }
+
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        digest = hashlib.sha256(encoded).hexdigest()[:16]
+
+        with open(json_path, "wb") as f:
+            f.write(encoded)
+
+        with open(json_path, "rb") as f:
+            decoded = json.loads(f.read().decode())
+
+        if decoded["row_count"] != 512:
+            raise SystemExit(f"python_sqlite_json_smoke: bad row_count {decoded['row_count']}")
+        if decoded["total"] != sum(value for _, value in rows):
+            raise SystemExit(f"python_sqlite_json_smoke: bad total {decoded['total']}")
+        if len(decoded["categories"]) != 7:
+            raise SystemExit(
+                f"python_sqlite_json_smoke: bad category count {len(decoded['categories'])}"
+            )
+
+        print(
+            "python_sqlite_json_smoke ok "
+            f"rows={decoded['row_count']} total={decoded['total']} digest={digest}"
+        )
+
+
+main()

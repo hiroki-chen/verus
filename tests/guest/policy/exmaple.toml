@@ -1,0 +1,47 @@
+[meta]
+name = "example_policy"
+package = "example_policy"
+version = "0.1.0"
+
+[lattice]
+levels = ["public", "app_internal", "secret"]
+# Define the partial order of the security levels. In this case, "public" <= "app_internal" <= "secret" which is
+# by accident a total order, but the policy can also support more complex partial orders.
+relations = [["public", "app_internal"], ["app_internal", "secret"]] 
+bot = "public" # The untrusted kernel will be automatically assigned to the bottom level, which is "public" in this case.
+top = "secret"
+
+[[resources]]
+type = "network"
+name = "SECRET_STORE_ENDPOINT"
+endpoint = "10.0.0.1:5432"
+label = "secret"
+
+[[resources]]
+type = "function"
+name = "foo"
+measurement = "sha256:0xdeadbeefbeefdeadcoffee"
+label = "app_internal"
+
+[[resources]]
+type = "function"
+name = "bar"
+measurement = "sha256:0xdeadcoffee1234567890"
+label = "app_internal"
+declassifier = true
+
+[[interactions]]
+subject = "foo"
+action = "recv"
+source = "SECRET_STORE_ENDPOINT"
+transition = { type = "UPGRADE", from = "public", to = "secret" }
+
+[[interactions]]
+subject = "foo"
+action = "send"
+source = "SECRET_STORE_ENDPOINT"
+transition = { type = "DOWNGRADE", from = "secret", to = "public", declassifier = "bar" }
+
+[defaults]
+# While-list based. Any other interaction that is not explicitly allowed in the policy will be denied by default.
+unmatched_action = "deny"

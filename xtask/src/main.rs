@@ -25,8 +25,8 @@ fn main() -> Result<()> {
     let builder = Builder::new(target_arch.to_string());
 
     match cli.command {
-        Commands::CreateBootable { ovmf_path, stage2_path, stage1_path } => {
-            builder.create_bootable(ovmf_path, stage2_path, stage1_path)
+        Commands::CreateBootable { ovmf_path, stage2_path, stage1_path, release } => {
+            builder.create_bootable(ovmf_path, stage2_path, stage1_path, release)
         }
         Commands::Qemu { config_path } => builder.qemu(config_path),
         Commands::StressTest { iter, timeout, config_path } => {

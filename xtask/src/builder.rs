@@ -525,10 +525,11 @@ impl Builder {
         ovmf_path: Option<PathBuf>,
         stage2_path: Option<PathBuf>,
         stage1_path: Option<PathBuf>,
+        release: bool,
     ) -> Result<()> {
         match self.config.target_arch.as_str() {
-            "snp" => self.create_bootable_snp(ovmf_path, stage2_path),
-            "tdx" => self.create_bootable_tdx(stage2_path, stage1_path),
+            "snp" => self.create_bootable_snp(ovmf_path, stage2_path, release),
+            "tdx" => self.create_bootable_tdx(stage2_path, stage1_path, release),
             _ => bail!("Unsupported target architecture: {}", self.config.target_arch),
         }
     }
@@ -537,13 +538,14 @@ impl Builder {
         &self,
         deko_monitor_path: Option<PathBuf>,
         stage1_path: Option<PathBuf>,
+        release: bool,
     ) -> Result<()> {
-        self.build(BuildTarget::All, true)?;
+        self.build(BuildTarget::All, release)?;
 
-        let loader_path = stage1_path.unwrap_or_else(|| self.config.stage1_path(true));
+        let loader_path = stage1_path.unwrap_or_else(|| self.config.stage1_path(release));
         let deko_monitor_path =
-            deko_monitor_path.unwrap_or_else(|| self.config.deko_monitor_path(true));
-        let boot_img_path = self.config.boot_image_path();
+            deko_monitor_path.unwrap_or_else(|| self.config.deko_monitor_path(release));
+        let boot_img_path = self.config.boot_image_path(release);
 
         println!("✓ Creating bootable image with:");
         println!("  Loader Path: {:?}", loader_path);
@@ -585,11 +587,12 @@ impl Builder {
         &self,
         ovmf_path: Option<PathBuf>,
         stage2_path: Option<PathBuf>,
+        release: bool,
     ) -> Result<()> {
-        let stage2_path = stage2_path.unwrap_or_else(|| self.config.stage2_binary_path(true));
-        let boot_img_path = self.config.igvm_path();
+        let stage2_path = stage2_path.unwrap_or_else(|| self.config.stage2_binary_path(release));
+        let boot_img_path = self.config.igvm_path(release);
         let ovmf_path = ovmf_path.unwrap_or_else(ProjectConfig::default_ovmf_path);
-        let kernel_path = self.config.deko_monitor_path(false);
+        let kernel_path = self.config.deko_monitor_path(release);
 
         println!("✓ Creating IGVM image with:");
         println!("  Stage2 Path: {:?}", stage2_path);

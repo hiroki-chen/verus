@@ -27,7 +27,8 @@ aes-gcm = { version = "0.10.3", default-features = false, features = [
 sha3 = { version = "0.10.8", default-features = false }
 uuid = { version = "1.20.0", default-features = false }
 rand_core = { version = "0.10.0", default-features = false }
-regorus = { workspace = true }
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+toml = {version = "1.1.0-spec-1.1.0", default-features = false, features = ["serde", "parse"] }
 
 [build-dependencies]
 chrono = { version = "0.4", features = ["std"] }

@@ -50,9 +50,13 @@ impl ProjectConfig {
         self.target_dir(release).join("deko.elf")
     }
 
-    pub(crate) fn boot_image_path(&self) -> PathBuf { self.target_dir(false).join("boot.img") }
+    pub(crate) fn boot_image_path(&self, release: bool) -> PathBuf {
+        self.target_dir(release).join("boot.img")
+    }
 
-    pub(crate) fn igvm_path(&self) -> PathBuf { self.target_dir(false).join("igvm.igvm") }
+    pub(crate) fn igvm_path(&self, release: bool) -> PathBuf {
+        self.target_dir(release).join("igvm.igvm")
+    }
 
     pub(crate) fn custom_target_name(&self) -> &str { &self.target_triple }
 
@@ -123,7 +127,7 @@ impl Default for FinalQemuConfig {
             enable_graphics: false,
             drive: vec![],
             debug: false,
-            igvm_path: config.igvm_path().display().to_string(),
+            igvm_path: config.igvm_path(false).display().to_string(),
             bios_path: ProjectConfig::default_ovmf_path().display().to_string(),
             extra_config: vec![],
         }

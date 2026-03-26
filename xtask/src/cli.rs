@@ -35,6 +35,8 @@ pub(crate) enum Commands {
         stage2_path: Option<PathBuf>,
         #[arg(short, long)]
         stage1_path: Option<PathBuf>,
+        #[arg(short, long, help = "Create a bootable image from release artifacts")]
+        release: bool,
     },
     Qemu {
         #[arg(short, long)]

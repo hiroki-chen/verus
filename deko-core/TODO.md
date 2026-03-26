@@ -38,6 +38,42 @@ This document tracks all TODO items and assumptions found in the deko-core crate
 
 ## Medium Priority Items
 
+### Policy Engine / Domains (`src/policy/*`)
+- [ ] **High**: Add an explicit policy-loading SVSM protocol
+  - Goal: inject policy bytes into the guest through a dedicated extend service instead of overloading existing launch/map paths
+  - Suggested entry: add a new protocol alongside `DEKO_SERVICE_EXTEND_REPORT_APP`, `DEKO_SERVICE_EXTEND_LAUNCH_APP`, and `DEKO_SERVICE_EXTEND_MAP_IFC`
+  - Output: `policy bytes -> PolicyConfigToml -> FiniteLattice / PolicyDomain`
+
+- [ ] **High**: Refactor `DekoPolicyEngine` into a multi-domain registry
+  - Goal: manage multiple `PolicyDomain`s instead of a single lattice
+  - Suggested mappings:
+    - `domain_id -> PolicyDomain`
+    - `app identity -> domain_id`
+  - Domain should be the main abstraction, with lattice as one component inside a domain
+
+- [ ] **High**: Associate loaded policy with namespace / workspace metadata
+  - Goal: bind policy domains to some cloud-native selector such as namespace, workspace, or similar tenant identifier
+  - Keep this mapping separate from lattice semantics
+  - Suggested shape: `DomainSelector -> DomainId`
+
+- [ ] **High**: Bind apps to domains during app registration
+  - Goal: determine domain ownership at `report_app` time, not lazily at first syscall
+  - Suggested hook: `handle_deko_service_report_app`
+  - Result: `pid/tgid/measurement/... -> DomainId`
+
+- [ ] **High**: Require launch-time domain resolution
+  - Goal: refuse app launch if the app has not been bound to a policy domain
+  - Suggested hook: `handle_deko_service_launch_app`
+  - This keeps launch semantics simple and makes later IFC enforcement deterministic
+
+- [ ] **High**: Make cross-domain communication forbidden by default
+  - Goal: any interaction with `src_domain != dst_domain` is denied unless an explicit cross-domain policy allows it
+  - Treat this as a top-level policy-engine rule rather than scattering it across individual syscall handlers
+
+- [ ] **Medium**: Separate trusted parsing from verified policy compilation more cleanly
+  - Current state: parser is a trusted boundary; `FiniteLattice::compile` is verified
+  - Next step: shrink the trusted parser boundary to TOML decoding only, and keep raw-to-internal conversion as small and auditable as possible
+
 ### Memory Management
 - [ ] **Frame Allocator** (`src/mm/frame_allocator.rs`):
   - Implement proper return value with provenance tracking

@@ -1,3 +1,6 @@
 use vstd::prelude::*;
 
-verus! {} // verus!
+verus! {
+
+
+} // verus!

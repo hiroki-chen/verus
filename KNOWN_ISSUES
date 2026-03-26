@@ -1,22 +1,103 @@
-# `TZ` and segmentation fault
+# `TZ`, stdio refill, and `ld-linux` RELRO faults
 
-The default `ld-linux.so` will, mysteriously, write to its own `RELRO` field that causes segfault when `TZ` is not set or `TZ=:/etc/localtime`.
+There is a guest-side crash that originally showed up as:
 
-The code that triggers this error is:
+- `TZ` unset
+- `TZ=:/etc/localtime`
+- Python / `tzset()` / `localtime()` paths
 
-```c
+The issue is now narrowed down much further.
 
-void
-__tzfile_read (const char *file, size_t extra, char **extrap)
-{
-  /* ... */
- read_again:
-  if (__builtin_expect (__fread_unlocked ((void *) &tzhead, sizeof (tzhead), /* <- __fread_unlocked */
-					  1, f) != 1, 0)
-      || memcmp (tzhead.tzh_magic, TZ_MAGIC, sizeof (tzhead.tzh_magic)) != 0)
-    goto lose;
+## Current minimal repro
 
-}
-```
+Use:
 
-The minimal reproducible case is `tests/guest/func/stdio_seek_read_smoke.c`.
+- `tests/guest/func/stdio_seek_read_smoke.c`
+- `stdio_fread1`
+- or `stdio_fgetc`
+
+The reproducer is no longer timezone-specific in behavior. The failing shape is:
+
+1. `fopen("/etc/localtime", ...)`
+2. first `fread(...)` succeeds
+3. `fseek(...)` succeeds
+4. second stdio read/refill crashes
+
+The equivalent `fd` path works:
+
+1. `open(...)`
+2. `read(...)`
+3. `lseek(...)`
+4. `read(...)`
+
+## What is ruled out
+
+- The file itself is readable.
+- The first stdio read succeeds.
+- `fseek(...)` bookkeeping looks sane before the second read.
+- Bulk copy is not the issue:
+  - `fread(..., 1, 1, ...)` also crashes.
+  - `fgetc()` also crashes.
+- The non-stdio `fd` path works.
+
+## glibc narrowing
+
+Instrumenting host-built glibc showed this path for the failing second read:
+
+1. `_IO_new_file_underflow()` reaches `U3`
+2. `_IO_file_read()` is entered
+3. `__libc_read()` is entered
+4. marker before `SYSCALL_CANCEL(read, ...)` prints
+5. marker after it never prints
+
+So the fault is currently narrowed to:
+
+- `__libc_read()`
+- inside `SYSCALL_CANCEL(read, ...)`
+- effectively at the `INLINE_SYSCALL_CALL(read, ...)` boundary
+
+This is after stdio has decided it needs a refill, and before control returns to the caller.
+
+## `ld-linux` symptom
+
+When reproducing with the mounted host-built loader, the kernel reports a write fault inside `ld-linux-x86-64.so.2` on a `GNU_RELRO` location.
+
+In one investigated build, the crashing instruction was a write to:
+
+- `ld-linux-x86-64.so.2 + 0x34aa0`
+- symbol: `start_time`
+- section: `.data.rel.ro`
+
+The corresponding instruction pointer resolved to:
+
+- `ld-linux-x86-64.so.2 + 0x1c800`
+- `elf/dl-usage.c`
+
+Earlier builds showed a similar pattern at a different `RELRO` slot (`tunable_list + 0x620`). The exact symbol changed across rebuilds, but the shape remained the same:
+
+- user-space write
+- into loader `RELRO`
+- during or immediately around the failing stdio/read path
+
+## Takeaway
+
+This currently looks like a control-flow/runtime-state problem in the guest/trampoline environment, not a plain tzfile parsing bug and not a plain file I/O bug.
+
+## Debug checkpoint (2026-03-23)
+
+- `trace_pipe` with `deko:deko_syscall_entry` and `deko:deko_syscall_exit` confirms that Linux-side syscall handling does complete for the failing reads.
+- For the reproducer, the interesting sequence is:
+  - first `read(fd=3, buf=..., count=4096) -> ret=0x72` (`114`)
+  - `lseek(fd=3, off=-60, SEEK_CUR) -> ret=0x36` (`54`)
+  - second `read(fd=3, buf=..., count=4096) -> ret=0x3c` (`60`)
+- So the current failure is not “Linux read never returns”.  The syscall does return on the VMPL0/Linux side.
+- The current suspicion is therefore narrower:
+  - the bad state appears after the VMPL0 syscall exit,
+  - during or after the return path back into VMPL1,
+  - before VMPL1 reliably finishes the `ifc.rs` post-syscall path.
+- To make this visible, `deko-core/src/policy/ifc.rs` was temporarily changed so the following progress markers use `kinfo!` instead of `kdebug!`:
+  - `ifc: entered with syscall_body_ptr = ...`
+  - `ifc: before request_vmpl2_syscall_handler`
+  - `ifc: after request_vmpl2_syscall_handler`
+  - `ifc: before sysret_epilogue`
+  - `ifc: after sysret_epilogue`

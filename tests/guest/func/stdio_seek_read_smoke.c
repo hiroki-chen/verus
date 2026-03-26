@@ -1,8 +1,8 @@
 #include <errno.h>
 #include <fcntl.h>
-#include <stdio_ext.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdio_ext.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -22,7 +22,8 @@ static uint32_t decode_be32(const unsigned char *p) {
          ((uint32_t)p[2] << 8) | (uint32_t)p[3];
 }
 
-static int compute_second_header_skip(const unsigned char *hdr, off_t *skip_out) {
+static int compute_second_header_skip(const unsigned char *hdr,
+                                      off_t *skip_out) {
   uint32_t timecnt;
   uint32_t typecnt;
   uint32_t charcnt;
@@ -89,7 +90,6 @@ static int do_stdio_path(const char *path, unsigned long *out_hash) {
     fclose(f);
     return -1;
   }
-
   if (compute_second_header_skip(hdr1.bytes, &skip) != 0) {
     fclose(f);
     return -1;
@@ -100,7 +100,6 @@ static int do_stdio_path(const char *path, unsigned long *out_hash) {
     fclose(f);
     return -1;
   }
-
   stage("stdio-fread-2");
   n2 = fread(&hdr2, 1, sizeof(hdr2), f);
   if (n2 != sizeof(hdr2)) {
@@ -112,6 +111,111 @@ static int do_stdio_path(const char *path, unsigned long *out_hash) {
   fclose(f);
   *out_hash = hash_bytes(hdr1.bytes, sizeof(hdr1.bytes)) ^
               (hash_bytes(hdr2.bytes, sizeof(hdr2.bytes)) << 1);
+  return 0;
+}
+
+static int do_stdio_fread1_path(const char *path, unsigned long *out_hash) {
+  FILE *f = fopen(path, "r");
+  struct tzhead_raw hdr1;
+  unsigned char one = 0;
+  struct stat st;
+  size_t n1, n2;
+  off_t skip;
+
+  if (f == NULL) {
+    perror("fopen");
+    return -1;
+  }
+
+  if (fstat(fileno(f), &st) != 0) {
+    perror("fstat");
+    fclose(f);
+    return -1;
+  }
+
+  stage("stdio-fread1-fread-1");
+  n1 = fread(&hdr1, 1, sizeof(hdr1), f);
+  if (n1 != sizeof(hdr1)) {
+    fprintf(stderr, "stdio fread1 short first read got=%zu\n", n1);
+    fclose(f);
+    return -1;
+  }
+  if (compute_second_header_skip(hdr1.bytes, &skip) != 0) {
+    fclose(f);
+    return -1;
+  }
+  stage("stdio-fread1-fseek");
+  if (fseek(f, skip, SEEK_CUR) != 0) {
+    perror("fseek-fread1");
+    fclose(f);
+    return -1;
+  }
+  stage("stdio-fread1-fread-2");
+  n2 = fread(&one, 1, 1, f);
+  if (n2 != 1) {
+    fprintf(stderr, "stdio fread1 short second read got=%zu\n", n2);
+    fclose(f);
+    return -1;
+  }
+
+  fclose(f);
+  *out_hash = hash_bytes(hdr1.bytes, sizeof(hdr1.bytes)) ^ (unsigned long)one;
+  return 0;
+}
+
+static int do_stdio_fgetc_path(const char *path, unsigned long *out_hash) {
+  FILE *f = fopen(path, "r");
+  struct tzhead_raw hdr1;
+  unsigned char hdr2[44];
+  struct stat st;
+  size_t n1;
+  off_t skip;
+  int c;
+
+  if (f == NULL) {
+    perror("fopen");
+    return -1;
+  }
+
+  if (fstat(fileno(f), &st) != 0) {
+    perror("fstat");
+    fclose(f);
+    return -1;
+  }
+
+  stage("stdio-fgetc-fread-1");
+  n1 = fread(&hdr1, 1, sizeof(hdr1), f);
+  if (n1 != sizeof(hdr1)) {
+    fprintf(stderr, "stdio fgetc short first read got=%zu\n", n1);
+    fclose(f);
+    return -1;
+  }
+  if (compute_second_header_skip(hdr1.bytes, &skip) != 0) {
+    fclose(f);
+    return -1;
+  }
+  stage("stdio-fgetc-fseek");
+  if (fseek(f, skip, SEEK_CUR) != 0) {
+    perror("fseek-fgetc");
+    fclose(f);
+    return -1;
+  }
+  stage("stdio-fgetc-read-2");
+  for (size_t i = 0; i < sizeof(hdr2); ++i) {
+    c = fgetc(f);
+    if (c == EOF) {
+      fprintf(stderr,
+              "stdio fgetc second read hit EOF at i=%zu feof=%d ferror=%d\n", i,
+              feof(f), ferror(f));
+      fclose(f);
+      return -1;
+    }
+    hdr2[i] = (unsigned char)c;
+  }
+
+  fclose(f);
+  *out_hash = hash_bytes(hdr1.bytes, sizeof(hdr1.bytes)) ^
+              (hash_bytes(hdr2, sizeof(hdr2)) << 1);
   return 0;
 }
 
@@ -143,7 +247,6 @@ static int do_stdio_unlocked_path(const char *path, unsigned long *out_hash) {
     fclose(f);
     return -1;
   }
-
   if (compute_second_header_skip(hdr1.bytes, &skip) != 0) {
     fclose(f);
     return -1;
@@ -154,7 +257,6 @@ static int do_stdio_unlocked_path(const char *path, unsigned long *out_hash) {
     fclose(f);
     return -1;
   }
-
   stage("stdio-unlocked-fread-2");
   n2 = fread_unlocked(&hdr2, 1, sizeof(hdr2), f);
   if (n2 != sizeof(hdr2)) {
@@ -220,6 +322,8 @@ int main(int argc, char **argv) {
   unsigned long stdio_unlocked_hash = 0;
   unsigned long fd_hash = 0;
   int stdio_ok = 0;
+  int stdio_fread1_ok = 0;
+  int stdio_fgetc_ok = 0;
   int stdio_unlocked_ok = 0;
   int fd_ok = 0;
   const char *mode = argc > 1 ? argv[1] : "all";
@@ -230,6 +334,24 @@ int main(int argc, char **argv) {
       fprintf(stderr, "stdio path failed\n");
     } else {
       stdio_ok = 1;
+    }
+  }
+
+  if (strcmp(mode, "all") == 0 || strcmp(mode, "stdio_fread1") == 0) {
+    stage("stdio-fread1-path");
+    if (do_stdio_fread1_path(path, &stdio_hash) != 0) {
+      fprintf(stderr, "stdio fread1 path failed\n");
+    } else {
+      stdio_fread1_ok = 1;
+    }
+  }
+
+  if (strcmp(mode, "all") == 0 || strcmp(mode, "stdio_fgetc") == 0) {
+    stage("stdio-fgetc-path");
+    if (do_stdio_fgetc_path(path, &stdio_hash) != 0) {
+      fprintf(stderr, "stdio fgetc path failed\n");
+    } else {
+      stdio_fgetc_ok = 1;
     }
   }
 
@@ -252,7 +374,8 @@ int main(int argc, char **argv) {
   }
 
   if (strcmp(mode, "stdio") == 0) {
-    printf("stdio_seek_read_smoke mode=stdio ok=%d hash=%lu\n", stdio_ok, stdio_hash);
+    printf("stdio_seek_read_smoke mode=stdio ok=%d hash=%lu\n", stdio_ok,
+           stdio_hash);
     return stdio_ok ? 0 : 1;
   }
 
@@ -262,15 +385,33 @@ int main(int argc, char **argv) {
     return stdio_unlocked_ok ? 0 : 1;
   }
 
+  if (strcmp(mode, "stdio_fread1") == 0) {
+    printf("stdio_seek_read_smoke mode=stdio_fread1 ok=%d hash=%lu\n",
+           stdio_fread1_ok, stdio_hash);
+    return stdio_fread1_ok ? 0 : 1;
+  }
+
+  if (strcmp(mode, "stdio_fgetc") == 0) {
+    printf("stdio_seek_read_smoke mode=stdio_fgetc ok=%d hash=%lu\n",
+           stdio_fgetc_ok, stdio_hash);
+    return stdio_fgetc_ok ? 0 : 1;
+  }
+
   if (strcmp(mode, "fd") == 0) {
     printf("stdio_seek_read_smoke mode=fd ok=%d hash=%lu\n", fd_ok, fd_hash);
     return fd_ok ? 0 : 1;
   }
 
-  printf("stdio_seek_read_smoke stdio_ok=%d stdio_unlocked_ok=%d fd_ok=%d stdio_hash=%lu stdio_unlocked_hash=%lu fd_hash=%lu stdio_match=%s unlocked_match=%s\n",
-         stdio_ok, stdio_unlocked_ok, fd_ok,
-         stdio_hash, stdio_unlocked_hash, fd_hash,
-         stdio_hash == fd_hash ? "yes" : "no",
-         stdio_unlocked_hash == fd_hash ? "yes" : "no");
-  return (stdio_ok && stdio_unlocked_ok && fd_ok) ? 0 : 1;
+  printf(
+      "stdio_seek_read_smoke stdio_ok=%d stdio_fread1_ok=%d stdio_fgetc_ok=%d "
+      "stdio_unlocked_ok=%d fd_ok=%d stdio_hash=%lu stdio_unlocked_hash=%lu "
+      "fd_hash=%lu stdio_match=%s unlocked_match=%s\n",
+      stdio_ok, stdio_fread1_ok, stdio_fgetc_ok, stdio_unlocked_ok, fd_ok,
+      stdio_hash, stdio_unlocked_hash, fd_hash,
+      stdio_hash == fd_hash ? "yes" : "no",
+      stdio_unlocked_hash == fd_hash ? "yes" : "no");
+  return (stdio_ok && stdio_fread1_ok && stdio_fgetc_ok && stdio_unlocked_ok &&
+          fd_ok)
+             ? 0
+             : 1;
 }

@@ -70,6 +70,19 @@ pub open spec fn slice_wf<T: WellFormed>(s: Seq<T>) -> bool {
     forall|i: int| 0 <= i < s.len() ==> (#[trigger] s[i]).wf()
 }
 
+pub open spec fn bytes_eq_spec(lhs: Seq<u8>, rhs: Seq<u8>) -> bool {
+    lhs =~= rhs
+}
+
+#[verifier::external_body]
+#[verus_spec(r =>
+    ensures
+        r <==> bytes_eq_spec(lhs@, rhs@),
+)]
+pub fn bytes_eq(lhs: &[u8], rhs: &[u8]) -> bool {
+    lhs == rhs
+}
+
 pub assume_specification<T, U, const N: usize>[ <[T; N] as core::cmp::PartialEq<[U; N]>>::eq ](
     _0: &[T; N],
     _1: &[U; N],
