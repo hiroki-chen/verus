@@ -19,6 +19,8 @@
   - boundary-state preservation where applicable.
 - Do not add `#[verifier::external_body]` without explicit user approval.
 - Do not introduce `axiom` or `admit` unless absolutely necessary due to proof limitations, such as unavoidable raw-pointer casting boundaries. If such a step is needed, explain the exact blocker first.
+- Always choose triggers for quantifiers for proof searching and performance to help SMT solvers instantiate predicates, proof conditions, etc.
+- Use `#[verus_spec(invariant ...)]` above the loop block when you apply loop invariant.
 
 ## Naming Conventions
 

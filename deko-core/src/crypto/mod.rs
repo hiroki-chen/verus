@@ -6,7 +6,4 @@ pub mod aes;
 pub mod hash;
 pub mod uuid;
 
-verus! {
-
-
-} // verus!
+verus! {} // verus!

@@ -1,7 +1,4 @@
 use vstd::prelude::*;
 
 // Testing
-verus! {
-
-
-} // verus!
+verus! {} // verus!
