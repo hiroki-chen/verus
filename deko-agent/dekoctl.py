@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import argparse
-import ctypes
 import fcntl
 import os
 import struct
@@ -25,7 +24,6 @@ _IOC_READ = 2
 
 BINDING_STRUCT = struct.Struct("=QII")
 LOOKUP_STRUCT = struct.Struct("=QII")
-LOAD_POLICY_STRUCT = struct.Struct("=IIQQ")
 
 
 def _ioc(direction: int, ioc_type: int, nr: int, size: int) -> int:
@@ -48,7 +46,6 @@ def _iowr(ioc_type: int, nr: int, size: int) -> int:
 DEKO_IOC_BIND_DOMAIN = _iow(DEKO_IOC_MAGIC, 0x01, BINDING_STRUCT.size)
 DEKO_IOC_LOOKUP_DOMAIN = _iowr(DEKO_IOC_MAGIC, 0x02, LOOKUP_STRUCT.size)
 DEKO_IOC_UNBIND_DOMAIN = _iow(DEKO_IOC_MAGIC, 0x03, BINDING_STRUCT.size)
-DEKO_IOC_LOAD_POLICY = _iow(DEKO_IOC_MAGIC, 0x04, LOAD_POLICY_STRUCT.size)
 
 
 def open_device(path: str) -> int:
@@ -72,17 +69,6 @@ def unbind_domain(fd: int, mnt_ns_id: int, domain_id: int) -> None:
     fcntl.ioctl(fd, DEKO_IOC_UNBIND_DOMAIN, payload)
 
 
-def load_policy(fd: int, domain_id: int, policy_bytes: bytes) -> None:
-    policy_buf = ctypes.create_string_buffer(policy_bytes, len(policy_bytes))
-    payload = LOAD_POLICY_STRUCT.pack(
-        domain_id,
-        0,
-        ctypes.addressof(policy_buf),
-        len(policy_bytes),
-    )
-    fcntl.ioctl(fd, DEKO_IOC_LOAD_POLICY, payload)
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Minimal /dev/deko ioctl tester")
     parser.add_argument("--device", default="/dev/deko")
@@ -98,10 +84,6 @@ def build_parser() -> argparse.ArgumentParser:
     unbind_parser = subparsers.add_parser("unbind")
     unbind_parser.add_argument("--mnt-ns-id", type=int, required=True)
     unbind_parser.add_argument("--domain-id", type=int, default=0)
-
-    load_parser = subparsers.add_parser("load-policy")
-    load_parser.add_argument("--domain-id", type=int, required=True)
-    load_parser.add_argument("--policy-file", required=True)
 
     return parser
 
@@ -121,14 +103,6 @@ def main() -> int:
         elif args.command == "unbind":
             unbind_domain(fd, args.mnt_ns_id, args.domain_id)
             print(f"unbound mnt_ns_id={args.mnt_ns_id} domain_id={args.domain_id}")
-        elif args.command == "load-policy":
-            with open(args.policy_file, "rb") as f:
-                policy_bytes = f.read()
-            load_policy(fd, args.domain_id, policy_bytes)
-            print(
-                f"loaded policy domain_id={args.domain_id} "
-                f"bytes={len(policy_bytes)} file={args.policy_file}"
-            )
     finally:
         os.close(fd)
     return 0

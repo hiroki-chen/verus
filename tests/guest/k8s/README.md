@@ -25,6 +25,13 @@ belong to the same Deko domain.
   Example policy for the `orders` domain.
 - `Dockerfile.orders-function`
   Shared image build file for the Python handlers.
+- `../../deko-agent/deko_agent.py`
+  Prototype guest-side attribution agent for turning `data-storage` labels into
+  `mnt_ns_id -> domain_id` bindings.
+- `../../deko-agent/Dockerfile`
+  Minimal image for the prototype agent.
+- `deko_agent_daemonset.yaml`
+  Example `DaemonSet` + RBAC for running one attribution agent per node.
 
 ## Python handlers
 
@@ -119,3 +126,120 @@ Delete all resources from the example:
 ```bash
 kubectl delete -f tests/guest/k8s/orders_function_group.yaml
 ```
+
+## Prototype Guest Agent
+
+`deko-agent/deko_agent.py` currently does this:
+
+1. Watches Pods scheduled onto the local node.
+2. Reads the Pod label `data-storage=...`.
+3. Resolves each container's host PID by scanning host `/proc/*/cgroup` for the
+   container ID.
+4. Reads `/proc/<pid>/ns/mnt` to obtain `mnt_ns_id`.
+5. Computes a temporary `domain_id` as `sha256(data-storage)[0..4]`.
+6. Calls `/dev/deko` to register `mnt_ns_id -> domain_id`.
+7. Optionally appends a JSONL debug record to a host file.
+
+The JSONL output shape is:
+
+```json
+{
+  "namespace": "faas-orders",
+  "pod": "orders-ingest-...",
+  "uid": "...",
+  "data_storage": "orders",
+  "domain_id": 1611977249,
+  "container_id": "...",
+  "pid": 12345,
+  "mnt_ns_id": 4026532846
+}
+```
+
+### Run Once On A Node
+
+The prototype expects:
+
+- service-account access to list Pods
+- visibility into the host `/proc`
+- access to the host `/dev/deko` char device
+
+Example one-shot run:
+
+```bash
+sudo python3 deko-agent/deko_agent.py \
+  --node-name "$(kubectl get pod -n kube-system -o wide | awk 'NR==2 {print $7}')" \
+  --bindings-file /tmp/deko-domain-bindings.jsonl \
+  --proc-root /proc \
+  --device-path /dev/deko \
+  --once
+```
+
+### Build And Deploy The Prototype DaemonSet
+
+Before deploying the `DaemonSet`, make sure the prototype `/dev/deko` device
+exists on the node host:
+
+```bash
+cd /home/haobchen/cage-sev/deko-lkm
+make
+sudo insmod deko.ko
+ls -l /dev/deko
+```
+
+Build the agent image inside Minikube's Docker environment:
+
+```bash
+cd /home/haobchen/cage-sev
+eval "$(minikube docker-env)"
+
+docker build -f tests/guest/k8s/Dockerfile.deko-agent \
+  -t deko-agent:latest .
+```
+
+Apply the `DaemonSet`:
+
+```bash
+kubectl apply -f tests/guest/k8s/deko_agent_daemonset.yaml
+kubectl -n deko-system rollout status daemonset/deko-agent --timeout=120s
+kubectl -n deko-system logs daemonset/deko-agent
+```
+
+If the `orders` example is already deployed, the agent should start emitting
+lines similar to:
+
+```text
+[deko-agent] registered pod=orders-ingest-... data-storage=orders domain_id=... mnt_ns_id=...
+```
+
+You can also confirm the kernel side saw the ioctl:
+
+```bash
+dmesg | tail -n 50
+```
+
+Expected lines:
+
+```text
+deko: bind mnt_ns_id=... domain_id=...
+```
+
+Current limitation:
+
+- the prototype `DaemonSet` derives `domain_id` from `data-storage` locally
+- it does not yet perform signed endorsement validation
+- it currently talks to the prototype `/dev/deko` LKM, not the final Linux
+  path that `report_app` will query
+
+## Agent Source Layout
+
+The example deployment files remain under `tests/guest/k8s/`, but the agent
+itself now lives in the first-class component directory:
+
+- `deko-agent/deko_agent.py`
+- `deko-agent/Dockerfile`
+
+This keeps:
+
+- `deko-lkm/` for the guest-kernel `/dev/deko` interface
+- `deko-agent/` for the guest userspace node-local daemon
+- `tests/guest/k8s/` for example manifests and smoke tests

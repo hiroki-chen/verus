@@ -1,29 +1,75 @@
 #include <linux/fs.h>
+#include <linux/hashtable.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
-#include <asm/sev.h>
 
 #include "deko_ioctl.h"
 
-extern int deko_domain_bind(u64 mnt_ns_id, u32 domain_id);
-extern int deko_domain_lookup(u64 mnt_ns_id, u32 *domain_id);
-extern int deko_domain_unbind(u64 mnt_ns_id, u32 domain_id);
-extern int svsm_deko_load_policy(u32 domain_id, const void *buf, u64 len);
+#define DEKO_DOMAIN_BITS 8
+
+struct deko_binding_entry {
+  u64 mnt_ns_id;
+  u32 domain_id;
+  struct hlist_node node;
+};
+
+static DEFINE_HASHTABLE(deko_domain_table, DEKO_DOMAIN_BITS);
+static DEFINE_MUTEX(deko_domain_lock);
+
+static struct deko_binding_entry *deko_find_binding_locked(u64 mnt_ns_id) {
+  struct deko_binding_entry *entry;
+
+  hash_for_each_possible(deko_domain_table, entry, node, mnt_ns_id) {
+    if (entry->mnt_ns_id == mnt_ns_id)
+      return entry;
+  }
+
+  return NULL;
+}
 
 static long deko_bind_domain(const struct deko_domain_binding *binding) {
+  struct deko_binding_entry *entry;
+
   if (binding->mnt_ns_id == 0 || binding->domain_id == 0)
     return -EINVAL;
 
-  return deko_domain_bind(binding->mnt_ns_id, binding->domain_id);
+  mutex_lock(&deko_domain_lock);
+
+  entry = deko_find_binding_locked(binding->mnt_ns_id);
+  if (entry) {
+    if (entry->domain_id == binding->domain_id) {
+      mutex_unlock(&deko_domain_lock);
+      return 0;
+    }
+
+    mutex_unlock(&deko_domain_lock);
+    return -EEXIST;
+  }
+
+  entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+  if (!entry) {
+    mutex_unlock(&deko_domain_lock);
+    return -ENOMEM;
+  }
+
+  entry->mnt_ns_id = binding->mnt_ns_id;
+  entry->domain_id = binding->domain_id;
+  hash_add(deko_domain_table, &entry->node, entry->mnt_ns_id);
+
+  mutex_unlock(&deko_domain_lock);
+
+  pr_info("deko: bind mnt_ns_id=%llu domain_id=%u\n", binding->mnt_ns_id,
+          binding->domain_id);
+  return 0;
 }
 
 static long deko_lookup_domain(struct deko_domain_lookup *lookup) {
-  u32 domain_id = 0;
-  int ret;
+  struct deko_binding_entry *entry;
 
   if (lookup->mnt_ns_id == 0)
     return -EINVAL;
@@ -31,37 +77,44 @@ static long deko_lookup_domain(struct deko_domain_lookup *lookup) {
   lookup->domain_id = 0;
   lookup->found = 0;
 
-  ret = deko_domain_lookup(lookup->mnt_ns_id, &domain_id);
-  if (!ret) {
-    lookup->domain_id = domain_id;
+  mutex_lock(&deko_domain_lock);
+
+  entry = deko_find_binding_locked(lookup->mnt_ns_id);
+  if (entry) {
+    lookup->domain_id = entry->domain_id;
     lookup->found = 1;
-    return 0;
   }
-  if (ret == -ENOENT)
-    return 0;
-  return ret;
+
+  mutex_unlock(&deko_domain_lock);
+  return 0;
 }
 
 static long deko_unbind_domain(const struct deko_domain_binding *binding) {
+  struct deko_binding_entry *entry;
+
   if (binding->mnt_ns_id == 0)
     return -EINVAL;
-  return deko_domain_unbind(binding->mnt_ns_id, binding->domain_id);
-}
 
-static long deko_load_policy(const struct deko_load_policy *req) {
-  void *policy_buf;
-  int ret;
+  mutex_lock(&deko_domain_lock);
 
-  if (req->domain_id == 0 || req->policy_ptr == 0 || req->policy_len == 0)
-    return -EINVAL;
+  entry = deko_find_binding_locked(binding->mnt_ns_id);
+  if (!entry) {
+    mutex_unlock(&deko_domain_lock);
+    return -ENOENT;
+  }
 
-  policy_buf = memdup_user(u64_to_user_ptr(req->policy_ptr), req->policy_len);
-  if (IS_ERR(policy_buf))
-    return PTR_ERR(policy_buf);
+  if (binding->domain_id != 0 && entry->domain_id != binding->domain_id) {
+    mutex_unlock(&deko_domain_lock);
+    return -EEXIST;
+  }
 
-  ret = svsm_deko_load_policy(req->domain_id, policy_buf, req->policy_len);
-  kfree(policy_buf);
-  return ret;
+  hash_del(&entry->node);
+  mutex_unlock(&deko_domain_lock);
+
+  pr_info("deko: unbind mnt_ns_id=%llu domain_id=%u\n", entry->mnt_ns_id,
+          entry->domain_id);
+  kfree(entry);
+  return 0;
 }
 
 static long deko_unlocked_ioctl(struct file *file, unsigned int cmd,
@@ -99,14 +152,6 @@ static long deko_unlocked_ioctl(struct file *file, unsigned int cmd,
 
     return deko_unbind_domain(&binding);
   }
-  case DEKO_IOC_LOAD_POLICY: {
-    struct deko_load_policy req;
-
-    if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
-      return -EFAULT;
-
-    return deko_load_policy(&req);
-  }
   default:
     return -ENOTTY;
   }
@@ -128,11 +173,23 @@ static struct miscdevice deko_miscdev = {
 };
 
 static int __init deko_init(void) {
+  hash_init(deko_domain_table);
   pr_info("deko: registering /dev/deko\n");
   return misc_register(&deko_miscdev);
 }
 
 static void __exit deko_exit(void) {
+  struct deko_binding_entry *entry;
+  struct hlist_node *tmp;
+  int bucket;
+
+  mutex_lock(&deko_domain_lock);
+  hash_for_each_safe(deko_domain_table, bucket, tmp, entry, node) {
+    hash_del(&entry->node);
+    kfree(entry);
+  }
+  mutex_unlock(&deko_domain_lock);
+
   misc_deregister(&deko_miscdev);
   pr_info("deko: unregistered /dev/deko\n");
 }

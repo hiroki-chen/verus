@@ -7,9 +7,7 @@ import json
 import os
 import ssl
 import struct
-import subprocess
 import sys
-import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -33,7 +31,6 @@ _IOC_DIRSHIFT = _IOC_SIZESHIFT + _IOC_SIZEBITS
 _IOC_WRITE = 1
 
 BINDING_STRUCT = struct.Struct("=QII")
-LOAD_POLICY_STRUCT = struct.Struct("=IIQQ")
 
 
 def log(message: str) -> None:
@@ -59,7 +56,6 @@ def _iow(ioc_type: int, nr: int, size: int) -> int:
 
 
 DEKO_IOC_BIND_DOMAIN = _iow(DEKO_IOC_MAGIC, 0x01, BINDING_STRUCT.size)
-DEKO_IOC_LOAD_POLICY = _iow(DEKO_IOC_MAGIC, 0x04, LOAD_POLICY_STRUCT.size)
 
 
 def read_text(path: str) -> str:
@@ -89,16 +85,6 @@ def kube_get_json(path: str, token_path: str, ca_path: str) -> dict[str, Any]:
         return json.load(response)
 
 
-def kube_get_text(path: str, token_path: str, ca_path: str) -> str:
-    token, context = kube_context(token_path, ca_path)
-    request = urllib.request.Request(
-        urllib.parse.urljoin(kube_api_url(), path),
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    with urllib.request.urlopen(request, context=context, timeout=10) as response:
-        return response.read().decode("utf-8")
-
-
 def fetch_local_node_pods(
     node_name: str, token_path: str, ca_path: str
 ) -> list[dict[str, Any]]:
@@ -106,23 +92,6 @@ def fetch_local_node_pods(
     path = f"/api/v1/pods?fieldSelector={selector}"
     data = kube_get_json(path, token_path, ca_path)
     return data.get("items", [])
-
-
-def fetch_policy_bytes(
-    namespace: str,
-    configmap_name: str,
-    configmap_key: str,
-    token_path: str,
-    ca_path: str,
-) -> bytes:
-    path = f"/api/v1/namespaces/{namespace}/configmaps/{configmap_name}"
-    data = kube_get_json(path, token_path, ca_path)
-    config_data = data.get("data", {})
-    if configmap_key not in config_data:
-        raise RuntimeError(
-            f"configmap {namespace}/{configmap_name} missing key {configmap_key}"
-        )
-    return config_data[configmap_key].encode("utf-8")
 
 
 def extract_data_storage(pod: dict[str, Any]) -> str | None:
@@ -205,90 +174,6 @@ def bind_namespace_domain(device_path: str, mnt_ns_id: int, domain_id: int) -> N
         os.close(fd)
 
 
-def load_policy_blob(device_path: str, domain_id: int, policy_bytes: bytes) -> None:
-    import ctypes
-
-    policy_buf = ctypes.create_string_buffer(policy_bytes, len(policy_bytes))
-    payload = LOAD_POLICY_STRUCT.pack(
-        domain_id,
-        0,
-        ctypes.addressof(policy_buf),
-        len(policy_bytes),
-    )
-    fd = os.open(device_path, os.O_RDWR)
-    try:
-        fcntl.ioctl(fd, DEKO_IOC_LOAD_POLICY, payload)
-    finally:
-        os.close(fd)
-
-
-def policy_configmap_name(args: argparse.Namespace, data_storage: str) -> str:
-    return f"{args.policy_configmap_prefix}{data_storage}"
-
-
-def ensure_policy_loaded(
-    args: argparse.Namespace, namespace: str | None, data_storage: str, domain_id: int
-) -> None:
-    if not args.auto_load_policy:
-        return
-    if not namespace:
-        raise RuntimeError("pod namespace missing for automatic policy load")
-
-    policy_key = (namespace, domain_id)
-    if policy_key in args.loaded_policies:
-        return
-
-    configmap_name = policy_configmap_name(args, data_storage)
-    policy_bytes = fetch_policy_bytes(
-        namespace,
-        configmap_name,
-        args.policy_configmap_key,
-        args.token_path,
-        args.ca_path,
-    )
-    if args.policy_loader:
-        with tempfile.NamedTemporaryFile(
-            mode="wb", suffix=".toml", prefix=f"deko-policy-{domain_id}-", delete=False
-        ) as handle:
-            handle.write(policy_bytes)
-            policy_path = handle.name
-        try:
-            subprocess.run(
-                [
-                    args.policy_loader,
-                    "load-policy",
-                    "--device",
-                    args.device_path,
-                    "--domain-id",
-                    str(domain_id),
-                    "--policy-file",
-                    policy_path,
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except subprocess.CalledProcessError as err:
-            stderr = err.stderr.strip()
-            stdout = err.stdout.strip()
-            detail = stderr or stdout or str(err)
-            raise RuntimeError(detail) from err
-        finally:
-            try:
-                os.unlink(policy_path)
-            except OSError:
-                pass
-    else:
-        load_policy_blob(args.device_path, domain_id, policy_bytes)
-    args.loaded_policies.add(policy_key)
-    log(
-        "loaded policy "
-        f"namespace={namespace} data-storage={data_storage} "
-        f"domain_id={domain_id} bytes={len(policy_bytes)} "
-        f"configmap={configmap_name}"
-    )
-
-
 def resolve_bindings_for_pod(pod: dict[str, Any], proc_root: str) -> list[dict[str, Any]]:
     data_storage = extract_data_storage(pod)
     if not data_storage:
@@ -333,17 +218,6 @@ def run_once(args: argparse.Namespace) -> int:
             name = pod.get("metadata", {}).get("name", "<unknown>")
             log(f"skip pod {name}: {err}")
             continue
-
-        if bindings:
-            namespace = bindings[0]["namespace"]
-            data_storage = bindings[0]["data_storage"]
-            domain_id = bindings[0]["domain_id"]
-            try:
-                ensure_policy_loaded(args, namespace, data_storage, domain_id)
-            except Exception as err:
-                name = pod.get("metadata", {}).get("name", "<unknown>")
-                log(f"skip pod {name}: failed to load policy: {err}")
-                continue
 
         for binding in bindings:
             total_bindings += 1
@@ -406,27 +280,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ca-path", default=DEFAULT_CA_PATH)
     parser.add_argument("--interval-sec", type=int, default=15)
     parser.add_argument(
-        "--auto-load-policy",
-        action=argparse.BooleanOptionalAction,
-        default=os.environ.get("DEKO_AUTO_LOAD_POLICY", "1") != "0",
-        help="Automatically load a policy blob from a namespaced ConfigMap before binding.",
-    )
-    parser.add_argument(
-        "--policy-configmap-prefix",
-        default=os.environ.get("DEKO_POLICY_CONFIGMAP_PREFIX", "deko-policy-"),
-        help="Prefix for namespaced policy ConfigMaps. data-storage is appended.",
-    )
-    parser.add_argument(
-        "--policy-configmap-key",
-        default=os.environ.get("DEKO_POLICY_CONFIGMAP_KEY", "policy.toml"),
-        help="Key inside the policy ConfigMap that contains the TOML policy blob.",
-    )
-    parser.add_argument(
-        "--policy-loader",
-        default=os.environ.get("DEKO_POLICY_LOADER", "/app/deko-agent-rs"),
-        help="Optional Rust helper used to compile TOML policy into a binary blob before load.",
-    )
-    parser.add_argument(
         "--once",
         action="store_true",
         help="Run a single scan instead of polling forever.",
@@ -440,7 +293,6 @@ def main() -> int:
     if not args.node_name:
         parser.error("--node-name is required")
     args.seen_bindings = set()
-    args.loaded_policies = set()
     if args.once:
         return run_once(args)
     return run_loop(args)
