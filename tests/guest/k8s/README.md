@@ -32,6 +32,9 @@ belong to the same Deko domain.
   Minimal image for the prototype agent.
 - `deko_agent_daemonset.yaml`
   Example `DaemonSet` + RBAC for running one attribution agent per node.
+- `install_minikube_guest.sh`
+  Convenience installer for guest-side K8s test dependencies such as Docker,
+  `kubectl`, `minikube`, and `crictl`.
 
 ## Python handlers
 
@@ -49,6 +52,14 @@ Each service listens on port `8080` and exposes:
 - `POST /write` for writer
 
 ## Deploy With Minikube
+
+If the guest VM does not already have the K8s tooling installed, you can start
+with:
+
+```bash
+cd /home/haobchen/cage-sev
+sudo bash tests/guest/k8s/install_minikube_guest.sh
+```
 
 From the repository root:
 
