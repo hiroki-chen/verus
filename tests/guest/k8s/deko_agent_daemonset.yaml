@@ -17,6 +17,9 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -61,6 +64,12 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: DEKO_AUTO_LOAD_POLICY
+              value: "1"
+            - name: DEKO_POLICY_CONFIGMAP_PREFIX
+              value: deko-policy-
+            - name: DEKO_POLICY_CONFIGMAP_KEY
+              value: policy.toml
             - name: DEKO_BINDINGS_FILE
               value: /host/tmp/deko-domain-bindings.jsonl
             - name: DEKO_HOST_PROC

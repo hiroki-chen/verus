@@ -13,6 +13,9 @@ use vstd::prelude::*;
 #[cfg(feature = "alloc")]
 use crate::cpu::irq::IrqSafeLockGuard;
 use crate::guest::{DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode};
+use crate::kerror;
+#[cfg(feature = "alloc")]
+use crate::kinfo;
 #[cfg(feature = "alloc")]
 use crate::mm::frame_allocator::DekoAllocatorApi;
 use crate::policy::userapp::setup_vmpl1_func_ptr;
@@ -145,7 +148,11 @@ impl DekoPolicyEngine {
     > {
         let policy = config::parse_policy_config_from_bytes(buf)?;
         let lattice = lattice::FiniteLattice::compile(&policy.lattice).map_err(
-            |_err| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidFormat),
+            |err|
+                {
+                    kerror!("Failed to compile lattice for domain_id=", domain_id, ": ", err);
+                    DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidFormat)
+                },
         )?;
         self.domains.insert(domain_id, DekoPolicyDomain { domain_id, policy, lattice });
         if self.default_domain.is_none() {
@@ -189,13 +196,13 @@ pub fn register_policy_domain(domain_id: DomainId, buf: &[u8]) -> DekoGuestServR
         engine_state,
         __,
         {
-            let mut engine = match engine_state {
+            let mut engine = match engine_state.take() {
                 Some(engine) => engine,
                 None => DekoPolicyEngine::new(),
             };
-            engine.load_domain_from_bytes(domain_id, buf)?;
+            let load_result = engine.load_domain_from_bytes(domain_id, buf);
             engine_state = Some(engine);
-            Ok(())
+            load_result
         }
     )
 }

@@ -1253,12 +1253,6 @@ fn do_reigster_user_app(
                 kerror!("do_register_user_app: unknown policy domain", req.domain_id);
                 return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
             }
-            // Look up if the parent is a shim process.
-
-            if !lookup_parent_is_shim(req.ppid) {
-                // Ignore.
-                return Ok(());
-            }
             if core::hint::unlikely(!check_user_vrange(req)) {
                 kerror!("do_register_user_app: invalid user vaddr range", comm, req.start_code=>hex, req.end_code=>hex);
                 return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));

@@ -1,22 +1,18 @@
 use deko_std::address::{create_paddr_range, PhysAddr, VirtAddr};
 use deko_std::bits::{bit_u32_and_auto, bit_u64_and_auto, lemma_aligned_to_4k};
 use deko_std::deko_rwlock_read_atomic_data;
-use deko_std::mem::{PAGE_SIZE, PAGE_SIZE_2M, PERCPU_BASE};
-use deko_std::prelude::{DekoAtomicData, VADDR_UPPER_MASK};
+use deko_std::mem::{PAGE_SIZE, PERCPU_BASE};
 use deko_std::wf::WellFormed;
 use vstd::prelude::*;
 
 use crate::collections::Vec;
-use crate::cpu::regs::MSR_LSTAR;
 use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission, PERCPU_AREAS};
-use crate::guest::service::TRAMPOLINE_PA;
 use crate::guest::{
-    bind_current_cpu_vmpl1_slot, guest_page_table, install_hook, stage_fake_vmpl1_handoff_request,
-    DekoGuestLstarWriteReq, DekoGuestRequestParams, DekoGuestServError, DekoGuestServResult,
-    DekoGuestServResultCode, DekoLoadPolicyReq, DekoMapIfcReq, DekoMapIfcSingleReq, DekoNewAppReq,
-    DekoTaskMigrateReq, PtRegs, DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER,
-    DEKO_SERVICE_EXTEND_LAUNCH_APP, DEKO_SERVICE_EXTEND_LOAD_POLICY, DEKO_SERVICE_EXTEND_MAP_IFC,
-    DEKO_SERVICE_EXTEND_MSR_INTERCEPT, DEKO_SERVICE_EXTEND_REPORT_APP,
+    bind_current_cpu_vmpl1_slot, stage_fake_vmpl1_handoff_request, DekoGuestRequestParams,
+    DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode, DekoLoadPolicyReq,
+    DekoMapIfcReq, DekoMapIfcSingleReq, DekoNewAppReq, DekoTaskMigrateReq, PtRegs,
+    DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER, DEKO_SERVICE_EXTEND_LAUNCH_APP,
+    DEKO_SERVICE_EXTEND_LOAD_POLICY, DEKO_SERVICE_EXTEND_MAP_IFC, DEKO_SERVICE_EXTEND_REPORT_APP,
     DEKO_SERVICE_EXTEND_TASK_MIGRATE, DEKO_SERVICE_EXTEND_TIMER_EVENT, DEKO_SERVICE_TIMER,
 };
 use crate::mm::frame_allocator::DekoAllocatorApi;
@@ -31,309 +27,6 @@ use crate::policy::userapp::{
 use crate::{kdebug, kerror, kinfo, kwarn, SELF_MAP};
 
 verus! {
-
-/// Validates the trampoline setup request parameters, including the trampoline GPA
-/// and the syscall enter address.
-#[inline]
-#[verus_spec(r =>
-    ensures
-        r is Ok ==> {
-          &&& valid_trampoline_gpa_spec(req.trampoline_gpa.0)
-          &&& valid_kernel_vaddr_spec(syscall_enter_addr)
-        }
-)]
-fn validate_trampoline_setup_req(
-    req: &DekoGuestTrampolineSetupReq,
-    syscall_enter_addr: u64,
-) -> DekoGuestServResult<()> {
-    if is_write {
-        let aligned_req = params.r9 & !(PAGE_SIZE as u64 - 1);
-        let offset = params.r9 % PAGE_SIZE as u64;
-
-        proof {
-            let n = params.r9;
-
-            assert(aligned_req % PAGE_SIZE == 0) by (bit_vector)
-                requires
-                    aligned_req == (n & !((PAGE_SIZE as u64 - 1) as u64)),
-                    PAGE_SIZE == 0x1000,
-            ;
-        }
-
-        if core::hint::unlikely(!check_within_guest_mmap(PhysAddr(aligned_req))) {
-            kerror!("MSR intercept: LSTAR request struct NOT within guest mmap:", PhysAddr(params.r9));
-            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-        }
-        if core::hint::unlikely(aligned_req >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE) {
-            kerror!("MSR intercept: LSTAR request struct out of range:", PhysAddr(params.r9));
-            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-        }
-        let lstar_req_mapping = match TempMapping::new(
-            create_paddr_range(PhysAddr(aligned_req), 1),
-        ) {
-            Some(m) => m,
-            None => {
-                kerror!("MSR intercept: failed to create temporary mapping for LSTAR request struct at:", PhysAddr(params.r9));
-                return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy));
-            },
-        };
-
-        if core::hint::unlikely(
-            core::mem::size_of::<DekoGuestLstarWriteReq>() as u64 > PAGE_SIZE as u64 - offset,
-        ) {
-            kerror!("MSR intercept: LSTAR request struct exceeds page boundary:", PhysAddr(params.r9));
-            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-        }
-        let req = lstar_req_mapping.read_ref_at::<DekoGuestLstarWriteReq>(offset as usize);
-        let mut req = req.clone();
-        let syscall_enter_addr = req.syscall_enter_addr.0;
-
-        if req.page_offset_base.0 % PAGE_SIZE as u64 != 0 || req.page_offset_base.0
-            < VADDR_UPPER_MASK {
-            kerror!("MSR intercept: invalid page offset base:", req.page_offset_base => hex);
-            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-        }
-        if req.trampoline_gpa.0 % PAGE_SIZE as u64 != 0 {
-            kerror!("MSR intercept: invalid trampoline gpa:", req.trampoline_gpa => hex);
-            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-        }
-        if req.trampoline_gpa.0 >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE_2M {
-            kerror!("MSR intercept: trampoline gpa out of range:", req.trampoline_gpa => hex);
-            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-        }
-        if core::hint::unlikely(syscall_enter_addr < VADDR_UPPER_MASK) {
-            kerror!("MSR intercept: invalid syscall enter address:", syscall_enter_addr => hex);
-            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-        }
-        kdebug!("Request:", req);
-
-        let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
-        let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
-        let guest_cr3 = strip_confidentiality_bits(guest_cr3, cpu_borrow.private_bit);
-
-        if !check_within_guest_mmap(PhysAddr(guest_cr3)) {
-            kerror!("MSR intercept: guest CR3 NOT within guest mmap:", guest_cr3);
-            kerror!("MSR intercept: cannot handle LSTAR MSR intercept without valid guest CR3");
-            kerror!("MSR intercept: this is a serious security issue; aborting");
-
-            return Err(DekoGuestServError::FatalError);
-        }
-        if core::hint::unlikely(guest_cr3 % PAGE_SIZE != 0) {
-            kerror!("MSR intercept: unaligned guest CR3:", guest_cr3);
-            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-        }
-        if core::hint::unlikely(guest_cr3 >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE) {
-            kerror!("MSR intercept: guest CR3 out of range:", guest_cr3);
-            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-        }
-        let guest_pgtable = guest_page_table(guest_cr3)?;
-        let syscall_enter_addr = VirtAddr(syscall_enter_addr);
-        install_hook(
-            guest_pgtable,
-            syscall_enter_addr,
-            cpu_borrow.private_bit,
-            cpu_borrow.shared_bit,
-            &req,
-        )?;
-
-        lstar_req_mapping.write_ref_at::<DekoGuestLstarWriteReq>(offset as usize, &req);
-
-        kdebug!("MSR intercept: LSTAR MSR intercept handled successfully");
-
-        if TRAMPOLINE_PA.get().is_none() {
-            TRAMPOLINE_PA.init(DekoAtomicData::new(req.trampoline_gpa));
-        }
-    }
-    if core::hint::unlikely(!valid_kernel_vaddr(VirtAddr(syscall_enter_addr))) {
-        kerror!("Trampoline setup: invalid syscall enter address:", syscall_enter_addr => hex);
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-
-    }
-    Ok(())
-}
-
-#[verus_spec(r =>
-    with
-        Tracked(cpu_perm): Tracked<&mut DekoCpuCtxPermission>,
-    requires
-        old(cpu_perm).wf(),
-        old(params).additional_data is Some,
-    ensures
-        cpu_perm.wf(),
-        cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
-)]
-fn handle_deko_service_trampoline_setup(params: &mut DekoGuestRequestParams) -> DekoGuestServResult<
-    (),
-> {
-    kinfo!("Trampoline setup: request struct:", PhysAddr(params.r9));
-
-    let aligned_req = params.r9 & !(PAGE_SIZE as u64 - 1);
-    let offset = params.r9 % PAGE_SIZE as u64;
-
-    proof {
-        let n = params.r9;
-
-        assert(aligned_req % PAGE_SIZE == 0) by (bit_vector)
-            requires
-                aligned_req == (n & !((PAGE_SIZE as u64 - 1) as u64)),
-                PAGE_SIZE == 0x1000,
-        ;
-    }
-
-    if core::hint::unlikely(!check_within_guest_mmap(PhysAddr(aligned_req))) {
-        kerror!("Trampoline setup: request struct NOT within guest mmap:", PhysAddr(params.r9));
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-    }
-    if core::hint::unlikely(aligned_req >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE) {
-        kerror!("Trampoline setup: request struct out of range:", PhysAddr(params.r9));
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-    }
-    let setup_req_mapping = match TempMapping::new(create_paddr_range(PhysAddr(aligned_req), 1)) {
-        Some(m) => m,
-        None => {
-            kerror!("Trampoline setup: failed to create temporary mapping for request struct at:", PhysAddr(params.r9));
-            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy));
-        },
-    };
-
-    if core::hint::unlikely(
-        core::mem::size_of::<DekoGuestTrampolineSetupReq>() as u64 > PAGE_SIZE as u64 - offset,
-    ) {
-        kerror!("Trampoline setup: request struct exceeds page boundary:", PhysAddr(params.r9));
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-    }
-    let req = setup_req_mapping.read_ref_at::<DekoGuestTrampolineSetupReq>(offset as usize);
-    let req = req.clone();
-    let syscall_enter_addr = req.syscall_enter_addr.0;
-
-    validate_trampoline_setup_req(&req, syscall_enter_addr)?;
-    kinfo!("Trampoline setup request:", req);
-
-    let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
-    let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
-    let guest_cr3 = strip_confidentiality_bits(
-        params.additional_data.unwrap().guest_cr3,
-        cpu_borrow.private_bit,
-    );
-
-    if core::hint::unlikely(!valid_guest_page(PhysAddr(guest_cr3))) {
-        kerror!("Trampoline setup: invalid guest CR3:", guest_cr3);
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-    }
-    let guest_pgtable = guest_page_table(guest_cr3)?;
-    let syscall_enter_addr = VirtAddr(syscall_enter_addr);
-    install_hook(
-        guest_pgtable,
-        syscall_enter_addr,
-        cpu_borrow.private_bit,
-        cpu_borrow.shared_bit,
-        &req,
-    )?;
-
-    setup_req_mapping.write_ref_at::<DekoGuestTrampolineSetupReq>(offset as usize, &req);
-
-    kinfo!("Trampoline setup handled successfully");
-
-    if TRAMPOLINE_PA.get().is_none() {
-        TRAMPOLINE_PA.init(DekoAtomicData::new(req.trampoline_gpa));
-    }
-    Ok(())
-}
-
-#[verifier::external_body]
-fn read_guest_bytes(blob_gpa: PhysAddr, blob_len: usize) -> DekoGuestServResult<Vec<u8>> {
-    if blob_len == 0 {
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-    }
-    let aligned_gpa = blob_gpa.0 & !(PAGE_SIZE - 1);
-    let page_offset = (blob_gpa.0 - aligned_gpa) as usize;
-    let total_span = page_offset.checked_add(blob_len).ok_or(
-        DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam),
-    )?;
-    let page_size = PAGE_SIZE as usize;
-    let nr_pages = total_span.div_ceil(page_size);
-    let last_page_gpa = aligned_gpa.checked_add(((nr_pages - 1) as u64) * PAGE_SIZE).ok_or(
-        DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam),
-    )?;
-
-    if !check_within_guest_mmap(PhysAddr(aligned_gpa)) || !check_within_guest_mmap(
-        PhysAddr(last_page_gpa),
-    ) {
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
-    }
-    let mapping = TempMapping::new(create_paddr_range(PhysAddr(aligned_gpa), nr_pages)).ok_or(
-        DekoGuestServError::SoftError(DekoGuestServResultCode::Busy),
-    )?;
-    let src = unsafe {
-        core::slice::from_raw_parts(
-            (mapping.inner.start.0 as usize + page_offset) as *const u8,
-            blob_len,
-        )
-    };
-
-    Ok(src.to_vec_in(DekoAllocatorApi {  }))
-}
-
-#[verus_spec(r =>
-    with
-        Tracked(cpu_perm): Tracked<&mut DekoCpuCtxPermission>,
-    requires
-        old(cpu_perm).wf(),
-    ensures
-        cpu_perm.wf(),
-        cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
-)]
-fn handle_deko_service_load_policy(params: &mut DekoGuestRequestParams) -> DekoGuestServResult<()> {
-    let req_gpa = params.r9;
-    let req_offset = req_gpa % PAGE_SIZE as u64;
-    let req_body = req_gpa & !(PAGE_SIZE as u64 - 1);
-
-    proof {
-        let n = params.r9;
-
-        assert(req_body % PAGE_SIZE == 0) by (bit_vector)
-            requires
-                req_body == (n & !((PAGE_SIZE as u64 - 1) as u64)),
-                PAGE_SIZE == 0x1000,
-        ;
-    }
-
-    if core::hint::unlikely(!check_within_guest_mmap(PhysAddr(req_body))) {
-        kerror!("Load policy: request body NOT within guest mmap:", PhysAddr(req_body));
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-    }
-    if core::hint::unlikely(
-        req_body >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE || core::mem::size_of::<
-            DekoLoadPolicyReq,
-        >() as u64 > PAGE_SIZE - req_offset,
-    ) {
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-    }
-    let req_mapping = TempMapping::new(create_paddr_range(PhysAddr(req_body), 1)).ok_or(
-        DekoGuestServError::SoftError(DekoGuestServResultCode::Busy),
-    )?;
-    let req = *req_mapping.read_ref_at::<DekoLoadPolicyReq>(req_offset as usize);
-    let blob_len = usize::try_from(req.blob_len).map_err(
-        |_err| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam),
-    )?;
-    kinfo!(
-        "Load policy request: domain_id=",
-        req.domain_id,
-        " blob_gpa=",
-        PhysAddr(req.blob_gpa),
-        " blob_len=",
-        blob_len,
-    );
-    let blob = read_guest_bytes(PhysAddr(req.blob_gpa), blob_len)?;
-    kinfo!(
-        "Load policy bytes copied: domain_id=",
-        req.domain_id,
-        " blob_len=",
-        blob.len(),
-    );
-    register_policy_domain(req.domain_id, blob.as_slice())?;
-    Ok(())
-}
 
 #[verifier::external_body]
 fn read_guest_bytes(blob_gpa: PhysAddr, blob_len: usize) -> DekoGuestServResult<Vec<u8>> {
@@ -417,14 +110,7 @@ fn handle_deko_service_load_policy(params: &mut DekoGuestRequestParams) -> DekoG
         |_err| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam),
     )?;
     let blob = read_guest_bytes(PhysAddr(req.blob_gpa), blob_len)?;
-
     register_policy_domain(req.domain_id, blob.as_slice())?;
-    kdebug!(
-        "Load policy: registered policy domain",
-        req.domain_id,
-        " size=",
-        req.blob_len
-    );
     Ok(())
 }
 
@@ -784,11 +470,6 @@ pub(super) fn handle_guest_exit_extend_service(
     cpu_idx: u64,
 ) -> DekoGuestServResult<u64> {
     match req {
-        DEKO_SERVICE_EXTEND_TRAMPOLINE_SETUP => {
-            proof_with!(Tracked(cpu_perm));
-            handle_deko_service_trampoline_setup(params)?;
-            Ok(0)
-        },
         DEKO_SERVICE_EXTEND_REPORT_APP => {
             proof_with!(Tracked(cpu_perm));
             handle_deko_service_report_app(params)?;

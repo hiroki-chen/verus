@@ -8,8 +8,5 @@ edition = "2021"
 [dependencies]
 deko-policy-format = { path = "../deko-policy-format", features = ["alloc"] }
 libc = "0.2"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-sha2 = "0.10"
 toml = "0.9"

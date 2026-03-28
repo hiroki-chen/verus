@@ -4,10 +4,10 @@ ARG SCRIPT_PATH
 
 WORKDIR /app
 
-COPY tests/guest/scripts /app/scripts
+COPY . /app/scripts
 
 RUN test -n "${SCRIPT_PATH}" \
-    && test -f "/app/${SCRIPT_PATH}" \
-    && chmod +x "/app/${SCRIPT_PATH}"
+    && test -f "/app/scripts/${SCRIPT_PATH}" \
+    && chmod +x "/app/scripts/${SCRIPT_PATH}"
 
 CMD ["python3", "/app/scripts/orders_ingest.py"]

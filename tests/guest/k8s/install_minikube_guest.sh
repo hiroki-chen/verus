@@ -123,10 +123,10 @@ Recommended next steps:
 4. Build and deploy the Deko examples:
    cd ${SCRIPT_DIR%/tests/guest/k8s}
    eval "\$(minikube docker-env)"
-   docker build -f tests/guest/k8s/Dockerfile.orders-function --build-arg SCRIPT_PATH=scripts/orders_ingest.py -t orders-ingest:latest .
-   docker build -f tests/guest/k8s/Dockerfile.orders-function --build-arg SCRIPT_PATH=scripts/orders_transform.py -t orders-transform:latest .
-   docker build -f tests/guest/k8s/Dockerfile.orders-function --build-arg SCRIPT_PATH=scripts/orders_writer.py -t orders-writer:latest .
-   docker build -f tests/guest/k8s/Dockerfile.deko-agent -t deko-agent:latest .
+   docker build -f tests/guest/k8s/Dockerfile.orders-function --build-arg SCRIPT_PATH=orders_ingest.py -t orders-ingest:latest tests/guest/scripts
+   docker build -f tests/guest/k8s/Dockerfile.orders-function --build-arg SCRIPT_PATH=orders_transform.py -t orders-transform:latest tests/guest/scripts
+   docker build -f tests/guest/k8s/Dockerfile.orders-function --build-arg SCRIPT_PATH=orders_writer.py -t orders-writer:latest tests/guest/scripts
+   docker build -f tests/guest/k8s/Dockerfile.deko-agent -t deko-agent:latest deko-agent
    kubectl apply -f tests/guest/k8s/orders_function_group.yaml
    kubectl apply -f tests/guest/k8s/deko_agent_daemonset.yaml
 

@@ -27,14 +27,24 @@ belong to the same Deko domain.
   Shared image build file for the Python handlers.
 - `../../deko-agent/deko_agent.py`
   Prototype guest-side attribution agent for turning `data-storage` labels into
-  `mnt_ns_id -> domain_id` bindings.
+  `mnt_ns_id -> domain_id` bindings and auto-loading domain policies.
 - `../../deko-agent/Dockerfile`
   Minimal image for the prototype agent.
+- `../../deko-agent/Dockerfile.prebuilt`
+  Runtime-only image that copies in a host-built Rust `deko-agent` binary.
 - `deko_agent_daemonset.yaml`
   Example `DaemonSet` + RBAC for running one attribution agent per node.
 - `install_minikube_guest.sh`
   Convenience installer for guest-side K8s test dependencies such as Docker,
   `kubectl`, `minikube`, and `crictl`.
+- `recover_minikube_guest.sh`
+  One-shot recovery script for guest reboot scenarios. It rebuilds images,
+  reinstalls `deko.ko` into the Minikube node, recreates `/dev/deko`, and
+  reapplies the example manifests.
+- `guest_init.sh`
+  One-shot guest bootstrap script that starts Minikube, installs `deko.ko`
+  into the Minikube node, rebuilds the latest images, and reapplies the
+  example manifests.
 
 ## Python handlers
 
@@ -61,6 +71,14 @@ cd /home/haobchen/cage-sev
 sudo bash tests/guest/k8s/install_minikube_guest.sh
 ```
 
+After a guest reboot, the fastest way to restore the full Minikube + Deko test
+setup is:
+
+```bash
+cd /home/haobchen/cage-sev
+bash tests/guest/k8s/recover_minikube_guest.sh
+```
+
 From the repository root:
 
 ```bash
@@ -71,17 +89,17 @@ eval "$(minikube docker-env)"
 Build the three images inside Minikube's Docker environment:
 
 ```bash
-docker build -f tests/guest/k8s/Dockerfile.orders-function \
-  --build-arg SCRIPT_PATH=scripts/orders_ingest.py \
-  -t orders-ingest:latest .
+docker build -f /home/haobchen/cage-sev/tests/guest/k8s/Dockerfile.orders-function \
+  --build-arg SCRIPT_PATH=orders_ingest.py \
+  -t orders-ingest:latest /home/haobchen/cage-sev/tests/guest/scripts
 
-docker build -f tests/guest/k8s/Dockerfile.orders-function \
-  --build-arg SCRIPT_PATH=scripts/orders_transform.py \
-  -t orders-transform:latest .
+docker build -f /home/haobchen/cage-sev/tests/guest/k8s/Dockerfile.orders-function \
+  --build-arg SCRIPT_PATH=orders_transform.py \
+  -t orders-transform:latest /home/haobchen/cage-sev/tests/guest/scripts
 
-docker build -f tests/guest/k8s/Dockerfile.orders-function \
-  --build-arg SCRIPT_PATH=scripts/orders_writer.py \
-  -t orders-writer:latest .
+docker build -f /home/haobchen/cage-sev/tests/guest/k8s/Dockerfile.orders-function \
+  --build-arg SCRIPT_PATH=orders_writer.py \
+  -t orders-writer:latest /home/haobchen/cage-sev/tests/guest/scripts
 ```
 
 Apply the resources:
@@ -148,8 +166,34 @@ kubectl delete -f tests/guest/k8s/orders_function_group.yaml
    container ID.
 4. Reads `/proc/<pid>/ns/mnt` to obtain `mnt_ns_id`.
 5. Computes a temporary `domain_id` as `sha256(data-storage)[0..4]`.
-6. Calls `/dev/deko` to register `mnt_ns_id -> domain_id`.
-7. Optionally appends a JSONL debug record to a host file.
+6. Fetches `ConfigMap/deko-policy-<data-storage>` from the same namespace and
+   auto-loads `policy.toml` into Deko.
+7. Calls `/dev/deko` to register `mnt_ns_id -> domain_id`.
+8. Optionally appends a JSONL debug record to a host file.
+
+Before app registration starts succeeding, the corresponding policy domain must
+already exist inside the monitor. For the current `orders` example, the
+prototype-derived domain id is:
+
+```text
+471239387
+```
+
+You can still push the policy manually with:
+
+```bash
+sudo python3 /home/haobchen/cage-sev/deko-agent/dekoctl.py \
+  load-policy \
+  --domain-id 471239387 \
+  --policy-file /home/haobchen/cage-sev/tests/guest/k8s/orders_policy.toml
+```
+
+But the example YAML is now wired for automatic loading too. The contract is:
+
+- workload namespace contains `ConfigMap/deko-policy-<data-storage>`
+- the policy blob lives under key `policy.toml`
+- `deko-agent` loads that policy once per `(namespace, domain_id)` before it
+  registers namespace bindings
 
 The JSONL output shape is:
 
@@ -204,7 +248,19 @@ cd /home/haobchen/cage-sev
 eval "$(minikube docker-env)"
 
 docker build -f tests/guest/k8s/Dockerfile.deko-agent \
-  -t deko-agent:latest .
+  -t deko-agent:latest deko-agent
+```
+
+If you want to use a host-built Rust binary instead, first stage it at:
+
+- `deko-agent/dist/deko-agent`
+
+Then build the runtime-only image:
+
+```bash
+docker build -f tests/guest/k8s/Dockerfile.deko-agent-prebuilt \
+  -t deko-agent-rust:latest \
+  deko-agent
 ```
 
 Apply the `DaemonSet`:
@@ -248,6 +304,7 @@ itself now lives in the first-class component directory:
 
 - `deko-agent/deko_agent.py`
 - `deko-agent/Dockerfile`
+- `deko-agent/Dockerfile.prebuilt`
 
 This keeps:
 

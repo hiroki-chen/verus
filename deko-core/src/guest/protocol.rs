@@ -6,8 +6,6 @@ use vstd::prelude::*;
 
 verus! {
 
-global layout DekoGuestTrampolineSetupReq is size == 0x18;
-
 global layout DekoNewAppReq is size == 0x70;
 
 global layout DekoMapIfcReq is size == 0x298;
@@ -186,8 +184,6 @@ pub const DEKO_SERVICE_ATTEST_SERVICES: u32 = 0x0;
 
 pub const DEKO_SERVICE_ATTEST_SINGLE_SERVICE: u32 = 0x1;
 
-pub const DEKO_SERVICE_EXTEND_TRAMPOLINE_SETUP: u32 = 0x0;
-
 pub const DEKO_SERVICE_EXTEND_SYSCALL_ANALYSIS: u32 = 0x1;
 
 pub const DEKO_SERVICE_EXTEND_REPORT_APP: u32 = 0x2;
@@ -206,17 +202,6 @@ pub const DEKO_SERVICE_EXTEND_TIMER_EVENT: u32 = 0x6;
 pub const DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER: u32 = 0x7;
 
 pub const DEKO_SERVICE_EXTEND_LOAD_POLICY: u32 = 0x8;
-
-/// Represents a request structure for LSTAR MSR write operations.
-/// The guest must place this request at the given physical address
-/// before invoking the LSTAR write service.
-#[repr(C, align(8))]
-#[derive(Copy, Clone, DekoDebug)]
-pub struct DekoGuestTrampolineSetupReq {
-    pub syscall_enter_addr: VirtAddr,
-    pub trampoline_gva: VirtAddr,
-    pub trampoline_gpa: PhysAddr,
-}
 
 #[repr(C, align(8))]
 #[derive(Copy, Clone, DekoDebug)]

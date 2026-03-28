@@ -4,11 +4,9 @@
 
 This project is a secure monitor running at VMPL0 for SEV-SNP where the guest kernel is untrusted.
 
-- VMPL0 is the root of enforcement inside the guest and is trusted to maintain isolation, memory ownership, interrupt safety, and register-state integrity across boundary transitions.
-- VMPL1 runs the monitored secure application and is trusted only within the scope of its own measured code and assigned resources.
-- VMPL2 runs the general-purpose Linux kernel and must be treated as untrusted for confidentiality, integrity, and control-flow decisions.
-- Any input originating from VMPL2, including memory contents, pointers, requests, interrupt-related state, and protocol fields, must be validated before use.
-- No invariant of the monitor or VMPL1 may depend on VMPL2 behaving correctly.
+- VMPL0: The Deko monitor.
+- VMPL1: Monitored secure application
+- VMPL2: Linux kernel for the rest of the work but untrusted.
 
 ## Environment and Setup
 
