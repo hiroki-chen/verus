@@ -1,39 +1,42 @@
-# Orders Function Group Example
+# Guest K8s Projects
 
-This directory contains a minimal K8s/FaaS-style example for one Deko policy
-domain.
+This directory contains project-based K8s examples for guest-side Deko testing.
 
-The business boundary is selected by the shared label:
+Each project owns:
 
-- `data-storage=orders`
+- its own namespace
+- a namespaced `deko-policy-<data-storage>` `ConfigMap`
+- one or more workloads labeled with `data-storage=<project>`
+- an optional smoke `Job`
 
-The function group contains three services:
+The shared `deko-agent` `DaemonSet` watches local Pods, auto-loads policy, and
+registers `mnt_ns_id -> domain_id` bindings.
 
-- `orders-ingest`
-- `orders-transform`
-- `orders-writer`
+## Projects
 
-They are deployed together in the `faas-orders` namespace and are expected to
-belong to the same Deko domain.
+- `projects/orders`
+  Three-stage FaaS-style pipeline: ingest, transform, writer.
+- `projects/syscalls`
+  Single probe service plus smoke job that exercises a variety of filesystem,
+  pipe, socketpair, mmap, and timing syscalls.
 
 ## Files
 
-- `orders_function_group.yaml`
-  K8s resources for the namespace, config map, deployments, services, and a
-  smoke-test job.
-- `orders_policy.toml`
-  Example policy for the `orders` domain.
-- `Dockerfile.orders-function`
-  Shared image build file for the Python handlers.
+- `shared/Dockerfile.python-service`
+  Shared image build file for Python-backed service workloads.
+- `shared/deko_agent_daemonset.yaml`
+  Shared `DaemonSet` + RBAC for running one attribution agent per node.
+- `projects/orders/project.yaml`
+  Orders namespace, policy `ConfigMap`, three services, and smoke job.
+- `projects/orders/policy.toml`
+  Orders policy source in standalone form.
+- `projects/syscalls/project.yaml`
+  Syscalls namespace, policy `ConfigMap`, probe service, and smoke job.
+- `projects/syscalls/policy.toml`
+  Syscalls policy source in standalone form.
 - `../../deko-agent/deko_agent.py`
   Prototype guest-side attribution agent for turning `data-storage` labels into
   `mnt_ns_id -> domain_id` bindings and auto-loading domain policies.
-- `../../deko-agent/Dockerfile`
-  Minimal image for the prototype agent.
-- `../../deko-agent/Dockerfile.prebuilt`
-  Runtime-only image that copies in a host-built Rust `deko-agent` binary.
-- `deko_agent_daemonset.yaml`
-  Example `DaemonSet` + RBAC for running one attribution agent per node.
 - `install_minikube_guest.sh`
   Convenience installer for guest-side K8s test dependencies such as Docker,
   `kubectl`, `minikube`, and `crictl`.
@@ -53,6 +56,7 @@ The deployed handlers are:
 - `tests/guest/scripts/orders_ingest.py`
 - `tests/guest/scripts/orders_transform.py`
 - `tests/guest/scripts/orders_writer.py`
+- `tests/guest/scripts/syscalls_probe.py`
 
 Each service listens on port `8080` and exposes:
 
@@ -60,6 +64,7 @@ Each service listens on port `8080` and exposes:
 - `POST /orders` for ingest
 - `POST /transform` for transform
 - `POST /write` for writer
+- `POST /probe` for syscall probing
 
 ## Deploy With Minikube
 
@@ -86,43 +91,55 @@ cd /home/haobchen/cage-sev
 eval "$(minikube docker-env)"
 ```
 
-Build the three images inside Minikube's Docker environment:
+Build the project images inside Minikube's Docker environment:
 
 ```bash
-docker build -f /home/haobchen/cage-sev/tests/guest/k8s/Dockerfile.orders-function \
+docker build -f /home/haobchen/cage-sev/tests/guest/k8s/shared/Dockerfile.python-service \
   --build-arg SCRIPT_PATH=orders_ingest.py \
-  -t orders-ingest:latest /home/haobchen/cage-sev/tests/guest/scripts
+  -t orders-ingest:latest /home/haobchen/cage-sev/tests/guest
 
-docker build -f /home/haobchen/cage-sev/tests/guest/k8s/Dockerfile.orders-function \
+docker build -f /home/haobchen/cage-sev/tests/guest/k8s/shared/Dockerfile.python-service \
   --build-arg SCRIPT_PATH=orders_transform.py \
-  -t orders-transform:latest /home/haobchen/cage-sev/tests/guest/scripts
+  -t orders-transform:latest /home/haobchen/cage-sev/tests/guest
 
-docker build -f /home/haobchen/cage-sev/tests/guest/k8s/Dockerfile.orders-function \
+docker build -f /home/haobchen/cage-sev/tests/guest/k8s/shared/Dockerfile.python-service \
   --build-arg SCRIPT_PATH=orders_writer.py \
-  -t orders-writer:latest /home/haobchen/cage-sev/tests/guest/scripts
+  -t orders-writer:latest /home/haobchen/cage-sev/tests/guest
+
+docker build -f /home/haobchen/cage-sev/tests/guest/k8s/shared/Dockerfile.python-service \
+  --build-arg SCRIPT_PATH=syscalls_probe.py \
+  -t syscalls-probe:latest /home/haobchen/cage-sev/tests/guest
 ```
 
 Apply the resources:
 
 ```bash
-kubectl apply -f tests/guest/k8s/orders_function_group.yaml
+kubectl apply -f tests/guest/k8s/projects/orders/project.yaml
+kubectl apply -f tests/guest/k8s/projects/syscalls/project.yaml
+kubectl apply -f tests/guest/k8s/shared/deko_agent_daemonset.yaml
 ```
 
-Wait for the three deployments:
+Wait for the deployments:
 
 ```bash
 kubectl -n faas-orders wait --for=condition=available deployment/orders-ingest --timeout=120s
 kubectl -n faas-orders wait --for=condition=available deployment/orders-transform --timeout=120s
 kubectl -n faas-orders wait --for=condition=available deployment/orders-writer --timeout=120s
+kubectl -n faas-syscalls wait --for=condition=available deployment/syscalls-probe --timeout=120s
 ```
 
 Run and inspect the smoke test:
 
 ```bash
 kubectl -n faas-orders delete job orders-pipeline-smoke --ignore-not-found
-kubectl apply -f tests/guest/k8s/orders_function_group.yaml
+kubectl apply -f tests/guest/k8s/projects/orders/project.yaml
 kubectl -n faas-orders wait --for=condition=complete job/orders-pipeline-smoke --timeout=120s
 kubectl -n faas-orders logs job/orders-pipeline-smoke
+
+kubectl -n faas-syscalls delete job syscalls-smoke --ignore-not-found
+kubectl apply -f tests/guest/k8s/projects/syscalls/project.yaml
+kubectl -n faas-syscalls wait --for=condition=complete job/syscalls-smoke --timeout=120s
+kubectl -n faas-syscalls logs job/syscalls-smoke
 ```
 
 ## Inspect Results
@@ -131,6 +148,7 @@ Show all resources:
 
 ```bash
 kubectl get all -n faas-orders
+kubectl get all -n faas-syscalls
 ```
 
 Inspect logs:
@@ -139,6 +157,7 @@ Inspect logs:
 kubectl -n faas-orders logs deploy/orders-ingest
 kubectl -n faas-orders logs deploy/orders-transform
 kubectl -n faas-orders logs deploy/orders-writer
+kubectl -n faas-syscalls logs deploy/syscalls-probe
 ```
 
 Inspect the persisted output:
@@ -150,10 +169,12 @@ kubectl -n faas-orders exec deploy/orders-writer -- cat /tmp/orders-db/ord-1001.
 
 ## Clean Up
 
-Delete all resources from the example:
+Delete all resources from the projects:
 
 ```bash
-kubectl delete -f tests/guest/k8s/orders_function_group.yaml
+kubectl delete -f tests/guest/k8s/projects/orders/project.yaml
+kubectl delete -f tests/guest/k8s/projects/syscalls/project.yaml
+kubectl delete -f tests/guest/k8s/shared/deko_agent_daemonset.yaml
 ```
 
 ## Prototype Guest Agent
@@ -185,7 +206,7 @@ You can still push the policy manually with:
 sudo python3 /home/haobchen/cage-sev/deko-agent/dekoctl.py \
   load-policy \
   --domain-id 471239387 \
-  --policy-file /home/haobchen/cage-sev/tests/guest/k8s/orders_policy.toml
+  --policy-file /home/haobchen/cage-sev/tests/guest/k8s/projects/orders/policy.toml
 ```
 
 But the example YAML is now wired for automatic loading too. The contract is:
@@ -266,7 +287,7 @@ docker build -f tests/guest/k8s/Dockerfile.deko-agent-prebuilt \
 Apply the `DaemonSet`:
 
 ```bash
-kubectl apply -f tests/guest/k8s/deko_agent_daemonset.yaml
+kubectl apply -f tests/guest/k8s/shared/deko_agent_daemonset.yaml
 kubectl -n deko-system rollout status daemonset/deko-agent --timeout=120s
 kubectl -n deko-system logs daemonset/deko-agent
 ```

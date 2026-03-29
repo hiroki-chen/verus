@@ -94,9 +94,6 @@ name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
-dependencies = [
- "no-panic",
-]
 
 [[package]]
 name = "lexical-core"
@@ -156,17 +153,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "no-panic"
-version = "0.1.36"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f967505aabc8af5752d098c34146544a43684817cdba8f9725b292530cabbf53"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -202,9 +188,6 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
-dependencies = [
- "no-panic",
-]
 
 [[package]]
 name = "syn"

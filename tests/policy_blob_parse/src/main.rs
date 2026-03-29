@@ -22,8 +22,8 @@ fn main() {
     assert_eq!(header.kind, PolicyBlobKind::LatticeV1 as u16);
     assert_eq!(payload.len(), header.payload_len as usize);
 
-    let borrowed = decode_borrowed_lattice_v1_blob(payload)
-        .expect("borrowed lattice blob should decode");
+    let borrowed =
+        decode_borrowed_lattice_v1_blob(payload).expect("borrowed lattice blob should decode");
 
     assert_eq!(borrowed.header.level_count, 3);
     assert_eq!(borrowed.header.relation_count, 2);

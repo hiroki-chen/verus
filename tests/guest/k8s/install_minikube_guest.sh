@@ -123,12 +123,14 @@ Recommended next steps:
 4. Build and deploy the Deko examples:
    cd ${SCRIPT_DIR%/tests/guest/k8s}
    eval "\$(minikube docker-env)"
-   docker build -f tests/guest/k8s/Dockerfile.orders-function --build-arg SCRIPT_PATH=orders_ingest.py -t orders-ingest:latest tests/guest/scripts
-   docker build -f tests/guest/k8s/Dockerfile.orders-function --build-arg SCRIPT_PATH=orders_transform.py -t orders-transform:latest tests/guest/scripts
-   docker build -f tests/guest/k8s/Dockerfile.orders-function --build-arg SCRIPT_PATH=orders_writer.py -t orders-writer:latest tests/guest/scripts
+   docker build -f tests/guest/k8s/shared/Dockerfile.python-service --build-arg SCRIPT_PATH=orders_ingest.py -t orders-ingest:latest tests/guest
+   docker build -f tests/guest/k8s/shared/Dockerfile.python-service --build-arg SCRIPT_PATH=orders_transform.py -t orders-transform:latest tests/guest
+   docker build -f tests/guest/k8s/shared/Dockerfile.python-service --build-arg SCRIPT_PATH=orders_writer.py -t orders-writer:latest tests/guest
+   docker build -f tests/guest/k8s/shared/Dockerfile.python-service --build-arg SCRIPT_PATH=syscalls_probe.py -t syscalls-probe:latest tests/guest
    docker build -f tests/guest/k8s/Dockerfile.deko-agent -t deko-agent:latest deko-agent
-   kubectl apply -f tests/guest/k8s/orders_function_group.yaml
-   kubectl apply -f tests/guest/k8s/deko_agent_daemonset.yaml
+   kubectl apply -f tests/guest/k8s/projects/orders/project.yaml
+   kubectl apply -f tests/guest/k8s/projects/syscalls/project.yaml
+   kubectl apply -f tests/guest/k8s/shared/deko_agent_daemonset.yaml
 
 If you want to skip Docker and try Minikube's "none" driver, that is possible,
 but this script optimizes for the Docker driver because it matches our current

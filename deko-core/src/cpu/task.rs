@@ -2255,18 +2255,16 @@ fn serv_main_loop(cpu_index: usize) -> ! {
                     Err(e) => {
                         ret_params = params;
                         match e {
-                            DekoGuestServError::FatalError(msg) => {
+                            DekoGuestServError::FatalError => {
                                 kerror!(
                                     "guest request fatal: cpu=",
                                     cpu_index,
                                     " protocol=",
                                     protocol,
                                     " req=",
-                                    req,
-                                    " err=",
-                                    msg
+                                    req
                                 );
-                                die(msg.as_str());
+                                die("Fatal error occurred when handling guest request.");
                             },
                             DekoGuestServError::SoftError(e) => {
                                 r = e.into_error_code();

@@ -51,20 +51,25 @@ build_images() {
   log "Building latest Docker images in Minikube Docker"
   eval "$(minikube -p "${CLUSTER_NAME}" docker-env)"
 
-  docker build -f "${REPO_ROOT}/tests/guest/k8s/Dockerfile.orders-function" \
+  docker build -f "${REPO_ROOT}/tests/guest/k8s/shared/Dockerfile.python-service" \
     --build-arg SCRIPT_PATH=orders_ingest.py \
     -t orders-ingest:latest \
-    "${REPO_ROOT}/tests/guest/scripts"
+    "${REPO_ROOT}/tests/guest"
 
-  docker build -f "${REPO_ROOT}/tests/guest/k8s/Dockerfile.orders-function" \
+  docker build -f "${REPO_ROOT}/tests/guest/k8s/shared/Dockerfile.python-service" \
     --build-arg SCRIPT_PATH=orders_transform.py \
     -t orders-transform:latest \
-    "${REPO_ROOT}/tests/guest/scripts"
+    "${REPO_ROOT}/tests/guest"
 
-  docker build -f "${REPO_ROOT}/tests/guest/k8s/Dockerfile.orders-function" \
+  docker build -f "${REPO_ROOT}/tests/guest/k8s/shared/Dockerfile.python-service" \
     --build-arg SCRIPT_PATH=orders_writer.py \
     -t orders-writer:latest \
-    "${REPO_ROOT}/tests/guest/scripts"
+    "${REPO_ROOT}/tests/guest"
+
+  docker build -f "${REPO_ROOT}/tests/guest/k8s/shared/Dockerfile.python-service" \
+    --build-arg SCRIPT_PATH=syscalls_probe.py \
+    -t syscalls-probe:latest \
+    "${REPO_ROOT}/tests/guest"
 
   docker build -f "${REPO_ROOT}/tests/guest/k8s/Dockerfile.deko-agent" \
     -t deko-agent:latest \
@@ -96,12 +101,14 @@ install_deko_module() {
 
 apply_manifests() {
   log "Applying latest workload and agent manifests"
-  kubectl apply -f "${REPO_ROOT}/tests/guest/k8s/orders_function_group.yaml"
-  kubectl apply -f "${REPO_ROOT}/tests/guest/k8s/deko_agent_daemonset.yaml"
+  kubectl apply -f "${REPO_ROOT}/tests/guest/k8s/projects/orders/project.yaml"
+  kubectl apply -f "${REPO_ROOT}/tests/guest/k8s/projects/syscalls/project.yaml"
+  kubectl apply -f "${REPO_ROOT}/tests/guest/k8s/shared/deko_agent_daemonset.yaml"
 
   kubectl -n faas-orders rollout status deployment/orders-ingest --timeout=120s
   kubectl -n faas-orders rollout status deployment/orders-transform --timeout=120s
   kubectl -n faas-orders rollout status deployment/orders-writer --timeout=120s
+  kubectl -n faas-syscalls rollout status deployment/syscalls-probe --timeout=120s
   kubectl -n deko-system rollout status daemonset/deko-agent --timeout=120s
 }
 
@@ -115,9 +122,13 @@ Useful checks:
   kubectl get pods -A
   kubectl -n deko-system logs -l app.kubernetes.io/name=deko-agent
   kubectl -n faas-orders delete job orders-pipeline-smoke --ignore-not-found
-  kubectl apply -f ${REPO_ROOT}/tests/guest/k8s/orders_function_group.yaml
+  kubectl apply -f ${REPO_ROOT}/tests/guest/k8s/projects/orders/project.yaml
   kubectl -n faas-orders wait --for=condition=complete job/orders-pipeline-smoke --timeout=120s
   kubectl -n faas-orders logs job/orders-pipeline-smoke
+  kubectl -n faas-syscalls delete job syscalls-smoke --ignore-not-found
+  kubectl apply -f ${REPO_ROOT}/tests/guest/k8s/projects/syscalls/project.yaml
+  kubectl -n faas-syscalls wait --for=condition=complete job/syscalls-smoke --timeout=120s
+  kubectl -n faas-syscalls logs job/syscalls-smoke
 EOF
 }
 

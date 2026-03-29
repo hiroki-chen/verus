@@ -109,7 +109,21 @@ fn handle_deko_service_load_policy(params: &mut DekoGuestRequestParams) -> DekoG
     let blob_len = usize::try_from(req.blob_len).map_err(
         |_err| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam),
     )?;
+    kinfo!(
+        "Load policy request: domain_id=",
+        req.domain_id,
+        " blob_gpa=",
+        PhysAddr(req.blob_gpa),
+        " blob_len=",
+        blob_len,
+    );
     let blob = read_guest_bytes(PhysAddr(req.blob_gpa), blob_len)?;
+    kinfo!(
+        "Load policy bytes copied: domain_id=",
+        req.domain_id,
+        " blob_len=",
+        blob.len(),
+    );
     register_policy_domain(req.domain_id, blob.as_slice())?;
     Ok(())
 }

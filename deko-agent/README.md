@@ -35,14 +35,14 @@ The current Rust binary exposes these minimal commands:
 ```bash
 cargo run --manifest-path deko-agent/Cargo.toml -- \
   compile-policy \
-  --input tests/guest/k8s/orders_policy.toml \
+  --input tests/guest/k8s/projects/orders/policy.toml \
   --output /tmp/orders-policy.bin
 
 cargo run --manifest-path deko-agent/Cargo.toml -- \
   load-policy \
   --device /dev/deko \
   --domain-id 471239387 \
-  --policy-file tests/guest/k8s/orders_policy.toml
+  --policy-file tests/guest/k8s/projects/orders/policy.toml
 ```
 
 For now this Rust binary covers:
@@ -130,7 +130,7 @@ domain start registering:
 sudo python3 /home/haobchen/cage-sev/deko-agent/dekoctl.py \
   load-policy \
   --domain-id 471239387 \
-  --policy-file /home/haobchen/cage-sev/tests/guest/k8s/orders_policy.toml
+  --policy-file /home/haobchen/cage-sev/tests/guest/k8s/projects/orders/policy.toml
 ```
 
 The expected order is:
