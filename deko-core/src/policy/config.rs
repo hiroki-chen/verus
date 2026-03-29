@@ -61,12 +61,34 @@ pub fn parse_policy_config_from_bytes(buf: &[u8]) -> DekoGuestServResult<PolicyC
         let (header, payload) = decode_policy_blob_header(buf).map_err(
             |_err| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidFormat),
         )?;
+        kinfo!(
+            "Policy blob header: buf_len=",
+            buf.len(),
+            " payload_len=",
+            header.payload_len,
+            " kind=",
+            header.kind,
+            " version=",
+            header.version,
+        );
         if header.kind != PolicyBlobKind::LatticeV1 as u16 {
             return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidFormat));
         }
         let blob = decode_borrowed_lattice_v1_blob(payload).map_err(
             |_err| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidFormat),
         )?;
+        kinfo!(
+            "Policy lattice header: level_count=",
+            blob.header.level_count,
+            " relation_count=",
+            blob.header.relation_count,
+            " string_bytes_len=",
+            blob.header.string_bytes_len,
+            " bot_idx=",
+            blob.header.bot_level_idx,
+            " top_idx=",
+            blob.header.top_level_idx,
+        );
 
         let mut levels = Vec::with_capacity_in(
             blob.header.level_count as usize,
