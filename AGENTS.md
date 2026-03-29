@@ -4,9 +4,11 @@
 
 This project is a secure monitor running at VMPL0 for SEV-SNP where the guest kernel is untrusted.
 
-- VMPL0: The Deko monitor.
-- VMPL1: Monitored secure application
-- VMPL2: Linux kernel for the rest of the work but untrusted.
+- VMPL0 is the root of enforcement inside the guest and is trusted to maintain isolation, memory ownership, interrupt safety, and register-state integrity across boundary transitions.
+- VMPL1 runs the monitored secure application and is trusted only within the scope of its own measured code and assigned resources.
+- VMPL2 runs the general-purpose Linux kernel and must be treated as untrusted for confidentiality, integrity, and control-flow decisions.
+- Any input originating from VMPL2, including memory contents, pointers, requests, interrupt-related state, and protocol fields, must be validated before use.
+- No invariant of the monitor or VMPL1 may depend on VMPL2 behaving correctly.
 
 ## Environment and Setup
 
@@ -18,6 +20,22 @@ This project is a secure monitor running at VMPL0 for SEV-SNP where the guest ke
 - Before making verification-related changes, ensure both the Rust toolchain and the Verus toolchain are installed and correctly configured.
 - After every code modification, run `cargo pretty`.
 - The Linux guest kernel we are using can be found inside `~/.config/qemu.snp.toml`.
+
+## Required Command Selection Policy
+
+- For build tasks, first check `.cargo/config.toml`, then use the most specific matching alias.
+- Unless the user explicitly asks for a release build, a non-SNP target, or a different workflow, use `cargo build-deko-snp-debug`.
+- Do not substitute generic commands for project aliases. For example, do not replace `cargo build-deko-snp-debug` with `cargo build`.
+- If an alias wraps required environment setup, target selection, linker configuration, or bootstrapping, you must use that alias rather than reconstructing the command manually.
+- When reporting what you ran, name the exact alias used.
+
+## Default Development Workflow
+
+- Inspect `.cargo/config.toml`.
+- Use the repository alias for the task instead of raw Cargo commands.
+- For ordinary compile checks in this repository, default to `cargo build-deko-snp-debug`.
+- After edits, run `cargo pretty`.
+- Then run the smallest relevant verification, check, or test command for the changed component, again preferring repository aliases.
 
 ## Coding and Verification Standards
 

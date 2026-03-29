@@ -97,6 +97,7 @@ verus! {
 fn main() {
     // Run proptest manually or via cargo test
     test_buddy_coalescing_regression();
+    test_monitor_heap_geometry_guardrails();
     test_random_alloc_free();
     test_no_overlap();
     test_memory_reuse();
@@ -140,6 +141,36 @@ fn test_buddy_coalescing_regression() {
 
         allocator.deallocate(merged, 0x2000, 0x1000);
     }
+}
+
+fn test_monitor_heap_geometry_guardrails() {
+    const MONITOR_HEAP_SIZE: u64 = 0xEF7000;
+    const OLD_FULL_ORDER: u64 = 21;
+    const NEW_FULL_ORDER: u64 = 18;
+    const CLAMPED_HEAP_SIZE: u64 = 0x400000;
+    const NODE_SIZE: u64 = core::mem::size_of::<deko_std::list::Node<()>>() as u64;
+
+    assert!(
+        !valid_heap_param_impl(0xFFFFFF8000108000, MONITOR_HEAP_SIZE, OLD_FULL_ORDER),
+        "old full allocator geometry should be rejected",
+    );
+
+    let old_min_block = MONITOR_HEAP_SIZE >> (OLD_FULL_ORDER - 1);
+    assert!(
+        old_min_block < NODE_SIZE,
+        "expected old min block to be smaller than Node<()>: min_block={old_min_block:#x} node={NODE_SIZE:#x}",
+    );
+
+    assert!(
+        valid_heap_param_impl(0xFFFFFF8000108000, CLAMPED_HEAP_SIZE, NEW_FULL_ORDER),
+        "clamped full allocator geometry should be accepted",
+    );
+
+    let new_min_block = CLAMPED_HEAP_SIZE >> (NEW_FULL_ORDER - 1);
+    assert!(
+        new_min_block >= NODE_SIZE,
+        "expected new min block to fit Node<()>: min_block={new_min_block:#x} node={NODE_SIZE:#x}",
+    );
 }
 
 proptest! {

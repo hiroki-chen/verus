@@ -32,8 +32,9 @@ pretty = "xtask pretty"
 test-buddy = "xtest buddy"
 test-collections = "xtest collections"
 
-# TODO: Fork another version. This will download unncessary git submodules recursively.
-install-igvmbuilder = "install --git https://github.com/coconut-svsm/svsm.git igvmbuilder"
+# TODO: Fork another version. This will download unnecessary git submodules recursively.
+# Latest version of igvmbuilder is incompatible with our codebase, so we need to use a specific commit. We should consider forking and maintaining our own version of igvmbuilder in the future.
+install-igvmbuilder = "install --git https://github.com/coconut-svsm/svsm.git igvmbuilder --rev da737d"
 
 # For some reason the latest version does not work well on our end.
 bootstrap-verus = "xtask bootstrap-verus"

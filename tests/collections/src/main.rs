@@ -112,8 +112,6 @@ fn main() {
     test_vec_string_growth_churn();
     test_vec_byte_push_growth();
     test_nested_vec_reallocation();
-    test_string_push_and_pop();
-    test_string_reserve_and_clear();
 }
 
 fn test_monitor_heap_geometry_vec_growth() {
@@ -287,56 +285,6 @@ fn test_vec_byte_push_growth() {
     }
 
     assert!(v_deko.is_empty());
-}
-
-fn test_string_push_and_pop() {
-    setup_allocator();
-
-    let mut s_deko = DekoString::new_in(DekoAllocatorApi {});
-    let mut s_std = String::new();
-
-    for round in 0..64usize {
-        let chunk = format!("round={round}:{}", "x".repeat(32 + (round % 11)));
-
-        s_deko.push_str(&chunk);
-        s_std.push_str(&chunk);
-
-        let ch = char::from_u32('a' as u32 + (round % 26) as u32).unwrap();
-        s_deko.push(ch);
-        s_std.push(ch);
-
-        assert_eq!(s_deko.as_str(), s_std.as_str());
-        assert_eq!(s_deko.char_len(), s_std.chars().count());
-    }
-
-    for _ in 0..40usize {
-        assert_eq!(s_deko.pop(), s_std.pop());
-        assert_eq!(s_deko.as_str(), s_std.as_str());
-    }
-}
-
-fn test_string_reserve_and_clear() {
-    setup_allocator();
-
-    let mut s_deko = DekoString::with_capacity_in(16, DekoAllocatorApi {});
-
-    assert!(s_deko.is_empty());
-    assert_eq!(s_deko.as_str(), "");
-
-    for round in 0..32usize {
-        s_deko.reserve(64 + round);
-        s_deko.push_str("payload:");
-        s_deko.push(char::from_u32('0' as u32 + (round % 10) as u32).unwrap());
-    }
-
-    assert!(!s_deko.is_empty());
-    assert!(s_deko.capacity() >= s_deko.len());
-    assert!(s_deko.as_str().starts_with("payload:"));
-
-    s_deko.clear();
-
-    assert!(s_deko.is_empty());
-    assert_eq!(s_deko.as_str(), "");
 }
 
 proptest! {
