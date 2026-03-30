@@ -133,15 +133,15 @@ fn deko_ifc_entry_vmpl1(syscall_body_ptr: DekoPPtr<DekoSyscallBody>) -> u64 {
     }
     // Then request VMPL2 to handle the syscall.
 
-    kdebug!("ifc: before request_vmpl2_syscall_handler");
+    kinfo!("ifc: before request_vmpl2_syscall_handler");
 
     if let Err(e) = request_vmpl2_syscall_handler() {
         kerror!("ifc: request_vmpl2_syscall_handler failed: ", e);
         return e.into_result_code();
     }
-    kdebug!("ifc: after request_vmpl2_syscall_handler");
+    kinfo!("ifc: after request_vmpl2_syscall_handler");
     // Check the syscall return value and prepare for returning to the guest.
-    kdebug!("ifc: before sysret_epilogue");
+    kinfo!("ifc: before sysret_epilogue");
 
     if let Err(e) = sysret_epilogue(&mut syscall_body) {
         kerror!("ifc: sysret_epilogue failed");
@@ -149,7 +149,7 @@ fn deko_ifc_entry_vmpl1(syscall_body_ptr: DekoPPtr<DekoSyscallBody>) -> u64 {
     }
     syscall_body_ptr.write(Tracked(&mut syscall_perm), syscall_body);
 
-    kdebug!("ifc: after sysret_epilogue:", syscall_body);
+    kinfo!("ifc: after sysret_epilogue:", syscall_body);
 
     0
 }

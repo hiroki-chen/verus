@@ -9,7 +9,8 @@ use vstd::prelude::*;
 use crate::cpu::{DekoCpuCtxPermission, PERCPU_AREAS};
 use crate::guest::service::{read_guest_copied, write_guest};
 use crate::guest::{
-    DekoGuestRequestParams, DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode,
+    valid_guest_page, DekoGuestRequestParams, DekoGuestServError, DekoGuestServResult,
+    DekoGuestServResultCode,
 };
 use crate::imp::RmpFlags;
 use crate::mm::vm::TempMapping;
@@ -235,9 +236,9 @@ pub(crate) fn handle_deko_service_pvalidate(params: &DekoGuestRequestParams) -> 
 
             match pvalidate_result {
                 Ok(()) => guest_req.next = guest_req.next + 1,
-                Err(e) => match e {
+                Err(ref e) => match e {
                     DekoGuestServError::SoftError(_) => break ,
-                    DekoGuestServError::FatalError => return pvalidate_result,
+                    DekoGuestServError::FatalError(_) => return pvalidate_result,
                 },
             };
 
@@ -269,16 +270,8 @@ pub(crate) fn handle_deko_service_remap_ca(
 ) -> DekoGuestServResult<()> {
     let ca_pa = params.rcx;
 
-    if core::hint::unlikely(ca_pa % PAGE_SIZE != 0) {
-        kerror!("Guest remap CA: unaligned CA page: ca_pa=", ca_pa);
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
-    }
-    if core::hint::unlikely(!check_within_guest_mmap(PhysAddr(ca_pa))) {
+    if core::hint::unlikely(!valid_guest_page(PhysAddr(ca_pa))) {
         kerror!("Guest remap CA: invalid CA page: ca_pa=", ca_pa);
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
-    }
-    if core::hint::unlikely(ca_pa >= 0x000f_ffff_ffff_f000u64 - PAGE_SIZE) {
-        kerror!("Guest remap CA: ca page out of range: ca_pa=", ca_pa);
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
     }
     let ca_mapping = match TempMapping::new(create_paddr_range(PhysAddr(ca_pa), 1)) {

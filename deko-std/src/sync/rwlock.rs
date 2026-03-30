@@ -239,6 +239,12 @@ RwLockToks<K, V, Pred: InvariantPredicate<K, V>> {
 
 verus! {
 
+#[doc(hidden)]
+#[deprecated(
+    note = "deko_rwlock_*_atomic_data critical sections must not use implicit control-flow exits such as `?`, `return`, `break`, or `continue`; doing so can skip unlock and leak the lock"
+)]
+pub const DEKO_RWLOCK_ATOMIC_DATA_CONTROL_FLOW_WARNING: () = ();
+
 /// A trait for predicates that can be used to constrain the values
 /// stored into the [`RwLock`]. We maintain the invariant that the
 /// value `v` stored into the lock always satisfies `inv(v)`.
@@ -878,7 +884,8 @@ impl<V: WellFormed, P, S: Spin, Pred: RwLockPredicate<DekoAtomicData<V, P>>> Pre
 ///
 /// # ⚠️ Critical Warning: Control Flow
 ///
-/// **Do not use `return`, `break`, or `continue` to exit the `$body` block.**
+/// **Do not rely on implicit control-flow exits such as `return`, `break`, `continue`,
+/// or `?` to escape the `$body` block.**
 ///
 /// This macro manually manages lock release *after* the body executes. If you interrupt the
 /// control flow (e.g., by breaking out of a loop from inside the macro), the `release_read()` call
@@ -886,6 +893,9 @@ impl<V: WellFormed, P, S: Spin, Pred: RwLockPredicate<DekoAtomicData<V, P>>> Pre
 ///
 /// If you need to exit a loop based on a value read inside the lock, return that value from the
 /// macro and check it in the outer scope.
+///
+/// Because the lock release happens *after* `$body` returns normally, any early exit that escapes
+/// the macro expansion can leak the lock.
 ///
 /// # Example
 ///
@@ -911,6 +921,7 @@ impl<V: WellFormed, P, S: Spin, Pred: RwLockPredicate<DekoAtomicData<V, P>>> Pre
 #[macro_export]
 macro_rules! deko_rwlock_read_atomic_data {
     ($lock:expr, $data_binding:ident, $perm_binding:ident, $body:tt) => {{
+        let _ = $crate::sync::rwlock::DEKO_RWLOCK_ATOMIC_DATA_CONTROL_FLOW_WARNING;
         let read_handle = $lock.acquire_read();
         let $crate::sync::DekoAtomicData { data: $data_binding, perm: $perm_binding } = read_handle.borrow();
 
@@ -941,11 +952,15 @@ macro_rules! deko_rwlock_read_atomic_data {
 ///
 /// # ⚠️ Critical Warning: Control Flow
 ///
-/// **Do not use `return`, `break`, or `continue` to exit the `$body` block.**
+/// **Do not rely on implicit control-flow exits such as `return`, `break`, `continue`,
+/// or `?` to escape the `$body` block.**
 ///
 /// This macro manually manages lock release *after* the body executes. If you interrupt the
 /// control flow (e.g., by breaking out of a loop from inside the macro), the `release_write()` call
 /// will be skipped, causing a **deadlock** where the lock is held forever.
+///
+/// Because the lock release happens *after* `$body` returns normally, any early exit that escapes
+/// the macro expansion can leak the lock.
 ///
 /// # Example
 ///
@@ -969,6 +984,7 @@ macro_rules! deko_rwlock_read_atomic_data {
 #[macro_export]
 macro_rules! deko_rwlock_write_atomic_data {
     ($lock:expr, $data_binding:ident, $perm_binding:ident, $body:tt) => {{
+        let _ = $crate::sync::rwlock::DEKO_RWLOCK_ATOMIC_DATA_CONTROL_FLOW_WARNING;
         let mut write_handle = $lock.acquire_write();
         let $crate::sync::DekoAtomicData { data: mut $data_binding, perm: mut $perm_binding } = write_handle.get();
 

@@ -55,6 +55,10 @@ This document tracks all TODO items and assumptions found in the deko-core crate
   - Goal: bind policy domains to some cloud-native selector such as namespace, workspace, or similar tenant identifier
   - Keep this mapping separate from lattice semantics
   - Suggested shape: `DomainSelector -> DomainId`
+  - Updated direction for FaaS/K8s:
+    - the practical selector is the business boundary, currently `data-storage=...`
+    - a domain is a set of function instances that together implement one business logic boundary
+    - do not equate `DomainId` with raw K8s namespace or Pod identity
 
 - [ ] **High**: Bind apps to domains during app registration
   - Goal: determine domain ownership at `report_app` time, not lazily at first syscall
@@ -69,6 +73,72 @@ This document tracks all TODO items and assumptions found in the deko-core crate
 - [ ] **High**: Make cross-domain communication forbidden by default
   - Goal: any interaction with `src_domain != dst_domain` is denied unless an explicit cross-domain policy allows it
   - Treat this as a top-level policy-engine rule rather than scattering it across individual syscall handlers
+
+- [ ] **High**: Add guest-side namespace attribution for K8s/FaaS workloads
+  - Goal: resolve `mnt_ns_id -> DomainId` inside the guest without requiring Docker/K8s startup changes
+  - Non-goal: do not expect the K8s control plane itself to know or assign `DomainId`
+  - Deployment model:
+    - one node-local `deko-agent` per K8s node, preferably as a `DaemonSet`
+    - do not deploy one attribution agent per function group
+  - Expected data flow:
+    - watch Pods scheduled onto the local node
+    - read the endorsed workload/domain metadata
+    - discover the local container init PID through CRI/container runtime metadata
+    - read `/proc/<pid>/ns/mnt` to obtain the mount-namespace inode
+    - register `mnt_ns_id -> DomainId` into the guest kernel
+  - Keep the agent small:
+    - attribution only
+    - no allow/deny policy decisions
+    - no policy compilation or IFC enforcement
+  - Initial trust model:
+    - the agent may run in ordinary guest userspace; VMPL1 is not required for the first end-to-end path
+    - rely on attestation / measurement to identify the agent binary and its initial image
+    - do not treat secrecy as the main concern for this path; integrity and attribution correctness matter more
+
+- [ ] **High**: Treat the guest attribution agent as a small TCB component
+  - Goal: make the trust split explicit
+  - Trusted responsibility:
+    - translate endorsed workload identity into `mnt_ns_id -> DomainId`
+  - Untrusted / weakly trusted inputs:
+    - raw K8s labels
+    - container runtime metadata
+    - control-plane delivered Pod objects unless backed by endorsement
+  - Design rule:
+    - the monitor remains the enforcement TCB
+    - the agent is only the domain-attribution TCB
+
+- [ ] **High**: Require signed workload endorsement before accepting K8s domain attribution
+  - Goal: defend against a polluted K8s control plane that can forge labels or Pod metadata
+  - Do not trust `data-storage=...` by itself
+  - Introduce a signed domain claim / endorsement checked by the guest agent
+  - Minimum claim fields:
+    - business selector such as `data-storage`
+    - `domain_id`
+    - workload identity (for example service account / function group identity)
+    - image digest or an allowed image set
+    - policy hash
+    - expiry / version
+  - Validation rule:
+    - the guest agent verifies the claim with a trusted key before registering `mnt_ns_id -> DomainId`
+    - raw K8s annotations/configmaps may transport the claim, but are not the root of trust
+  - Measurement note:
+    - attestation / measurement can establish that the correct agent binary is running
+    - they do not by themselves establish that K8s-provided workload metadata is unmodified
+    - therefore metadata still needs an authenticated hash / signature style endorsement path
+
+- [ ] **Medium**: Add a guest-kernel registration interface for namespace/domain bindings
+  - Goal: give the guest attribution agent a narrow API surface for `mnt_ns_id -> DomainId`
+  - Candidate shape:
+    - a small misc device or ioctl interface, e.g. `/dev/deko_domain`
+  - Expected operation:
+    - bind namespace inode to a verified `DomainId`
+    - reject conflicting rebinds unless explicitly allowed by policy/control logic
+
+- [ ] **Medium**: Decide production vs prototype implementation language for `deko-agent`
+  - Recommended production language: Rust
+    - rationale: memory safety for a TCB-adjacent component and alignment with the rest of the stack
+  - Acceptable prototype language: Python
+    - rationale: quickly validate the control/data flow before hardening
 
 - [ ] **Medium**: Separate trusted parsing from verified policy compilation more cleanly
   - Current state: parser is a trusted boundary; `FiniteLattice::compile` is verified

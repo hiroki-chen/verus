@@ -72,8 +72,8 @@ unsafe impl<V: WellFormed + Heap, S: Spin> core::alloc::Allocator for DekoBuddyA
 ///
 pub const HEAP_SIZE_STAGE2: usize = 10;
 
-/// Minblock = ?
-pub const HEAP_SIZE_FULL: usize = 21;
+/// For an 8 MiB full heap, order 19 keeps the buddy min block at Node<()> size.
+pub const HEAP_SIZE_FULL: usize = 19;
 
 /// The _true_ global allocator for Deko that manages the physical pages.
 ///

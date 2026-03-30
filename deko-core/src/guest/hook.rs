@@ -7,7 +7,8 @@ use vstd::prelude::*;
 
 use crate::cpu::DekoCpuCtx;
 use crate::guest::{
-    DekoGuestLstarWriteReq, DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode,
+    valid_kernel_vaddr, valid_trampoline_gpa, DekoGuestServError, DekoGuestServResult,
+    DekoGuestServResultCode, DekoGuestTrampolineSetupReq,
 };
 use crate::mm::paging::{bit_not_in_addr_region, bit_not_overlapping, PageTable};
 use crate::mm::vm::TempMapping;
@@ -23,7 +24,6 @@ core::arch::global_asm!(
 
 extern "C" {
     fn deko_trampoline_start();
-    fn deko_async_timer_trampoline();
     fn deko_sysret_window_start();
     fn deko_sysret_window_end();
     fn deko_trampoline_end();
@@ -56,8 +56,6 @@ pub const GUEST_TRAMPOLINE_MAGIC: &'static [u8; 15] = &[
 
 func_ptr!(deko_trampoline_start);
 
-func_ptr!(deko_async_timer_trampoline);
-
 func_ptr!(deko_trampoline_end);
 
 #[inline(always)]
@@ -85,10 +83,9 @@ pub fn install_hook(
     syscall_enter_addr: VirtAddr,
     private_bit: u64,
     shared_bit: u64,
-    req: &DekoGuestLstarWriteReq,
+    req: &DekoGuestTrampolineSetupReq,
 ) -> DekoGuestServResult<()> {
-    if req.trampoline_gva.0 < VADDR_UPPER_MASK || req.trampoline_gpa.0 % PAGE_SIZE != 0
-        || req.trampoline_gpa.0 >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE_2M {
+    if !valid_kernel_vaddr(req.trampoline_gva) || !valid_trampoline_gpa(req.trampoline_gpa.0) {
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
     let g_trampoline_mapping = PageTable::walk_lvl3_guest(
@@ -142,15 +139,25 @@ pub(crate) fn inject_ifc_policy_engine(
             size_64m < payload.len() || payload.len() == 0 || trampoline_gva.0 >= u64::MAX
                 - size_64m as u64,
         ) {
-            return Err(DekoGuestServError::FatalError);
+            return Err(
+                DekoGuestServError::fatal(
+                    "inject_ifc_engine: invalid payload length or trampoline address",
+                ),
+            );
         }
         if core::hint::unlikely(blob_gpa.0 % PAGE_SIZE_2M != 0) {
             kerror!("IFC policy engine blob GPA is not page-aligned", blob_gpa => hex);
-            return Err(DekoGuestServError::FatalError);
+            return Err(
+                DekoGuestServError::fatal("inject_ifc_engine: blob GPA is not page-aligned"),
+            );
         }
         if core::hint::unlikely(blob_gpa.0 >= 0x0000_FFFF_FFFF_F000u64 - size_64m as u64) {
             kerror!("IFC policy engine blob GPA exceeds canonical address space", blob_gpa => hex);
-            return Err(DekoGuestServError::FatalError);
+            return Err(
+                DekoGuestServError::fatal(
+                    "inject_ifc_engine: blob GPA exceeds canonical address space",
+                ),
+            );
         }
         let ifc_start_va = VirtAddr(trampoline_gva.0 + PAGE_SIZE_2M);
         let len = payload.len() as u64 / PAGE_SIZE + 1;
@@ -165,7 +172,9 @@ pub(crate) fn inject_ifc_policy_engine(
 
         let Some(temp_mapping) = TempMapping::new(create_paddr_range(blob_gpa, len as usize)) else {
             kerror!("Failed to create temporary mapping for IFC policy engine blob");
-            return Err(DekoGuestServError::FatalError);
+            return Err(
+                DekoGuestServError::fatal("inject_ifc_engine: failed to create temporary mapping"),
+            );
         };
 
         temp_mapping.copy_bytes_from(payload);
@@ -224,7 +233,9 @@ unsafe fn patch_trampoline(
             PAGE_SIZE,
         );
 
-        return Err(DekoGuestServError::FatalError);
+        return Err(
+            DekoGuestServError::fatal("patch_trampoline: trampoline size exceeds page size"),
+        );
     }
     update_ifc_engine_entry(deko_ifc_entry_func_ptr() as u64);
 
@@ -247,6 +258,15 @@ unsafe fn patch_trampoline(
     );
 
     DEKO_VMPL1_SYSCALL_TRAMPOLINE.init(DekoAtomicData::new(trampoline_gva));
+    kinfo!(
+        "Installed syscall trampoline:",
+        "syscall_enter=",
+        syscall_enter_addr,
+        " trampoline_gva=",
+        trampoline_gva,
+        " size=",
+        trampoline_size,
+    );
 
     Ok(())
 }

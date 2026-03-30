@@ -1281,9 +1281,15 @@ impl DekoLinuxSigAction {
 fn get_active_pid() -> DekoGuestServResult<u32> {
     let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
     let cpu_borrow = cpu.borrow(Tracked(&cpu_perm.ptr_perm));
-    let ext_vmpl1 = cpu_borrow.ext_vmpl1.as_ref().ok_or(DekoGuestServError::FatalError)?;
+    let ext_vmpl1 = cpu_borrow.ext_vmpl1.as_ref().ok_or_else(|| {
+        kerror!("get_active_pid: missing VMPL1 context for current CPU");
+        DekoGuestServError::fatal("get_active_pid: missing VMPL1 context for current CPU")
+    })?;
 
-    ext_vmpl1.current_pid.ok_or(DekoGuestServError::FatalError)
+    ext_vmpl1.current_pid.ok_or_else(|| {
+        kerror!("get_active_pid: current VMPL1 context has no active PID");
+        DekoGuestServError::fatal("get_active_pid: current VMPL1 context has no active PID")
+    })
 }
 
 fn get_buf_va() -> DekoGuestServResult<VirtAddr> {
@@ -1312,13 +1318,13 @@ fn get_buf_va() -> DekoGuestServResult<VirtAddr> {
                         Some(buf) => Ok(*buf),
                         None => {
                             kerror!("The shared buffer for PID ", active_pid, " is not initialized");
-                            Err(DekoGuestServError::FatalError)
+                            Err(DekoGuestServError::fatal("get_buf_va: shared buffer is not initialized"))
                         },
                     }
                 }
             } else {
                 kerror!("The app list is not initialized");
-                Err(DekoGuestServError::FatalError)
+                Err(DekoGuestServError::fatal("get_buf_va: app list is not initialized"))
             }
         }
     }
@@ -1379,7 +1385,7 @@ fn shadow_rt_sigaction(
                     Ok(())
                 }
             } else {
-                Err(DekoGuestServError::FatalError)
+                Err(DekoGuestServError::fatal("shadow_rt_sigaction: app list is not initialized"))
             }
         }
     }
@@ -1487,7 +1493,7 @@ fn syscall_arch_prctl_ret(
         ARCH_SET_GS | ARCH_GET_FS | ARCH_GET_GS | ARCH_MAP_VDSO_X32 | ARCH_MAP_VDSO_32 => {},
         _ => {
             kerror!("`arch_prctl` called with unknown flag: ", flag=>hex);
-            return Err(DekoGuestServError::FatalError);
+            return Err(DekoGuestServError::fatal("syscall_arch_prctl_ret: unknown arch_prctl flag"));
         },
     }
 

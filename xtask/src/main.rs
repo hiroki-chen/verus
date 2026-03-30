@@ -33,6 +33,7 @@ fn main() -> Result<()> {
             builder.stress_test(iter, timeout, config_path)
         }
         Commands::Build { target, release } => builder.build(target, release),
+        Commands::BuildAgent { release, stage } => builder.build_agent(release, stage),
         Commands::Test { suite, release } => test_runner(suite, release),
         Commands::Pretty { paths } => pretty(paths),
         Commands::BootstrapVerus { commit, branch } => {

@@ -17,7 +17,7 @@
 //! This test suite is designed to capture such edge cases where the formal verification
 //! might miss, by running the buddy allocator in a controlled environment and checking
 //! its behavior with real memory allocations.
-use deko_std::mem::{DekoHeap, DekoHeapPredicate, Heap};
+use deko_std::mem::{valid_heap_param_impl, DekoHeap, DekoHeapPredicate, Heap};
 use proptest::prelude::*;
 use vstd::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -96,6 +96,8 @@ verus! {
 #[verifier::external_body]
 fn main() {
     // Run proptest manually or via cargo test
+    test_buddy_coalescing_regression();
+    test_monitor_heap_geometry_guardrails();
     test_random_alloc_free();
     test_no_overlap();
     test_memory_reuse();
@@ -105,6 +107,72 @@ fn main() {
 }
 
 } // verus!
+
+fn test_buddy_coalescing_regression() {
+    const HEAP_SIZE: usize = 0x2000;
+    const HEAP_ALIGN: usize = 0x1000;
+
+    for free_right_first in [true, false] {
+        let (_buffer, heap_start, heap_len) = create_aligned_heap(HEAP_SIZE, HEAP_ALIGN);
+        let mut allocator = DekoHeap::<2>::new(Ghost::assume_new());
+        allocator.init(heap_start, heap_len, 2);
+
+        let left = allocator.allocate(0x1000, 0x1000);
+        let right = allocator.allocate(0x1000, 0x1000);
+
+        assert_ne!(left, 0, "left half allocation failed");
+        assert_ne!(right, 0, "right half allocation failed");
+        assert_ne!(left, right, "expected two distinct buddy blocks");
+
+        if free_right_first {
+            allocator.deallocate(right, 0x1000, 0x1000);
+            allocator.deallocate(left, 0x1000, 0x1000);
+        } else {
+            allocator.deallocate(left, 0x1000, 0x1000);
+            allocator.deallocate(right, 0x1000, 0x1000);
+        }
+
+        let merged = allocator.allocate(0x2000, 0x1000);
+        assert_eq!(
+            merged,
+            heap_start,
+            "expected buddy blocks to coalesce back into the full heap; free_right_first={free_right_first}",
+        );
+
+        allocator.deallocate(merged, 0x2000, 0x1000);
+    }
+}
+
+fn test_monitor_heap_geometry_guardrails() {
+    const MONITOR_HEAP_SIZE: u64 = 0xEF7000;
+    const OLD_FULL_ORDER: u64 = 21;
+    const NEW_FULL_ORDER: u64 = 18;
+    const CLAMPED_HEAP_SIZE: u64 = 0x400000;
+    const NODE_SIZE: u64 = core::mem::size_of::<deko_std::list::Node<()>>() as u64;
+
+    assert!(
+        !valid_heap_param_impl(0xFFFFFF8000108000, MONITOR_HEAP_SIZE, OLD_FULL_ORDER),
+        "old full allocator geometry should be rejected",
+    );
+
+    let old_min_block = MONITOR_HEAP_SIZE >> (OLD_FULL_ORDER - 1);
+    assert!(
+        old_min_block < NODE_SIZE,
+        "expected old min block to be smaller than Node<()>: min_block={old_min_block:#x} node={NODE_SIZE:#x}",
+    );
+
+    assert!(
+        valid_heap_param_impl(0xFFFFFF8000108000, CLAMPED_HEAP_SIZE, NEW_FULL_ORDER),
+        "clamped full allocator geometry should be accepted",
+    );
+
+    let new_min_block = CLAMPED_HEAP_SIZE >> (NEW_FULL_ORDER - 1);
+    assert!(
+        new_min_block >= NODE_SIZE,
+        "expected new min block to fit Node<()>: min_block={new_min_block:#x} node={NODE_SIZE:#x}",
+    );
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 10000,  // More test cases

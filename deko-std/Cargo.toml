@@ -10,14 +10,14 @@ verus_builtin_macros = { workspace = true }
 verus_state_machines_macros = { workspace = true }
 
 cfg-if = { version = "1.0.4", default-features = false }
-itoa = { version = "1.0.15", features = ["no-panic"] }
+itoa = { version = "1.0.15" }
 lexical-core = { version = "1.0.6", default-features = false, features = [
   "write-integers",
   "write-floats",
   "power-of-two",
 ] }
 paste = "1.0.15"
-ryu = { version = "1.0.20", features = ["no-panic"] }
+ryu = { version = "1.0.20" }
 hashbrown = { version = "0.16.1", optional = true, default-features = false, features = [
   "default-hasher",
   "inline-more",

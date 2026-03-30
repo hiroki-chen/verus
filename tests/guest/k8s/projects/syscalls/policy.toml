@@ -1,0 +1,36 @@
+[meta]
+name = "syscalls_domain_policy"
+package = "syscalls_domain_policy"
+version = "0.1.0"
+
+[domain]
+selector_label = "data-storage"
+selector_value = "syscalls"
+
+[lattice]
+levels = ["public", "syscall_internal"]
+relations = [["public", "syscall_internal"]]
+bot = "public"
+top = "syscall_internal"
+
+[[resources]]
+type = "network"
+name = "SYSCALLS_HTTP"
+endpoint = "0.0.0.0:8080"
+label = "public"
+
+[[resources]]
+type = "function"
+name = "syscalls-probe"
+measurement = "sha256:0x44444444444444444444444444444444"
+initial_label = "syscall_internal"
+
+[[interactions]]
+subject = "syscalls-probe"
+action = "recv"
+source = "SYSCALLS_HTTP"
+from = "public"
+to = "syscall_internal"
+
+[defaults]
+unmatched_action = "deny"

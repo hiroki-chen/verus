@@ -48,6 +48,12 @@ pub(crate) enum Commands {
         #[arg(short, long)]
         release: bool,
     },
+    BuildAgent {
+        #[arg(short, long)]
+        release: bool,
+        #[arg(long, default_value_t = true)]
+        stage: bool,
+    },
     Test {
         #[arg(
             help = "Test suite to run (e.g., 'buddy', 'elf'). If not specified, runs all tests."

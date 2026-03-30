@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd -- "${SCRIPT_DIR}/../../.." && pwd)
+
+CLUSTER_NAME="${CLUSTER_NAME:-minikube}"
+MINIKUBE_DRIVER="${MINIKUBE_DRIVER:-docker}"
+MINIKUBE_CPUS="${MINIKUBE_CPUS:-2}"
+MINIKUBE_MEMORY_MB="${MINIKUBE_MEMORY_MB:-4096}"
+DEKO_MODULE_PATH="${DEKO_MODULE_PATH:-${REPO_ROOT}/deko-lkm/deko.ko}"
+BUILD_IMAGES="${BUILD_IMAGES:-1}"
+APPLY_WORKLOADS="${APPLY_WORKLOADS:-1}"
+
+log() {
+  printf '[recover-minikube-guest] %s\n' "$*"
+}
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "Missing required command: $1" >&2
+    exit 1
+  }
+}
+
+ensure_module_exists() {
+  if [[ ! -f "${DEKO_MODULE_PATH}" ]]; then
+    echo "Missing deko module: ${DEKO_MODULE_PATH}" >&2
+    echo "Please build deko-lkm first against your patched guest kernel." >&2
+    exit 1
+  fi
+}
+
+ensure_cluster() {
+  if ! minikube status -p "${CLUSTER_NAME}" >/dev/null 2>&1; then
+    log "Starting Minikube cluster ${CLUSTER_NAME}"
+    minikube start \
+      -p "${CLUSTER_NAME}" \
+      --driver="${MINIKUBE_DRIVER}" \
+      --cpus="${MINIKUBE_CPUS}" \
+      --memory="${MINIKUBE_MEMORY_MB}"
+  else
+    log "Minikube cluster ${CLUSTER_NAME} already exists"
+    minikube start -p "${CLUSTER_NAME}" >/dev/null
+  fi
+
+  kubectl config use-context "${CLUSTER_NAME}" >/dev/null 2>&1 || true
+}
+
+build_images() {
+  if [[ "${BUILD_IMAGES}" != "1" ]]; then
+    log "Skipping Docker image builds"
+    return
+  fi
+
+  log "Building Rust deko-agent helper"
+  cargo build-agent-debug
+
+  log "Building function and agent images inside Minikube Docker"
+  eval "$(minikube -p "${CLUSTER_NAME}" docker-env)"
+
+  docker build -f "${REPO_ROOT}/tests/guest/k8s/shared/Dockerfile.python-service" \
+    --build-arg SCRIPT_PATH=orders_ingest.py \
+    -t orders-ingest:latest \
+    "${REPO_ROOT}/tests/guest"
+
+  docker build -f "${REPO_ROOT}/tests/guest/k8s/shared/Dockerfile.python-service" \
+    --build-arg SCRIPT_PATH=orders_transform.py \
+    -t orders-transform:latest \
+    "${REPO_ROOT}/tests/guest"
+
+  docker build -f "${REPO_ROOT}/tests/guest/k8s/shared/Dockerfile.python-service" \
+    --build-arg SCRIPT_PATH=orders_writer.py \
+    -t orders-writer:latest \
+    "${REPO_ROOT}/tests/guest"
+
+  docker build -f "${REPO_ROOT}/tests/guest/k8s/shared/Dockerfile.python-service" \
+    --build-arg SCRIPT_PATH=syscalls_probe.py \
+    -t syscalls-probe:latest \
+    "${REPO_ROOT}/tests/guest"
+
+  docker build -f "${REPO_ROOT}/tests/guest/k8s/Dockerfile.deko-agent" \
+    -t deko-agent:latest \
+    "${REPO_ROOT}/deko-agent"
+}
+
+install_deko_device() {
+  local remote_module="/tmp/deko.ko"
+
+  log "Installing deko.ko into Minikube node"
+  minikube -p "${CLUSTER_NAME}" cp "${DEKO_MODULE_PATH}" "${remote_module}"
+
+  minikube -p "${CLUSTER_NAME}" ssh -- "sudo rmmod deko 2>/dev/null || true"
+  minikube -p "${CLUSTER_NAME}" ssh -- "sudo insmod ${remote_module}"
+  minikube -p "${CLUSTER_NAME}" ssh -- '
+    set -eu
+    minor=$(awk '"'"'$2 == "deko" { print $1 }'"'"' /proc/misc)
+    if [ -z "${minor}" ]; then
+      echo "failed to resolve deko misc minor" >&2
+      exit 1
+    fi
+    sudo rm -f /dev/deko
+    sudo mknod /dev/deko c 10 "${minor}"
+    sudo chmod 600 /dev/deko
+    ls -l /dev/deko
+  '
+}
+
+apply_resources() {
+  if [[ "${APPLY_WORKLOADS}" != "1" ]]; then
+    log "Skipping kubectl apply"
+    return
+  fi
+
+  log "Applying workload and agent manifests"
+  kubectl apply -f "${REPO_ROOT}/tests/guest/k8s/projects/orders/project.yaml"
+  kubectl apply -f "${REPO_ROOT}/tests/guest/k8s/projects/syscalls/project.yaml"
+  kubectl apply -f "${REPO_ROOT}/tests/guest/k8s/shared/deko_agent_daemonset.yaml"
+
+  kubectl -n faas-orders rollout status deployment/orders-ingest --timeout=120s
+  kubectl -n faas-orders rollout status deployment/orders-transform --timeout=120s
+  kubectl -n faas-orders rollout status deployment/orders-writer --timeout=120s
+  kubectl -n faas-syscalls rollout status deployment/syscalls-probe --timeout=120s
+  kubectl -n deko-system rollout status daemonset/deko-agent --timeout=120s
+}
+
+print_next_steps() {
+  cat <<EOF
+
+Recovery complete.
+
+Useful checks:
+
+  kubectl get pods -A
+  kubectl -n deko-system logs -l app.kubernetes.io/name=deko-agent
+  kubectl -n faas-orders delete job orders-pipeline-smoke --ignore-not-found
+  kubectl apply -f ${REPO_ROOT}/tests/guest/k8s/projects/orders/project.yaml
+  kubectl -n faas-orders wait --for=condition=complete job/orders-pipeline-smoke --timeout=120s
+  kubectl -n faas-orders logs job/orders-pipeline-smoke
+  kubectl -n faas-syscalls delete job syscalls-smoke --ignore-not-found
+  kubectl apply -f ${REPO_ROOT}/tests/guest/k8s/projects/syscalls/project.yaml
+  kubectl -n faas-syscalls wait --for=condition=complete job/syscalls-smoke --timeout=120s
+  kubectl -n faas-syscalls logs job/syscalls-smoke
+EOF
+}
+
+main() {
+  require_cmd minikube
+  require_cmd kubectl
+  require_cmd docker
+  require_cmd cargo
+  ensure_module_exists
+  ensure_cluster
+  build_images
+  install_deko_device
+  apply_resources
+  print_next_steps
+}
+
+main "$@"

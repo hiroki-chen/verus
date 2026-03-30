@@ -2,6 +2,7 @@
 
 use std::sync::Once;
 
+use deko_core::collections::String as DekoString;
 use deko_core::mm::frame_allocator::DekoAllocatorApi;
 use deko_core::mm::DEKO_FRAME_ALLOCATOR_FULL;
 use proptest::prelude::*;
@@ -103,9 +104,239 @@ fn setup_allocator() {
 fn main() {
     println!("Running collection tests...");
 
+    test_monitor_heap_geometry_vec_growth();
     test_vec_random_ops();
     test_vec_large_elements();
     test_vec_strings();
+    test_vec_growth_churn();
+    test_vec_string_growth_churn();
+    test_vec_byte_push_growth();
+    test_nested_vec_reallocation();
+    test_string_push_and_pop();
+    test_string_reserve_and_clear();
+}
+
+fn test_monitor_heap_geometry_vec_growth() {
+    const HEAP_SIZE: usize = 0x400000;
+    const HEAP_ALIGN: usize = 0x1000;
+
+    let (_buffer, heap_start, heap_len) = create_aligned_heap(HEAP_SIZE, HEAP_ALIGN);
+    let allocator = deko_core::mm::frame_allocator::DekoPageFrameAllocator::<18>::new();
+    allocator.init(heap_start, heap_len);
+
+    let mut v_deko = Vec::<u8, _>::new_in(allocator.0);
+    let mut v_std = Vec::<u8>::new();
+
+    for round in 0..64usize {
+        let target_len = 64 + round * 13;
+
+        for i in 0..target_len {
+            let byte = ((round * 97 + i) & 0xff) as u8;
+            v_deko.push(byte);
+            v_std.push(byte);
+        }
+
+        assert_eq!(v_deko.as_slice(), v_std.as_slice());
+
+        for _ in 0..(target_len / 2) {
+            assert_eq!(v_deko.pop(), v_std.pop());
+        }
+    }
+}
+
+fn test_vec_growth_churn() {
+    setup_allocator();
+
+    let rounds = 128usize;
+    let base_len = 4096usize;
+    let extra_len = 2048usize;
+
+    let mut v_deko = Vec::<u64, _>::new_in(DekoAllocatorApi {});
+    let mut v_std = Vec::<u64>::new();
+
+    for round in 0..rounds {
+        for i in 0..base_len {
+            let value = ((round as u64) << 32) | i as u64;
+            v_deko.push(value);
+            v_std.push(value);
+        }
+
+        v_deko.reserve(extra_len + round);
+        v_std.reserve(extra_len + round);
+
+        for i in 0..extra_len {
+            let value = (!round as u64) ^ i as u64;
+            v_deko.push(value);
+            v_std.push(value);
+        }
+
+        assert_eq!(v_deko.len(), v_std.len());
+        assert_eq!(v_deko.as_slice(), v_std.as_slice());
+
+        for _ in 0..(base_len + extra_len) / 2 {
+            assert_eq!(v_deko.pop(), v_std.pop());
+        }
+
+        v_deko.shrink_to_fit();
+        v_std.shrink_to_fit();
+
+        assert_eq!(v_deko.as_slice(), v_std.as_slice());
+
+        v_deko.clear();
+        v_std.clear();
+
+        v_deko.shrink_to_fit();
+        v_std.shrink_to_fit();
+
+        assert_eq!(v_deko.len(), 0);
+        assert_eq!(v_std.len(), 0);
+    }
+}
+
+fn test_vec_string_growth_churn() {
+    setup_allocator();
+
+    let mut v_deko = Vec::<String, _>::new_in(DekoAllocatorApi {});
+    let mut v_std = Vec::<String>::new();
+
+    for round in 0..64usize {
+        v_deko.reserve(128 + round);
+        v_std.reserve(128 + round);
+
+        for i in 0..256usize {
+            let payload = format!(
+                "round={round}:index={i}:payload={}",
+                "x".repeat(256 + (i % 17))
+            );
+            v_deko.push(payload.clone());
+            v_std.push(payload);
+        }
+
+        assert_eq!(v_deko.as_slice(), v_std.as_slice());
+
+        for _ in 0..192usize {
+            assert_eq!(v_deko.pop(), v_std.pop());
+        }
+
+        v_deko.shrink_to_fit();
+        v_std.shrink_to_fit();
+
+        assert_eq!(v_deko.as_slice(), v_std.as_slice());
+
+        v_deko.clear();
+        v_std.clear();
+    }
+}
+
+fn test_nested_vec_reallocation() {
+    setup_allocator();
+
+    let mut outer = Vec::<Vec<u8, DekoAllocatorApi>, _>::new_in(DekoAllocatorApi {});
+
+    for round in 0..96usize {
+        let mut inner = Vec::<u8, _>::new_in(DekoAllocatorApi {});
+        inner.reserve(1024 + round * 3);
+
+        for i in 0..(2048 + round * 8) {
+            inner.push(((round + i) & 0xff) as u8);
+        }
+
+        assert_eq!(inner.len(), 2048 + round * 8);
+        outer.push(inner);
+
+        if outer.len() % 8 == 0 {
+            let removed = outer.remove(0);
+            assert!(!removed.is_empty());
+        }
+    }
+
+    while let Some(mut inner) = outer.pop() {
+        let original_len = inner.len();
+        inner.truncate(original_len / 2);
+        inner.shrink_to_fit();
+        assert_eq!(inner.len(), original_len / 2);
+    }
+}
+
+fn test_vec_byte_push_growth() {
+    setup_allocator();
+
+    let mut v_deko = Vec::<u8, _>::new_in(DekoAllocatorApi {});
+    let mut v_std = Vec::<u8>::new();
+
+    for round in 0..256usize {
+        let target_len = 1024 + round * 37;
+
+        for i in 0..target_len {
+            let byte = ((round * 131 + i) & 0xff) as u8;
+            v_deko.push(byte);
+            v_std.push(byte);
+        }
+
+        assert_eq!(v_deko.as_slice(), v_std.as_slice());
+
+        for _ in 0..(target_len / 3) {
+            assert_eq!(v_deko.pop(), v_std.pop());
+        }
+
+        assert_eq!(v_deko.as_slice(), v_std.as_slice());
+    }
+
+    while !v_std.is_empty() {
+        assert_eq!(v_deko.pop(), v_std.pop());
+    }
+
+    assert!(v_deko.is_empty());
+}
+
+fn test_string_push_and_pop() {
+    setup_allocator();
+
+    let mut s_deko = DekoString::new_in(DekoAllocatorApi {});
+    let mut s_std = String::new();
+
+    for round in 0..64usize {
+        let chunk = format!("round={round}:{}", "x".repeat(32 + (round % 11)));
+
+        s_deko.push_str(&chunk);
+        s_std.push_str(&chunk);
+
+        let ch = char::from_u32('a' as u32 + (round % 26) as u32).unwrap();
+        s_deko.push(ch);
+        s_std.push(ch);
+
+        assert_eq!(s_deko.as_str(), s_std.as_str());
+        assert_eq!(s_deko.char_len(), s_std.chars().count());
+    }
+
+    for _ in 0..40usize {
+        assert_eq!(s_deko.pop(), s_std.pop());
+        assert_eq!(s_deko.as_str(), s_std.as_str());
+    }
+}
+
+fn test_string_reserve_and_clear() {
+    setup_allocator();
+
+    let mut s_deko = DekoString::with_capacity_in(16, DekoAllocatorApi {});
+
+    assert!(s_deko.is_empty());
+    assert_eq!(s_deko.as_str(), "");
+
+    for round in 0..32usize {
+        s_deko.reserve(64 + round);
+        s_deko.push_str("payload:");
+        s_deko.push(char::from_u32('0' as u32 + (round % 10) as u32).unwrap());
+    }
+
+    assert!(!s_deko.is_empty());
+    assert!(s_deko.capacity() >= s_deko.len());
+    assert!(s_deko.as_str().starts_with("payload:"));
+
+    s_deko.clear();
+
+    assert!(s_deko.is_empty());
+    assert_eq!(s_deko.as_str(), "");
 }
 
 proptest! {

@@ -1,15 +1,18 @@
 use deko_macros::DekoDebug;
 use deko_std::address::{PhysAddr, VirtAddr};
+use deko_std::fmt::{DekoDebug as _, DekoWriter};
 use deko_std::wf::WellFormed;
 use vstd::prelude::*;
 
 verus! {
 
-global layout DekoGuestLstarWriteReq is size == 0x30;
+global layout DekoGuestTrampolineSetupReq is size == 0x18;
 
 global layout DekoNewAppReq is size == 0x70;
 
 global layout DekoMapIfcReq is size == 0x298;
+
+global layout DekoLoadPolicyReq is size == 0x18;
 
 #[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
 pub enum DekoVmplSwitchErr {
@@ -42,19 +45,53 @@ pub enum DekoGuestServResultCode {
     Other(u64),
 }
 
-#[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum DekoGuestServError {
     SoftError(DekoGuestServResultCode),
-    FatalError,
+    FatalError(crate::collections::String),
 }
 
 #[verus_verify]
 impl DekoGuestServError {
+    #[verifier::external_body]
+    pub fn fatal(msg: &str) -> Self {
+        let mut err = crate::collections::String::new_in(
+            crate::mm::frame_allocator::DekoAllocatorApi {  },
+        );
+        err.push_str(msg);
+        DekoGuestServError::FatalError(err)
+    }
+
+    #[inline(always)]
+    pub fn fatal_empty() -> Self {
+        DekoGuestServError::FatalError(
+            crate::collections::String::new_in(crate::mm::frame_allocator::DekoAllocatorApi {  }),
+        )
+    }
+
     #[verus_spec()]
     pub fn into_result_code(&self) -> u64 {
         match self {
             DekoGuestServError::SoftError(code) => code.into_error_code(),
-            DekoGuestServError::FatalError => 0xFFFF_FFFF_FFFF_FFFFu64,
+            DekoGuestServError::FatalError(_) => 0xFFFF_FFFF_FFFF_FFFFu64,
+        }
+    }
+}
+
+impl deko_std::fmt::DekoDebug for DekoGuestServError {
+    #[verifier::external_body]
+    fn deko_debug<W: DekoWriter>(&self, writer: &W) {
+        match self {
+            DekoGuestServError::SoftError(code) => {
+                writer.write_str("SoftError(");
+                code.deko_debug(writer);
+                writer.write_str(")");
+            },
+            DekoGuestServError::FatalError(msg) => {
+                writer.write_str("FatalError(");
+                msg.deko_debug(writer);
+                writer.write_str(")");
+            },
         }
     }
 }
@@ -86,7 +123,7 @@ impl core::fmt::Debug for DekoGuestServError {
             DekoGuestServError::SoftError(
                 code,
             ) => write!(f, "SoftError({:?})", code.into_error_code()),
-            DekoGuestServError::FatalError => write!(f, "FatalError"),
+            DekoGuestServError::FatalError(msg) => write!(f, "FatalError({})", msg.as_str()),
         }
     }
 }
@@ -149,7 +186,7 @@ pub const DEKO_SERVICE_ATTEST_SERVICES: u32 = 0x0;
 
 pub const DEKO_SERVICE_ATTEST_SINGLE_SERVICE: u32 = 0x1;
 
-pub const DEKO_SERVICE_EXTEND_MSR_INTERCEPT: u32 = 0x0;
+pub const DEKO_SERVICE_EXTEND_TRAMPOLINE_SETUP: u32 = 0x0;
 
 pub const DEKO_SERVICE_EXTEND_SYSCALL_ANALYSIS: u32 = 0x1;
 
@@ -168,24 +205,15 @@ pub const DEKO_SERVICE_EXTEND_TIMER_EVENT: u32 = 0x6;
 // migration request (0x5) to avoid protocol collision.
 pub const DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER: u32 = 0x7;
 
-/// Represents a request structure for LSTAR MSR write operations.
-/// The guest must place this request at the given physical address
-/// before invoking the LSTAR write service.
+pub const DEKO_SERVICE_EXTEND_LOAD_POLICY: u32 = 0x8;
+
+/// Request body for guest trampoline setup.
 #[repr(C, align(8))]
 #[derive(Copy, Clone, DekoDebug)]
-pub struct DekoGuestLstarWriteReq {
-    /// The guest virtual address of the syscall entry point.
+pub struct DekoGuestTrampolineSetupReq {
     pub syscall_enter_addr: VirtAddr,
-    /// The guest allocated virtual address of the trampoline area.
     pub trampoline_gva: VirtAddr,
-    /// The physical address of the trampoline code.
     pub trampoline_gpa: PhysAddr,
-    /// The physical address of the IFC policy engine blob.
-    pub blob_gpa: PhysAddr,
-    /// Guest  page offset base.
-    pub page_offset_base: VirtAddr,
-    /// Being returned.
-    pub sysret_trampoline: u64,
 }
 
 #[repr(C, align(8))]
@@ -210,6 +238,23 @@ pub struct DekoMapIfcReq {
     pub ghcb_va: u64,
     pub db_va: u64,
     pub reqs: [DekoMapIfcSingleReq; 16],
+}
+
+#[repr(C, align(8))]
+#[derive(Copy, Clone, DekoDebug)]
+pub struct DekoLoadPolicyReq {
+    pub domain_id: u32,
+    pub _reserved: u32,
+    #[deko(hex)]
+    pub blob_gpa: u64,
+    #[deko(hex)]
+    pub blob_len: u64,
+}
+
+impl WellFormed for DekoLoadPolicyReq {
+    open spec fn wf(&self) -> bool {
+        true
+    }
 }
 
 #[allow(non_camel_case_types)]
@@ -258,6 +303,7 @@ pub struct DekoNewAppReq {
     /// Initial kernel GS base for the thread.
     pub kernel_gs_base: u64,
     pub app_type: DekoNewAppType,
+    pub domain_id: u32,
 }
 
 impl WellFormed for DekoNewAppReq {

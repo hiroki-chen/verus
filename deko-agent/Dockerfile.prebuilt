@@ -1,0 +1,9 @@
+FROM debian:bookworm-slim
+
+WORKDIR /app
+
+COPY dist/deko-agent /app/deko-agent
+
+RUN chmod +x /app/deko-agent
+
+ENTRYPOINT ["/app/deko-agent"]

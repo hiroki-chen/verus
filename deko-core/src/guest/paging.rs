@@ -8,7 +8,10 @@ use deko_std::wf::WellFormed;
 use vstd::prelude::*;
 
 use crate::collections::Vec;
-use crate::guest::{DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode};
+use crate::guest::{
+    valid_guest_page, valid_guest_page_addr, DekoGuestServError, DekoGuestServResult,
+    DekoGuestServResultCode,
+};
 use crate::imp::{RmpFlags, Rmp_ALL_BITS};
 use crate::mm::check_within_guest_mmap;
 use crate::mm::paging::{
@@ -157,12 +160,22 @@ impl Page {
         let val = pte.borrow(Tracked(pte_perm));
         let paddr = val.address(private_bit, shared_bit);
 
-        if core::hint::unlikely(paddr.0 >= 0x0000_FFFF_FFFF_F000u64 || paddr.0 % PAGE_SIZE != 0) {
+        if core::hint::unlikely(!valid_guest_page_addr(paddr.0)) {
             kerror!("Guest created invalid physical address", paddr);
 
-            return Err(DekoGuestServError::FatalError);
+            return Err(
+                DekoGuestServError::fatal(
+                    "guest paging: invalid physical address from guest page table",
+                ),
+            );
         }
-        TempMapping::new(create_paddr_range(paddr, 1)).ok_or(DekoGuestServError::FatalError)
+        TempMapping::new(create_paddr_range(paddr, 1)).ok_or_else(
+            ||
+                {
+                    kerror!("Guest paging: failed to create temporary mapping for", paddr);
+                    DekoGuestServError::fatal("guest paging: failed to create temporary mapping")
+                },
+        )
     }
 }
 
@@ -176,14 +189,7 @@ impl PageTable {
             }
     )]
     pub fn map_guest_cr3(guest_cr3: PhysAddr) -> DekoGuestServResult<TempMapping> {
-        if core::hint::unlikely(!check_within_guest_mmap(guest_cr3)) {
-            kerror!("Guest provided invalid CR3 value", guest_cr3);
-
-            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
-        }
-        if core::hint::unlikely(
-            guest_cr3.0 >= 0x0000_FFFF_FFFF_F000u64 || guest_cr3.0 % PAGE_SIZE != 0,
-        ) {
+        if core::hint::unlikely(!valid_guest_page(guest_cr3)) {
             kerror!("Guest provided invalid CR3 value", guest_cr3);
 
             return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));

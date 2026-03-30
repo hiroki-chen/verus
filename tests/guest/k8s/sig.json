@@ -1,0 +1,8 @@
+{
+  "domain_id": 1145141919810,
+  "data_storage": "orders",
+  "image_digest": "sha256:...",
+  "service_account": "orders-runtime",
+  "policy_hash": "sha256:...",
+  "expires_at": "2026-04-01T00:00:00Z"
+}

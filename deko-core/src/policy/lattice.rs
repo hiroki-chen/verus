@@ -1,5 +1,7 @@
 use core::fmt;
 
+use deko_macros::DekoDebug;
+use deko_std::fmt::DekoDebug;
 use deko_std::std_extra::slice::{bytes_eq, bytes_eq_spec};
 use deko_std::wf::WellFormed;
 use vstd::prelude::*;
@@ -8,6 +10,7 @@ use vstd::prelude::*;
 use crate::collections::update_vec;
 #[cfg(feature = "alloc")]
 use crate::collections::Vec;
+use crate::kinfo;
 #[cfg(feature = "alloc")]
 use crate::mm::frame_allocator::DekoAllocatorApi;
 
@@ -20,6 +23,22 @@ pub struct LatticeConfigToml {
     pub relations: Vec<(Vec<u8>, Vec<u8>)>,
     pub bot: Vec<u8>,
     pub top: Vec<u8>,
+}
+
+#[cfg(feature = "alloc")]
+impl DekoDebug for LatticeConfigToml {
+    #[verifier::external_body]
+    fn deko_debug<W: deko_std::prelude::DekoWriter>(&self, writer: &W) {
+        writer.write_str("LatticeConfigToml { levels: ");
+        self.levels.deko_debug(writer);
+        writer.write_str(", relations: ");
+        self.relations.deko_debug(writer);
+        writer.write_str(", bot: ");
+        self.bot.deko_debug(writer);
+        writer.write_str(", top: ");
+        self.top.deko_debug(writer);
+        writer.write_str(" }");
+    }
 }
 
 #[cfg(feature = "alloc")]
@@ -52,7 +71,7 @@ pub struct FiniteLattice {
 }
 
 #[cfg(feature = "alloc")]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, DekoDebug)]
 pub enum FiniteLatticeBuildError {
     EmptyLevels,
     DuplicateLevelName(Vec<u8>),
@@ -166,6 +185,7 @@ impl FiniteLattice {
             self.valid_level(rhs),
     {
         exists|j: LevelId, m: LevelId|
+            #![auto]
             self.valid_level(j) && self.valid_level(m) && self.is_join_of(lhs, rhs, j)
                 && self.is_meet_of(lhs, rhs, m)
     }
@@ -184,6 +204,7 @@ impl FiniteLattice {
             rel_count <= cfg.relations@.len(),
     {
         exists|rel: int|
+            #![auto]
             0 <= rel < rel_count as int && bytes_eq_spec(cfg.relations@[rel].0@, cfg.levels@[src]@)
                 && bytes_eq_spec(cfg.relations@[rel].1@, cfg.levels@[dst]@)
     }
@@ -287,6 +308,7 @@ impl FiniteLattice {
         Self::validate_distinct_levels(cfg)?;
         proof {
             assert forall|i: int, j: int|
+                #![auto]
                 0 <= i < cfg.levels@.len() && 0 <= j < cfg.levels@.len() && i
                     != j implies cfg.levels@[i]@ != cfg.levels@[j]@ by {
                 if 0 <= i < cfg.levels@.len() && 0 <= j < cfg.levels@.len() && i != j {
@@ -351,32 +373,39 @@ impl FiniteLattice {
     #[verus_spec(r =>
         ensures
             r is Ok ==> forall|i: int, j: int|
+                #![auto]
                 0 <= i < cfg.levels@.len() && i < j < cfg.levels@.len()
                     ==> cfg.levels@[i]@ != cfg.levels@[j]@,
     )]
     fn validate_distinct_levels(cfg: &LatticeConfigToml) -> Result<(), FiniteLatticeBuildError> {
         let n = cfg.levels.len();
         let mut i = 0;
-        while i < n
+        #[verus_spec(
             invariant
                 n == cfg.levels@.len(),
                 i <= n,
                 forall|a: int, b: int|
+                    #![auto]
                     0 <= a < i as int && a < b < n as int ==> cfg.levels@[a]@ != cfg.levels@[b]@,
             decreases n - i,
-        {
+        )]
+        while i < n {
             let mut j = i + 1;
-            while j < n
+            #[verus_spec(
                 invariant
                     n == cfg.levels@.len(),
                     i < n,
                     i + 1 <= j <= n,
-                    forall|b: int| i < b < j as int ==> cfg.levels@[i as int]@ != cfg.levels@[b]@,
+                    forall|b: int|
+                        #![auto]
+                        i < b < j as int ==> cfg.levels@[i as int]@ != cfg.levels@[b]@,
                     forall|a: int, b: int|
+                        #![auto]
                         0 <= a < i as int && a < b < n as int ==> cfg.levels@[a]@
                             != cfg.levels@[b]@,
                 decreases n - j,
-            {
+            )]
+            while j < n {
                 if cfg.levels[i] == cfg.levels[j] {
                     return Err(FiniteLatticeBuildError::DuplicateLevelName(cfg.levels[i].clone()));
                 }
@@ -421,7 +450,7 @@ impl FiniteLattice {
         let n = levels.len();
         let mut flows: Vec<Vec<bool>> = Vec::with_capacity_in(n, DekoAllocatorApi {  });
         let mut i = 0;
-        while i < n
+        #[verus_spec(
             invariant
                 flows.wf(),
                 flows@.len() == i,
@@ -432,17 +461,19 @@ impl FiniteLattice {
                     0 <= r < flows@.len() && 0 <= c < n as int ==> #[trigger] flows@[r]@[c] == (r
                         == c),
             decreases n - i,
-        {
+        )]
+        while i < n {
             let mut row: Vec<bool> = Vec::with_capacity_in(n, DekoAllocatorApi {  });
             let mut j = 0;
-            while j < n
+            #[verus_spec(
                 invariant
                     row.wf(),
                     row@.len() == j,
                     j <= n,
                     forall|c: int| 0 <= c < j as int ==> #[trigger] row@[c] == (c == i as int),
                 decreases n - j,
-            {
+            )]
+            while j < n {
                 row.push(i == j);
                 j += 1;
             }
@@ -465,6 +496,7 @@ impl FiniteLattice {
             old(flows).wf(),
             old(flows)@.len() == cfg.levels@.len(),
             forall|i: int, j: int|
+                #![auto]
                 0 <= i < cfg.levels@.len() && 0 <= j < cfg.levels@.len() && i != j ==> cfg.levels@[i]@
                     != cfg.levels@[j]@,
             forall|i: int|
@@ -502,13 +534,14 @@ impl FiniteLattice {
             }
         }
         let mut rel = 0;
-        while rel < cfg.relations.len()
+        #[verus_spec(
             invariant
                 flows.wf(),
                 n == cfg.levels@.len(),
                 flows@.len() == n,
                 rel <= cfg.relations@.len(),
                 forall|a: int, b: int|
+                    #![auto]
                     0 <= a < cfg.levels@.len() && 0 <= b < cfg.levels@.len() && a != b
                         ==> cfg.levels@[a]@ != cfg.levels@[b]@,
                 forall|r: int| 0 <= r < flows@.len() ==> #[trigger] flows@[r]@.len() == n,
@@ -516,7 +549,8 @@ impl FiniteLattice {
                     0 <= r < n as int && 0 <= c < n as int ==> #[trigger] flows@[r]@[c] == (r == c
                         || Self::relation_declared_prefix(cfg, rel as nat, r, c)),
             decreases cfg.relations.len() - rel,
-        {
+        )]
+        while rel < cfg.relations.len() {
             let (lhs_name, rhs_name) = &cfg.relations[rel];
             let lhs = match Self::lookup_level(&cfg.levels, lhs_name) {
                 Some(i) => i,
@@ -612,10 +646,12 @@ impl FiniteLattice {
                     i,
                     j,
                 ),
-            r is Ok ==> forall|i: int| 0 <= i < flows@.len() ==> flows@[i]@[i],
+            r is Ok ==> forall|i: int| #![auto] 0 <= i < flows@.len() ==> flows@[i]@[i],
             r is Ok ==> forall|a: int, b: int|
+                #![auto]
                 0 <= a < flows@.len() && 0 <= b < flows@.len() && a != b ==> !(flows@[a][b] && flows@[b][a]),
             r is Ok ==> forall|a: int, b: int, c: int|
+                #![auto]
                 0 <= a < flows@.len() && 0 <= b < flows@.len() && 0 <= c < flows@.len()
                     && flows@[a][b] && flows@[b][c] ==> flows@[a][c],
     )]
@@ -624,19 +660,21 @@ impl FiniteLattice {
         Self::transitive_closure(flows);
         let n = flows.len();
         let mut i = 0;
-        while i < n
+        #[verus_spec(
             invariant
                 flows.wf(),
                 flows@.len() == n,
                 i <= n,
                 forall|r: int| 0 <= r < flows@.len() ==> #[trigger] flows@[r]@.len() == n,
                 forall|a: int, b: int|
+                    #![auto]
                     0 <= a < i as int && 0 <= b < n as int && a != b ==> !(flows@[a][b]
                         && flows@[b][a]),
             decreases n - i,
-        {
+        )]
+        while i < n {
             let mut j = 0;
-            while j < n
+            #[verus_spec(
                 invariant
                     flows.wf(),
                     flows@.len() == n,
@@ -644,13 +682,16 @@ impl FiniteLattice {
                     j <= n,
                     forall|r: int| 0 <= r < flows@.len() ==> #[trigger] flows@[r]@.len() == n,
                     forall|a: int, b: int|
+                        #![auto]
                         0 <= a < i as int && 0 <= b < n as int && a != b ==> !(flows@[a][b]
                             && flows@[b][a]),
                     forall|b: int|
+                        #![auto]
                         0 <= b < j as int && i as int != b ==> !(flows@[i as int][b]
                             && flows@[b][i as int]),
                 decreases n - j,
-            {
+            )]
+            while j < n {
                 if i != j && flows[i][j] && flows[j][i] {
                     return Err(FiniteLatticeBuildError::NotPartialOrder { lhs: i, rhs: j });
                 }
@@ -659,7 +700,7 @@ impl FiniteLattice {
             i += 1;
         }
         proof {
-            assert forall|i: int| 0 <= i < flows@.len() implies flows@[i]@[i] by {
+            assert forall|i: int| #![auto] 0 <= i < flows@.len() implies flows@[i]@[i] by {
                 assert(Self::diag_cell(pre, i));
                 assert(Self::flow_matrix_view(pre)[i][i]);
                 assert(flows@[i]@[i]);
@@ -686,7 +727,7 @@ impl FiniteLattice {
     > {
         let n = flows.len();
         let mut i = 0;
-        while i < n
+        #[verus_spec(
             invariant
                 flows.wf(),
                 flows@.len() == n,
@@ -697,7 +738,8 @@ impl FiniteLattice {
                 forall|a: int| 0 <= a < i as int ==> #[trigger] flows@[bot_idx as int][a],
                 forall|a: int| 0 <= a < i as int ==> #[trigger] flows@[a][top_idx as int],
             decreases n - i,
-        {
+        )]
+        while i < n {
             if !flows[bot_idx][i] {
                 return Err(FiniteLatticeBuildError::MissingBottomReachability { level: i });
             }
@@ -707,10 +749,14 @@ impl FiniteLattice {
             i += 1;
         }
         proof {
-            assert forall|i: int| 0 <= i < flows@.len() implies flows@[bot_idx as int][i] by {
+            assert forall|i: int|
+                #![auto]
+                0 <= i < flows@.len() implies flows@[bot_idx as int][i] by {
                 assert(flows@[bot_idx as int][i]);
             }
-            assert forall|i: int| 0 <= i < flows@.len() implies flows@[i][top_idx as int] by {
+            assert forall|i: int|
+                #![auto]
+                0 <= i < flows@.len() implies flows@[i][top_idx as int] by {
                 assert(flows@[i][top_idx as int]);
             }
         }
@@ -741,6 +787,7 @@ impl FiniteLattice {
                 l1.0 < flows@.len() && l2.0 < flows@.len() && flows@[l1.0 as int][l2.0 as int]
                     && flows@[l2.0 as int][l1.0 as int] ==> l1 == l2,
             forall|l1: LevelId, l2: LevelId, l3: LevelId|
+                #![auto]
                 l1.0 < flows@.len() && l2.0 < flows@.len() && l3.0 < flows@.len()
                     && flows@[l1.0 as int][l2.0 as int] && flows@[l2.0 as int][l3.0 as int]
                     ==> flows@[l1.0 as int][l3.0 as int],
@@ -770,13 +817,9 @@ impl FiniteLattice {
             assert(lattice.valid_level(lattice.bot));
             assert(lattice.valid_level(lattice.top));
             assert forall|i: int, j: int|
-                0 <= i < lattice.flows@.len() && 0 <= j < lattice.flows@.len()
-                    ==> #[trigger] lattice.flows@[i]@[j] == Self::tc_prefix(
-                    Self::config_matrix(cfg),
-                    cfg.levels@.len(),
-                    i,
-                    j,
-                ) by {
+                0 <= i < lattice.flows@.len() && 0 <= j
+                    < lattice.flows@.len() implies #[trigger] lattice.flows@[i]@[j]
+                == Self::tc_prefix(Self::config_matrix(cfg), cfg.levels@.len(), i, j) by {
                 if 0 <= i < lattice.flows@.len() && 0 <= j < lattice.flows@.len() {
                     assert(lattice.flows@[i]@[j] == Self::tc_prefix(
                         Self::config_matrix(cfg),
@@ -787,10 +830,10 @@ impl FiniteLattice {
                 }
             }
             assert forall|l1: LevelId, l2: LevelId|
-                lattice.valid_level(l1) && lattice.valid_level(l2) ==> lattice.has_join_and_meet(
-                    l1,
+                #![auto]
+                lattice.valid_level(l1) && lattice.valid_level(
                     l2,
-                ) by {}
+                ) implies lattice.has_join_and_meet(l1, l2) by {}
             assert forall|l: LevelId|
                 lattice.valid_level(l) implies #[trigger] lattice.flows_to_spec(l, l) by {
                 let idx = l.0;
@@ -810,6 +853,7 @@ impl FiniteLattice {
                 }
             }
             assert forall|l1: LevelId, l2: LevelId, l3: LevelId|
+                #![auto]
                 lattice.valid_level(l1) && lattice.valid_level(l2) && lattice.valid_level(l3)
                     && lattice.flows_to_spec(l1, l2) && lattice.flows_to_spec(
                     l2,
@@ -823,7 +867,7 @@ impl FiniteLattice {
                 assert(0 <= c < n as int);
                 assert(lattice.flows@[a][c]);
             }
-            assert forall|l: LevelId| lattice.valid_level(l) implies lattice.flows_to_spec(
+            assert forall|l: LevelId| #![auto] lattice.valid_level(l) implies lattice.flows_to_spec(
                 lattice.bot,
                 l,
             ) by {
@@ -831,7 +875,7 @@ impl FiniteLattice {
                 assert(idx < n);
                 assert(lattice.flows@[bot_idx as int][idx as int]);
             }
-            assert forall|l: LevelId| lattice.valid_level(l) implies lattice.flows_to_spec(
+            assert forall|l: LevelId| #![auto] lattice.valid_level(l) implies lattice.flows_to_spec(
                 l,
                 lattice.top,
             ) by {
@@ -913,16 +957,20 @@ impl FiniteLattice {
         ensures
             r matches Some(i) ==> i < levels@.len() && bytes_eq_spec(levels@[i as int]@, name@),
             r is None ==> forall|i: int|
+                #![auto]
                 0 <= i < levels@.len() ==> !bytes_eq_spec(levels@[i]@, name@),
     )]
     fn lookup_level(levels: &[Vec<u8>], name: &[u8]) -> Option<usize> {
         let mut i = 0;
-        while i < levels.len()
+        #[verus_spec(
             invariant
                 0 <= i <= levels.len(),
-                forall|j: int| 0 <= j < i as int ==> !bytes_eq_spec(levels@[j]@, name@),
+                forall|j: int|
+                    #![auto]
+                    0 <= j < i as int ==> !bytes_eq_spec(levels@[j]@, name@),
             decreases levels.len() - i,
-        {
+        )]
+        while i < levels.len() {
             if bytes_eq(levels[i].as_slice(), name) {
                 proof {
                     assert(bytes_eq_spec(levels@[i as int]@, name@));
@@ -1007,8 +1055,8 @@ impl FiniteLattice {
             0 <= j < matrix1.len(),
             k <= matrix1.len(),
             matrix1.len() == matrix2.len(),
-            forall|r: int| 0 <= r < matrix1.len() ==> matrix1[r].len() == matrix1.len(),
-            forall|r: int| 0 <= r < matrix2.len() ==> matrix2[r].len() == matrix2.len(),
+            forall|r: int| #![auto] 0 <= r < matrix1.len() ==> matrix1[r].len() == matrix1.len(),
+            forall|r: int| #![auto] 0 <= r < matrix2.len() ==> matrix2[r].len() == matrix2.len(),
             forall|r: int, c: int|
                 0 <= r < matrix1.len() && 0 <= c < matrix1.len() ==> matrix1[r][c] == matrix2[r][c],
         ensures
@@ -1049,6 +1097,7 @@ impl FiniteLattice {
     proof fn lemma_unique_level_name(cfg: &LatticeConfigToml, i: int, j: int, name: Seq<u8>)
         requires
             forall|a: int, b: int|
+                #![auto]
                 0 <= a < cfg.levels@.len() && 0 <= b < cfg.levels@.len() && a != b
                     ==> cfg.levels@[a]@ != cfg.levels@[b]@,
             0 <= i < cfg.levels@.len(),
@@ -1081,7 +1130,7 @@ impl FiniteLattice {
         requires
             0 <= i < matrix.len(),
             0 <= j < matrix.len(),
-            forall|r: int| 0 <= r < matrix.len() ==> matrix[r].len() == matrix.len(),
+            forall|r: int| #![auto] 0 <= r < matrix.len() ==> matrix[r].len() == matrix.len(),
             matrix[i][j],
         ensures
             Self::tc_prefix(matrix, k, i, j),
@@ -1098,7 +1147,7 @@ impl FiniteLattice {
         requires
             0 <= i < matrix.len(),
             k < matrix.len(),
-            forall|r: int| 0 <= r < matrix.len() ==> matrix[r].len() == matrix.len(),
+            forall|r: int| #![auto] 0 <= r < matrix.len() ==> matrix[r].len() == matrix.len(),
         ensures
             Self::tc_prefix(matrix, (k + 1) as nat, i, k as int) == Self::tc_prefix(
                 matrix,
@@ -1115,7 +1164,7 @@ impl FiniteLattice {
         requires
             0 <= j < matrix.len(),
             k < matrix.len(),
-            forall|r: int| 0 <= r < matrix.len() ==> matrix[r].len() == matrix.len(),
+            forall|r: int| #![auto] 0 <= r < matrix.len() ==> matrix[r].len() == matrix.len(),
         ensures
             Self::tc_prefix(matrix, (k + 1) as nat, k as int, j) == Self::tc_prefix(
                 matrix,
@@ -1133,7 +1182,7 @@ impl FiniteLattice {
             0 <= i < matrix.len(),
             0 <= j < matrix.len(),
             k < matrix.len(),
-            forall|r: int| 0 <= r < matrix.len() ==> matrix[r].len() == matrix.len(),
+            forall|r: int| #![auto] 0 <= r < matrix.len() ==> matrix[r].len() == matrix.len(),
         ensures
             Self::tc_prefix(matrix, (k + 1) as nat, i, j) == (Self::tc_prefix(matrix, k, i, j) || (
             Self::tc_prefix(matrix, k, i, k as int) && Self::tc_prefix(matrix, k, k as int, j))),
@@ -1158,7 +1207,7 @@ impl FiniteLattice {
             0 <= j < matrix.len(),
             0 <= p < k,
             k <= matrix.len(),
-            forall|r: int| 0 <= r < matrix.len() ==> matrix[r].len() == matrix.len(),
+            forall|r: int| #![auto] 0 <= r < matrix.len() ==> matrix[r].len() == matrix.len(),
             Self::tc_prefix(matrix, k, i, p),
             Self::tc_prefix(matrix, k, p, j),
         ensures
@@ -1223,6 +1272,7 @@ impl FiniteLattice {
                     && Self::flow_matrix_view(old(flows)@)[i][j]
                     ==> flows@[i]@[j],
             forall|i: int, j: int, k: int|
+                #![auto]
                 0 <= i < flows@.len() && 0 <= j < flows@.len() && 0 <= k < flows@.len()
                     && flows@[i]@[j] && flows@[j]@[k] ==> flows@[i]@[k],
     )]
@@ -1234,7 +1284,7 @@ impl FiniteLattice {
         let ghost base = Self::flow_matrix_view(flows@);
         let mut k = 0;
         // Outer loop: after iteration `k`, `flows` matches `tc_prefix(base, k, .., ..)`.
-        while k < n
+        #[verus_spec(
             invariant
                 flows.wf(),
                 n == flows@.len(),
@@ -1245,10 +1295,11 @@ impl FiniteLattice {
                     0 <= i < n as int && 0 <= j < n as int ==> #[trigger] flows@[i]@[j]
                         == Self::tc_prefix(base, k as nat, i, j),
             decreases n - k,
-        {
+        )]
+        while k < n {
             let mut i = 0;
             // Middle loop: rows before `i` have already been updated to pivot `k`.
-            while i < n
+            #[verus_spec(
                 invariant
                     flows.wf(),
                     n == flows@.len(),
@@ -1263,11 +1314,12 @@ impl FiniteLattice {
                         i as int <= r < n as int && 0 <= c < n as int ==> #[trigger] flows@[r]@[c]
                             == Self::tc_prefix(base, k as nat, r, c),
                 decreases n - i,
-            {
+            )]
+            while i < n {
                 let ik = flows[i][k];
                 let mut j = 0;
                 // Inner loop: columns before `j` in row `i` already reflect pivot `k`.
-                while j < n
+                #[verus_spec(
                     invariant
                         flows.wf(),
                         n == flows@.len(),
@@ -1298,7 +1350,8 @@ impl FiniteLattice {
                                 c,
                             ),
                     decreases n - j,
-                {
+                )]
+                while j < n {
                     let kj = flows[k][j];
                     let mut row = flows.remove(i);
                     let new_val = row[j] || (ik && kj);
@@ -1315,14 +1368,17 @@ impl FiniteLattice {
             assert(k == n);
             // At loop exit we have the full closure `tc_prefix(base, n, .., ..)`.
             assert forall|i: int, j: int|
+                #![auto]
                 0 <= i < flows@.len() && 0 <= j < flows@.len() implies flows@[i]@[j]
                 == Self::tc_prefix(base, n as nat, i, j) by {};
             assert forall|i: int, j: int|
+                #![auto]
                 0 <= i < flows@.len() && 0 <= j < flows@.len()
                     && base[i][j] implies flows@[i]@[j] by {
                 Self::lemma_tc_prefix_contains_base(base, n as nat, i, j);
             }
             assert forall|i: int, j: int, m: int|
+                #![auto]
                 0 <= i < flows@.len() && 0 <= j < flows@.len() && 0 <= m < flows@.len()
                     && flows@[i]@[j] && flows@[j]@[m] implies flows@[i]@[m] by {
                 Self::lemma_tc_prefix_closed_under_pivot(base, n as nat, j, i, m);
@@ -1345,7 +1401,7 @@ impl FiniteLattice {
         let mut lhs = 0;
         // Sweep all pairs and accumulate the prefix fact:
         // every pair seen so far already has both a join and a meet.
-        while lhs < n
+        #[verus_spec(
             invariant
                 self.square(),
                 n == self.level_names.len(),
@@ -1356,9 +1412,10 @@ impl FiniteLattice {
                         LevelId(b as usize),
                     ),
             decreases n - lhs,
-        {
+        )]
+        while lhs < n {
             let mut rhs = 0;
-            while rhs < n
+            #[verus_spec(
                 invariant
                     self.square(),
                     n == self.level_names.len(),
@@ -1375,7 +1432,8 @@ impl FiniteLattice {
                             LevelId(b as usize),
                         ),
                 decreases n - rhs,
-            {
+            )]
+            while rhs < n {
                 let join = self.join(LevelId(lhs), LevelId(rhs));
                 if join.is_none() {
                     return Err(FiniteLatticeBuildError::MissingJoin { lhs, rhs });
@@ -1447,7 +1505,7 @@ impl FiniteLattice {
         let mut cand = 0;
         // Try each level as a candidate bound until we find one that dominates every other
         // bound of the same kind. That gives least-upper-bound or greatest-lower-bound.
-        while cand < n
+        #[verus_spec(
             invariant
                 self.square(),
                 self.valid_level(lhs),
@@ -1455,7 +1513,8 @@ impl FiniteLattice {
                 n == self.level_names.len(),
                 cand <= n,
             decreases n - cand,
-        {
+        )]
+        while cand < n {
             let is_bound = if upper {
                 self.flows[lhs.0][cand] && self.flows[rhs.0][cand]
             } else {
@@ -1467,7 +1526,7 @@ impl FiniteLattice {
                 let mut other = 0;
                 // Scan all other levels and check that any competing bound is above `cand`
                 // (or below `cand` in the meet case).
-                while other < n
+                #[verus_spec(
                     invariant
                         self.square(),
                         self.valid_level(lhs),
@@ -1488,7 +1547,8 @@ impl FiniteLattice {
                                 self.flows_to_spec(j, LevelId(cand))
                             },
                     decreases n - other,
-                {
+                )]
+                while other < n {
                     let other_is_bound = if upper {
                         self.flows[lhs.0][other] && self.flows[rhs.0][other]
                     } else {
@@ -1615,13 +1675,14 @@ impl WellFormed for FiniteLattice {
             self.valid_level(l1) && self.valid_level(l2) && self.flows_to_spec(l1, l2)
                 && self.flows_to_spec(l2, l1) ==> l1 == l2
         &&& forall|l1: LevelId, l2: LevelId, l3: LevelId|
+            #![auto]
             self.valid_level(l1) && self.valid_level(l2) && self.valid_level(l3)
                 && self.flows_to_spec(l1, l2) && self.flows_to_spec(l2, l3) ==> self.flows_to_spec(
                 l1,
                 l3,
             )
-        &&& forall|l: LevelId| self.valid_level(l) ==> self.flows_to_spec(self.bot, l)
-        &&& forall|l: LevelId| self.valid_level(l) ==> self.flows_to_spec(l, self.top)
+        &&& forall|l: LevelId| #![auto] self.valid_level(l) ==> self.flows_to_spec(self.bot, l)
+        &&& forall|l: LevelId| #![auto] self.valid_level(l) ==> self.flows_to_spec(l, self.top)
         &&& forall|l1: LevelId, l2: LevelId|
             self.valid_level(l1) && self.valid_level(l2) ==> self.has_join_and_meet(l1, l2)
     }
@@ -1638,13 +1699,14 @@ impl WellFormed for FiniteLattice {
             this.valid_level(l1) && this.valid_level(l2) && this.flows_to_spec(l1, l2)
                 && this.flows_to_spec(l2, l1) ==> l1 == l2,
         forall|l1: LevelId, l2: LevelId, l3: LevelId|
+            #![auto]
             this.valid_level(l1) && this.valid_level(l2) && this.valid_level(l3)
                 && this.flows_to_spec(l1, l2) && this.flows_to_spec(l2, l3) ==> this.flows_to_spec(
                 l1,
                 l3,
             ),
-        forall|l: LevelId| this.valid_level(l) ==> this.flows_to_spec(this.bot, l),
-        forall|l: LevelId| this.valid_level(l) ==> this.flows_to_spec(l, this.top),
+        forall|l: LevelId| #![auto] this.valid_level(l) ==> this.flows_to_spec(this.bot, l),
+        forall|l: LevelId| #![auto] this.valid_level(l) ==> this.flows_to_spec(l, this.top),
         forall|l1: LevelId, l2: LevelId|
             this.valid_level(l1) && this.valid_level(l2) ==> this.has_join_and_meet(l1, l2),
     ensures
@@ -1849,12 +1911,12 @@ impl SecurityLattice<LevelId> for FiniteLattice {
 
     /// Chooses the join witness guaranteed to exist by `wf()`.
     open spec fn join(&self, lhs: LevelId, rhs: LevelId) -> LevelId {
-        choose|level: LevelId| self.valid_level(level) && self.is_join_of(lhs, rhs, level)
+        choose|level: LevelId| #![auto] self.valid_level(level) && self.is_join_of(lhs, rhs, level)
     }
 
     /// Chooses the meet witness guaranteed to exist by `wf()`.
     open spec fn meet(&self, lhs: LevelId, rhs: LevelId) -> LevelId {
-        choose|level: LevelId| self.valid_level(level) && self.is_meet_of(lhs, rhs, level)
+        choose|level: LevelId| #![auto] self.valid_level(level) && self.is_meet_of(lhs, rhs, level)
     }
 
     /// Discharges the trait reflexivity obligation from `FiniteLattice::wf()`.
@@ -1965,34 +2027,6 @@ pub open spec fn valid_downgrade<Level: WellFormed + Copy + PartialEq, L: Securi
         lattice.valid_level(to),
 {
     has_declassifier && lattice.flows_to(to, from)
-}
-
-#[verus_spec(r =>
-    ensures
-        valid_upgrade::<Level, L>(lattice, from, to) ==> lattice.flows_to(from, to),
-)]
-/// Expands [`valid_upgrade`] back into the underlying lattice flow relation.
-pub proof fn lemma_valid_upgrade_sound<
-    Level: WellFormed + Copy + PartialEq,
-    L: SecurityLattice<Level>,
->(lattice: &L, from: Level, to: Level) {
-    assert(valid_upgrade::<Level, L>(lattice, from, to) ==> lattice.flows_to(from, to))
-        by (compute);
-}
-
-#[verus_spec(r =>
-    ensures
-        valid_downgrade::<Level, L>(lattice, from, to, has_declassifier) ==> has_declassifier
-            && lattice.flows_to(to, from),
-)]
-/// Expands [`valid_downgrade`] into its concrete declassifier and reverse-flow
-/// obligations.
-pub proof fn lemma_valid_downgrade_sound<
-    Level: WellFormed + Copy + PartialEq,
-    L: SecurityLattice<Level>,
->(lattice: &L, from: Level, to: Level, has_declassifier: bool) {
-    assert(valid_downgrade::<Level, L>(lattice, from, to, has_declassifier) ==> has_declassifier
-        && lattice.flows_to(to, from)) by (compute);
 }
 
 } // verus!

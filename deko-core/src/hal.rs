@@ -17,6 +17,9 @@ use crate::{die, imp, kdebug, kerror, kinfo, kwarn, DekoKernelLaunchInfo, Stage2
 
 verus! {
 
+// Clamp the exported full heap to a power-of-two geometry the buddy allocator can verify.
+const FULL_HEAP_CLAMP_SIZE: u64 = 0x800000;
+
 /// A global flag to indicate whether the AP has been started.
 ///
 /// Allow APs to proceed as the environment is now ready. This
@@ -697,6 +700,11 @@ fn prepare_heap(
             kerror!("No remaining memory for heap after loading kernel and IGVM params!");
             crate::die("");
         },
+    };
+    let heap_size = if heap_size > FULL_HEAP_CLAMP_SIZE {
+        FULL_HEAP_CLAMP_SIZE
+    } else {
+        heap_size
     };
 
     proof {

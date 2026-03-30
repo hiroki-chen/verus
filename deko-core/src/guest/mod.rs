@@ -1,7 +1,7 @@
 use deko_macros::DekoDebug;
-use deko_std::address::{create_paddr_range, PhysAddr};
-use deko_std::mem::{PAGE_SIZE, PERCPU_CAA_BASE};
-use deko_std::prelude::DekoPointsTo;
+use deko_std::address::{create_paddr_range, PhysAddr, VirtAddr};
+use deko_std::mem::{PAGE_SIZE, PAGE_SIZE_2M, PERCPU_CAA_BASE};
+use deko_std::prelude::{DekoPointsTo, VADDR_UPPER_MASK};
 use deko_std::ptr::DekoPPtr;
 use deko_std::sync::DekoSimpleOnceCell;
 use deko_std::wf::WellFormed;
@@ -15,6 +15,7 @@ use crate::cpu::{DekoCpuCtx, DekoCpuCtxPermission, PERCPU_AREAS};
 use crate::imp::ghcb::vmpl_switch_with_rax;
 use crate::imp::vmsa::{GuestVMExit, VMSA};
 use crate::imp::VMPL_GUEST_DEKO_MONITOR;
+use crate::mm::check_within_guest_mmap;
 use crate::mm::paging::{PageTable, PageTablePermission};
 use crate::mm::vm::TempMapping;
 use crate::policy::DekoSyscallBody;
@@ -33,17 +34,18 @@ pub(crate) mod userapp_runtime;
 pub use hook::{install_hook, GUEST_TRAMPOLINE_MAGIC, GUEST_TRAMPOLINE_PML4_HOLE};
 pub use paging::{guest_phys_to_virt, GuestMapping, GuestPageOffsetBase, GUEST_PAGE_OFFSET_BASE};
 pub use protocol::{
-    DekoGuestLstarWriteReq, DekoGuestRequestAdditionalData, DekoGuestRequestParams,
-    DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode, DekoMapIfcReq,
-    DekoMapIfcSingleReq, DekoNewAppReq, DekoNewAppType, DekoTaskMigrateReq, DekoVmplSwitchErr,
-    DEKO_GUEST_EXIT_PROTOCOL_ATTEST_SERVICE, DEKO_GUEST_EXIT_PROTOCOL_DEKO_SERVICE,
-    DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE, DEKO_GUEST_EXIT_PROTOCOL_TPM_SERVICE,
-    DEKO_SERVICE_APP_ENTER_OK, DEKO_SERVICE_APP_EXIT, DEKO_SERVICE_ATTEST_SERVICES,
-    DEKO_SERVICE_ATTEST_SINGLE_SERVICE, DEKO_SERVICE_CREATE_VCPU, DEKO_SERVICE_DEPOSIT_MEMORY,
-    DEKO_SERVICE_DESTROY_VCPU, DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER,
-    DEKO_SERVICE_EXTEND_LAUNCH_APP, DEKO_SERVICE_EXTEND_MAP_IFC, DEKO_SERVICE_EXTEND_MSR_INTERCEPT,
-    DEKO_SERVICE_EXTEND_REPORT_APP, DEKO_SERVICE_EXTEND_SYSCALL_ANALYSIS,
-    DEKO_SERVICE_EXTEND_TASK_MIGRATE, DEKO_SERVICE_EXTEND_TIMER_EVENT, DEKO_SERVICE_PVALIDATE,
+    DekoGuestRequestAdditionalData, DekoGuestRequestParams, DekoGuestServError,
+    DekoGuestServResult, DekoGuestServResultCode, DekoGuestTrampolineSetupReq, DekoLoadPolicyReq,
+    DekoMapIfcReq, DekoMapIfcSingleReq, DekoNewAppReq, DekoNewAppType, DekoTaskMigrateReq,
+    DekoVmplSwitchErr, DEKO_GUEST_EXIT_PROTOCOL_ATTEST_SERVICE,
+    DEKO_GUEST_EXIT_PROTOCOL_DEKO_SERVICE, DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE,
+    DEKO_GUEST_EXIT_PROTOCOL_TPM_SERVICE, DEKO_SERVICE_APP_ENTER_OK, DEKO_SERVICE_APP_EXIT,
+    DEKO_SERVICE_ATTEST_SERVICES, DEKO_SERVICE_ATTEST_SINGLE_SERVICE, DEKO_SERVICE_CREATE_VCPU,
+    DEKO_SERVICE_DEPOSIT_MEMORY, DEKO_SERVICE_DESTROY_VCPU,
+    DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER, DEKO_SERVICE_EXTEND_LAUNCH_APP,
+    DEKO_SERVICE_EXTEND_LOAD_POLICY, DEKO_SERVICE_EXTEND_MAP_IFC, DEKO_SERVICE_EXTEND_REPORT_APP,
+    DEKO_SERVICE_EXTEND_SYSCALL_ANALYSIS, DEKO_SERVICE_EXTEND_TASK_MIGRATE,
+    DEKO_SERVICE_EXTEND_TIMER_EVENT, DEKO_SERVICE_EXTEND_TRAMPOLINE_SETUP, DEKO_SERVICE_PVALIDATE,
     DEKO_SERVICE_QUERY_PROTOCOL, DEKO_SERVICE_REMAP_CA, DEKO_SERVICE_TIMER,
     DEKO_SERVICE_WITHDRAW_MEMORY,
 };
@@ -52,6 +54,58 @@ pub(crate) use userapp_runtime::{
 };
 
 verus! {
+
+pub open spec fn valid_guest_page_addr_spec(pa: u64) -> bool {
+    &&& pa % PAGE_SIZE == 0
+    &&& pa < 0x000f_ffff_ffff_f000u64 - PAGE_SIZE
+}
+
+#[inline]
+#[verus_spec(r =>
+    ensures
+        r == valid_guest_page_addr_spec(pa),
+)]
+pub fn valid_guest_page_addr(pa: u64) -> bool {
+    pa % PAGE_SIZE == 0 && pa < 0x000f_ffff_ffff_f000u64 - PAGE_SIZE
+}
+
+#[inline]
+#[verus_spec(r =>
+    requires
+        pa.wf(),
+    ensures
+        r ==> valid_guest_page_addr_spec(pa.0),
+)]
+pub fn valid_guest_page(pa: PhysAddr) -> bool {
+    valid_guest_page_addr(pa.0) && check_within_guest_mmap(pa)
+}
+
+pub open spec fn valid_trampoline_gpa_spec(pa: u64) -> bool {
+    &&& pa % PAGE_SIZE == 0
+    &&& pa < 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE_2M
+}
+
+#[inline]
+#[verus_spec(r =>
+    ensures
+        r == valid_trampoline_gpa_spec(pa),
+)]
+pub fn valid_trampoline_gpa(pa: u64) -> bool {
+    pa % PAGE_SIZE == 0 && pa < 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE_2M
+}
+
+pub open spec fn valid_kernel_vaddr_spec(va: u64) -> bool {
+    va >= VADDR_UPPER_MASK
+}
+
+#[inline]
+#[verus_spec(r =>
+    ensures
+        r == valid_kernel_vaddr_spec(va.0),
+)]
+pub fn valid_kernel_vaddr(va: VirtAddr) -> bool {
+    va.0 >= VADDR_UPPER_MASK
+}
 
 global layout PtRegs is size == 0xa8, align == 8;
 
@@ -125,13 +179,6 @@ pub enum DekoGuestExitReason {
     /// Caused by an explicit VMGEXIT via GHCB instruction
     /// and the protocol is a SVSM call.
     VMGEXIT = 0x403,
-}
-
-pub exec static DEKO_POLICY_ENGINE_BLOB: DekoSimpleOnceCell<&'static [u8]>
-    ensures
-        DEKO_POLICY_ENGINE_BLOB.wf(),
-{
-    DekoSimpleOnceCell::new(Ghost(()))
 }
 
 #[repr(C, packed)]
@@ -395,7 +442,7 @@ pub fn handle_guest_exit(
         }
 )]
 pub fn guest_page_table(cr3: u64) -> DekoGuestServResult<TempMapping> {
-    if core::hint::unlikely(cr3 >= 0x0000_FFFF_FFFF_F000u64 - PAGE_SIZE || cr3 % PAGE_SIZE != 0) {
+    if core::hint::unlikely(!valid_guest_page_addr(cr3)) {
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
     }
     Ok(

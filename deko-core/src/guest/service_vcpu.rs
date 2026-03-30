@@ -11,13 +11,12 @@ use vstd::prelude::*;
 use crate::cpu::tlb::flush_tlb_global_sync;
 use crate::cpu::{DekoCpuCtxPermission, PERCPU_AREAS};
 use crate::guest::{
-    DekoGuestRequestParams, DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode,
+    valid_guest_page, DekoGuestRequestParams, DekoGuestServError, DekoGuestServResult,
+    DekoGuestServResultCode,
 };
 use crate::imp::RmpFlags;
 use crate::kerror;
-use crate::mm::check_within_guest_mmap;
 use crate::mm::vm::TempMapping;
-use crate::policy::{DekoMsrIntercept, DekoMsrInterceptVec0};
 use crate::snp::rmpadjust;
 use crate::snp::vmsa::VMSA;
 
@@ -46,16 +45,8 @@ pub(crate) fn handle_deko_service_vcpu_destroy(
 
     let vmsa = params.rcx;
 
-    if core::hint::unlikely(vmsa % PAGE_SIZE != 0) {
-        kerror!("Guest vCPU destroy: unaligned vmsa page: vmsa=", vmsa);
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
-    }
-    if core::hint::unlikely(!check_within_guest_mmap(PhysAddr(vmsa))) {
+    if core::hint::unlikely(!valid_guest_page(PhysAddr(vmsa))) {
         kerror!("Guest vCPU destroy: invalid vmsa page: vmsa=", vmsa);
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
-    }
-    if core::hint::unlikely(vmsa >= 0x000f_ffff_ffff_f000u64 - PAGE_SIZE) {
-        kerror!("Guest vCPU destroy: vmsa page out of range: vmsa=", vmsa);
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
     }
     let pvmsa = PhysAddr(vmsa);
@@ -107,19 +98,10 @@ pub(crate) fn handle_deko_service_vcpu_create(
     let caa_page = params.rdx;
     let sev_features = params.sev_features;
 
-    if core::hint::unlikely(vmsa_page % PAGE_SIZE != 0 || caa_page % PAGE_SIZE != 0) {
-        kerror!("Guest vCPU create: unaligned vmsa or caa page: vmsa=", vmsa_page, " caa=", caa_page);
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
-    }
-    if core::hint::unlikely(!check_within_guest_mmap(PhysAddr(vmsa_page))) {
-        kerror!("Guest vCPU create: invalid vmsa or caa page: vmsa=", vmsa_page, " caa=", caa_page);
-        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
-    }
     if core::hint::unlikely(
-        vmsa_page >= 0x000f_ffff_ffff_f000u64 - PAGE_SIZE || caa_page >= 0x000f_ffff_ffff_f000u64
-            - PAGE_SIZE,
+        !valid_guest_page(PhysAddr(vmsa_page)) || !valid_guest_page(PhysAddr(caa_page)),
     ) {
-        kerror!("Guest vCPU create: vmsa or caa page out of range: vmsa=", vmsa_page, " caa=", caa_page);
+        kerror!("Guest vCPU create: invalid vmsa or caa page: vmsa=", vmsa_page, " caa=", caa_page);
         return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidAddr));
     }
     let pvmsa = PhysAddr(vmsa_page);
@@ -223,7 +205,7 @@ pub(crate) fn handle_deko_service_vcpu_create(
                         }
                     }
 
-                    handle_deko_service_vcpu_create_syscall_intercept(vmsa_mapping)
+                    Ok(())
                 }
             } else {
                 kerror!("Guest vCPU create: internal error");
@@ -231,27 +213,6 @@ pub(crate) fn handle_deko_service_vcpu_create(
             }
         }
     }?;
-
-    Ok(())
-}
-
-#[inline]
-#[verifier::external_body]
-#[verus_spec(
-    requires
-        vmsa_mapping.wf(),
-)]
-fn handle_deko_service_vcpu_create_syscall_intercept(
-    vmsa_mapping: TempMapping,
-) -> DekoGuestServResult<()> {
-    let ptr = vmsa_mapping.inner.start.0;
-    let ptr = DekoPPtr(vstd::simple_pptr::PPtr(ptr as usize, core::marker::PhantomData));
-
-    proof_with!(Tracked::assume_new());
-    VMSA::enable_msr_intercept(
-        ptr,
-        &[DekoMsrIntercept::InterceptMsrVec0(DekoMsrInterceptVec0::LstarWrite)],
-    );
 
     Ok(())
 }

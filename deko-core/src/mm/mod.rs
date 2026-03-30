@@ -205,12 +205,27 @@ struct Allocator;
 /// such as [`DekoHeapAllocator`].
 #[verifier::external]
 unsafe impl core::alloc::GlobalAlloc for Allocator {
-    unsafe fn alloc(&self, _layout: core::alloc::Layout) -> *mut u8 {
-        panic!("No global allocator configured; please use explicit allocators like DekoHeapAllocator.");
+    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+        use core::alloc::Allocator as _;
+
+        let allocator = crate::mm::frame_allocator::DekoAllocatorApi {  };
+
+        match allocator.allocate(layout) {
+            Ok(ptr) => ptr.cast::<u8>().as_ptr(),
+            Err(_err) => core::ptr::null_mut(),
+        }
     }
 
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {
-        panic!("No global allocator configured; please use explicit allocators like DekoHeapAllocator.");
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
+        use core::alloc::Allocator as _;
+        use core::ptr::NonNull;
+
+        let allocator = crate::mm::frame_allocator::DekoAllocatorApi {  };
+        let Some(ptr) = NonNull::new(ptr) else {
+            return ;
+        };
+
+        allocator.deallocate(ptr, layout);
     }
 }
 

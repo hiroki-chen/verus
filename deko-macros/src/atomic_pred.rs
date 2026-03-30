@@ -3,7 +3,7 @@ use proc_macro2::{Group, TokenTree};
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
-use syn::{Ident, Result, Token, Type, parse_macro_input, parse_quote};
+use syn::{parse_macro_input, parse_quote, Ident, Result, Token, Type};
 
 /// Represents the input to the with_atomic_pred macro
 #[derive(Debug)]

@@ -24,11 +24,10 @@ use crate::cpu::{DekoCpuCtx, X86Tss};
 use crate::mm::paging::PageTable;
 use crate::mm::vm::TempMapping;
 use crate::mm::DEKO_FRAME_ALLOCATOR_FULL;
-use crate::policy::{DekoMsrInterceptVec0, DekoSyscallBody};
+use crate::policy::DekoSyscallBody;
 use crate::snp::{
     rdtscp, rmpadjust, DekoCpuCtxPermission, PageTablePermission, RmpFlags, Rmp_ALL_BITS,
-    SnpStatusFlags, ALT_INJ, BIT_VMSA, GUEST_MSR_INTERCEPT, REST_INJ, VMPL1_MAGIC_KERN,
-    VMPL_GUEST_DEKO_MONITOR,
+    SnpStatusFlags, ALT_INJ, BIT_VMSA, REST_INJ, VMPL1_MAGIC_KERN, VMPL_GUEST_DEKO_MONITOR,
 };
 use crate::{dbg, die, kdebug, kerror, kinfo, kunimplemented, kwarn};
 

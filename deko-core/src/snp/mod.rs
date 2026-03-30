@@ -1723,7 +1723,7 @@ fn do_copy_cpuid_to_fw(cpuid_table: &CpuidTable, to: TempMapping) {
     }
 
     let fw_cpuid_table = unsafe { &mut *(to.inner.start.0 as *mut CpuidTable) };
-    kinfo!("Copied CPU ID table to firmware location at", to.inner.start, ": ", fw_cpuid_table);
+    kinfo!("Copied CPU ID table to firmware location at", to.inner.start);
 }
 
 /// When a guest receives a #HV notification at any time, guest may choose

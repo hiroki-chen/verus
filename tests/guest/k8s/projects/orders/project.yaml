@@ -1,0 +1,367 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: faas-orders
+  labels:
+    app.kubernetes.io/part-of: orders-pipeline
+    deko.project/name: orders
+    data-storage: orders
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orders-domain-config
+  namespace: faas-orders
+data:
+  DATA_STORAGE: orders
+  INGEST_URL: http://orders-ingest:8080/orders
+  TRANSFORM_URL: http://orders-transform:8080/transform
+  WRITER_URL: http://orders-writer:8080/write
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deko-policy-orders
+  namespace: faas-orders
+  labels:
+    deko.project/name: orders
+    data-storage: orders
+data:
+  policy.toml: |
+    [meta]
+    name = "orders_domain_policy"
+    package = "orders_domain_policy"
+    version = "0.1.0"
+
+    [domain]
+    selector_label = "data-storage"
+    selector_value = "orders"
+
+    [lattice]
+    levels = ["public", "orders_internal", "orders_db"]
+    relations = [["public", "orders_internal"], ["orders_internal", "orders_db"]]
+    bot = "public"
+    top = "orders_db"
+
+    [[resources]]
+    type = "network"
+    name = "ORDERS_PUBLIC_API"
+    endpoint = "0.0.0.0:8080"
+    label = "public"
+
+    [[resources]]
+    type = "network"
+    name = "ORDERS_DB"
+    endpoint = "orders-db.default.svc.cluster.local:5432"
+    label = "orders_db"
+
+    [[resources]]
+    type = "function"
+    name = "orders-ingest"
+    measurement = "sha256:0x11111111111111111111111111111111"
+    initial_label = "public"
+
+    [[resources]]
+    type = "function"
+    name = "orders-transform"
+    measurement = "sha256:0x22222222222222222222222222222222"
+    initial_label = "orders_internal"
+
+    [[resources]]
+    type = "function"
+    name = "orders-writer"
+    measurement = "sha256:0x33333333333333333333333333333333"
+    initial_label = "orders_internal"
+
+    [[authorities]]
+    name = "orders_writer_db_release"
+    holder = "orders-writer"
+    kind = "declassify"
+    from = "orders_db"
+    to = "orders_internal"
+    sources = ["ORDERS_DB"]
+    sinks = ["ORDERS_PUBLIC_API"]
+
+    [[interactions]]
+    subject = "orders-ingest"
+    action = "recv"
+    source = "ORDERS_PUBLIC_API"
+    from = "public"
+    to = "orders_internal"
+
+    [[interactions]]
+    subject = "orders-writer"
+    action = "recv"
+    source = "ORDERS_DB"
+    from = "orders_internal"
+    to = "orders_db"
+
+    [[interactions]]
+    subject = "orders-writer"
+    action = "release"
+    source = "ORDERS_DB"
+    sink = "ORDERS_PUBLIC_API"
+    authority = "orders_writer_db_release"
+    from = "orders_db"
+    to = "orders_internal"
+
+    [defaults]
+    unmatched_action = "deny"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders-ingest
+  namespace: faas-orders
+  labels:
+    app.kubernetes.io/name: orders-ingest
+    app.kubernetes.io/part-of: orders-pipeline
+    deko.project/name: orders
+    deko.domain/group: orders-pipeline
+    data-storage: orders
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: orders-ingest
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: orders-ingest
+        app.kubernetes.io/part-of: orders-pipeline
+        deko.project/name: orders
+        deko.domain/group: orders-pipeline
+        data-storage: orders
+    spec:
+      volumes:
+        - name: deko-ready
+          hostPath:
+            path: /tmp/deko-ready
+            type: DirectoryOrCreate
+      containers:
+        - name: handler
+          image: orders-ingest:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - /app/scripts/wait_for_deko_bind.sh
+            - python3
+            - /app/scripts/orders_ingest.py
+          envFrom:
+            - configMapRef:
+                name: orders-domain-config
+          volumeMounts:
+            - name: deko-ready
+              mountPath: /deko-ready
+              readOnly: true
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            failureThreshold: 6
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders-ingest
+  namespace: faas-orders
+  labels:
+    app.kubernetes.io/name: orders-ingest
+    app.kubernetes.io/part-of: orders-pipeline
+    deko.project/name: orders
+    data-storage: orders
+spec:
+  selector:
+    app.kubernetes.io/name: orders-ingest
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders-transform
+  namespace: faas-orders
+  labels:
+    app.kubernetes.io/name: orders-transform
+    app.kubernetes.io/part-of: orders-pipeline
+    deko.project/name: orders
+    deko.domain/group: orders-pipeline
+    data-storage: orders
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: orders-transform
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: orders-transform
+        app.kubernetes.io/part-of: orders-pipeline
+        deko.project/name: orders
+        deko.domain/group: orders-pipeline
+        data-storage: orders
+    spec:
+      volumes:
+        - name: deko-ready
+          hostPath:
+            path: /tmp/deko-ready
+            type: DirectoryOrCreate
+      containers:
+        - name: handler
+          image: orders-transform:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - /app/scripts/wait_for_deko_bind.sh
+            - python3
+            - /app/scripts/orders_transform.py
+          envFrom:
+            - configMapRef:
+                name: orders-domain-config
+          volumeMounts:
+            - name: deko-ready
+              mountPath: /deko-ready
+              readOnly: true
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            failureThreshold: 6
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders-transform
+  namespace: faas-orders
+  labels:
+    app.kubernetes.io/name: orders-transform
+    app.kubernetes.io/part-of: orders-pipeline
+    deko.project/name: orders
+    data-storage: orders
+spec:
+  selector:
+    app.kubernetes.io/name: orders-transform
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders-writer
+  namespace: faas-orders
+  labels:
+    app.kubernetes.io/name: orders-writer
+    app.kubernetes.io/part-of: orders-pipeline
+    deko.project/name: orders
+    deko.domain/group: orders-pipeline
+    data-storage: orders
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: orders-writer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: orders-writer
+        app.kubernetes.io/part-of: orders-pipeline
+        deko.project/name: orders
+        deko.domain/group: orders-pipeline
+        data-storage: orders
+    spec:
+      volumes:
+        - name: deko-ready
+          hostPath:
+            path: /tmp/deko-ready
+            type: DirectoryOrCreate
+      containers:
+        - name: handler
+          image: orders-writer:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - /app/scripts/wait_for_deko_bind.sh
+            - python3
+            - /app/scripts/orders_writer.py
+          envFrom:
+            - configMapRef:
+                name: orders-domain-config
+          volumeMounts:
+            - name: deko-ready
+              mountPath: /deko-ready
+              readOnly: true
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            failureThreshold: 6
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders-writer
+  namespace: faas-orders
+  labels:
+    app.kubernetes.io/name: orders-writer
+    app.kubernetes.io/part-of: orders-pipeline
+    deko.project/name: orders
+    data-storage: orders
+spec:
+  selector:
+    app.kubernetes.io/name: orders-writer
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: orders-pipeline-smoke
+  namespace: faas-orders
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: orders-pipeline-smoke
+        app.kubernetes.io/part-of: orders-pipeline
+        deko.project/name: orders
+        data-storage: orders
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: smoke
+          image: curlimages/curl:8.8.0
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: orders-domain-config
+          command:
+            - sh
+            - -lc
+            - |
+              set -eu
+              payload='{"order_id":"ord-1001","customer":"alice","amount":1250}'
+              ingest_resp=$(curl -fsS -X POST "$INGEST_URL" -H 'Content-Type: application/json' -d "$payload")
+              echo "ingest: $ingest_resp"
+              transform_resp=$(curl -fsS -X POST "$TRANSFORM_URL" -H 'Content-Type: application/json' -d "$ingest_resp")
+              echo "transform: $transform_resp"
+              writer_resp=$(curl -fsS -X POST "$WRITER_URL" -H 'Content-Type: application/json' -d "$transform_resp")
+              echo "writer: $writer_resp"

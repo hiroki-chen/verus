@@ -21,9 +21,16 @@ pub type Vec<T> = alloc::vec::Vec<T, DekoAllocatorApi>;
 /// A type alias for a vector declaration that uses the Deko page frame allocator as its allocator.
 pub type VecDeque<T> = alloc::collections::vec_deque::VecDeque<T, DekoAllocatorApi>;
 
-/// Wrapper around `get_unchecked` for slices.
+/// A UTF-8 string that uses the Deko page frame allocator as its allocator.
+pub type String = deko_std::std_extra::string::String<DekoAllocatorApi>;
+
+/// Wrapper around [`[T]::get_unchecked`] for slices.
 ///
 /// The trait implementation in core is not directly usable in Verus.
+///
+/// This function can be used for performance critical code where the
+/// caller can guarantee that the index is in bounds, and wants to avoid
+/// the overhead of bounds checking.
 #[inline(always)]
 #[track_caller]
 #[verifier::external_body]
@@ -67,8 +74,12 @@ pub fn update_slice<T, const N: usize>(s: &mut [T; N], index: usize, value: T)
 } // verus!
 /// Creates a [`Vec`] containing the arguments.
 ///
-/// `vec!` allows `Vec`s to be defined with the same syntax as array expressions.
-/// There are two forms of this macro:
+/// [`vec!`] allows [`Vec`]s to be defined with the same syntax as array expressions.
+/// There are three forms of this macro:
+///
+/// 1. `vec![elem1, elem2, ...]` - creates a vector containing the given elements.
+/// 2. `vec![elem; count]` - creates a vector containing `count` copies of `elem`.
+/// 3. `vec![]` - creates an empty vector
 #[macro_export]
 macro_rules! vec {
     ($($x:expr),* $(,)?) => {

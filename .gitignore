@@ -7,6 +7,11 @@ build
 *.o
 *.bin
 *.elf
+*.cmd
+*.mod*
+*.ko
+*.symvers
+*.order
 
 .gdb_history
 .verus-*
@@ -16,3 +21,6 @@ tools
 TODO*
 
 .config/qemu.snp.toml
+
+*.pyc
+__pycache__

@@ -4,14 +4,13 @@ members = [
     "deko-core",
     "deko-logging",
     "deko-macros",
+    "deko-policy-format",
     "deko-stage1",
     "deko-std",
     "xtask",
     # bins
     "bin/deko-monitor",
     "bin/deko-stage2",
-    "bin/init",
-    "bin/deko-ifc",
 ]
 # Unfortunately due to `Cargo`'s default feature unification, we need to
 # exclude some crates that have conflicting default features like global
@@ -21,6 +20,7 @@ exclude = [
     "tests/buddy",
     "tests/collections",
     "tests/elf",
+    "tests/lattice",
     "deko-analysis",
 ]
 
@@ -40,6 +40,7 @@ prettyplease_verus = { git = "https://github.com/ziqiaozhou/verus", rev = "7c4a5
 deko-core = { path = "deko-core", default-features = false }
 deko-logging = { path = "deko-logging" }
 deko-macros = { path = "deko-macros" }
+deko-policy-format = { path = "deko-policy-format", default-features = false }
 deko-std = { path = "deko-std", default-features = false }
 elf = { git = "https://github.com/hiroki-chen/elf-rs.git" }
 
@@ -47,6 +48,8 @@ elf = { git = "https://github.com/hiroki-chen/elf-rs.git" }
 [profile.dev]
 panic = "abort"    # disable stack unwinding on panic
 incremental = true
+debug = 2
+opt-level = 0
 
 # the profile used for cargo build --release
 [profile.release]

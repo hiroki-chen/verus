@@ -1,5 +1,8 @@
-node_modules
-.git
-*.log
-Dockerfile
 target
+.git
+deko_objdump.log
+out.log
+last_run.log
+fail_run.log
+qemu.log
+logs

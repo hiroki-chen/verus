@@ -21,7 +21,6 @@ use deko_core::cpu::{
 };
 use deko_core::elf::ElfFile;
 use deko_core::fw::{load_acpi_tables, read_acpi_table};
-use deko_core::guest::DEKO_POLICY_ENGINE_BLOB;
 use deko_core::hal::set_is_stage2;
 use deko_core::logging::print_banner;
 use deko_core::mm::frame_allocator::DekoAllocatorApi;
@@ -470,7 +469,7 @@ fn deko_main(cpu_index: usize) {
             early_die();
         };
 
-        kinfo!("cpuid_table", cpuid_table);
+        kdebug!("cpuid_table", cpuid_table);
 
         init_mmap(&igvm_params);
 
@@ -524,12 +523,6 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
     loop {
     }
-}
-
-#[verifier::external_body]
-#[inline(always)]
-fn init_blob() {
-    // DEKO_POLICY_ENGINE_BLOB.init(POLICY_BLOB);
 }
 
 } // verus!

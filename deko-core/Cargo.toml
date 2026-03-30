@@ -12,6 +12,7 @@ verus_builtin_macros = { workspace = true }
 
 deko-logging = { workspace = true, optional = true }
 deko-macros = { workspace = true }
+deko-policy-format = { workspace = true, default-features = false, features = ["alloc"] }
 deko-std = { workspace = true, features = ["alloc"] }
 
 # Trusted third-party libraries

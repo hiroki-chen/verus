@@ -1,0 +1,9 @@
+[package]
+name = "policy_blob_parse"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+deko-policy-format = { path = "../../deko-policy-format", features = ["alloc"] }

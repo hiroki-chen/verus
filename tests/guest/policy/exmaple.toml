@@ -4,44 +4,76 @@ package = "example_policy"
 version = "0.1.0"
 
 [lattice]
+# Confidentiality lattice used by the monitor.
+# This example is a chain:
+#   public <= app_internal <= secret
+#
+# The compiler should still validate latticehood in the general case,
+# since user-supplied relations may define only a partial order.
 levels = ["public", "app_internal", "secret"]
-# Define the partial order of the security levels. In this case, "public" <= "app_internal" <= "secret" which is
-# by accident a total order, but the policy can also support more complex partial orders.
-relations = [["public", "app_internal"], ["app_internal", "secret"]] 
-bot = "public" # The untrusted kernel will be automatically assigned to the bottom level, which is "public" in this case.
+relations = [["public", "app_internal"], ["app_internal", "secret"]]
+# The untrusted kernel sits at the bottom confidentiality level.
+# This does NOT mean it is trusted; it means it must not observe
+# higher-confidentiality data.
+bot = "public"
 top = "secret"
 
 [[resources]]
 type = "network"
 name = "SECRET_STORE_ENDPOINT"
 endpoint = "10.0.0.1:5432"
+# Persistent resource labels are the canonical policy labels.
+# Any invocation reading from this endpoint must be able to observe `secret`.
 label = "secret"
+
+[[resources]]
+type = "network"
+name = "PUBLIC_API"
+endpoint = "0.0.0.0:443"
+# Public sink. Ordinary writes here are only valid from computations
+# whose current label is public, unless an explicit release rule applies.
+label = "public"
 
 [[resources]]
 type = "function"
 name = "foo"
 measurement = "sha256:0xdeadbeefbeefdeadcoffee"
-label = "app_internal"
+# Execution starts at a low label unless the trigger injects a higher one.
+# This field should be interpreted as the invocation's initial current label.
+initial_label = "public"
 
 [[resources]]
 type = "function"
 name = "bar"
 measurement = "sha256:0xdeadcoffee1234567890"
-label = "app_internal"
-declassifier = true
+# `bar` is still an ordinary IFC-confined function by default.
+# It is NOT globally exempt from IFC just because it can perform a release.
+initial_label = "public"
+
+[[authorities]]
+name = "bar_secret_to_public"
+holder = "bar"
+kind = "declassify"
+# Downgrade authority is explicit and scoped.
+# This is stronger than a boolean `declassifier = true`.
+from = "secret"
+to = "public"
+# The release authority is restricted to specific sources and sinks.
+# This prevents the declassifier from acting as a universal downgrade oracle.
+sources = ["SECRET_STORE_ENDPOINT"]
+sinks = ["PUBLIC_API"]
 
 [[interactions]]
-subject = "foo"
-action = "recv"
+subject = "bar"
+action = "release"
 source = "SECRET_STORE_ENDPOINT"
-transition = { type = "UPGRADE", from = "public", to = "secret" }
-
-[[interactions]]
-subject = "foo"
-action = "send"
-source = "SECRET_STORE_ENDPOINT"
-transition = { type = "DOWNGRADE", from = "secret", to = "public", declassifier = "bar" }
+sink = "PUBLIC_API"
+# Explicit privileged release point.
+# This is better than encoding declassification as a normal send with a transition.
+authority = "bar_secret_to_public"
+from = "secret"
+to = "public"
 
 [defaults]
-# While-list based. Any other interaction that is not explicitly allowed in the policy will be denied by default.
+# Whitelist policy: anything not explicitly allowed above is denied.
 unmatched_action = "deny"

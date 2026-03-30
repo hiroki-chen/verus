@@ -144,6 +144,68 @@ impl Builder {
         }
     }
 
+    pub(crate) fn build_agent(&self, release: bool, stage: bool) -> Result<()> {
+        println!("{}", "--- Building deko-agent ---".bright_cyan().bold());
+        println!("\n{} Discovering required binaries...", "🔍".bright_yellow());
+        let verus_binary = self.find_verus_binary()?;
+        let z3_binary = self.find_z3_binary()?;
+
+        std::env::set_var("VERUS_Z3_PATH", &z3_binary);
+        std::env::set_var("RUSTC_BOOTSTRAP", "1");
+
+        if verus_binary != PathBuf::from("verus") {
+            let verus_dir = verus_binary.parent().unwrap_or_else(|| Path::new("."));
+            let current_path = std::env::var("PATH").unwrap_or_default();
+            let new_path = format!("{}:{}", verus_dir.display(), current_path);
+            std::env::set_var("PATH", new_path);
+        }
+
+        let mut cmd = Command::new("cargo-verus");
+        cmd.arg("build")
+            .arg("--manifest-path")
+            .arg(self.config.root.join("deko-agent").join("Cargo.toml"))
+            .arg("--")
+            .arg("--expand-errors");
+
+        if release {
+            cmd.arg("--release");
+        }
+
+        let profile = if release { "release" } else { "debug" };
+        let log_file = format!("deko-agent-build-{}.log", profile);
+        self.execute_with_logging(cmd, &log_file)?;
+
+        let agent_root = self.config.root.join("deko-agent");
+        let built_binary = self.config.root.join("target").join(profile).join("deko-agent");
+        if !built_binary.exists() {
+            bail!("Built deko-agent binary not found at {:?}", built_binary);
+        }
+
+        if stage {
+            let dist_dir = agent_root.join("dist");
+            fs::create_dir_all(&dist_dir).context("Failed to create deko-agent/dist directory")?;
+            let staged_binary = dist_dir.join("deko-agent");
+            fs::copy(&built_binary, &staged_binary).with_context(|| {
+                format!(
+                    "Failed to stage deko-agent binary from {:?} to {:?}",
+                    built_binary, staged_binary
+                )
+            })?;
+            println!(
+                "{} Staged deko-agent binary to {}",
+                "✓".green(),
+                staged_binary.display().to_string().bright_white()
+            );
+        }
+
+        println!(
+            "{} Built deko-agent binary at {}",
+            "✓".green(),
+            built_binary.display().to_string().bright_white()
+        );
+        Ok(())
+    }
+
     fn execute_cargo_with_json(&self, mut cmd: Command, _log_file_name: &str) -> Result<()> {
         println!("{} Executing command: {:?}", "→".bright_blue(), cmd);
 

@@ -6,6 +6,10 @@ use vstd::simple_pptr::MemContents;
 
 use crate::prelude::*;
 
+const _: () = {
+    assert!(core::mem::size_of::<Node<()>>() == 0x20);
+};
+
 verus! {
 
 #[verifier::reject_recursive_types(V)]

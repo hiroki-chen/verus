@@ -15,9 +15,9 @@ pub type DekoHeapBlockPerm = DekoPointsTo<Node<()>>;
 
 pub const HEAP_ALIGNMENT: u64 = 0x1000;
 
-pub axiom fn node_size<T: Sized + WellFormed>()
+pub axiom fn node_zst_size()
     ensures
-        core::mem::size_of::<Node<T>>() == 16 + core::mem::size_of::<T>(),
+        core::mem::size_of::<Node<()>>() == 0x20,
 ;
 
 /// This function checks if the given parameters for a heap are valid only used for
@@ -350,7 +350,7 @@ impl<const ORDER: usize> Heap for DekoHeap<ORDER> {
             // We have found a valid buddy block to be merged with.
             if buddy != 0 {
                 // Check if the buddy block is indeed free.
-                if let Some(idx) = self.free_list.index(order as usize).find_by_addr(ptr) {
+                if let Some(idx) = self.free_list.index(order as usize).find_by_addr(buddy) {
                     // We have a buddy that is free.
                     let f = |list: LinkedList<()>| -> (res: (
                         (DekoPPtr<Node<()>>, Tracked<DekoHeapBlockPerm>),
@@ -378,42 +378,35 @@ impl<const ORDER: usize> Heap for DekoHeap<ORDER> {
                     );
 
                     ptr = ptr.min(buddy_ptr.addr() as u64);
-                } else {
-                    // If we reach here, we haven't found a buddy block of this size so
-                    // we just insert the block into the free list and mark it as free.
-                    let (ptr, Tracked(points_to)) = unsafe {
-                        // Because we are manipulating the raw memory, we need to
-                        // use `from_raw_uninit` to create a pointer from the raw address.
-                        // This is safe because we are guaranteed that the address is valid
-                        // and the memory is uninitialized by formal verification.
-                        //
-                        // No allocation is required because we are just casting raw address
-                        // into a "node".
-                        DekoPPtr::<Node<()>>::from_raw_uninit(ptr)
-                    };
-
-                    proof {
-                        assume(points_to.is_init());
-                        assume(points_to.value().value.wf());
-                    }
-
-                    let f = |list: LinkedList<()>| -> (res: ((), LinkedList<()>))
-                        requires
-                            list.wf(),
-                            self.free_list@.index(order as int) == list,
-                        ensures
-                            res.1.wf(),
-                        {
-                            let mut list = list;
-                            list.push_front_no_alloc(ptr, Tracked(points_to));
-                            ((), list)
-                        };
-
-                    self.free_list.update_in_place(order as usize, f);
-                    return ;
+                    order += 1;
+                    continue ;
                 }
             }
-            order += 1;
+            // If we reach here, either there is no valid buddy for this order,
+            // or the buddy block is currently allocated. In either case, the
+            // merged block stops growing here and must be returned to this free list.
+
+            let (ptr, Tracked(points_to)) = unsafe { DekoPPtr::<Node<()>>::from_raw_uninit(ptr) };
+
+            proof {
+                assume(points_to.is_init());
+                assume(points_to.value().value.wf());
+            }
+
+            let f = |list: LinkedList<()>| -> (res: ((), LinkedList<()>))
+                requires
+                    list.wf(),
+                    self.free_list@.index(order as int) == list,
+                ensures
+                    res.1.wf(),
+                {
+                    let mut list = list;
+                    list.push_front_no_alloc(ptr, Tracked(points_to));
+                    ((), list)
+                };
+
+            self.free_list.update_in_place(order as usize, f);
+            return ;
         }
     }
 
@@ -918,7 +911,8 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
             order < ORDER as u64,
             ptr >= self.heap_base,
         ensures
-            ptr + self.order_size(order as nat) >= self.heap_base + self.heap_size ==> r == 0,
+            self.order_size(order as nat) >= self.heap_size ==> r == 0,
+            ptr + self.order_size(order as nat) > self.heap_base + self.heap_size ==> r == 0,
     {
         proof {
             self.lemma_order_plus_min_heap_size(order as nat);
@@ -929,7 +923,8 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
         let min_block_size_log2 = self.min_block_size.ilog2() as u64;
         let size = 2u64.pow((order + min_block_size_log2) as u32) as u64;
 
-        if ptr >= u64::MAX - size || ptr + size >= self.heap_base + self.heap_size {
+        if ptr >= self.heap_base + self.heap_size || ptr >= u64::MAX - size || size
+            >= self.heap_size || ptr + size > self.heap_base + self.heap_size {
             // No buddy at all.
             0
         } else {

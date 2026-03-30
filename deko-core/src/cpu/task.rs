@@ -55,7 +55,6 @@ use crate::mm::vm::{
     VirtualMemoryRegionPred, VmMapping, VmMappingPred, VMR_GRANULE,
 };
 use crate::mm::{virt_to_phys, DEKO_FRAME_ALLOCATOR, DEKO_FRAME_ALLOCATOR_FULL};
-use crate::policy::enable_syscall_hook;
 use crate::snp::after_irq_enable;
 use crate::{dbg, die, kdebug, kerror, kinfo, kpanic_if, kunimplemented, kwarn};
 
@@ -2256,8 +2255,18 @@ fn serv_main_loop(cpu_index: usize) -> ! {
                     Err(e) => {
                         ret_params = params;
                         match e {
-                            DekoGuestServError::FatalError => {
-                                die("Fatal error occurred when handling guest request.");
+                            DekoGuestServError::FatalError(msg) => {
+                                kerror!(
+                                    "guest request fatal: cpu=",
+                                    cpu_index,
+                                    " protocol=",
+                                    protocol,
+                                    " req=",
+                                    req,
+                                    " err=",
+                                    msg
+                                );
+                                die(msg.as_str());
                             },
                             DekoGuestServError::SoftError(e) => {
                                 r = e.into_error_code();
@@ -2353,9 +2362,7 @@ pub fn try_enter_guest_with_params(
         proof_with!(Tracked(&mut vmsa_perm));
         VMSA::enable(vmsa);
 
-        enable_syscall_hook();
-
-        no_irq_zone(
+        match no_irq_zone(
             ||
                 {
                     flush_tlb_global_sync();
@@ -2364,7 +2371,25 @@ pub fn try_enter_guest_with_params(
                     // be delivered.
                     vmpl_switch(VMPL_GUEST_KERNEL)
                 },
-        );
+        ) {
+            DekoVmplSwitchErr::Ok => {},
+            DekoVmplSwitchErr::Cancelled => {
+                kdebug!(
+                    "VMPL switch cancelled before guest entry on CPU ",
+                    this_cpu_index
+                );
+                continue ;
+            },
+            DekoVmplSwitchErr::Failed(v) => {
+                kerror!(
+                    "VMPL switch failed before guest entry on CPU ",
+                    this_cpu_index,
+                    ", error=",
+                    v
+                );
+                return DekoGuestExitInformation::VmplSwitchFailed;
+            },
+        }
 
         let (ok, new_perm) = DekoCpuCtx::update_guest_vmsa(this_cpu_ptr, Tracked(this_cpu_perm));
         if !ok {
