@@ -6,10 +6,15 @@ use deko_std::wf::WellFormed;
 use vstd::prelude::*;
 
 use crate::cpu::DekoCpuCtx;
-use crate::guest::{DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode};
+use crate::guest::{
+    valid_kernel_vaddr, valid_trampoline_gpa, DekoGuestServError, DekoGuestServResult,
+    DekoGuestServResultCode, DekoGuestTrampolineSetupReq,
+};
+use crate::mm::paging::{bit_not_in_addr_region, bit_not_overlapping, PageTable};
 use crate::mm::vm::TempMapping;
 use crate::policy::ifc::deko_ifc_entry_func_ptr;
 use crate::policy::syscall::DEKO_VMPL1_SYSCALL_TRAMPOLINE;
+use crate::snp::vmsa::VMSA;
 use crate::{kerror, kinfo};
 
 core::arch::global_asm!(
@@ -60,6 +65,58 @@ pub fn update_ifc_engine_entry(entry: u64) {
     unsafe {
         core::ptr::write_volatile(core::ptr::addr_of_mut!(deko_ifc_engine_entry), entry);
     }
+}
+
+#[verus_spec(
+    requires
+        syscall_enter_addr.wf(),
+        syscall_enter_addr@ >= VADDR_UPPER_MASK,
+        guest_pgtable.wf(),
+        guest_pgtable.inner.end@ - guest_pgtable.inner.start@ == PAGE_SIZE,
+        bit_not_overlapping(private_bit),
+        bit_not_overlapping(shared_bit),
+        bit_not_in_addr_region(private_bit),
+        bit_not_in_addr_region(shared_bit),
+)]
+pub fn install_hook(
+    guest_pgtable: TempMapping,
+    syscall_enter_addr: VirtAddr,
+    private_bit: u64,
+    shared_bit: u64,
+    req: &DekoGuestTrampolineSetupReq,
+) -> DekoGuestServResult<()> {
+    if !valid_kernel_vaddr(req.trampoline_gva) || !valid_trampoline_gpa(req.trampoline_gpa.0) {
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    let g_trampoline_mapping = PageTable::walk_lvl3_guest(
+        &guest_pgtable,
+        req.trampoline_gva,
+        private_bit,
+        shared_bit,
+    )?;
+
+    if g_trampoline_mapping.temp_mappings.len() <= 1 || g_trampoline_mapping.temp_mappings.len()
+        > 4 {
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
+    let guest_trampoline_frame = g_trampoline_mapping.final_mapping().unwrap();
+    move_to_guest(guest_trampoline_frame, syscall_enter_addr, req.trampoline_gva)?;
+
+    g_trampoline_mapping.lock_translation_path()?;
+    finish_install_hook(syscall_enter_addr);
+
+    Ok(())
+}
+
+#[verus_spec()]
+fn finish_install_hook(addr: VirtAddr) {
+    let (this_cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
+
+    proof_with!(Tracked(&cpu_perm) => Tracked(mut vmsa_perm));
+    let vmsa = VMSA::this_vmsa(this_cpu);
+
+    proof_with!(Tracked(&mut vmsa_perm));
+    VMSA::set_lstar(vmsa, addr.0)
 }
 
 #[verus_spec(r =>
