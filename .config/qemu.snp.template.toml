@@ -1,11 +1,14 @@
   # Template values only. Copy this file to `.config/qemu.snp.toml`
   # and replace the placeholder paths with your local environment.
+  # Keep this template close to the known-good SVSM QEMU shape when
+  # debugging early boot issues. In particular, avoid changing `-cpu`,
+  # irqchip mode, and boot flow (`igvm` vs `-kernel`) at the same time.
 memory = "64G"
 debug = false
 igvm_path = "/absolute/path/to/cage-sev/target/x86_64-snp-deko/release/igvm.igvm"
 extra_config = [
   "-cpu",
-  "EPYC-v5",
+  "EPYC-v4",
   "-d",
   "int,cpu_reset",
   "-D",
@@ -22,14 +25,10 @@ extra_config = [
   "e1000,netdev=vmnic,romfile=",
   "-serial",
   "mon:stdio",
-  "-virtfs",
-  "local,path=/absolute/path/to/host-share,mount_tag=host_share,security_model=none,id=fs0",
-  "-virtfs",
-  "local,path=/absolute/path/to/cage-sev/tests/guest,mount_tag=guest_tests,security_model=none,id=fs1",
   "-kernel",
   "/absolute/path/to/linux/arch/x86/boot/bzImage",
   "-append",
-  "root=/dev/sda1 console=ttyS0 no5lvl nopti hugepages=0 mem_encrypt=on intremap=off nox2apic"
+  "root=/dev/sda1 console=ttyS0"
 ]
 # For debugging please reduce cores to catch early logic bugs.
 smp_cores = 16
