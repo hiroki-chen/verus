@@ -1781,9 +1781,17 @@ fn run_userapp(
         proof_with!(=> Tracked(vmsa_perm));
         let vmsa_ptr = vmsa.ptr();
 
-        let call_pending = take_vmpl1_call_pending();
-        proof_with!(Tracked(&vmsa_perm));
-        let info = DekoGuestExitInformation::try_parse_vmsa(vmsa_ptr, call_pending);
+        let exit_code = vmsa_ptr.borrow(Tracked(&vmsa_perm)).guest_exit_code.0;
+        let (call_pending, info) = if DekoGuestExitInformation::is_request_exit_code(exit_code) {
+            let call_pending = take_vmpl1_call_pending();
+            proof_with!(Tracked(&vmsa_perm));
+            let info = DekoGuestExitInformation::try_parse_vmsa(vmsa_ptr, call_pending);
+            (call_pending, info)
+        } else {
+            proof_with!(Tracked(&vmsa_perm));
+            let info = DekoGuestExitInformation::try_parse_vmsa(vmsa_ptr, false);
+            (false, info)
+        };
 
         let vmsa = vmsa_ptr.borrow(Tracked(&vmsa_perm));
         let snapshot = DekoUserApp::copy_vmsa_snapshot(vmsa);

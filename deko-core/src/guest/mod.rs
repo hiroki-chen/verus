@@ -270,6 +270,15 @@ impl WellFormed for DekoGuestExitInformation {
 #[verus_verify]
 impl DekoGuestExitInformation {
     #[inline(always)]
+    #[verus_spec(
+        returns
+            (exit_code == DekoGuestExitReason::VMGEXIT as u64),
+    )]
+    pub fn is_request_exit_code(exit_code: u64) -> bool {
+        exit_code == DekoGuestExitReason::VMGEXIT as u64
+    }
+
+    #[inline(always)]
     /// Asynchronous interrupt exits are not guest-issued protocol requests.
     /// The request parser should treat them as re-entry noise.
     pub fn is_spurious_exit_code(exit_code: u64) -> bool {
@@ -277,6 +286,20 @@ impl DekoGuestExitInformation {
             == DekoGuestExitReason::VINTR as u64
     }
 
+    /// Attempt to parse the guest exit information from the provided VMSA state.
+    ///
+    /// Returns [`None`] if the exit information is either:
+    ///
+    /// - Not a recognized service request (e.g., an asynchronous interrupt exit).
+    /// - A VM exit that should be ignored due to the absence of a pending call.
+    ///
+    /// Otherwise, returns [`Some(DekoGuestExitInformation)`] containing the decoded service request details.
+    ///
+    /// # Note
+    ///
+    /// An invalid guest exit code should not be recognized as a hard error as sometimes
+    /// spurious exits with unexpected codes can occur (e.g., due to APIC interrupts) unless
+    /// there is some fatal mis-configuration like a vCPU missing CAA is trying to make a service request.
     #[verus_spec(r =>
         with
             Tracked(vmsa_perm): Tracked<&DekoPointsTo<VMSA>>,
@@ -338,7 +361,7 @@ impl DekoGuestExitInformation {
         let (this_cpu, Tracked(this_cpu_perm)) = DekoCpuCtx::this_cpu();
         let cpu_index = this_cpu.borrow(Tracked(&this_cpu_perm.ptr_perm)).cpu_id;
 
-        let (caa) =
+        let caa =
             deko_rwlock_read_atomic_data! {
             PERCPU_AREAS,
             percpu_areas,
@@ -363,7 +386,11 @@ impl DekoGuestExitInformation {
             Some(caa) => {
                 proof_with!(Tracked(&this_cpu_perm) => Tracked(vmsa_perm));
                 let vmsa = VMSA::this_vmsa(this_cpu);
+                let exit_code = vmsa.borrow(Tracked(&vmsa_perm)).guest_exit_code.0;
 
+                if !Self::is_request_exit_code(exit_code) {
+                    return None;
+                }
                 proof_with!(Tracked(&this_cpu_perm) => Tracked(mut caa_perm));
                 let caa = CaaArea::this_caa(this_cpu);
 
@@ -381,26 +408,7 @@ impl DekoGuestExitInformation {
                 );
 
                 proof_with!(Tracked(&vmsa_perm));
-                let info = Self::try_parse_vmsa(vmsa, call_pending != 0);
-
-                if info.is_none() && call_pending != 0 && !Self::is_spurious_exit_code(
-                    vmsa.borrow(Tracked(&vmsa_perm)).guest_exit_code.0,
-                ) {
-                    // We clear call_pending before decoding the exit. Restore
-                    // it for unknown non-spurious exits so the guest request
-                    // is retried instead of being dropped.
-                    let v = caa.take(Tracked(&mut caa_perm));
-                    caa.write(
-                        Tracked(&mut caa_perm),
-                        CaaArea {
-                            call_pending: 1,
-                            mem_available: v.mem_available,
-                            no_eoi_required: v.no_eoi_required,
-                            reserved: v.reserved,
-                        },
-                    );
-                }
-                info
+                Self::try_parse_vmsa(vmsa, call_pending != 0)
             },
             None => {
                 kwarn!("Guest caa not created for CPU index ", cpu_index);
