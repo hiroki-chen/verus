@@ -174,6 +174,10 @@ impl PtRegs {
 #[allow(non_snake_case)]
 #[derive(DekoDebug, Clone, Copy, PartialEq, Eq)]
 pub enum DekoGuestExitReason {
+    /// Caused by an external interrupt while the guest was running.
+    INTR = 0x60,
+    /// Caused by a virtual interrupt-window exit.
+    VINTR = 0x64,
     /// We need to intercept the VMMCALL instruction from the guest.
     VMMCALL = 0x81,
     /// Caused by an explicit VMGEXIT via GHCB instruction
@@ -265,6 +269,14 @@ impl WellFormed for DekoGuestExitInformation {
 
 #[verus_verify]
 impl DekoGuestExitInformation {
+    #[inline(always)]
+    /// Asynchronous interrupt exits are not guest-issued protocol requests.
+    /// The request parser should treat them as re-entry noise.
+    pub fn is_spurious_exit_code(exit_code: u64) -> bool {
+        exit_code == DekoGuestExitReason::INTR as u64 || exit_code
+            == DekoGuestExitReason::VINTR as u64
+    }
+
     #[verus_spec(r =>
         with
             Tracked(vmsa_perm): Tracked<&DekoPointsTo<VMSA>>,
@@ -305,8 +317,11 @@ impl DekoGuestExitInformation {
             };
 
             Some(DekoGuestExitInformation::ServiceRequest { protocol, req, params })
+        } else if Self::is_spurious_exit_code(exit_code) {
+            // Leave async interrupt exits to the outer guest-entry loop.
+            // They do not consume a staged guest request.
+            None
         } else {
-            // Sometimes we would have `SVM_EXIT_INTR` here?
             kerror!("Unsupported guest exit code: ", exit_code=>hex);
             kerror!("Dumping VMSA: ", vmsa);
 
@@ -366,7 +381,26 @@ impl DekoGuestExitInformation {
                 );
 
                 proof_with!(Tracked(&vmsa_perm));
-                Self::try_parse_vmsa(vmsa, call_pending != 0)
+                let info = Self::try_parse_vmsa(vmsa, call_pending != 0);
+
+                if info.is_none() && call_pending != 0 && !Self::is_spurious_exit_code(
+                    vmsa.borrow(Tracked(&vmsa_perm)).guest_exit_code.0,
+                ) {
+                    // We clear call_pending before decoding the exit. Restore
+                    // it for unknown non-spurious exits so the guest request
+                    // is retried instead of being dropped.
+                    let v = caa.take(Tracked(&mut caa_perm));
+                    caa.write(
+                        Tracked(&mut caa_perm),
+                        CaaArea {
+                            call_pending: 1,
+                            mem_available: v.mem_available,
+                            no_eoi_required: v.no_eoi_required,
+                            reserved: v.reserved,
+                        },
+                    );
+                }
+                info
             },
             None => {
                 kwarn!("Guest caa not created for CPU index ", cpu_index);

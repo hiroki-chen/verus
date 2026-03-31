@@ -37,11 +37,11 @@ use crate::dbg::{
     dump_vmpl1_doorbell_snapshot_current_cpu, log_migrated_runtime_state, log_vmpl1_app_binding,
 };
 use crate::guest::{
-    bind_current_cpu_vmpl1_slot, copy_from_user, guest_page_table, take_vmpl1_call_pending,
-    valid_guest_page, valid_guest_page_addr, DekoGuestExitInformation, DekoGuestRequestParams,
-    DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode, DekoNewAppReq,
-    DekoNewAppType, DekoVmplSwitchErr, PtRegs, DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE,
-    DEKO_SERVICE_APP_ENTER_OK, DEKO_SERVICE_APP_EXIT,
+    bind_current_cpu_vmpl1_slot, copy_from_user, guest_page_table, set_vmpl1_call_pending,
+    take_vmpl1_call_pending, valid_guest_page, valid_guest_page_addr, DekoGuestExitInformation,
+    DekoGuestRequestParams, DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode,
+    DekoNewAppReq, DekoNewAppType, DekoVmplSwitchErr, PtRegs,
+    DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE, DEKO_SERVICE_APP_ENTER_OK, DEKO_SERVICE_APP_EXIT,
     DEKO_SERVICE_EXTEND_INVOKE_UNTRUSTED_SYSCALL_HANDLER, DEKO_SERVICE_EXTEND_TIMER_EVENT,
     DEKO_SERVICE_TIMER,
 };
@@ -1788,7 +1788,10 @@ fn run_userapp(
         let vmsa = vmsa_ptr.borrow(Tracked(&vmsa_perm));
         let snapshot = DekoUserApp::copy_vmsa_snapshot(vmsa);
 
-        if info.is_none() {
+        // Preserve the staged VMPL1 request across unrelated exits.
+        if info.is_none() && call_pending {
+            set_vmpl1_call_pending(true);
+
             continue ;
         }
         kdebug!("Entered guest app in VMPL1, now processing the request: ", info);
