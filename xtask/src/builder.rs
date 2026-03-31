@@ -2,12 +2,17 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
 
 use crate::cli::BuildTarget;
 use crate::config::{load_qemu_config, qemu_sev, qemu_tdx, ProjectConfig};
+
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn handle_sigint(_: i32) { INTERRUPTED.store(true, Ordering::SeqCst); }
 
 pub(crate) struct Builder {
     config: ProjectConfig,
@@ -504,10 +509,97 @@ impl Builder {
         timeout: u64,
         config_path: Option<PathBuf>,
     ) -> Result<()> {
-        use std::io::{BufRead, BufReader};
+        use std::io::Read;
         use std::sync::mpsc;
         use std::thread;
-        use std::time::Duration;
+        use std::time::{Duration, Instant};
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum QemuOutcome {
+            LoginPrompt,
+            KernelPanic,
+            StreamClosed,
+        }
+
+        #[derive(Debug)]
+        struct StreamEvent {
+            outcome: QemuOutcome,
+            recent_output: Vec<u8>,
+        }
+
+        fn watch_qemu_stream<R: Read + Send + 'static>(
+            reader: R,
+            tx: mpsc::Sender<StreamEvent>,
+        ) -> thread::JoinHandle<()> {
+            thread::spawn(move || {
+                const LOGIN_PROMPT: &[u8] = b"ubuntu login:";
+                const KERNEL_PANIC_UPPER: &[u8] = b"Kernel panic - not syncing:";
+                const KERNEL_PANIC_LOWER: &[u8] = b"kernel panic - not syncing:";
+                const MAX_WINDOW: usize = 8192;
+
+                let mut reader = reader;
+                let mut buf = [0u8; 1024];
+                let mut window = Vec::new();
+
+                loop {
+                    let read = match reader.read(&mut buf) {
+                        Ok(0) => {
+                            let _ = tx.send(StreamEvent {
+                                outcome: QemuOutcome::StreamClosed,
+                                recent_output: window.clone(),
+                            });
+                            break;
+                        }
+                        Ok(n) => n,
+                        Err(_) => {
+                            let _ = tx.send(StreamEvent {
+                                outcome: QemuOutcome::StreamClosed,
+                                recent_output: window.clone(),
+                            });
+                            break;
+                        }
+                    };
+
+                    window.extend_from_slice(&buf[..read]);
+                    if window.windows(LOGIN_PROMPT.len()).any(|w| w == LOGIN_PROMPT) {
+                        let _ = tx.send(StreamEvent {
+                            outcome: QemuOutcome::LoginPrompt,
+                            recent_output: window.clone(),
+                        });
+                        break;
+                    }
+                    if window.windows(KERNEL_PANIC_UPPER.len()).any(|w| w == KERNEL_PANIC_UPPER)
+                        || window.windows(KERNEL_PANIC_LOWER.len()).any(|w| w == KERNEL_PANIC_LOWER)
+                    {
+                        let _ = tx.send(StreamEvent {
+                            outcome: QemuOutcome::KernelPanic,
+                            recent_output: window.clone(),
+                        });
+                        break;
+                    }
+
+                    if window.len() > MAX_WINDOW {
+                        let keep_from = window.len() - MAX_WINDOW;
+                        window.drain(..keep_from);
+                    }
+                }
+            })
+        }
+
+        fn print_recent_qemu_output(output: &[u8]) {
+            println!("Recent QEMU output:");
+            if output.is_empty() {
+                println!("<no QEMU output captured>");
+            } else {
+                println!("{}", String::from_utf8_lossy(output).trim());
+            }
+        }
+
+        unsafe {
+            libc::signal(libc::SIGINT, handle_sigint as *const () as libc::sighandler_t);
+            libc::signal(libc::SIGTERM, handle_sigint as *const () as libc::sighandler_t);
+        }
+        INTERRUPTED.store(false, Ordering::SeqCst);
 
         println!("{} Starting QEMU stress test", "🧪".bright_cyan().bold());
         println!("Iterations: {}", iter);
@@ -517,6 +609,10 @@ impl Builder {
         let mut failed = 0;
 
         for i in 1..=iter {
+            if INTERRUPTED.load(Ordering::SeqCst) {
+                bail!("Stress test interrupted");
+            }
+
             print!("Iteration {}/{}: ", i, iter);
             std::io::stdout().flush()?;
 
@@ -524,56 +620,96 @@ impl Builder {
             cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
             let mut child = cmd.spawn().context("Failed to spawn QEMU")?;
-            let stdout = child.stdout.take().unwrap();
-            let (tx, rx) = mpsc::channel::<bool>();
+            let stdout = child.stdout.take().context("Missing QEMU stdout pipe")?;
+            let stderr = child.stderr.take().context("Missing QEMU stderr pipe")?;
+            let (tx, rx) = mpsc::channel::<StreamEvent>();
 
-            let tx_clone = tx.clone();
-            thread::spawn(move || {
-                let reader = BufReader::new(stdout);
-                for line in reader.lines() {
-                    match line {
-                        Ok(l) => {
-                            if l.contains("SecCoreStartupWithStack(0xFFFCC000, 0x820000)") {
-                                let _ = tx_clone.send(true);
-                                break;
-                            }
-                            if l.contains("invalid argument") {
-                                let _ = tx_clone.send(false);
-                                break;
+            let stdout_handle = watch_qemu_stream(stdout, tx.clone());
+            let stderr_handle = watch_qemu_stream(stderr, tx);
+
+            let deadline = Instant::now() + Duration::from_secs(timeout);
+            let mut stream_closed = 0usize;
+            let mut last_output = Vec::new();
+            let outcome = loop {
+                if INTERRUPTED.load(Ordering::SeqCst) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_handle.join();
+                    let _ = stderr_handle.join();
+                    bail!("Stress test interrupted");
+                }
+
+                let now = Instant::now();
+                if now >= deadline {
+                    break None;
+                }
+
+                let wait = deadline.saturating_duration_since(now).min(Duration::from_millis(200));
+                match rx.recv_timeout(wait) {
+                    Ok(event) if !event.recent_output.is_empty() => {
+                        last_output = event.recent_output;
+                        match event.outcome {
+                            QemuOutcome::LoginPrompt => break Some(QemuOutcome::LoginPrompt),
+                            QemuOutcome::KernelPanic => break Some(QemuOutcome::KernelPanic),
+                            QemuOutcome::StreamClosed => {
+                                stream_closed += 1;
+                                if stream_closed >= 2 {
+                                    break Some(QemuOutcome::StreamClosed);
+                                }
                             }
                         }
-                        Err(_) => break,
+                    }
+                    Ok(event) => match event.outcome {
+                        QemuOutcome::LoginPrompt => break Some(QemuOutcome::LoginPrompt),
+                        QemuOutcome::KernelPanic => break Some(QemuOutcome::KernelPanic),
+                        QemuOutcome::StreamClosed => {
+                            stream_closed += 1;
+                            if stream_closed >= 2 {
+                                break Some(QemuOutcome::StreamClosed);
+                            }
+                        }
+                    },
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        break Some(QemuOutcome::StreamClosed)
                     }
                 }
-            });
+            };
 
-            match rx.recv_timeout(Duration::from_secs(timeout)) {
-                Ok(true) => {
+            match outcome {
+                Some(QemuOutcome::LoginPrompt) => {
                     println!("{}", "PASSED".green());
                     passed += 1;
                 }
-                Ok(false) => {
-                    println!("{}", "FAILED (invalid argument)".red());
+                Some(QemuOutcome::KernelPanic) => {
+                    println!("{}", "FAILED (kernel panic)".red());
+                    print_recent_qemu_output(&last_output);
                     failed += 1;
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
+                Some(QemuOutcome::StreamClosed) => {
+                    let status = child.try_wait().ok().flatten();
+                    println!(
+                        "{}",
+                        format!("FAILED (process exited early, status: {:?})", status).red()
+                    );
+                    print_recent_qemu_output(&last_output);
+                    failed += 1;
+                }
+                None => {
                     println!("{}", "FAILED (timeout)".red());
-                    failed += 1;
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    println!("{}", "FAILED (process exited early)".red());
+                    print_recent_qemu_output(&last_output);
                     failed += 1;
                 }
             }
 
             let _ = child.kill();
             let _ = child.wait();
+            let _ = stdout_handle.join();
+            let _ = stderr_handle.join();
         }
 
         println!("\n{}", "═".repeat(60));
-        println!("Total: {}", iter);
-        println!("Passed: {}", passed.to_string().green());
-        println!("Failed: {}", failed.to_string().red());
+        println!("success: {}/{}, failure: {}/{}", passed, iter, failed, iter);
 
         if failed > 0 {
             bail!("Stress test failed with {} errors", failed);
