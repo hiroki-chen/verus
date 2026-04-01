@@ -962,7 +962,7 @@ impl Verifier {
                 }
                 ValidityResult::UnexpectedOutput(err) => {
                     util::PANIC_ON_DROP_VEC.store(false, std::sync::atomic::Ordering::SeqCst);
-                    panic!("unexpected output from solver: {}", err);
+                    panic!("unexpected output from solver: {} {}", &context.span.as_string, err);
                 }
             }
         }
@@ -2812,6 +2812,26 @@ impl Verifier {
         );
         let vir_crate =
             vir::traits::merge_external_traits(vir_crate).map_err(map_err_diagnostics)?;
+
+        if self.args.log_all || self.args.log_args.log_impl_names {
+            let mut file = self
+                .create_log_file(None, crate::config::IMPL_NAMES_SUFFIX)
+                .map_err(map_err_diagnostics)?;
+            for imp in &vir_crate.trait_impls {
+                let ts: Vec<String> =
+                    imp.x.trait_typ_args.iter().map(vir::ast_util::typ_to_diagnostic_str).collect();
+                writeln!(
+                    &mut file,
+                    "{}   ###   {}   ###   {}   ###   {}",
+                    vir::ast_util::path_as_friendly_rust_name(&imp.x.impl_path),
+                    vir::ast_util::path_as_friendly_rust_name(&imp.x.trait_path),
+                    &ts.join(", "),
+                    &imp.span.as_string,
+                )
+                .map_err(|e| io_vir_err("log_impl_names".to_string(), e))
+                .map_err(map_err_diagnostics)?;
+            }
+        }
 
         Arc::make_mut(&mut current_vir_crate).arch.word_bits = vir_crate.arch.word_bits;
 

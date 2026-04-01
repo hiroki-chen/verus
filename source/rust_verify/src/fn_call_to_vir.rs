@@ -819,8 +819,8 @@ fn verus_item_to_vir<'tcx, 'a>(
             }
             ExprItem::Old if bctx.new_mut_ref => {
                 record_spec_fn_pure_args_only(bctx, expr);
-                // TODO(new_mut_ref): restrict to form like `old(x)` or `old(x.field)`?
-                // TODO(new_mut_ref): old type signature should accept any type
+                // TODO(new_mut_ref): (blocking) restrict to form like `old(x)` or `old(x.field)`?
+                // TODO(new_mut_ref): (fix when done) old type signature should accept any type
                 let bctx = &BodyCtxt { in_old: true, ..bctx.clone() };
                 let arg = expr_to_vir_consume(bctx, &args[0], ExprModifier::REGULAR)?;
                 mk_expr(ExprX::Old(arg))
@@ -930,21 +930,6 @@ fn verus_item_to_vir<'tcx, 'a>(
                     }
                     _ => panic!(
                         "Expected a call for verus_builtin::strslice_get_char with two argument but did not receive it"
-                    ),
-                }
-            }
-            ExprItem::StrSliceIsAscii => {
-                record_spec_fn(bctx, expr);
-                match &expr.kind {
-                    ExprKind::Call(_, args) => {
-                        assert!(args.len() == 1);
-                        let arg0 = args.first().unwrap();
-                        let arg0 = expr_to_vir_consume(bctx, arg0, ExprModifier::REGULAR)
-                            .expect("internal compiler error");
-                        mk_expr(ExprX::Unary(UnaryOp::StrIsAscii, arg0))
-                    }
-                    _ => panic!(
-                        "Expected a call for verus_builtin::strslice_is_ascii with one argument but did not receive it"
                     ),
                 }
             }
@@ -2091,6 +2076,7 @@ fn verus_item_to_vir<'tcx, 'a>(
             ));
         }
         VerusItem::ErasedGhostValue
+        | VerusItem::ShadowGhostValue
         | VerusItem::DummyCapture(_)
         | VerusItem::MutableReferenceTie => {
             return err_span(
@@ -2182,6 +2168,19 @@ fn verus_item_to_vir<'tcx, 'a>(
                 id: bctx.ctxt.unique_read_kind_id(),
             };
             mk_expr(ExprX::ReadPlace(p, rk))
+        }
+        VerusItem::MutRefTracked => {
+            record_compilable_operator(bctx, expr, CompilableOperator::MutRefTracked);
+            if !bctx.new_mut_ref {
+                unsupported_err!(expr.span, "mut_ref spec funs without '-V new-mut-ref'", &args);
+            }
+            if !bctx.in_ghost {
+                return err_span(expr.span, "`mut_ref_tracked` must be in a 'proof' block");
+            }
+            let p = expr_to_vir_place(&bctx, &args[0], ExprModifier::REGULAR)?;
+            let p =
+                crate::rust_to_vir_expr::deref_mut_allow_cancelling_two_phase(bctx, expr.span, &p)?;
+            mk_expr(ExprX::BorrowMutTracked(p))
         }
         VerusItem::BuiltinDeref(d) => {
             // This would be easy to support (similar to handling borrow_mut etc.) but their usage

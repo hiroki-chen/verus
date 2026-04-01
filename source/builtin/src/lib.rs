@@ -1850,13 +1850,6 @@ pub fn f64_to_bits(_f: f64) -> u64 {
 }
 
 #[cfg(verus_keep_ghost)]
-#[rustc_diagnostic_item = "verus::verus_builtin::strslice_is_ascii"]
-#[verifier::spec]
-pub fn strslice_is_ascii<A>(_a: A) -> bool {
-    unimplemented!()
-}
-
-#[cfg(verus_keep_ghost)]
 #[rustc_diagnostic_item = "verus::verus_builtin::strslice_len"]
 #[verifier::spec]
 pub fn strslice_len<A>(_a: A) -> nat {
@@ -2312,6 +2305,12 @@ pub fn erased_ghost_value<S, T>(_: S) -> T {
 }
 
 #[cfg(verus_keep_ghost)]
+#[rustc_diagnostic_item = "verus::verus_builtin::shadow_ghost_value"]
+pub fn shadow_ghost_value<S, T>(_: S) -> T {
+    unimplemented!()
+}
+
+#[cfg(verus_keep_ghost)]
 #[rustc_diagnostic_item = "verus::verus_builtin::DummyCapture"]
 #[derive(Clone, Copy)]
 pub struct DummyCapture<'a> {
@@ -2379,5 +2378,11 @@ pub fn final_<T: ?Sized>(_mut_ref: &mut T) -> &mut T {
 #[rustc_diagnostic_item = "verus::verus_builtin::after_borrow"]
 #[verifier::spec]
 pub fn after_borrow<T>(_: T) -> T {
+    unimplemented!()
+}
+
+#[cfg(verus_keep_ghost)]
+#[rustc_diagnostic_item = "verus::verus_builtin::mut_ref_tracked"]
+pub fn mut_ref_tracked<T>(_: &mut T) -> &mut Tracked<T> {
     unimplemented!()
 }

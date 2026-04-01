@@ -51,7 +51,6 @@ pub(crate) fn prelude_nodes(config: PreludeConfig) -> Vec<Node> {
     let RMul = str_to_node(RMUL);
     #[allow(non_snake_case)]
     let RDiv = str_to_node(RDIV);
-    let check_decrease_int = str_to_node(CHECK_DECREASE_INT);
     let check_decrease_height = str_to_node(CHECK_DECREASE_HEIGHT);
     let height = str_to_node(HEIGHT);
     let height_le = nodes!(_ partial-order 0);
@@ -1016,18 +1015,6 @@ pub(crate) fn prelude_nodes(config: PreludeConfig) -> Vec<Node> {
         (declare-fun [height] ([Poly]) [Height])
         (declare-fun [height_lt] ([Height] [Height]) Bool)
         (declare-fun [height_rec_fun] ([Poly]) [Poly])
-        (declare-fun [check_decrease_int] (Int Int Bool) Bool)
-        (axiom (forall ((cur Int) (prev Int) (otherwise Bool)) (!
-            (= ([check_decrease_int] cur prev otherwise)
-                (or
-                    (and (<= 0 cur) (< cur prev))
-                    (and (= cur prev) otherwise)
-                )
-            )
-            :pattern (([check_decrease_int] cur prev otherwise))
-            :qid prelude_check_decrease_int
-            :skolemid skolem_prelude_check_decrease_int
-        )))
         (declare-fun [check_decrease_height] ([Poly] [Poly] Bool) Bool)
         (axiom (forall ((cur [Poly]) (prev [Poly]) (otherwise Bool)) (!
             (= ([check_decrease_height] cur prev otherwise)
@@ -1039,6 +1026,14 @@ pub(crate) fn prelude_nodes(config: PreludeConfig) -> Vec<Node> {
             :pattern (([check_decrease_height] cur prev otherwise))
             :qid prelude_check_decrease_height
             :skolemid skolem_prelude_check_decrease_height
+        )))
+        (axiom (forall ((cur Int) (prev Int)) (!
+            (= ([height_lt] ([height] ([box_int] cur)) ([height] ([box_int] prev)))
+                (and (<= 0 cur) (< cur prev))
+            )
+            :pattern (([height_lt] ([height] ([box_int] cur)) ([height] ([box_int] prev))))
+            :qid prelude_check_decrease_int_height
+            :skolemid skolem_prelude_check_decrease_int_height
         )))
     );
     prelude.extend(height_axioms);
@@ -1119,14 +1114,12 @@ pub(crate) fn array_functions(box_array: &str) -> Vec<Node> {
 
 pub(crate) fn strslice_functions(strslice_name: &str) -> Vec<Node> {
     let strslice = str_to_node(strslice_name);
-    let strslice_is_ascii = str_to_node(STRSLICE_IS_ASCII);
     let strslice_len = str_to_node(STRSLICE_LEN);
     let strslice_get_char = str_to_node(STRSLICE_GET_CHAR);
     let new_strlit = str_to_node(STRSLICE_NEW_STRLIT);
     let from_strlit = str_to_node(STRSLICE_FROM_STRLIT);
     nodes_vec!(
         // Strings
-        (declare-fun [strslice_is_ascii] ([strslice]) Bool)
         (declare-fun [strslice_len] ([strslice]) Int)
         (declare-fun [strslice_get_char] ([strslice] Int) Int)
         (declare-fun [new_strlit] (Int) [strslice])

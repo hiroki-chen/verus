@@ -65,6 +65,7 @@ const PREFIX_CLOSURE_TYPE: &str = "anonymous_closure%";
 const PREFIX_TUPLE_PARAM: &str = "T%";
 const PREFIX_SPEC_FN_TYPE: &str = "fun%";
 const PREFIX_IMPL_IDENT: &str = "impl&%";
+pub(crate) const PREFIX_IMPL_TUPLE: &str = "impl_tuple&%";
 const PREFIX_PROJECT: &str = "proj%";
 const PREFIX_PROJECT_DECORATION: &str = "proj%%";
 pub(crate) const PREFIX_DEFAULT_TYP_PARAM: &str = "def_typ_param%";
@@ -202,7 +203,6 @@ pub const AS_TYPE: &str = "as_type";
 pub const MK_FUN: &str = "mk_fun";
 pub const CONST_INT: &str = "const_int";
 pub const CONST_BOOL: &str = "const_bool";
-pub const CHECK_DECREASE_INT: &str = "check_decrease_int";
 pub const CHECK_DECREASE_HEIGHT: &str = "check_decrease_height";
 pub const HEIGHT: &str = "height";
 pub const HEIGHT_LT: &str = "height_lt";
@@ -244,7 +244,6 @@ pub const QID_OPAQUE_TYPE_BOUND: &str = "opaque_type_bound";
 
 pub const VERUS_SPEC: &str = "VERUS_SPEC__";
 
-pub const STRSLICE_IS_ASCII: &str = "str%strslice_is_ascii";
 pub const STRSLICE_LEN: &str = "str%strslice_len";
 pub const STRSLICE_GET_CHAR: &str = "str%strslice_get_char";
 pub const STRSLICE_NEW_STRLIT: &str = "str%new_strlit";
@@ -559,6 +558,10 @@ pub fn prefix_spec_fn_type(i: usize) -> Path {
 
 pub fn impl_ident(disambiguator: u32) -> Ident {
     Arc::new(format!("{}{}", PREFIX_IMPL_IDENT, disambiguator))
+}
+
+pub(crate) fn impl_tuple(trait_suffix: &str, arity: usize) -> Ident {
+    Arc::new(format!("{}{}{}", PREFIX_IMPL_TUPLE, trait_suffix, arity))
 }
 
 pub fn projection(decoration: bool, trait_path: &Path, name: &Ident) -> Ident {

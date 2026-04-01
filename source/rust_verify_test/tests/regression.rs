@@ -1157,6 +1157,8 @@ test_verify_one_file! {
 
 test_verify_one_file! {
     #[test] parsing_unit_ret_type_issue937 verus_code! {
+        use vstd::prelude::*;
+
         fn stuff() -> () { }
 
         fn stuff_fn_once<F: FnOnce(u8) -> ()>() { }
@@ -1558,6 +1560,8 @@ test_verify_one_file! {
 
 test_verify_one_file! {
     #[test] tuple_copy_bound_issue2211 verus_code! {
+        use vstd::prelude::*;
+
         fn requires_copy<T: Copy>(i: T) {
         }
 
@@ -1568,6 +1572,18 @@ test_verify_one_file! {
             let ref_b = &b;
             requires_copy((a, b));
             requires_copy((ref_a, ref_b));
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] no_verus_attribute_warning_issue2211 code! {
+        #[verifier::loop_isolation(false)]
+        mod m {
+            use vstd::prelude::*;
+            verus!{
+                proof fn stuff() { }
+            }
         }
     } => Ok(())
 }
