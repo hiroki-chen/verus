@@ -19,6 +19,11 @@ registers `mnt_ns_id -> domain_id` bindings.
 - `projects/syscalls`
   Single probe service plus smoke job that exercises a variety of filesystem,
   pipe, socketpair, mmap, and timing syscalls.
+- `projects/guest-tests`
+  Guest test image packaged as a two-stage launcher Pod. The control plane
+  first creates a fixed Pod so `deko-agent` can register its `mnt_ns_id`, then
+  `kubectl exec` starts the selected binary inside that already-registered
+  namespace.
 
 ## Files
 
@@ -34,8 +39,16 @@ registers `mnt_ns_id -> domain_id` bindings.
   Syscalls namespace, policy `ConfigMap`, probe service, and smoke job.
 - `projects/syscalls/policy.toml`
   Syscalls policy source in standalone form.
-- `../../deko-agent/deko_agent.py`
-  Prototype guest-side attribution agent for turning `data-storage` labels into
+- `projects/guest-tests/project.yaml`
+  Guest test namespace, policy `ConfigMap`, and launcher `Pod`.
+- `projects/guest-tests/policy.toml`
+  Guest test policy source in standalone form.
+- `projects/guest-tests/run_test.sh`
+  Helper for the two-stage guest test flow. It waits for namespace
+  registration, then `kubectl exec`s the requested binary into the launcher
+  Pod.
+- `../../deko-agent/src/main.rs`
+  Guest-side attribution agent for turning `data-storage` labels into
   `mnt_ns_id -> domain_id` bindings and auto-loading domain policies.
 - `install_minikube_guest.sh`
   Convenience installer for guest-side K8s test dependencies such as Docker,
@@ -109,6 +122,9 @@ docker build -f /home/haobchen/cage-sev/tests/guest/k8s/shared/Dockerfile.python
 docker build -f /home/haobchen/cage-sev/tests/guest/k8s/shared/Dockerfile.python-service \
   --build-arg SCRIPT_PATH=syscalls_probe.py \
   -t syscalls-probe:latest /home/haobchen/cage-sev/tests/guest
+
+docker build -f /home/haobchen/cage-sev/tests/guest/Dockerfile \
+  -t guest-tests:latest /home/haobchen/cage-sev/tests/guest
 ```
 
 Apply the resources:
@@ -116,6 +132,7 @@ Apply the resources:
 ```bash
 kubectl apply -f tests/guest/k8s/projects/orders/project.yaml
 kubectl apply -f tests/guest/k8s/projects/syscalls/project.yaml
+kubectl apply -f tests/guest/k8s/projects/guest-tests/project.yaml
 kubectl apply -f tests/guest/k8s/shared/deko_agent_daemonset.yaml
 ```
 
@@ -140,6 +157,14 @@ kubectl -n faas-syscalls delete job syscalls-smoke --ignore-not-found
 kubectl apply -f tests/guest/k8s/projects/syscalls/project.yaml
 kubectl -n faas-syscalls wait --for=condition=complete job/syscalls-smoke --timeout=120s
 kubectl -n faas-syscalls logs job/syscalls-smoke
+
+bash tests/guest/k8s/projects/guest-tests/run_test.sh malloc_churn
+```
+
+Run a specific guest test without editing the YAML:
+
+```bash
+bash tests/guest/k8s/projects/guest-tests/run_test.sh malloc_basic
 ```
 
 ## Inspect Results
@@ -149,6 +174,7 @@ Show all resources:
 ```bash
 kubectl get all -n faas-orders
 kubectl get all -n faas-syscalls
+kubectl get all -n faas-guest-tests
 ```
 
 Inspect logs:
@@ -158,6 +184,7 @@ kubectl -n faas-orders logs deploy/orders-ingest
 kubectl -n faas-orders logs deploy/orders-transform
 kubectl -n faas-orders logs deploy/orders-writer
 kubectl -n faas-syscalls logs deploy/syscalls-probe
+kubectl -n faas-guest-tests logs pod/guest-tests-launcher
 ```
 
 Inspect the persisted output:
@@ -174,12 +201,13 @@ Delete all resources from the projects:
 ```bash
 kubectl delete -f tests/guest/k8s/projects/orders/project.yaml
 kubectl delete -f tests/guest/k8s/projects/syscalls/project.yaml
+kubectl -n faas-guest-tests delete pod guest-tests-launcher --ignore-not-found
 kubectl delete -f tests/guest/k8s/shared/deko_agent_daemonset.yaml
 ```
 
-## Prototype Guest Agent
+## Guest Agent
 
-`deko-agent/deko_agent.py` currently does this:
+The Rust `deko-agent` currently does this:
 
 1. Watches Pods scheduled onto the local node.
 2. Reads the Pod label `data-storage=...`.
@@ -242,7 +270,7 @@ The prototype expects:
 Example one-shot run:
 
 ```bash
-sudo python3 deko-agent/deko_agent.py \
+deko-agent/target/release/deko-agent scan \
   --node-name "$(kubectl get pod -n kube-system -o wide | awk 'NR==2 {print $7}')" \
   --bindings-file /tmp/deko-domain-bindings.jsonl \
   --proc-root /proc \
@@ -323,7 +351,7 @@ Current limitation:
 The example deployment files remain under `tests/guest/k8s/`, but the agent
 itself now lives in the first-class component directory:
 
-- `deko-agent/deko_agent.py`
+- `deko-agent/src/main.rs`
 - `deko-agent/Dockerfile`
 - `deko-agent/Dockerfile.prebuilt`
 

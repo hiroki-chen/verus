@@ -71,6 +71,10 @@ build_images() {
     -t syscalls-probe:latest \
     "${REPO_ROOT}/tests/guest"
 
+  docker build -f "${REPO_ROOT}/tests/guest/Dockerfile" \
+    -t guest-tests:latest \
+    "${REPO_ROOT}/tests/guest"
+
   docker build -f "${REPO_ROOT}/tests/guest/k8s/Dockerfile.deko-agent" \
     -t deko-agent:latest \
     "${REPO_ROOT}/deko-agent"
@@ -103,6 +107,7 @@ apply_manifests() {
   log "Applying latest workload and agent manifests"
   kubectl apply -f "${REPO_ROOT}/tests/guest/k8s/projects/orders/project.yaml"
   kubectl apply -f "${REPO_ROOT}/tests/guest/k8s/projects/syscalls/project.yaml"
+  kubectl apply -f "${REPO_ROOT}/tests/guest/k8s/projects/guest-tests/project.yaml"
   kubectl apply -f "${REPO_ROOT}/tests/guest/k8s/shared/deko_agent_daemonset.yaml"
 
   kubectl -n faas-orders rollout status deployment/orders-ingest --timeout=120s
@@ -129,6 +134,9 @@ Useful checks:
   kubectl apply -f ${REPO_ROOT}/tests/guest/k8s/projects/syscalls/project.yaml
   kubectl -n faas-syscalls wait --for=condition=complete job/syscalls-smoke --timeout=120s
   kubectl -n faas-syscalls logs job/syscalls-smoke
+  guest_tests_job=\$(kubectl create -f ${REPO_ROOT}/tests/guest/k8s/projects/guest-tests/project.yaml -o jsonpath='{.metadata.name}')
+  kubectl -n faas-guest-tests wait --for=condition=complete job/\${guest_tests_job} --timeout=240s
+  kubectl -n faas-guest-tests logs job/\${guest_tests_job}
 EOF
 }
 

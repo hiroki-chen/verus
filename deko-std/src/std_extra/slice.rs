@@ -89,11 +89,6 @@ pub assume_specification<T, U, const N: usize>[ <[T; N] as core::cmp::PartialEq<
 ) -> bool where T: core::cmp::PartialEq<U>
 ;
 
-pub assume_specification[ core::primitive::str::as_bytes ](s: &str) -> (r: &[u8])
-    ensures
-        r@ =~= s@.map_values(|v| v as u8),
-;
-
 pub assume_specification<P: core::str::pattern::Pattern>[ core::primitive::str::trim_end_matches ](
     s: &str,
     p: P,

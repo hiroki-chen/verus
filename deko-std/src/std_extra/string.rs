@@ -28,6 +28,7 @@ verus! {
 /// [`Deref`]: core::ops::Deref
 #[verifier::external_body]
 #[verifier::reject_recursive_types(A)]
+#[derive(Hash)]
 pub struct String<A: core::alloc::Allocator> {
     bytes: Vec<u8, A>,
 }

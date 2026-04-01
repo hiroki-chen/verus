@@ -1,0 +1,84 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: faas-guest-tests
+  labels:
+    app.kubernetes.io/part-of: guest-tests
+    deko.project/name: guest-tests
+    data-storage: guest-tests
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: guest-tests-config
+  namespace: faas-guest-tests
+data:
+  DEKO_BIND_TIMEOUT_SECS: "60"
+  DEKO_GUEST_TEST_POD: "guest-tests-launcher"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deko-policy-guest-tests
+  namespace: faas-guest-tests
+  labels:
+    deko.project/name: guest-tests
+    data-storage: guest-tests
+data:
+  policy.toml: |
+    [meta]
+    name = "guest_tests_domain_policy"
+    package = "guest_tests_domain_policy"
+    version = "0.1.0"
+
+    [domain]
+    selector_label = "data-storage"
+    selector_value = "guest-tests"
+
+    [lattice]
+    levels = ["public", "guest_test_internal"]
+    relations = [["public", "guest_test_internal"]]
+    bot = "public"
+    top = "guest_test_internal"
+
+    [[resources]]
+    type = "function"
+    name = "malloc_churn"
+    measurement = "malloc_churn"
+    initial_label = "guest_test_internal"
+
+    [defaults]
+    unmatched_action = "deny"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: guest-tests-launcher
+  namespace: faas-guest-tests
+  labels:
+    app.kubernetes.io/name: guest-tests-launcher
+    app.kubernetes.io/part-of: guest-tests
+    deko.project/name: guest-tests
+    data-storage: guest-tests
+spec:
+  restartPolicy: Never
+  volumes:
+    - name: deko-ready
+      hostPath:
+        path: /tmp/deko-ready
+        type: DirectoryOrCreate
+  containers:
+    - name: launcher
+      image: guest-tests:latest
+      imagePullPolicy: IfNotPresent
+      envFrom:
+        - configMapRef:
+            name: guest-tests-config
+      volumeMounts:
+        - name: deko-ready
+          mountPath: /deko-ready
+          readOnly: true
+      command:
+        - /bin/sh
+        - -lc
+        - exec sleep infinity

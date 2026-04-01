@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![feature(alloc_error_handler)]
 #![allow(improper_ctypes_definitions)]
 #![feature(proc_macro_hygiene)]
 
@@ -9,6 +10,9 @@ use deko_std::prelude::*;
 use vstd::prelude::*;
 
 core::arch::global_asm!(include_str!("../stage2.S"), options(att_syntax));
+
+#[alloc_error_handler]
+fn alloc_error(_layout: core::alloc::Layout) -> ! { early_die(); }
 
 verus! {
 

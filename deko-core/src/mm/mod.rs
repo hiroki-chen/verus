@@ -194,15 +194,23 @@ pub fn init_guest_mmap(igvm_params: &IgvmParams<'_>) {
     }
 }
 
-/// Dummy allocator type to prevent accidental usage of the global allocator.
+/// Global allocator adapter that forwards allocation requests to [`DekoAllocatorApi`].
 #[doc(hidden)]
 struct Allocator;
 
-/// Forbidden global allocator implementation to avoid accidental usage.
+/// Global allocator bridge for code paths that require `alloc` crate integration.
 ///
-/// If you really want to use heap allocator for [`alloc`] crate, please use
-/// explicit APIs like [`alloc::vec::Vec::new_in`] with a proper allocator
-/// such as [`DekoHeapAllocator`].
+/// When the `global_alloc_api` feature is enabled, Rust's implicit global
+/// allocation hooks are serviced by [`DekoAllocatorApi`]. Explicit allocator
+/// APIs such as `Vec::new_in` remain the preferred path, and this bridge should
+/// be avoided unless a dependency cannot be made to use explicit allocator
+/// plumbing.
+///
+/// The main reason is auditability: explicit allocator APIs keep heap
+/// usage visible in verified interfaces and call sites, which makes it easier
+/// to see where verified code depends on allocation and to bound the trusted
+/// surface. In other words: if a code path can avoid the global allocator API,
+/// it should.
 #[verifier::external]
 unsafe impl core::alloc::GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {

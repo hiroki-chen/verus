@@ -178,9 +178,8 @@ pub(crate) fn load_qemu_config(path: &Path) -> Result<FinalQemuConfig> {
 }
 
 pub(crate) fn qemu_sev(config: &FinalQemuConfig, cmd: &mut std::process::Command) {
-    cmd.arg("-machine").arg(
-        "type=q35,confidential-guest-support=sev,kernel_irqchip=split,igvm-cfg=igvm,memory-backend=ram",
-    );
+    cmd.arg("-machine")
+        .arg("type=q35,confidential-guest-support=sev,igvm-cfg=igvm,memory-backend=ram");
     cmd.args(["-object", "sev-snp-guest,id=sev,reduced-phys-bits=1,cbitpos=51"]);
     cmd.arg("-object").arg(format!("memory-backend-memfd,id=ram,size={}", config.memory));
     cmd.arg("-object").arg(format!("igvm-cfg,id=igvm,file={}", config.igvm_path));

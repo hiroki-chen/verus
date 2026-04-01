@@ -74,6 +74,7 @@ struct PodSpec {
 
 #[derive(Default, Deserialize)]
 struct PodStatus {
+    phase: Option<String>,
     #[serde(rename = "containerStatuses")]
     container_statuses: Option<Vec<ContainerStatus>>,
 }
@@ -312,6 +313,10 @@ fn resolve_bindings_for_pod(pod: &Pod, proc_root: &Path) -> Result<Vec<BindingRe
     Ok(bindings)
 }
 
+fn should_scan_pod(pod: &Pod) -> bool {
+    !matches!(pod.status.phase.as_deref(), Some("Succeeded") | Some("Failed"))
+}
+
 fn ensure_policy_loaded(
     config: &ScanConfig,
     loaded_policies: &mut std::collections::BTreeSet<(String, u32)>,
@@ -327,14 +332,12 @@ fn ensure_policy_loaded(
         return Ok(());
     }
     let policy_toml = fetch_policy_bytes(config, namespace, data_storage)?;
-    let policy_blob = compile_policy_toml_to_blob(&policy_toml)
-        .map_err(|err| format!("failed to compile policy for {namespace}/{data_storage}: {err}"))?;
     let file = File::options()
         .read(true)
         .write(true)
         .open(&config.device_path)
         .map_err(|err| format!("failed to open {}: {err}", config.device_path))?;
-    load_policy(&file, domain_id, &policy_blob)
+    load_policy(&file, domain_id, &policy_toml)
         .map_err(|err| format!("ioctl load-policy failed: {err}"))?;
     loaded_policies.insert(key);
     log(&format!(
@@ -416,6 +419,9 @@ fn run_once(
     let mut total_bindings = 0usize;
     let mut new_bindings = 0usize;
     for pod in &pods {
+        if !should_scan_pod(pod) {
+            continue;
+        }
         let pod_name = pod.metadata.name.clone().unwrap_or_else(|| "<unknown>".to_string());
         let bindings = match resolve_bindings_for_pod(pod, &config.proc_root) {
             Ok(bindings) => bindings,
@@ -504,12 +510,7 @@ fn load_policy_command(args: &[String]) -> Result<(), String> {
     let policy_file = PathBuf::from(parse_flag(args, "--policy-file")?);
     let input_bytes = fs::read(&policy_file)
         .map_err(|err| format!("failed to read {}: {err}", policy_file.display()))?;
-    let policy_bytes = if has_flag(args, "--binary") {
-        input_bytes
-    } else {
-        compile_policy_toml_to_blob(&input_bytes)
-            .map_err(|err| format!("failed to compile {}: {err}", policy_file.display()))?
-    };
+    let policy_bytes = if has_flag(args, "--binary") { input_bytes } else { input_bytes };
     let file = File::options()
         .read(true)
         .write(true)

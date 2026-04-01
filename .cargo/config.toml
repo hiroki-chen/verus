@@ -7,9 +7,10 @@ rustflags = ["-Z", "emit-stack-sizes"]
 xtask = "run --package xtask --release --"
 xtest = "xtask test"
 
-qemu-tdx = "xtask --target-arch tdx qemu --config-path .config/qemu.tdx.config.toml"
-qemu-snp = "xtask --target-arch snp qemu --config-path .config/qemu.snp.toml"
-qemu-snp-template = "xtask --target-arch snp qemu --config-path .config/qemu.snp.template.toml"
+qemu-tdx = "run --package xtask --release -- --target-arch tdx qemu --config-path .config/qemu.tdx.config.toml"
+qemu-snp = "run --package xtask --release -- --target-arch snp qemu --config-path .config/qemu.snp.toml"
+qemu-snp-template = "run --package xtask --release -- --target-arch snp qemu --config-path .config/qemu.snp.template.toml"
+qemu-snp-stress = "run --package xtask --release -- --target-arch snp stress-test --config-path .config/qemu.snp.toml"
 
 create-bootable-tdx = "xtask  --target-arch tdx create-bootable --release --stage2-path target/x86_64-tdx-deko/release/deko-monitor"
 create-bootable-snp = "xtask  --target-arch snp create-bootable --release --stage2-path target/x86_64-snp-deko/release/deko-stage2.bin"

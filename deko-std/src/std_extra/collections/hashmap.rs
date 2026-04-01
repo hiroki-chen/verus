@@ -57,7 +57,8 @@ impl<K: DekoDebug, V: DekoDebug, A: core::alloc::Allocator> DekoDebug for HashMa
         writer.write_str("len = ");
         self.0.len().deko_debug(writer);
         writer.write_str(" {\n");
-        for (key, value) in self.0.iter() {
+        let mut iter = self.0.iter();
+        while let Some((key, value)) = iter.next() {
             writer.write_str("K: ");
             key.deko_debug(writer);
             writer.write_str(", V: ");
@@ -159,7 +160,8 @@ impl<K: Eq + Hash, V, A: core::alloc::Allocator> HashMap<K, V, A> {
                 #[trigger] self@.contains_key(k) ==> call_ensures(f, (&k, &self@[k]), ()),
     )]
     pub fn for_each<F: FnMut(&K, &V)>(&self, mut f: F) {
-        for (key, value) in self.0.iter() {
+        let mut iter = self.0.iter();
+        while let Some((key, value)) = iter.next() {
             f(key, value);
         }
     }

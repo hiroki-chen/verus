@@ -8,7 +8,7 @@ verus! {
 
 global layout DekoGuestTrampolineSetupReq is size == 0x18;
 
-global layout DekoNewAppReq is size == 0x70;
+global layout DekoNewAppReq is size == 0xb0;
 
 global layout DekoMapIfcReq is size == 0x298;
 
@@ -294,6 +294,9 @@ pub struct DekoNewAppReq {
     pub user_stack_size: u64,
     /// Command excluding the path.
     pub comm: [u8; 16],
+    /// Launch identity supplied by the guest kernel.
+    /// This is a dummy identity for now and will later carry a verifiable measurement.
+    pub launch_identity: [u8; 64],
     /// Returned VMPL1 kernel rsp for the initial thread.
     pub kernel_vmpl1_rsp: u64,
     /// Initial FS base for the thread.

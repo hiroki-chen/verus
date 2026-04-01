@@ -312,7 +312,7 @@ impl Builder {
         if release {
             cmd.arg("--release");
         }
-        cmd.arg("--").arg("--expand-errors");
+        cmd.arg("--").arg("--expand-errors").arg("--no-lifetime");
 
         let profile = if release { "release" } else { "debug" };
         let log_file = format!("deko-stage2-build-{}-{}.log", self.config.target_arch, profile);
@@ -348,7 +348,7 @@ impl Builder {
         if release {
             cmd.arg("--release");
         }
-        cmd.arg("--").arg("--expand-errors");
+        cmd.arg("--").arg("--expand-errors").arg("--no-lifetime");
 
         let log_file = format!("deko-monitor-build-{}-{}.log", self.config.target_arch, profile);
         self.execute_cargo_with_json(cmd, &log_file)?;

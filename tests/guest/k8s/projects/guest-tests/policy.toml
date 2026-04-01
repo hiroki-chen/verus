@@ -1,0 +1,23 @@
+[meta]
+name = "guest_tests_domain_policy"
+package = "guest_tests_domain_policy"
+version = "0.1.0"
+
+[domain]
+selector_label = "data-storage"
+selector_value = "guest-tests"
+
+[lattice]
+levels = ["public", "guest_test_internal"]
+relations = [["public", "guest_test_internal"]]
+bot = "public"
+top = "guest_test_internal"
+
+[[resources]]
+type = "function"
+name = "malloc_churn"
+measurement = "malloc_churn"
+initial_label = "guest_test_internal"
+
+[defaults]
+unmatched_action = "deny"

@@ -18,7 +18,7 @@ This project is a secure monitor running at VMPL0 for SEV-SNP where the guest ke
 - Do NOT use plain `cargo build` if `build-deko-snp-debug` or another project-specific build alias is available for the requested task.
 - If multiple build aliases exist, choose the one that most specifically matches the requested target, with preference for Deko SNP debug workflows during routine development.
 - Before making verification-related changes, ensure both the Rust toolchain and the Verus toolchain are installed and correctly configured.
-- After every code modification, run `cargo pretty`.
+- After every code modification (of Rust source code), run `cargo pretty`; there is no need to run this command if you modify other code.
 - The Linux guest kernel we are using can be found inside `~/.config/qemu.snp.toml`.
 
 ## Required Command Selection Policy
@@ -51,6 +51,7 @@ This project is a secure monitor running at VMPL0 for SEV-SNP where the guest ke
 - Do not introduce `axiom` or `admit` unless absolutely necessary due to proof limitations, such as unavoidable raw-pointer casting boundaries. If such a step is needed, explain the exact blocker first.
 - Always choose triggers for quantifiers for proof searching and performance to help SMT solvers instantiate predicates, proof conditions, etc.
 - Use `#[verus_spec(invariant ...)]` above the loop block when you apply loop invariant.
+- Make sure no hidden control flow occurs in `deko_rwlock_*_atomic_data!` macro.
 
 ## Naming Conventions
 
@@ -110,3 +111,7 @@ This project is a secure monitor running at VMPL0 for SEV-SNP where the guest ke
 - Keep status updates and code comments concise and technical.
 - When verification fails, explain the failure precisely rather than masking it.
 - Do not weaken guarantees, add proof escapes, or suppress obligations without explicit justification.
+
+## Misc
+
+Other important docs are described in `.contexts`, you also need to read them carefully before doing anything.

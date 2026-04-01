@@ -1,6 +1,6 @@
 # Build Guide
 
-This guide documents the actual `xtask` commands currently implemented in this repository.
+This guide documents the `xtask` workflows implemented in this repository and the preferred Cargo aliases that wrap them.
 
 ## Prerequisites
 
@@ -11,6 +11,22 @@ Complete setup first:
 - `cargo run --bin xtask -- bootstrap-qemu` (optional)
 - `cargo run --bin xtask -- bootstrap-ovmf` (optional)
 
+## xtask Overview
+
+`xtask` is the repository task runner for build, bootstrap, QEMU launch, formatting, and test workflows.
+
+You can invoke it in two ways:
+
+```bash
+# Direct form
+cargo run --package xtask --release -- --target-arch snp qemu --config-path .config/qemu.snp.toml
+
+# Preferred alias form when an alias exists
+cargo qemu-snp
+```
+
+The aliases live in `.cargo/config.toml`. Prefer them over reconstructing the command manually when they already match the workflow you want.
+
 ## Key Rule: Always Set Architecture
 
 `xtask` supports `--target-arch {tdx|snp|init}` as a global option.
@@ -18,8 +34,8 @@ Complete setup first:
 Use `--target-arch` explicitly for monitor builds and QEMU runs:
 
 ```bash
-cargo run --bin xtask -- --target-arch snp build --target all --release
-cargo run --bin xtask -- --target-arch tdx build --target all --release
+cargo run --package xtask --release -- --target-arch snp build --target all --release
+cargo run --package xtask --release -- --target-arch tdx build --target all --release
 ```
 
 ## Build Targets
@@ -35,26 +51,26 @@ Examples:
 
 ```bash
 # SNP full build
-cargo run --bin xtask -- --target-arch snp build --target all --release
+cargo build-deko-snp-release
 
 # TDX full build
-cargo run --bin xtask -- --target-arch tdx build --target all --release
+cargo build-deko-tdx-release
 
 # Build only stage1
-cargo run --bin xtask -- --target-arch tdx build --target stage1 --release
+cargo run --package xtask --release -- --target-arch tdx build --target stage1 --release
 
 # Build only init
-cargo run --bin xtask -- --target-arch init build --target init --release
+cargo build-init-release
 ```
 
 ## Create Bootable Artifacts
 
 ```bash
 # SNP: create IGVM image
-cargo run --bin xtask -- --target-arch snp create-bootable
+cargo create-bootable-snp-debug
 
 # TDX: create FAT boot image
-cargo run --bin xtask -- --target-arch tdx create-bootable
+cargo run --package xtask --release -- --target-arch tdx create-bootable
 ```
 
 Notes:
@@ -68,50 +84,57 @@ Use arch-specific config files:
 
 ```bash
 # SNP
-cargo run --bin xtask -- --target-arch snp qemu --config-path .config/qemu.snp.config.toml
+cargo qemu-snp
 
 # TDX
-cargo run --bin xtask -- --target-arch tdx qemu --config-path .config/qemu.tdx.config.toml
+cargo qemu-tdx
 ```
 
-Or use Cargo aliases from `.cargo/config.toml`:
+Equivalent direct commands:
 
 ```bash
-cargo qemu-snp
-cargo qemu-tdx
+cargo run --package xtask --release -- --target-arch snp qemu --config-path .config/qemu.snp.toml
+cargo run --package xtask --release -- --target-arch tdx qemu --config-path .config/qemu.tdx.config.toml
 ```
 
 ## Bootstrap Commands
 
 ```bash
 # Verus + Z3
-cargo run --bin xtask -- bootstrap-verus
+cargo run --package xtask --release -- bootstrap-verus
 
 # QEMU (IGVM-enabled fork)
-cargo run --bin xtask -- bootstrap-qemu
+cargo run --package xtask --release -- bootstrap-qemu
 
 # OVMF
-cargo run --bin xtask -- bootstrap-ovmf
+cargo run --package xtask --release -- bootstrap-ovmf
 ```
 
 ## Test and Utility Commands
 
 ```bash
 # Run all test suites under tests/
-cargo run --bin xtask -- test
+cargo run --package xtask --release -- test
 
 # Run one suite, e.g. buddy
-cargo run --bin xtask -- test buddy
+cargo xtest buddy
 
 # Pretty-print / formatting helper
-cargo run --bin xtask -- pretty --paths deko-core/src
+cargo pretty --paths xtask/src/builder.rs
 
 # Verification line counting helper
-cargo run --bin xtask -- line-count
+cargo stats
 
 # Repeated QEMU boot test
-cargo run --bin xtask -- --target-arch snp stress-test --iter 10 --timeout 30 --config-path .config/qemu.snp.config.toml
+cargo qemu-snp-stress -- --iter 10 --timeout 30
 ```
+
+Notes for `stress-test`:
+
+- `--iter` is the number of QEMU launch attempts.
+- `--timeout` is the per-run deadline in seconds.
+- The current SNP stress-test alias uses `.config/qemu.snp.toml`.
+- When passing extra arguments to a Cargo alias, include `--` before the xtask flags.
 
 ## Environment Variables
 

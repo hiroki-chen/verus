@@ -931,8 +931,6 @@ impl DekoUserApp {
             r matches Ok(r) ==> r.wf(),
     )]
     pub fn new(app_req: &DekoNewAppReq, guest_cr3: PhysAddr) -> DekoGuestServResult<Self> {
-        kinfo!("Creating new DekoUserApp with request", app_req, guest_cr3=>hex);
-
         let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
         let owner_cpu = cpu.borrow(Tracked(&cpu_perm.ptr_perm)).cpu_id as u32;
         let (vmpl1_stack_ptr, _) =
@@ -1180,7 +1178,6 @@ impl DekoUserApp {
                 // }
                 flush_tlb_global_sync();
 
-                kinfo!("Lifted VMPL for guest page", (start.0 + j * PAGE_SIZE) => hex);
                 j += 1;
             }
 
@@ -1213,6 +1210,28 @@ pub fn register_user_app(
     let comm = core::ffi::CStr::from_bytes_until_nul(&comm).map_err(
         |_e| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam),
     )?.to_str().map_err(|_e| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))?;
+    let launch_identity = req.launch_identity;
+    let launch_identity = core::ffi::CStr::from_bytes_until_nul(&launch_identity).map_err(
+        |_e| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam),
+    )?.to_str().map_err(|_e| DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))?;
+
+    if let Some(auth) = crate::policy::resolve_launch_authorization(launch_identity) {
+        kdebug!(
+            "report_app policy launch authorization: comm=",
+            comm,
+            " launch_identity=",
+            launch_identity,
+            " function=",
+            auth.function_name.as_str(),
+            " namespace=",
+            auth.namespace.as_str(),
+            " domain_id=",
+            auth.domain_id,
+        );
+        req.domain_id = auth.domain_id;
+    } else {
+        return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+    }
 
     if is_creation {
         do_reigster_user_app(req, comm, guest_cr3)
@@ -1625,28 +1644,38 @@ pub(crate) fn get_app_state_version(pid: u32) -> DekoGuestServResult<u64> {
 pub(crate) fn import_vmpl1_slot_vmsa_from_cpu(pid: u32, source_cpu: u32) -> DekoGuestServResult<
     bool,
 > {
-    deko_rwlock_read_atomic_data! {
+    let result =
+        deko_rwlock_read_atomic_data! {
         PERCPU_AREAS,
         percpu_areas,
         percpu_areas_perm,
         {
-            let Some(ref percpu_areas) = percpu_areas else {
-                return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy));
-            };
-            if source_cpu as usize >= percpu_areas.0.len() {
-                return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
-            }
-            let shared = &percpu_areas.0[source_cpu as usize];
-            if shared.vmpl1_export_pid != Some(pid) {
-                Ok(false)
-            } else if let Some(vmsa) = shared.vmpl1_export_vmsa.as_ref() {
-                save_app_vmsa_snapshot(pid, vmsa)?;
-                Ok(true)
-            } else {
-                Ok(false)
+            match percpu_areas {
+                Some(ref percpu_areas) => {
+                    if source_cpu as usize >= percpu_areas.0.len() {
+                        Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))
+                    } else {
+                        let shared = &percpu_areas.0[source_cpu as usize];
+                        if shared.vmpl1_export_pid != Some(pid) {
+                            Ok(false)
+                        } else if let Some(vmsa) = shared.vmpl1_export_vmsa.as_ref() {
+                            match save_app_vmsa_snapshot(pid, vmsa) {
+                                Ok(()) => Ok(true),
+                                Err(err) => Err(err),
+                            }
+                        } else {
+                            Ok(false)
+                        }
+                    }
+                },
+                None => {
+                    Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy))
+                }
             }
         }
-    }
+    };
+
+    result
 }
 
 #[verifier::external_body]
@@ -1656,23 +1685,31 @@ pub(crate) fn publish_current_cpu_vmpl1_slot_vmsa(
     version: u64,
     vmsa: &VMSA,
 ) -> DekoGuestServResult<()> {
-    deko_rwlock_write_atomic_data! {
+    let result =
+        deko_rwlock_write_atomic_data! {
         PERCPU_AREAS,
         percpu_areas,
         percpu_areas_perm,
         {
-            let Some(ref mut percpu_areas) = percpu_areas else {
-                return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy));
-            };
-            if cpu_index >= percpu_areas.0.len() {
-                return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+            match percpu_areas {
+                Some(ref mut percpu_areas) => {
+                    if cpu_index >= percpu_areas.0.len() {
+                        Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam))
+                    } else {
+                        percpu_areas.0[cpu_index].vmpl1_export_pid = Some(pid);
+                        percpu_areas.0[cpu_index].vmpl1_export_version = version;
+                        percpu_areas.0[cpu_index].vmpl1_export_vmsa = Some(*vmsa);
+                        Ok(())
+                    }
+                },
+                None => {
+                    Err(DekoGuestServError::SoftError(DekoGuestServResultCode::Busy))
+                },
             }
-            percpu_areas.0[cpu_index].vmpl1_export_pid = Some(pid);
-            percpu_areas.0[cpu_index].vmpl1_export_version = version;
-            percpu_areas.0[cpu_index].vmpl1_export_vmsa = Some(*vmsa);
-            Ok(())
         }
-    }
+    };
+
+    result
 }
 
 #[verus_spec(r =>

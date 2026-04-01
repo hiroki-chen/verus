@@ -12,10 +12,5 @@ uefi = { version = "0.35.0", features = ["logger", "panic_handler"] }
 uefi-raw = { version = "0.11.0" }
 xmas-elf = "0.10.0"
 
-[profile.release]
-lto = true
-panic = "abort"
-strip = true
-
 [features]
 tdx = []

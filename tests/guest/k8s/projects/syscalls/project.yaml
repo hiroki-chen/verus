@@ -73,7 +73,7 @@ metadata:
     deko.project/name: syscalls
     data-storage: syscalls
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: syscalls-probe

@@ -2342,9 +2342,6 @@ pub fn try_enter_guest_with_params(
         proof_with!(Tracked(&this_cpu_perm) => Tracked(mut vmsa_perm));
         let vmsa = VMSA::this_vmsa(this_cpu_ptr);
 
-        proof_with!(Tracked(&mut this_cpu_perm));
-        DekoCpuCtx::emulate_apic_guest(this_cpu_ptr);
-
         // This carries the request served by the monitor.
         // So we need to update rax to indicate whether the
         // request has been served successfully.
@@ -2414,12 +2411,6 @@ pub fn try_enter_guest_with_params(
         // Now we parse the information.
         if let Some(info) = DekoGuestExitInformation::get_guest_exit_information() {
             return info;
-        } else {
-            kdebug!(
-                "Ignoring VMPL2 noise exit with no pending call on CPU ",
-                this_cpu_index
-            );
-            continue ;
         }
     }
 }

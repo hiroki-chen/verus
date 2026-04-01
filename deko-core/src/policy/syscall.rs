@@ -27,6 +27,31 @@ use crate::{die, kdebug, kerror, kinfo, ktrace, kwarn, vec};
 
 verus! {
 
+/// Checks whether a specific system call is forbidden; by default, our policy forbids the following system calls:
+///
+/// - `execve` and `execveat`, which can be used to execute arbitrary code
+/// - `io_uring_enter`, `io_uring_register`, and `io_uring_setup`, which can be used to trigger io_uring vulnerabilities,
+///    and thus are not allowed in the sandbox.
+/// - `kexec_load` and `kexec_file_load`, which can be used to load a new kernel
+#[inline(always)]
+#[verus_spec(
+)]
+fn is_forbidden_syscall(nr: u64) -> bool {
+    match nr {
+      SYS_execve | SYS_execveat |
+      // In June 2023, Google's security team reported that 60% of the exploits submitted
+      // to their bug bounty program in 2022 were exploits of io_uring vulnerabilities.
+      //
+      // As a result, io_uring was disabled for apps in Android, and disabled entirely in
+      // ChromeOS as well as Google servers. Docker also consequently disabled io_uring
+      // from their default seccomp profile.
+      SYS_io_uring_enter | SYS_io_uring_register |
+      SYS_io_uring_setup | SYS_kexec_load | SYS_kexec_file_load | SYS_ptrace |
+      SYS_seccomp => true,
+        _ => false,
+    }
+}
+
 pub const ARCH_SET_GS: u64 = 0x1001;
 pub const ARCH_SET_FS: u64 = 0x1002;
 pub const ARCH_GET_FS: u64 = 0x1003;
@@ -1430,20 +1455,12 @@ pub fn analyze_and_prepare_syscall(syscall_body: &mut DekoSyscallBody) -> DekoGu
         SYS_write => { analyze_syscall_write(syscall_body)? },
         // Thread/Process related system calls
         SYS_clone3 | SYS_clone | SYS_fork | SYS_vfork => {},
-        // Filesystem.
-        // In June 2023, Google's security team reported that 60% of the exploits submitted
-        // to their bug bounty program in 2022 were exploits of io_uring vulnerabilities.
-        //
-        // As a result, io_uring was disabled for apps in Android, and disabled entirely in
-        // ChromeOS as well as Google servers. Docker also consequently disabled io_uring
-        // from their default seccomp profile.
-        SYS_io_uring_setup | SYS_io_uring_register | SYS_io_uring_enter => {
-            kerror!("For safety reasons these syscall(s) is forbidden: ", SYS_CALL_NAME[syscall_body.rax as usize]);
-
-            die("");
-        },
         SYS_exit | SYS_exit_group => { analyze_syscall_exit(syscall_body)? },
-        _ => (),
+        nr if is_forbidden_syscall(nr) => {
+            kerror!("Forbidden syscall invoked: ", SYS_CALL_NAME[nr as usize]);
+            return Err(DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidParam));
+        },
+        _ => {},
     }
 
     move_to_shared_buf(syscall_body)

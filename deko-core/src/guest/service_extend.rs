@@ -238,7 +238,23 @@ fn handle_deko_service_load_policy(params: &mut DekoGuestRequestParams) -> DekoG
         " blob_len=",
         blob.len(),
     );
+    match core::str::from_utf8(blob.as_slice()) {
+        Ok(policy_text) => {
+            kinfo!("Load policy text begin: domain_id=", req.domain_id);
+            kinfo!(policy_text);
+            kinfo!("Load policy text end: domain_id=", req.domain_id);
+        },
+        Err(_err) => {
+            kinfo!("Load policy text unavailable (non-utf8): domain_id=", req.domain_id);
+        },
+    }
     register_policy_domain(req.domain_id, blob.as_slice())?;
+    kinfo!(
+        "Load policy parsed successfully: domain_id=",
+        req.domain_id,
+        " blob_len=",
+        blob.len(),
+    );
     Ok(())
 }
 

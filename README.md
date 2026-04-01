@@ -53,6 +53,14 @@ All primary workflows are in `xtask`:
 
 Detailed command reference: [docs/Build.md](docs/Build.md)
 
+Common alias-based entry points:
+
+```bash
+cargo build-deko-snp-debug
+cargo qemu-snp
+cargo qemu-snp-stress -- --iter 10 --timeout 30
+```
+
 ## Project Structure
 
 | Path | Description |

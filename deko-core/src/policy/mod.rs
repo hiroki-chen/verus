@@ -11,6 +11,8 @@ use deko_std::with_permission;
 use vstd::prelude::*;
 
 #[cfg(feature = "alloc")]
+use crate::collections::String;
+#[cfg(feature = "alloc")]
 use crate::cpu::irq::IrqSafeLockGuard;
 use crate::guest::{DekoGuestServError, DekoGuestServResult, DekoGuestServResultCode};
 use crate::kerror;
@@ -43,6 +45,24 @@ pub type DomainId = u32;
 #[cfg(feature = "alloc")]
 pub type DekoPolicyDomainMap = HashMap<DomainId, DekoPolicyDomain, DekoAllocatorApi>;
 
+#[cfg(feature = "alloc")]
+pub type LaunchAuthorizationIndex = HashMap<String, Option<LaunchAuthorization>, DekoAllocatorApi>;
+
+#[cfg(feature = "alloc")]
+#[derive(Clone)]
+pub struct LaunchAuthorization {
+    pub domain_id: DomainId,
+    pub function_name: String,
+    pub namespace: String,
+}
+
+#[cfg(feature = "alloc")]
+impl WellFormed for LaunchAuthorization {
+    open spec fn wf(&self) -> bool {
+        self.function_name.wf() && self.namespace.wf()
+    }
+}
+
 global layout DekoSyscallBody is size == 0x50;
 
 /// The policy engine is responsible for enforcing security policies.
@@ -51,6 +71,9 @@ pub struct DekoPolicyEngine {
     #[cfg(feature = "alloc")]
     #[deko(skip)]
     domains: DekoPolicyDomainMap,
+    #[cfg(feature = "alloc")]
+    #[deko(skip)]
+    launch_index: LaunchAuthorizationIndex,
     #[cfg(feature = "alloc")]
     pub default_domain: Option<DomainId>,
 }
@@ -67,12 +90,15 @@ pub struct DekoPolicyDomain {
     #[cfg(feature = "alloc")]
     #[deko(skip)]
     pub lattice: lattice::FiniteLattice,
+    #[cfg(feature = "alloc")]
+    #[deko(skip)]
+    pub launch_graph: config::FunctionLaunchGraph,
 }
 
 #[cfg(feature = "alloc")]
 impl WellFormed for DekoPolicyDomain {
     open spec fn wf(&self) -> bool {
-        self.policy.wf() && self.lattice.wf()
+        self.policy.wf() && self.lattice.wf() && self.launch_graph.wf()
     }
 }
 
@@ -117,6 +143,7 @@ impl DekoPolicyEngine {
     #[cfg(feature = "alloc")]
     pub closed spec fn wf(&self) -> bool {
         &&& self.domains.wf()
+        &&& self.launch_index.wf()
         &&& (self.default_domain is Some ==> self.domains@.contains_key(
             self.default_domain.unwrap(),
         ))
@@ -132,8 +159,36 @@ impl DekoPolicyEngine {
     fn new() -> Self {
         Self {
             domains: HashMap::new_in(AllocatorWrapper(DekoAllocatorApi {  })),
+            launch_index: HashMap::new_in(AllocatorWrapper(DekoAllocatorApi {  })),
             default_domain: None,
         }
+    }
+
+    #[cfg(feature = "alloc")]
+    fn clone_string(text: &str) -> String {
+        let mut out = String::new_in(DekoAllocatorApi {  });
+        out.push_str(text);
+        out
+    }
+
+    #[cfg(feature = "alloc")]
+    #[verus_spec(
+        requires
+            old(self).wf(),
+            auth.wf(),
+        ensures
+            self.domains@ =~= old(self).domains@,
+            self.default_domain == old(self).default_domain,
+            self.launch_index.wf(),
+    )]
+    fn record_launch_identity(&mut self, identity: &str, auth: &LaunchAuthorization) {
+        let key = Self::clone_string(identity);
+        let value = match self.launch_index.get(&key) {
+            Some(Some(existing)) if existing.domain_id == auth.domain_id => Some(existing.clone()),
+            Some(_) => None,
+            None => Some(auth.clone()),
+        };
+        self.launch_index.insert(key, value);
     }
 
     #[cfg(feature = "alloc")]
@@ -154,7 +209,33 @@ impl DekoPolicyEngine {
                     DekoGuestServError::SoftError(DekoGuestServResultCode::InvalidFormat)
                 },
         )?;
-        self.domains.insert(domain_id, DekoPolicyDomain { domain_id, policy, lattice });
+        let launch_graph = config::FunctionLaunchGraph::from_policy(&policy);
+        let mut i = 0usize;
+        #[verus_spec(
+            invariant
+                i <= launch_graph.nodes.len(),
+                self.wf(),
+                policy.wf(),
+                launch_graph.wf(),
+                lattice.wf(),
+            decreases
+                launch_graph.nodes.len() - i,
+        )]
+        while i < launch_graph.nodes.len() {
+            let node = &launch_graph.nodes[i];
+            let auth = LaunchAuthorization {
+                domain_id,
+                function_name: node.name.clone(),
+                namespace: node.namespace.clone(),
+            };
+            self.record_launch_identity(node.name.as_str(), &auth);
+            self.record_launch_identity(node.measurement.as_str(), &auth);
+            i += 1;
+        }
+        self.domains.insert(
+            domain_id,
+            DekoPolicyDomain { domain_id, policy, lattice, launch_graph },
+        );
         if self.default_domain.is_none() {
             self.default_domain = Some(domain_id);
         }
@@ -217,6 +298,27 @@ pub fn policy_domain_exists(domain_id: DomainId) -> bool {
             match engine_state {
                 Some(engine) => engine.domains.contains_key(&domain_id),
                 None => false,
+            }
+        }
+    )
+}
+
+#[cfg(feature = "alloc")]
+pub fn resolve_launch_authorization(identity: &str) -> Option<LaunchAuthorization> {
+    deko_rwlock_read_atomic_data!(
+        DEKO_POLICY_ENGINE,
+        engine_state,
+        __,
+        {
+            match engine_state.as_ref() {
+                Some(engine) => {
+                    let key = DekoPolicyEngine::clone_string(identity);
+                    match engine.launch_index.get(&key) {
+                        Some(Some(auth)) => Some(auth.clone()),
+                        _ => None,
+                    }
+                },
+                None => None,
             }
         }
     )

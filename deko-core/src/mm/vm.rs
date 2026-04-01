@@ -2057,7 +2057,7 @@ impl VirtualMemory {
     #[verus_spec(r =>
         with
             Ghost(parent): Ghost<&VirtualMemoryRegion>,
-            -> vm_perm: Tracked<VirtualMemoryPermission>,
+            -> vm_perm: Tracked<VirtualMemoryPermission>
         requires
             range.wf(),
             mapping.wf(),

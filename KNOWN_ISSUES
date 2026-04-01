@@ -1,103 +1,50 @@
 # `TZ`, stdio refill, and `ld-linux` RELRO faults
 
-There is a guest-side crash that originally showed up as:
+The issue was caused an accidental return value of the second `fread` to `/etc/localtime` in Docker env which is 0x3c, the syscall number for `exit` which is then mis-interpreted by the proxy loop as the signal for exit. Thus invoking the exit rountine in glibc with corrupt register values.
 
-- `TZ` unset
-- `TZ=:/etc/localtime`
-- Python / `tzset()` / `localtime()` paths
+Fixed by reading the old system call number as rax will be updated after processing the system call.
 
-The issue is now narrowed down much further.
+# K8s application crash
 
-## Current minimal repro
+There will be two types of the crash:
 
-Use:
+- The application hangs after entering the monitor. Likely due to a deadlock or something.
+- The application returns with invalid register values and crashes.
 
-- `tests/guest/func/stdio_seek_read_smoke.c`
-- `stdio_fread1`
-- or `stdio_fgetc`
+```text
+[32m[INFO] [0m[CPU:0] [VMPL:1] deko-core/src/cpu/idt_handlers.rs:28 Page Fault Error Code:  0x14
+[32m[INFO] [0m[CPU:0] [VMPL:1] deko-core/src/cpu/idt_handlers.rs:33   - caused by a non-present page
+[32m[INFO] [0m[CPU:0] [VMPL:1] deko-core/src/cpu/idt_handlers.rs:39   - caused by a read access
+[32m[INFO] [0m[CPU:0] [VMPL:1] deko-core/src/cpu/idt_handlers.rs:43   - occurred in user mode
+[32m[INFO] [0m[CPU:0] [VMPL:1] deko-core/src/cpu/idt_handlers.rs:52   - caused by an instruction fetch
+[32m[INFO] [0m[CPU:0] [VMPL:1] deko-core/src/cpu/idt_handlers.rs:101 faulting address (CR2): 0x78C86AB38260
+```
 
-The reproducer is no longer timezone-specific in behavior. The failing shape is:
+## Executing the application
 
-1. `fopen("/etc/localtime", ...)`
-2. first `fread(...)` succeeds
-3. `fseek(...)` succeeds
-4. second stdio read/refill crashes
+We currently do not support launching the application through a wraper or somthing that requires us to do `execve` or similar system calls. This is because such system calls replace the memory of the process with the new executable, incurring many awkward checks with isolations. However, `fork`s, `clone`s, and other thread-like system calls are supported.
 
-The equivalent `fd` path works:
+## CPUID nullptr
 
-1. `open(...)`
-2. `read(...)`
-3. `lseek(...)`
-4. `read(...)`
+```text
+[    1.880154]  ? show_regs+0x6c/0x80
+[    1.880411]  ? __die+0x24/0x80
+[    1.880654]  ? page_fault_oops+0x175/0x5a0
+[    1.880956]  ? do_user_addr_fault+0x2e5/0x690
+[    1.881276]  ? exc_page_fault+0x82/0x190
+[    1.881582]  ? asm_exc_page_fault+0x27/0x30
+[    1.881891]  ? native_cpuid+0x15/0x40
+[    1.882164]  jailhouse_cpuid_base+0xc7/0x100
+[    1.882477]  jailhouse_paravirt+0xe/0x20
+[    1.882779]  physflat_probe+0x4f/0x60
+[    1.883052]  x86_64_probe_apic+0x32/0x70
+[    1.883343]  apic_intr_mode_init+0x89/0x110
+[    1.883663]  x86_late_time_init+0x24/0x40
+[    1.883964]  start_kernel+0x6e0/0xb10
+[    1.884236]  x86_64_start_reservations+0x18/0x30
+[    1.884597]  x86_64_start_kernel+0x9b/0xa0
+[    1.884896]  common_startup_64+0x13e/0x141
+```
 
-## What is ruled out
-
-- The file itself is readable.
-- The first stdio read succeeds.
-- `fseek(...)` bookkeeping looks sane before the second read.
-- Bulk copy is not the issue:
-  - `fread(..., 1, 1, ...)` also crashes.
-  - `fgetc()` also crashes.
-- The non-stdio `fd` path works.
-
-## glibc narrowing
-
-Instrumenting host-built glibc showed this path for the failing second read:
-
-1. `_IO_new_file_underflow()` reaches `U3`
-2. `_IO_file_read()` is entered
-3. `__libc_read()` is entered
-4. marker before `SYSCALL_CANCEL(read, ...)` prints
-5. marker after it never prints
-
-So the fault is currently narrowed to:
-
-- `__libc_read()`
-- inside `SYSCALL_CANCEL(read, ...)`
-- effectively at the `INLINE_SYSCALL_CALL(read, ...)` boundary
-
-This is after stdio has decided it needs a refill, and before control returns to the caller.
-
-## `ld-linux` symptom
-
-When reproducing with the mounted host-built loader, the kernel reports a write fault inside `ld-linux-x86-64.so.2` on a `GNU_RELRO` location.
-
-In one investigated build, the crashing instruction was a write to:
-
-- `ld-linux-x86-64.so.2 + 0x34aa0`
-- symbol: `start_time`
-- section: `.data.rel.ro`
-
-The corresponding instruction pointer resolved to:
-
-- `ld-linux-x86-64.so.2 + 0x1c800`
-- `elf/dl-usage.c`
-
-Earlier builds showed a similar pattern at a different `RELRO` slot (`tunable_list + 0x620`). The exact symbol changed across rebuilds, but the shape remained the same:
-
-- user-space write
-- into loader `RELRO`
-- during or immediately around the failing stdio/read path
-
-## Takeaway
-
-This currently looks like a control-flow/runtime-state problem in the guest/trampoline environment, not a plain tzfile parsing bug and not a plain file I/O bug.
-
-## Debug checkpoint (2026-03-23)
-
-- `trace_pipe` with `deko:deko_syscall_entry` and `deko:deko_syscall_exit` confirms that Linux-side syscall handling does complete for the failing reads.
-- For the reproducer, the interesting sequence is:
-  - first `read(fd=3, buf=..., count=4096) -> ret=0x72` (`114`)
-  - `lseek(fd=3, off=-60, SEEK_CUR) -> ret=0x36` (`54`)
-  - second `read(fd=3, buf=..., count=4096) -> ret=0x3c` (`60`)
-- So the current failure is not “Linux read never returns”.  The syscall does return on the VMPL0/Linux side.
-- The current suspicion is therefore narrower:
-  - the bad state appears after the VMPL0 syscall exit,
-  - during or after the return path back into VMPL1,
-  - before VMPL1 reliably finishes the `ifc.rs` post-syscall path.
-- To make this visible, `deko-core/src/policy/ifc.rs` was temporarily changed so the following progress markers use `kinfo!` instead of `kdebug!`:
-  - `ifc: entered with syscall_body_ptr = ...`
-  - `ifc: before request_vmpl2_syscall_handler`
-  - `ifc: after request_vmpl2_syscall_handler`
-  - `ifc: before sysret_epilogue`
-  - `ifc: after sysret_epilogue`
+1. caused by mis-routed VMGEXIT request and we cleared call_pending, so the request response will be mis-interpreted.
+2. `EPYC-v5` is not well-supported by QEMU. Thus some behavior will be weird.

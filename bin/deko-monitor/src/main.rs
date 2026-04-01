@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![feature(alloc_error_handler)]
 #![feature(proc_macro_hygiene)]
 #![feature(likely_unlikely)]
 #![allow(improper_ctypes)]
@@ -50,6 +51,9 @@ core::arch::global_asm!(include_str!("../monitor.S"), options(att_syntax));
 // const POLICY_BLOB: &'static [u8] =
 //     include_bytes!("../../../target/x86_64-snp-deko/debug/deko-ifc.bin");
 
+#[alloc_error_handler]
+fn alloc_error(_layout: core::alloc::Layout) -> ! { early_die(); }
+
 verus! {
 
 // TODO: Replace the real thing.
@@ -71,7 +75,6 @@ exec static LAUNCH_INFO: DekoOnceCell<DekoKernelLaunchInfo, (), DekoKernelLaunch
     DekoOnceCell::new(Ghost(DekoKernelLaunchInfoPred {  }))
 }
 
-#[verifier::external_body]
 #[verus_spec(
     with
         Tracked(ctx_perm): Tracked<&DekoCpuCtxPermission>,
@@ -79,13 +82,17 @@ exec static LAUNCH_INFO: DekoOnceCell<DekoKernelLaunchInfo, (), DekoKernelLaunch
         addr.wf(),
         ctx_perm.pgtable_perm.mapped(addr),
 )]
+#[verifier::external_body]
 fn init_cpuid_table(addr: VirtAddr) {
     let cpuid_tables = unsafe { &mut *(addr.0 as *mut CpuidTable) };
 
-    for fns in cpuid_tables.func.0.iter_mut() {
+    let mut i = 0;
+    while i < cpuid_tables.func.0.len() {
+        let fns = &mut cpuid_tables.func.0[i];
         if fns.eax_in == 0x8000_001f {
             fns.eax_out |= 1 << 28;
         }
+        i += 1;
     }
 
     CPUID_TABLE.init(DekoAtomicData::new(cpuid_tables.clone()));

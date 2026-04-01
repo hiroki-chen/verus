@@ -197,7 +197,7 @@ impl SnpGuestDriver {
     /// Createsa new SNP Guest Driver instance.
     #[verus_spec(r =>
         with
-            -> request_perm: Tracked<SnpGuestDriverPermission>,
+            -> request_perm: Tracked<SnpGuestDriverPermission>
         ensures
             r.wf(),
             r.wf_with(request_perm@),

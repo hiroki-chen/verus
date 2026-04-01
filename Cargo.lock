@@ -651,6 +651,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
+name = "foo"
+version = "0.1.0"
+dependencies = [
+ "verus_builtin",
+ "verus_builtin_macros",
+ "verus_state_machines_macros",
+ "vstd",
+]
+
+[[package]]
 name = "foreign-types"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2445,13 +2455,13 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "verus_builtin"
-version = "0.0.0-2026-03-17-2326"
-source = "git+https://github.com/hiroki-chen/verus.git?branch=verus-spec-const-fix#6108ad4c719379b37bc3759fe0620bb3227a036c"
+version = "0.0.0-2026-03-29-0113"
+source = "git+https://github.com/hiroki-chen/verus.git?branch=verus-spec-const-fix#ddef1f5ca57fa96148c871969f980f73c3dee645"
 
 [[package]]
 name = "verus_builtin_macros"
-version = "0.0.0-2026-03-17-2326"
-source = "git+https://github.com/hiroki-chen/verus.git?branch=verus-spec-const-fix#6108ad4c719379b37bc3759fe0620bb3227a036c"
+version = "0.0.0-2026-03-29-0113"
+source = "git+https://github.com/hiroki-chen/verus.git?branch=verus-spec-const-fix#ddef1f5ca57fa96148c871969f980f73c3dee645"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2464,7 +2474,7 @@ dependencies = [
 [[package]]
 name = "verus_prettyplease"
 version = "0.0.0-2026-03-15-0111"
-source = "git+https://github.com/hiroki-chen/verus.git?branch=verus-spec-const-fix#6108ad4c719379b37bc3759fe0620bb3227a036c"
+source = "git+https://github.com/hiroki-chen/verus.git?branch=verus-spec-const-fix#ddef1f5ca57fa96148c871969f980f73c3dee645"
 dependencies = [
  "proc-macro2",
  "verus_syn",
@@ -2473,7 +2483,7 @@ dependencies = [
 [[package]]
 name = "verus_state_machines_macros"
 version = "0.0.0-2026-03-15-0111"
-source = "git+https://github.com/hiroki-chen/verus.git?branch=verus-spec-const-fix#6108ad4c719379b37bc3759fe0620bb3227a036c"
+source = "git+https://github.com/hiroki-chen/verus.git?branch=verus-spec-const-fix#ddef1f5ca57fa96148c871969f980f73c3dee645"
 dependencies = [
  "indexmap 1.9.3",
  "proc-macro2",
@@ -2484,7 +2494,7 @@ dependencies = [
 [[package]]
 name = "verus_syn"
 version = "0.0.0-2026-03-15-0111"
-source = "git+https://github.com/hiroki-chen/verus.git?branch=verus-spec-const-fix#6108ad4c719379b37bc3759fe0620bb3227a036c"
+source = "git+https://github.com/hiroki-chen/verus.git?branch=verus-spec-const-fix#ddef1f5ca57fa96148c871969f980f73c3dee645"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2499,8 +2509,8 @@ checksum = "442887c63f2c839b346c192d047a7c87e73d0689c9157b00b53dcc27dd5ea793"
 
 [[package]]
 name = "vstd"
-version = "0.0.0-2026-03-17-2326"
-source = "git+https://github.com/hiroki-chen/verus.git?branch=verus-spec-const-fix#6108ad4c719379b37bc3759fe0620bb3227a036c"
+version = "0.0.0-2026-03-29-0113"
+source = "git+https://github.com/hiroki-chen/verus.git?branch=verus-spec-const-fix#ddef1f5ca57fa96148c871969f980f73c3dee645"
 dependencies = [
  "verus_builtin",
  "verus_builtin_macros",

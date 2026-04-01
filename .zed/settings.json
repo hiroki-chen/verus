@@ -23,5 +23,6 @@
         }
       }
     }
-  }
+  },
+  "semantic_tokens": "combined",
 }

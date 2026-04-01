@@ -13,6 +13,7 @@
 #![allow(non_shorthand_field_patterns)]
 #![allow(mismatched_lifetime_syntaxes)]
 #![feature(pattern)]
+#![feature(proc_macro_hygiene)]
 #![feature(sized_hierarchy)]
 #![feature(specialization)]
 #![feature(likely_unlikely)]

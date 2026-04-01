@@ -111,7 +111,7 @@ impl<const ORDER: usize> WellFormed for DekoPageFrameAllocator<ORDER> {
 ///     alloc::vec::Vec::new_in(DekoPageFrameAllocator::<10>::new()); // this is annoying and expose details about the allocator
 /// v.push(42);
 /// ```
-#[derive(DekoDebug, Clone, Copy)]
+#[derive(DekoDebug, Clone, Copy, Hash)]
 pub struct DekoAllocatorApi;
 
 impl WellFormed for DekoAllocatorApi {

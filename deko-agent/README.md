@@ -6,7 +6,7 @@ Current prototype responsibilities:
 
 - watch Pods scheduled onto the local Kubernetes node
 - read the workload selector label such as `data-storage=...`
-- auto-load a policy blob from a namespaced K8s `ConfigMap`
+- auto-load a policy document from a namespaced K8s `ConfigMap`
 - resolve container host PIDs by scanning host `/proc/*/cgroup`
 - read `/proc/<pid>/ns/mnt` to obtain `mnt_ns_id`
 - derive a temporary `domain_id` from `data-storage`
@@ -18,15 +18,12 @@ from:
 - `deko-lkm/` for guest-kernel interfaces such as `/dev/deko`
 - `tests/guest/k8s/` for example deployments and smoke tests
 
-The current prototype implementation is Python. A Rust implementation skeleton
-now also exists under:
+The current implementation is Rust under:
 
 - `deko-agent/Cargo.toml`
 - `deko-agent/src/main.rs`
 - `deko-agent/src/policy_compile.rs`
 - `deko-agent/src/ioctl.rs`
-
-The Rust path is the long-term implementation target.
 
 ## Rust Skeleton
 
@@ -47,14 +44,15 @@ cargo run --manifest-path deko-agent/Cargo.toml -- \
 
 For now this Rust binary covers:
 
-- TOML lattice policy compilation into `deko-policy-format` binary blobs
 - direct `/dev/deko` ioctl helpers for:
   - `load-policy`
   - `bind`
   - `lookup`
   - `unbind`
+- a legacy `compile-policy` helper for lattice-only binary blobs used by older experiments
 
-It does not yet replace the Python K8s watch/Pod scan loop.
+This binary now provides the K8s watch/Pod scan loop as well as the direct
+`/dev/deko` ioctl helpers.
 
 ## Prebuilt Rust Image
 
@@ -123,8 +121,8 @@ dmesg | tail -n 20
 
 ## Prototype Policy Load
 
-The same helper can also push a policy blob into the monitor before apps from a
-domain start registering:
+The same helper can also push a policy TOML document into the monitor before
+apps from a domain start registering:
 
 ```bash
 sudo python3 /home/haobchen/cage-sev/deko-agent/dekoctl.py \
@@ -138,3 +136,8 @@ The expected order is:
 1. load the policy for `domain_id`
 2. bind `mnt_ns_id -> domain_id`
 3. let the app `exec` path call `report_app`
+
+The Rust agent's default `load-policy` path now sends the raw TOML bytes so the
+monitor can parse the full policy, including launch-related fields beyond the
+lattice. The optional `--binary` mode remains only for older lattice-only blob
+experiments.
