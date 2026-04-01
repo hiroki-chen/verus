@@ -417,9 +417,9 @@ impl PerCpuAreas {
             old(self)@.len() < CPUID_MAX_COUNT,
             id == old(self)@.len() as u32,
         ensures
-            self.wf_with(*perm),
-            self@.len() == old(self)@.len() + 1,
-            self@.len() <= CPUID_MAX_COUNT,
+            final(self).wf_with(*final(perm)),
+            final(self)@.len() == old(self)@.len() + 1,
+            final(self)@.len() <= CPUID_MAX_COUNT,
     )]
     pub fn push_new_cpu(&mut self, id: u32) {
         let (cpu_shared, Tracked(cpu_shared_perm)) = PerCpuShared::new(id);
@@ -589,11 +589,11 @@ impl DekoCpuCtxPerVmpl {
             r.wf(),
             r.wf_with(perm@),
             r.current_pid is None,
-            pgtable_perm.wf(),
-            pgtable_perm.pgtable_perm == old(pgtable_perm).pgtable_perm,
-            pgtable_perm.private_bit == old(pgtable_perm).private_bit,
-            pgtable_perm.shared_bit == old(pgtable_perm).shared_bit,
-            pgtable_perm.mapping_space == old(pgtable_perm).mapping_space,
+            final(pgtable_perm).wf(),
+            final(pgtable_perm).pgtable_perm == old(pgtable_perm).pgtable_perm,
+            final(pgtable_perm).private_bit == old(pgtable_perm).private_bit,
+            final(pgtable_perm).shared_bit == old(pgtable_perm).shared_bit,
+            final(pgtable_perm).mapping_space == old(pgtable_perm).mapping_space,
     )]
     pub fn new(vmpl: u8, private_bit: u64, shared_bit: u64) -> Self {
         broadcast use RmpFlags::lemma_each_bit_is_valid;
@@ -704,7 +704,7 @@ impl DekoCpuCtxPerVmpl {
             private_bit == pgtable_perm.private_bit,
             shared_bit == pgtable_perm.shared_bit,
         ensures
-            self.wf_with(*perm),
+            self.wf_with(*final(perm)),
     )]
     pub fn init(
         &self,
@@ -1349,7 +1349,7 @@ impl DekoCpuCtx {
             old(perm).wf_with(ptr),
             ms == old(perm).pgtable_perm.mapping_space,
         ensures
-            perm.wf_with(ptr),
+            final(perm).wf_with(ptr),
     {
         let page: DekoPPtr<crate::mm::paging::Page> = ptr.borrow(Tracked(&perm.ptr_perm)).pgtable;
         let private_bit = ptr.borrow(Tracked(&perm.ptr_perm)).private_bit;
@@ -1572,9 +1572,9 @@ impl DekoCpuCtx {
             old(perm).wf_with(ptr),
             old(perm).ptr_perm.value().ctx_switch_stack is Some,
         ensures
-            perm.wf_with(ptr),
-            perm.ptr_perm.value().ext_vmpl1 is Some,
-            perm.ext_vmpl1_perm is Some,
+            final(perm).wf_with(ptr),
+            final(perm).ptr_perm.value().ext_vmpl1 is Some,
+            final(perm).ext_vmpl1_perm is Some,
     {
         let cr3 = read_cr3();  // re-use it.
         let mut cpu = ptr.take(Tracked(&mut perm.ptr_perm));
@@ -1610,7 +1610,7 @@ impl DekoCpuCtx {
         requires
             old(perm).wf_with(ptr),
         ensures
-            perm.wf_with(ptr),
+            final(perm).wf_with(ptr),
     {
         broadcast use crate::snp::RmpFlags::lemma_each_bit_is_valid;
 
@@ -1680,7 +1680,7 @@ impl DekoCpuCtx {
             old(perm).wf_with(ptr),
             old(perm).ptr_perm.value().ctx_switch_stack is Some,
         ensures
-            perm.wf_with(ptr),
+            final(perm).wf_with(ptr),
     {
         // Check if we have already allocated the VMSA.
         {
@@ -1773,10 +1773,11 @@ impl DekoCpuCtx {
             paddr@ % 0x1000 == 0,
             old(perm).wf_with(ptr),
         ensures
-            perm.pgtable_perm.private_bit == old(perm).pgtable_perm.private_bit,
-            perm.pgtable_perm.shared_bit == old(perm).pgtable_perm.shared_bit,
-            perm.wf_with(ptr),
-            perm.pgtable_perm.virt_to_frame_spec(vaddr) matches Some(frame) && frame.address_spec(
+            final(perm).pgtable_perm.private_bit == old(perm).pgtable_perm.private_bit,
+            final(perm).pgtable_perm.shared_bit == old(perm).pgtable_perm.shared_bit,
+            final(perm).wf_with(ptr),
+            final(perm).pgtable_perm.virt_to_frame_spec(vaddr) matches Some(frame)
+                && frame.address_spec(
                 old(perm).pgtable_perm.private_bit,
                 old(perm).pgtable_perm.shared_bit,
             ) == paddr,
@@ -2176,9 +2177,9 @@ impl DekoCpuCtx {
             old(perm).ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
             task.wf(),
         ensures
-            perm.wf_with(ptr),
-            perm.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
-            perm.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
+            final(perm).wf_with(ptr),
+            final(perm).ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
+            final(perm).ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
     )]
     #[allow(non_shorthand_field_patterns)]
     pub fn set_idle_task(ptr: DekoPPtr<Self>, task: DekoRunnablePtr) {
@@ -2220,11 +2221,13 @@ impl DekoCpuCtx {
             old(perm).ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
             task.wf(),
         ensures
-            perm.wf_with(ptr),
-            perm.ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
-            perm.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
-            perm.ptr_perm.value().cpu_id == old(perm).ptr_perm.value().cpu_id,
-            perm.ptr_perm.value().ctx_switch_stack == old(perm).ptr_perm.value().ctx_switch_stack,
+            final(perm).wf_with(ptr),
+            final(perm).ptr_perm.value().vm_region_spec() matches Some(vm) && vm.wf(),
+            final(perm).ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
+            final(perm).ptr_perm.value().cpu_id == old(perm).ptr_perm.value().cpu_id,
+            final(perm).ptr_perm.value().ctx_switch_stack == old(
+                perm,
+            ).ptr_perm.value().ctx_switch_stack,
     {
         let cpu = ptr.borrow(Tracked(&perm.ptr_perm));
 
@@ -2299,8 +2302,8 @@ impl DekoCpuCtx {
                 &&& cur.wf()
                 &&& next.wf()
             },
-            perm.wf_with(ptr),
-            perm.ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
+            final(perm).wf_with(ptr),
+            final(perm).ptr_perm.value().run_queue_spec() matches Some(rq) && rq.wf(),
     {
         let mut cpu = ptr.take(Tracked(&mut perm.ptr_perm));
         let rq = cpu.run_queue.as_ref().unwrap();

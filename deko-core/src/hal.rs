@@ -227,7 +227,7 @@ pub exec static PLATFORM: OnceLock<PlatformType, PlatformPredicate>
     requires
         old(idt).entries.wf(),
     ensures
-        idt.wf(),
+        final(idt).wf(),
 )]
 fn init_early_idt(idt: &mut Idt) {
     crate::cpu::idt::init_early_idt(idt);
@@ -238,7 +238,7 @@ fn init_early_idt(idt: &mut Idt) {
     requires
         old(idt).wf(),
     ensures
-        idt.wf(),
+        final(idt).wf(),
 )]
 fn init_early_idt_late(idt: &mut Idt) {
     crate::cpu::idt::init_generic_idt(idt);
@@ -478,7 +478,7 @@ pub fn setup_env(ctx: DekoPPtr<DekoCtx>) -> (__discard: !) {
     ensures
         r.0.wf(),
         r.1.wf(),
-        ctx_perm.wf_with(ctx),
+        final(ctx_perm).wf_with(ctx),
 )]
 fn load_igvm_params(
     ctx: DekoPPtr<DekoCpuCtx>,
@@ -587,15 +587,15 @@ unsafe fn copy_igvm_params_to_mapped_region(src_addr: VirtAddr, igvm_vregion: Va
         header.wf_for_loading(old(ctx_perm).pgtable_perm.mapping_space),
         header.get_igvm_param_block_spec().find_kernel_region_spec() matches Some((kstart, _)) ==> kstart == *old(kernel_end),
     ensures
-        ctx_perm.wf_with(ctx),
-        ctx_perm.pgtable_perm.mapping_space == old(ctx_perm).pgtable_perm.mapping_space,
+        final(ctx_perm).wf_with(ctx),
+        final(ctx_perm).pgtable_perm.mapping_space == old(ctx_perm).pgtable_perm.mapping_space,
         r matches Some((entry_point, vaddr_range))
             ==> {
                     &&& entry_point.wf()
                     &&& vaddr_range.wf()
-                    &&& kernel_end.wf()
-                    &&& kernel_end@ > old(kernel_end)@
-                    &&& kernel_end@ % PAGE_SIZE == 0
+                    &&& final(kernel_end).wf()
+                    &&& final(kernel_end)@ > old(kernel_end)@
+                    &&& final(kernel_end)@ % PAGE_SIZE == 0
                     &&& entry_point@ % PAGE_SIZE == 0
                     &&& vaddr_range.start@ % PAGE_SIZE == 0
                     &&& vaddr_range.end@ % PAGE_SIZE == 0
@@ -676,7 +676,7 @@ fn load_deko_monitor(
         r.0.end@ % PAGE_SIZE == 0,
         r.1.start@ % PAGE_SIZE == 0,
         r.1.end@ % PAGE_SIZE == 0,
-        ctx_perm.wf_with(ctx),
+        final(ctx_perm).wf_with(ctx),
 )]
 fn prepare_heap(
     ctx: DekoPPtr<DekoCpuCtx>,

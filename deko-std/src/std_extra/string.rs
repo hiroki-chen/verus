@@ -144,8 +144,8 @@ impl<A: core::alloc::Allocator> String<A> {
     #[verifier::external_body]
     #[verus_spec(
         ensures
-            self@ == Seq::<char>::empty(),
-            string_is_ascii_spec(self),
+            final(self)@ == Seq::<char>::empty(),
+            string_is_ascii_spec(final(self)),
     )]
     pub fn clear(&mut self) {
         self.bytes.clear();
@@ -173,7 +173,7 @@ impl<A: core::alloc::Allocator> String<A> {
     #[verifier::external_body]
     #[verus_spec(
         ensures
-            self@ == old(self)@ + other@,
+            final(self)@ == old(self)@ + other@,
     )]
     pub fn push_str(&mut self, other: &str) {
         self.bytes.extend_from_slice(other.as_bytes());
@@ -183,7 +183,7 @@ impl<A: core::alloc::Allocator> String<A> {
     #[verifier::external_body]
     #[verus_spec(
         ensures
-            self@ == old(self)@ + seq![ch],
+            final(self)@ == old(self)@ + seq![ch],
     )]
     pub fn push(&mut self, ch: char) {
         let mut buf = [0u8;4];
@@ -199,11 +199,11 @@ impl<A: core::alloc::Allocator> String<A> {
                 Some(ch) => {
                     &&& old(self)@.len() > 0
                     &&& ch == old(self)@[old(self)@.len() - 1]
-                    &&& self@ == old(self)@.subrange(0, old(self)@.len() - 1)
+                    &&& final(self)@ == old(self)@.subrange(0, old(self)@.len() - 1)
                 },
                 None => {
                     &&& old(self)@.len() == 0
-                    &&& self@ == old(self)@
+                    &&& final(self)@ == old(self)@
                 },
             },
     )]

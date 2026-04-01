@@ -104,8 +104,8 @@ pub(crate) fn bind_current_cpu_vmpl1_slot(
         old(cpu_perm0).wf_with(cpu_ptr),
         old(cpu_perm0).ptr_perm.value().ext_vmpl1 is Some,
     ensures
-        cpu_perm0.wf_with(cpu_ptr),
-        cpu_perm0.ptr_perm.value().ext_vmpl1 is Some,
+        final(cpu_perm0).wf_with(cpu_ptr),
+        final(cpu_perm0).ptr_perm.value().ext_vmpl1 is Some,
 {
     let cpu_id = cpu_ptr.borrow(Tracked(&cpu_perm0.ptr_perm)).cpu_id as u32;
     let mut cpu = cpu_ptr.take(Tracked(&mut cpu_perm0.ptr_perm));
@@ -132,8 +132,8 @@ pub(crate) fn stage_fake_vmpl1_handoff_request(
         old(cpu_perm0).wf_with(cpu_ptr),
         old(cpu_perm0).ptr_perm.value().ext_vmpl1 is Some,
     ensures
-        cpu_perm0.wf_with(cpu_ptr),
-        cpu_perm0.ptr_perm.value().ext_vmpl1 is Some,
+        final(cpu_perm0).wf_with(cpu_ptr),
+        final(cpu_perm0).ptr_perm.value().ext_vmpl1 is Some,
 {
     let cpu_id = cpu_ptr.borrow(Tracked(&cpu_perm0.ptr_perm)).cpu_id as u32;
     let mut cpu = cpu_ptr.take(Tracked(&mut cpu_perm0.ptr_perm));

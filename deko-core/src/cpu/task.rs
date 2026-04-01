@@ -558,9 +558,9 @@ impl DekoRunQueue {
             old(self).wf_with(*old(perm)),
             task.wf(),
         ensures
-            self.wf(),
-            self@ =~= old(self)@.insert(old(self)@.len() as int, task@),
-            self.wf_with(*perm),
+            final(self).wf(),
+            final(self)@ =~= old(self)@.insert(old(self)@.len() as int, task@),
+            final(self).wf_with(*final(perm)),
     )]
     pub fn push_back(&mut self, task: DekoRunnablePtr) {
         proof_with!(=> Tracked(node_perm));
@@ -584,9 +584,9 @@ impl DekoRunQueue {
             old(self).wf_with(*old(perm)),
             task.wf(),
         ensures
-            self.wf(),
-            self@ =~= old(self)@.insert(0, task@),
-            self.wf_with(*perm),
+            final(self).wf(),
+            final(self)@ =~= old(self)@.insert(0, task@),
+            final(self).wf_with(*final(perm)),
     )]
     pub fn push_front(&mut self, task: DekoRunnablePtr) {
         proof_with!(=> Tracked(node_perm));
@@ -611,8 +611,8 @@ impl DekoRunQueue {
             old(self).wf_with(*old(perm)),
             task.wf(),
         ensures
-            self.wf(),
-            self.wf_with(*perm),
+            final(self).wf(),
+            final(self).wf_with(*final(perm)),
     )]
     pub fn handle_task(&mut self, task: DekoRunnablePtr) {
         let DekoAtomicData { data: task_ref, .. } = task.as_ref();
@@ -641,8 +641,8 @@ impl DekoRunQueue {
             old(self).wf_with(*old(perm)),
             old(self).current is Some,
         ensures
-            self.wf_with(*perm),
-            self.current is Some,
+            final(self).wf_with(*final(perm)),
+            final(self).current is Some,
             r matches Some((cur, next)) ==> {
                 &&& cur.wf()
                 &&& next.wf()
@@ -673,8 +673,8 @@ impl DekoRunQueue {
             old(self).wf(),
             old(self).wf_with(*old(perm)),
         ensures
-            self.wf(),
-            self.wf_with(*perm),
+            final(self).wf(),
+            final(self).wf_with(*final(perm)),
     )]
     pub fn cleanup_terminated_task(&mut self) {
         if let Some(terminated_task) = self.terminated.take() {
@@ -696,8 +696,8 @@ impl DekoRunQueue {
             old(self).wf(),
             old(self).wf_with(*old(perm)),
         ensures
-            self.wf(),
-            self.wf_with(*perm),
+            final(self).wf(),
+            final(self).wf_with(*final(perm)),
             r.wf(),
     )]
     pub fn get_next_task(&mut self) -> DekoRunnablePtr {
@@ -736,8 +736,8 @@ impl DekoRunQueue {
             old(self).run_list@.len() < usize::MAX - 1,
             idle.wf(),
         ensures
-            self@ =~= old(self)@,
-            self.wf_with(*perm),
+            final(self)@ =~= old(self)@,
+            final(self).wf_with(*final(perm)),
             r =~= old(self).idle,
     )]
     pub fn set_idle_task(&mut self, idle: DekoRunnablePtr) -> Option<DekoRunnablePtr> {
@@ -785,8 +785,8 @@ impl DekoRunQueue {
             old(self).wf_with(*old(perm)),
             old(self).is_scheduleable_spec(),
         ensures
-            self.wf_with(*perm),
-            self.current is Some,
+            final(self).wf_with(*final(perm)),
+            final(self).current is Some,
             r.wf(),
     )]
     pub fn schedule_init(&mut self) -> DekoRunnablePtr {
@@ -922,10 +922,10 @@ impl DekoRunnable {
             old(vm_region).wf_with(old(vm_region_perm)),
             xsave@ == xsave_perm.pptr(),
         ensures
-            vm_region.wf(),
-            vm_region.wf_with(vm_region_perm),
-            old(vm_region_perm).pgtable_perm.private_bit == vm_region_perm.pgtable_perm.private_bit,
-            old(vm_region_perm).pgtable_perm.shared_bit == vm_region_perm.pgtable_perm.shared_bit,
+            final(vm_region).wf(),
+            final(vm_region).wf_with(final(vm_region_perm)),
+            old(vm_region_perm).pgtable_perm.private_bit == final(vm_region_perm).pgtable_perm.private_bit,
+            old(vm_region_perm).pgtable_perm.shared_bit == final(vm_region_perm).pgtable_perm.shared_bit,
             r.0.end >= r.0.start,
             r.2.wf(),
     )]
@@ -986,10 +986,10 @@ impl DekoRunnable {
             old(vm_region).areas@.len() + 1 < u64::MAX as int,
             xsave@ == xsave_perm.pptr(),
         ensures
-            vm_region.wf(),
-            vm_region.wf_with(vm_region_perm),
-            old(vm_region_perm).pgtable_perm.private_bit == vm_region_perm.pgtable_perm.private_bit,
-            old(vm_region_perm).pgtable_perm.shared_bit == vm_region_perm.pgtable_perm.shared_bit,
+            final(vm_region).wf(),
+            final(vm_region).wf_with(final(vm_region_perm)),
+            old(vm_region_perm).pgtable_perm.private_bit == final(vm_region_perm).pgtable_perm.private_bit,
+            old(vm_region_perm).pgtable_perm.shared_bit == final(vm_region_perm).pgtable_perm.shared_bit,
             r.0.end >= r.0.start,
             r.2.wf(),
     )]

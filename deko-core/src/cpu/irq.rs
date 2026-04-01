@@ -91,7 +91,7 @@ impl IrqState {
         requires
             old(perm).wf_with(old(self)),
         ensures
-            perm.wf_with(self),
+            final(perm).wf_with(final(self)),
     )]
     pub fn push(&mut self, was_enabled: bool) {
         // todo: add this for both VMPL0 and VMPL1.
@@ -113,7 +113,7 @@ impl IrqState {
         requires
             old(perm).wf_with(old(self)),
         ensures
-            perm.wf_with(self),
+            final(perm).wf_with(final(self)),
     )]
     pub fn pop(&mut self) -> i32 {
         let tracked mut count0_perm = perm.counts_perm.tracked_remove(0);

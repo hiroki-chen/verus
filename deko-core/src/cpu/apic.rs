@@ -294,10 +294,10 @@ impl X86LocalApic {
             old(caa_perm).is_init(),
             old(caa_perm).pptr() == caa@,
         ensures
-            caa_perm.wf(),
-            caa_perm.is_init(),
-            caa_perm.pptr() == caa@,
-            caa_perm.value().no_eoi_required == 0,
+            final(caa_perm).wf(),
+            final(caa_perm).is_init(),
+            final(caa_perm).pptr() == caa@,
+            final(caa_perm).value().no_eoi_required == 0,
     )]
     pub fn clear_guest_eoi(caa: DekoPPtr<CaaArea>) {
         let mut caa_area = caa.take(Tracked(caa_perm));
@@ -311,7 +311,7 @@ impl X86LocalApic {
         requires
             old(self).wf(),
         ensures
-            self.wf(),
+            final(self).wf(),
     )]
     pub fn consume_host_interrupts(&mut self) {
         let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
@@ -356,8 +356,8 @@ impl X86LocalApic {
             old(self).wf(),
             old(cpu_perm).wf_with(cpu),
         ensures
-            self.wf(),
-            cpu_perm.wf_with(cpu),
+            final(self).wf(),
+            final(cpu_perm).wf_with(cpu),
     )]
     pub fn process_ipi(&mut self, cpu: DekoPPtr<DekoCpuCtx>) {
     }
@@ -375,13 +375,13 @@ impl X86LocalApic {
             old(vmsa_perm).is_init(),
             old(vmsa_perm).pptr() == vmsa@,
         ensures
-            self.wf(),
-            caa_perm.wf(),
-            caa_perm.is_init(),
-            caa_perm.pptr() == caa@,
-            vmsa_perm.wf(),
-            vmsa_perm.is_init(),
-            vmsa_perm.pptr() == vmsa@,
+            final(self).wf(),
+            final(caa_perm).wf(),
+            final(caa_perm).is_init(),
+            final(caa_perm).pptr() == caa@,
+            final(vmsa_perm).wf(),
+            final(vmsa_perm).is_init(),
+            final(vmsa_perm).pptr() == vmsa@,
     )]
     pub fn check_delivered_interrupts(&mut self, vmsa: DekoPPtr<VMSA>, caa: DekoPPtr<CaaArea>) {
         // Check if any interrupt has been delivered.
@@ -433,7 +433,7 @@ impl X86LocalApic {
             old(self).wf(),
             old(self).isr > 0,
         ensures
-            self.wf(),
+            final(self).wf(),
     )]
     fn perform_eoi(&mut self) {
         self.isr = self.isr - 1;  // no underflow because of precondition
@@ -460,7 +460,7 @@ impl X86LocalApic {
             old(self).wf(),
             irq != 0,
         ensures
-            self.wf(),
+            final(self).wf(),
     )]
     fn rewind_pending_interrupt(&mut self, irq: u8) {
         let Some(new_index) = self.isr.checked_sub(1) else {
@@ -507,9 +507,9 @@ impl X86LocalApic {
             old(vmsa_perm).is_init(),
             old(vmsa_perm).pptr() == vmsa@,
         ensures
-            self.wf(),
-            caa_perm.wf(),
-            vmsa_perm.wf(),
+            final(self).wf(),
+            final(caa_perm).wf(),
+            final(vmsa_perm).wf(),
     )]
     pub fn serve_guest(&mut self, cpu_index: usize, caa: DekoPPtr<CaaArea>, vmsa: DekoPPtr<VMSA>) {
         self.consume_host_interrupts();
@@ -612,9 +612,9 @@ impl X86LocalApic {
             old(vmsa_perm).is_init(),
             old(vmsa_perm).pptr() == vmsa@,
         ensures
-            self.wf(),
-            vmsa_perm.wf(),
-            vmsa_perm.wf(),
+            final(self).wf(),
+            final(vmsa_perm).wf(),
+            final(vmsa_perm).wf(),
     )]
     fn deliver_interrupt_immediately(&mut self, irq: u8, vmsa: DekoPPtr<VMSA>) -> bool {
         {

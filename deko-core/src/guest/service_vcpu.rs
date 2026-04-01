@@ -30,8 +30,8 @@ pub(crate) exec static RMP_GUARD: AtomicBool = AtomicBool::new(false);
     requires
         old(cpu_perm).wf(),
     ensures
-        cpu_perm.wf(),
-        cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
+        final(cpu_perm).wf(),
+        final(cpu_perm).ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
 )]
 pub(crate) fn handle_deko_service_vcpu_destroy(
     params: &DekoGuestRequestParams,
@@ -80,8 +80,8 @@ pub(crate) fn handle_deko_service_vcpu_destroy(
     requires
         old(cpu_perm).wf(),
     ensures
-        cpu_perm.wf(),
-        cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
+        final(cpu_perm).wf(),
+        final(cpu_perm).ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
 )]
 pub(crate) fn handle_deko_service_vcpu_create(
     params: &DekoGuestRequestParams,

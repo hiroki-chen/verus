@@ -266,11 +266,11 @@ impl<V: WellFormed> DekoPPtr<V> {
             old(perm).mem_wf(),
             old(perm).wf(),
         ensures
-            perm.pptr() == old(perm).pptr(),  // the pointer remains the same
+            final(perm).pptr() == old(perm).pptr(),  // the pointer remains the same
             v == old(perm).value(),
             v.wf(),
-            perm.mem_wf(),
-            perm.wf(),
+            final(perm).mem_wf(),
+            final(perm).wf(),
         opens_invariants none
         no_unwind
     {
@@ -304,9 +304,9 @@ impl<V: WellFormed> DekoPPtr<V> {
             old(perm).wf(),
             v.wf(),
         ensures
-            perm.pptr() == old(perm).pptr(),
-            perm.mem_contents() == MemContents::Init(v),
-            perm.wf(),
+            final(perm).pptr() == old(perm).pptr(),
+            final(perm).mem_contents() == MemContents::Init(v),
+            final(perm).wf(),
         opens_invariants none
         no_unwind
     {
@@ -324,9 +324,9 @@ impl<V: WellFormed> DekoPPtr<V> {
             old(perm).wf(),
             v.wf(),
         ensures
-            perm.pptr() == old(perm).pptr(),
-            perm.mem_contents() == MemContents::Init(v),
-            perm.wf(),
+            final(perm).pptr() == old(perm).pptr(),
+            final(perm).mem_contents() == MemContents::Init(v),
+            final(perm).wf(),
         opens_invariants none
         no_unwind
     {
@@ -509,9 +509,9 @@ impl<V: WellFormed> DekoPPtr<V> {
             old(perm).value().cast_valid(),
             t.wf(),
         ensures
-            perm.pptr() == old(perm).pptr(),
-            perm.wf(),
-            perm.mem_contents() matches MemContents::Init(v) ==> {
+            final(perm).pptr() == old(perm).pptr(),
+            final(perm).wf(),
+            final(perm).mem_contents() matches MemContents::Init(v) ==> {
                 <V as SafeCastInto<T>>::cast_into(v) == t
             },
         opens_invariants none
@@ -634,8 +634,8 @@ impl<V: WellFormed> DekoPointsTo<V> {
     /// Note that this is a `proof` function, i.e., it is operationally a no-op in executable code.
     pub proof fn leak_contents(tracked &mut self)
         ensures
-            self.pptr() == old(self).pptr(),
-            self.is_uninit(),
+            final(self).pptr() == old(self).pptr(),
+            final(self).is_uninit(),
     {
         use_type_invariant(&*self);
         self.points_to.leak_contents();

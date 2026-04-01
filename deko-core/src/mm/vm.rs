@@ -214,11 +214,11 @@ impl DekoTaskMM {
             old(pgtable_perm).wf(),
             old(pgtable_perm).pgtable_perm.pptr() == pgtable@,
         ensures
-            pgtable_perm.wf(),
-            pgtable_perm.pgtable_perm.pptr() == pgtable@,
-            pgtable_perm.mapping_space == old(pgtable_perm).mapping_space,
-            pgtable_perm.private_bit == old(pgtable_perm).private_bit,
-            pgtable_perm.shared_bit == old(pgtable_perm).shared_bit,
+            final(pgtable_perm).wf(),
+            final(pgtable_perm).pgtable_perm.pptr() == pgtable@,
+            final(pgtable_perm).mapping_space == old(pgtable_perm).mapping_space,
+            final(pgtable_perm).private_bit == old(pgtable_perm).private_bit,
+            final(pgtable_perm).shared_bit == old(pgtable_perm).shared_bit,
     )]
     pub fn copy_to_page_table(&self, pgtable: DekoPPtr<PageTable>) {
         deko_rwlock_read_atomic_data! {
@@ -657,9 +657,9 @@ impl VirtualMemoryTemporary {
             nr_pages > 0,
             vaddr_start@ + (nr_pages as u64) * PAGE_SIZE < u64::MAX,
         ensures
-            self.wf(),
-            self.vaddr_start == vaddr_start,
-            self.nr_pages == nr_pages,
+            final(self).wf(),
+            final(self).vaddr_start == vaddr_start,
+            final(self).nr_pages == nr_pages,
     )]
     pub fn set(&mut self, vaddr_start: VirtAddr, nr_pages: usize) {
         kpanic_if!(
@@ -695,7 +695,7 @@ impl VirtualMemoryTemporary {
             old(self).wf(),
             nr_pages < old(self).nr_pages,
         ensures
-            self.wf(),
+            final(self).wf(),
             r matches Some(vaddr) ==> {
                 &&& vaddr.wf()
                 &&& vaddr@ >= old(self).vaddr_start@
@@ -728,7 +728,7 @@ impl VirtualMemoryTemporary {
             vaddr@ % PAGE_SIZE == 0,
             vaddr@ >= old(self).vaddr_start@,
         ensures
-            self.wf(),
+            final(self).wf(),
         opens_invariants none
         no_unwind
     )]
@@ -1375,11 +1375,11 @@ impl VirtualMemoryRegion {
             self.private_bit == old(pgtable_perm).private_bit,
             self.shared_bit == old(pgtable_perm).shared_bit,
         ensures
-            pgtable_perm.wf(),
-            pgtable_perm.pgtable_perm.pptr() == target_pgtable@,
-            old(pgtable_perm).mapping_space == pgtable_perm.mapping_space,
-            old(pgtable_perm).private_bit == pgtable_perm.private_bit,
-            old(pgtable_perm).shared_bit == pgtable_perm.shared_bit,
+            final(pgtable_perm).wf(),
+            final(pgtable_perm).pgtable_perm.pptr() == target_pgtable@,
+            old(pgtable_perm).mapping_space == final(pgtable_perm).mapping_space,
+            old(pgtable_perm).private_bit == final(pgtable_perm).private_bit,
+            old(pgtable_perm).shared_bit == final(pgtable_perm).shared_bit,
             // more...
     )]
     #[verifier::external_body]
@@ -1463,10 +1463,10 @@ impl VirtualMemoryRegion {
             flags.wf(),
             flags.bits() & Pte_ALL_BITS == flags.bits(),
         ensures
-            self.wf(),
-            self.wf_with(perm),
-            old(perm).pgtable_perm.private_bit == perm.pgtable_perm.private_bit,
-            old(perm).pgtable_perm.shared_bit == perm.pgtable_perm.shared_bit,
+            final(self).wf(),
+            final(self).wf_with(final(perm)),
+            old(perm).pgtable_perm.private_bit == final(perm).pgtable_perm.private_bit,
+            old(perm).pgtable_perm.shared_bit == final(perm).pgtable_perm.shared_bit,
             r matches Some(vaddr) ==> {
                 &&& vaddr@ % PAGE_SIZE == 0
                 // &&& self.range.start@ <= vaddr@ < self.range.end@
@@ -1518,10 +1518,10 @@ impl VirtualMemoryRegion {
                 &&& vaddr@ % PAGE_SIZE == 0
                 // &&& self.range.start@ <= vaddr@ < self.range.end@
             },
-            self.wf(),
-            self.wf_with(perm),
-            old(perm).pgtable_perm.private_bit == perm.pgtable_perm.private_bit,
-            old(perm).pgtable_perm.shared_bit == perm.pgtable_perm.shared_bit,
+            final(self).wf(),
+            final(self).wf_with(final(perm)),
+            old(perm).pgtable_perm.private_bit == final(perm).pgtable_perm.private_bit,
+            old(perm).pgtable_perm.shared_bit == final(perm).pgtable_perm.shared_bit,
     )]
     #[verifier::spinoff_prover]
     pub fn insert_aligned(
@@ -1791,13 +1791,13 @@ impl VirtualMemoryRegion {
                 vaddr.wf(),
                 vaddr@ >= VADDR_UPPER_MASK,
             ensures
-                self.wf(),
-                self.wf_with(perm),
-                old(perm).pgtable_perm.private_bit == perm.pgtable_perm.private_bit,
-                old(perm).pgtable_perm.shared_bit == perm.pgtable_perm.shared_bit,
+                final(self).wf(),
+                final(self).wf_with(final(perm)),
+                old(perm).pgtable_perm.private_bit == final(perm).pgtable_perm.private_bit,
+                old(perm).pgtable_perm.shared_bit == final(perm).pgtable_perm.shared_bit,
                 r matches Some(vm) ==> {
                     &&& vm.wf()
-                    &&& vm_perm@ matches Some(vm_perm_val) && vm.wf_with(&vm_perm_val) && vm_perm_val.parent_id == self.id
+                    &&& vm_perm@ matches Some(vm_perm_val) && vm.wf_with(&vm_perm_val) && vm_perm_val.parent_id == final(self).id
                 }
     )]
     pub fn remove(&mut self, vaddr: VirtAddr) -> Option<VirtualMemory> {
@@ -1869,12 +1869,12 @@ impl VirtualMemoryRegion {
             vm_block.wf_with(&vm_block_perm),
             vm_block_perm.parent_id == old(self).id,
         ensures
-            self.wf(),
-            self.wf_with(perm),
-            self.areas@.len() == old(self).areas@.len() + 1,
-            old(perm).pgtable_perm.private_bit == perm.pgtable_perm.private_bit,
-            old(perm).pgtable_perm.shared_bit == perm.pgtable_perm.shared_bit,
-            old(self).id == self.id,
+            final(self).wf(),
+            final(self).wf_with(final(perm)),
+            final(self).areas@.len() == old(self).areas@.len() + 1,
+            old(perm).pgtable_perm.private_bit == final(perm).pgtable_perm.private_bit,
+            old(perm).pgtable_perm.shared_bit == final(perm).pgtable_perm.shared_bit,
+            old(self).id == final(self).id,
     )]
     #[verifier::spinoff_prover]
     pub fn insert_at_vaddr(&mut self, vaddr: VirtAddr, vm_block: VirtualMemory) {
@@ -2159,14 +2159,14 @@ impl VirtualMemory {
             flags.wf(),
             flags.bits() & Pte_ALL_BITS == flags.bits(),
         ensures
-            parent_perm.pgtable_perm.wf(),
+            final(parent_perm).pgtable_perm.wf(),
             // parent_perm.pgtable_perm.mapped_region(self.range), // not so simple.
-            parent_perm.pgtable_perm.mapping_space == ms,
-            parent_perm.pgtable_perm.private_bit == private_bit,
-            parent_perm.pgtable_perm.shared_bit == shared_bit,
-            parent_perm.pgtable_perm.pgtable_perm.pptr() == old(parent_perm).pgtable_perm.pgtable_perm.pptr(),
-            parent_perm.vm_perms == old(parent_perm).vm_perms,
-            parent_perm.id == old(parent_perm).id,
+            final(parent_perm).pgtable_perm.mapping_space == ms,
+            final(parent_perm).pgtable_perm.private_bit == private_bit,
+            final(parent_perm).pgtable_perm.shared_bit == shared_bit,
+            final(parent_perm).pgtable_perm.pgtable_perm.pptr() == old(parent_perm).pgtable_perm.pgtable_perm.pptr(),
+            final(parent_perm).vm_perms == old(parent_perm).vm_perms,
+            final(parent_perm).id == old(parent_perm).id,
     )]
     #[verifier::spinoff_prover]
     pub fn map(
@@ -2261,14 +2261,14 @@ impl VirtualMemory {
         requires
 
         ensures
-            perm.vm_perms.wf(),
-            perm.pgtable_perm.wf(),
+            final(perm).vm_perms.wf(),
+            final(perm).pgtable_perm.wf(),
             // Must explicitly state these invariants.
-            old(perm).pgtable_perm.pgtable_perm.pptr() == perm.pgtable_perm.pgtable_perm.pptr(),
-            old(perm).pgtable_perm.private_bit == perm.pgtable_perm.private_bit,
-            old(perm).pgtable_perm.shared_bit == perm.pgtable_perm.shared_bit,
-            old(perm).pgtable_perm.mapping_space == perm.pgtable_perm.mapping_space,
-            old(perm).id == perm.id,
+            old(perm).pgtable_perm.pgtable_perm.pptr() == final(perm).pgtable_perm.pgtable_perm.pptr(),
+            old(perm).pgtable_perm.private_bit == final(perm).pgtable_perm.private_bit,
+            old(perm).pgtable_perm.shared_bit == final(perm).pgtable_perm.shared_bit,
+            old(perm).pgtable_perm.mapping_space == final(perm).pgtable_perm.mapping_space,
+            old(perm).id == final(perm).id,
     )]
     pub fn unmap(
         &self,

@@ -256,7 +256,7 @@ impl SecretsPage {
             from.wf(),
             old(this).is_init(),
         ensures
-            this.is_init(),
+            final(this).is_init(),
     )]
     pub fn copy_from_rwlock(
         this: &mut WriteHandle<
@@ -423,10 +423,10 @@ pub fn validate_memory(
         heap_end % PAGE_SIZE == 0,
         heap_end <= LOWMEM_END as u64,
     ensures
-        ctx_perm.wf(),
-        old(ctx_perm).deko_ctx_ptr_perm.pptr() === ctx_perm.deko_ctx_ptr_perm.pptr(),
-        old(ctx_perm).private_bit() == ctx_perm.private_bit(),
-        old(ctx_perm).shared_bit() == ctx_perm.shared_bit(),
+        final(ctx_perm).wf(),
+        old(ctx_perm).deko_ctx_ptr_perm.pptr() === final(ctx_perm).deko_ctx_ptr_perm.pptr(),
+        old(ctx_perm).private_bit() == final(ctx_perm).private_bit(),
+        old(ctx_perm).shared_bit() == final(ctx_perm).shared_bit(),
 {
     let mut cur = heap_start;
 
@@ -491,7 +491,7 @@ pub fn init_guest_host(
     requires
         old(ctx_perm).wf_with(ctx),
     ensures
-        ctx_perm.wf_with(ctx),
+        final(ctx_perm).wf_with(ctx),
 {
     msr_register_ghcb_gpa(crate::snp::ghcb::validate_ghcb(ctx, Tracked(ctx_perm), false));
 }
@@ -506,7 +506,7 @@ pub fn init_platform_end(
         old(ctx_perm).pgtable_perm.wf(),
         old(ctx_perm).ptr_perm.wf(),
     ensures
-        *ctx_perm == *old(ctx_perm),  /* fix later. */
+        *final(ctx_perm) == *old(ctx_perm),  /* fix later. */
 {
     let debug_console_port = igvm_params.debug_serial_port as u16;
     crate::snp::logging::init_ghcb_logging(debug_console_port);
@@ -619,9 +619,9 @@ pub fn init_each_cpu(ctx: DekoPPtr<DekoCtx>, Tracked(ctx_perm): Tracked<DekoCtxP
         vrange.end@ % PAGE_SIZE == 0,
     ensures
         if validate { true } else { true },  // TODO: fill in later.
-        ctx_perm.wf(),
-        ctx_perm.pgtable_perm.mapped_region(vrange),
-        ctx_perm.pgtable_perm.mapping_space == old(ctx_perm).pgtable_perm.mapping_space,
+        final(ctx_perm).wf(),
+        final(ctx_perm).pgtable_perm.mapped_region(vrange),
+        final(ctx_perm).pgtable_perm.mapping_space == old(ctx_perm).pgtable_perm.mapping_space,
 )]
 pub fn validate_vaddr_region(vrange: VaddrRange, validate: bool) {
     broadcast use vstd::arithmetic::div_mod::lemma_mod_equivalence;
@@ -711,7 +711,7 @@ pub fn pvalidate(
         old(pgtable_perm).wf(),
         old(pgtable_perm).mapped(VirtAddr(vaddr)),
     ensures
-        *old(pgtable_perm) == *pgtable_perm,
+        *old(pgtable_perm) == *final(pgtable_perm),
 {
     let ret: u64;
     let rcx = if psize == PAGE_SIZE {
@@ -778,7 +778,7 @@ pub fn rmpadjust(
         flags.bits() & Rmp_ALL_BITS == flags.bits(),
         psize == PAGE_SIZE || psize == PAGE_SIZE_2M,
     ensures
-        *old(pgtable_perm) == *pgtable_perm,
+        *old(pgtable_perm) == *final(pgtable_perm),
 {
     let ret: u64;
 
@@ -845,12 +845,12 @@ pub fn setup_apic(ctx: DekoPPtr<DekoCpuCtx>, Tracked(ctx_perm): Tracked<&mut Dek
     requires
         old(ctx_perm).wf_with(ctx),
     ensures
-        ctx_perm.wf_with(ctx),
-        ctx_perm.ptr_perm.value().vm_region == old(ctx_perm).ptr_perm.value().vm_region,
-        ctx_perm.ptr_perm.value().run_queue == old(ctx_perm).ptr_perm.value().run_queue,
-        ctx_perm.ptr_perm.value().shared_bit == old(ctx_perm).ptr_perm.value().shared_bit,
-        ctx_perm.ptr_perm.value().private_bit == old(ctx_perm).ptr_perm.value().private_bit,
-        ctx_perm.ptr_perm.value().pgtable == old(ctx_perm).ptr_perm.value().pgtable,
+        final(ctx_perm).wf_with(ctx),
+        final(ctx_perm).ptr_perm.value().vm_region == old(ctx_perm).ptr_perm.value().vm_region,
+        final(ctx_perm).ptr_perm.value().run_queue == old(ctx_perm).ptr_perm.value().run_queue,
+        final(ctx_perm).ptr_perm.value().shared_bit == old(ctx_perm).ptr_perm.value().shared_bit,
+        final(ctx_perm).ptr_perm.value().private_bit == old(ctx_perm).ptr_perm.value().private_bit,
+        final(ctx_perm).ptr_perm.value().pgtable == old(ctx_perm).ptr_perm.value().pgtable,
 {
     broadcast use SnpStatusFlags::lemma_each_bit_is_valid;
     // Use the restricted interrupt mode.
@@ -1184,11 +1184,11 @@ pub fn launch_fw(
         igvm_params.wf(),
         kernel_prange.wf(),
     ensures
-        pgtable_perm.wf(),
-        pgtable_perm.mapping_space == old(pgtable_perm).mapping_space,
-        pgtable_perm.private_bit == old(pgtable_perm).private_bit,
-        pgtable_perm.shared_bit == old(pgtable_perm).shared_bit,
-        pgtable_perm.pgtable_perm == old(pgtable_perm).pgtable_perm,
+        final(pgtable_perm).wf(),
+        final(pgtable_perm).mapping_space == old(pgtable_perm).mapping_space,
+        final(pgtable_perm).private_bit == old(pgtable_perm).private_bit,
+        final(pgtable_perm).shared_bit == old(pgtable_perm).shared_bit,
+        final(pgtable_perm).pgtable_perm == old(pgtable_perm).pgtable_perm,
 )]
 pub fn prepare_guest_fw(
     header: &DekoKernelLaunchInfo,
@@ -1444,11 +1444,11 @@ unsafe fn do_modify_fw_secrets_page(
                 &&& memories@[i].end@ % PAGE_SIZE == 0
             },
     ensures
-        pgtable_perm.wf(),
-        pgtable_perm.mapping_space == old(pgtable_perm).mapping_space,
-        pgtable_perm.private_bit == old(pgtable_perm).private_bit,
-        pgtable_perm.shared_bit == old(pgtable_perm).shared_bit,
-        pgtable_perm.pgtable_perm == old(pgtable_perm).pgtable_perm,
+        final(pgtable_perm).wf(),
+        final(pgtable_perm).mapping_space == old(pgtable_perm).mapping_space,
+        final(pgtable_perm).private_bit == old(pgtable_perm).private_bit,
+        final(pgtable_perm).shared_bit == old(pgtable_perm).shared_bit,
+        final(pgtable_perm).pgtable_perm == old(pgtable_perm).pgtable_perm,
 )]
 pub(crate) fn validate_fw_memories(
     header: &DekoKernelLaunchInfo,
@@ -1512,11 +1512,11 @@ pub(crate) fn validate_fw_memories(
         prange.start@ % PAGE_SIZE == 0,
         prange.end@ % PAGE_SIZE == 0,
     ensures
-        pgtable_perm.wf(),
-        pgtable_perm.mapping_space == old(pgtable_perm).mapping_space,
-        pgtable_perm.private_bit == old(pgtable_perm).private_bit,
-        pgtable_perm.shared_bit == old(pgtable_perm).shared_bit,
-        pgtable_perm.pgtable_perm == old(pgtable_perm).pgtable_perm,
+        final(pgtable_perm).wf(),
+        final(pgtable_perm).mapping_space == old(pgtable_perm).mapping_space,
+        final(pgtable_perm).private_bit == old(pgtable_perm).private_bit,
+        final(pgtable_perm).shared_bit == old(pgtable_perm).shared_bit,
+        final(pgtable_perm).pgtable_perm == old(pgtable_perm).pgtable_perm,
 )]
 fn validate_fw_memory_region(prange: PaddrRange) {
     broadcast use RmpFlags::lemma_each_bit_is_valid;
@@ -1580,11 +1580,11 @@ fn validate_fw_memory_region(prange: PaddrRange) {
         igvm_params.wf(),
         kernel_region.wf(),
     ensures
-        pgtable_perm.wf(),
-        pgtable_perm.mapping_space == old(pgtable_perm).mapping_space,
-        pgtable_perm.private_bit == old(pgtable_perm).private_bit,
-        pgtable_perm.shared_bit == old(pgtable_perm).shared_bit,
-        pgtable_perm.pgtable_perm == old(pgtable_perm).pgtable_perm,
+        final(pgtable_perm).wf(),
+        final(pgtable_perm).mapping_space == old(pgtable_perm).mapping_space,
+        final(pgtable_perm).private_bit == old(pgtable_perm).private_bit,
+        final(pgtable_perm).shared_bit == old(pgtable_perm).shared_bit,
+        final(pgtable_perm).pgtable_perm == old(pgtable_perm).pgtable_perm,
 )]
 #[verifier::external_body]
 fn validate_fw(igvm_params: &IgvmParams<'_>, kernel_region: PaddrRange) {

@@ -506,11 +506,11 @@ impl FiniteLattice {
                 0 <= i < old(flows)@.len() && 0 <= j < old(flows)@.len() ==> #[trigger]
                     old(flows)@[i]@[j] == (i == j),
         ensures
-            r is Ok ==> flows.wf(),
-            r is Ok ==> flows@.len() == cfg.levels@.len(),
-            r is Ok ==> forall|i: int| 0 <= i < flows@.len() ==> #[trigger] flows@[i]@.len() == cfg.levels@.len(),
+            r is Ok ==> final(flows).wf(),
+            r is Ok ==> final(flows)@.len() == cfg.levels@.len(),
+            r is Ok ==> forall|i: int| 0 <= i < final(flows)@.len() ==> #[trigger] final(flows)@[i]@.len() == cfg.levels@.len(),
             r is Ok ==> forall|i: int, j: int|
-                0 <= i < flows@.len() && 0 <= j < flows@.len() ==> #[trigger] flows@[i]@[j]
+                0 <= i < final(flows)@.len() && 0 <= j < final(flows)@.len() ==> #[trigger] final(flows)@[i]@[j]
                     == (i == j || Self::relation_declared_prefix(
                     cfg,
                     cfg.relations@.len(),
@@ -635,25 +635,25 @@ impl FiniteLattice {
                     == old(flows)@.len(),
             forall|i: int| 0 <= i < old(flows)@.len() ==> #[trigger] Self::diag_cell(old(flows)@, i),
         ensures
-            r is Ok ==> flows.wf(),
-            r is Ok ==> flows@.len() == old(flows)@.len(),
-            r is Ok ==> forall|i: int| 0 <= i < flows@.len() ==> #[trigger] flows@[i]@.len() == flows@.len(),
+            r is Ok ==> final(flows).wf(),
+            r is Ok ==> final(flows)@.len() == old(flows)@.len(),
+            r is Ok ==> forall|i: int| 0 <= i < final(flows)@.len() ==> #[trigger] final(flows)@[i]@.len() == final(flows)@.len(),
             r is Ok ==> forall|i: int, j: int|
-                0 <= i < flows@.len() && 0 <= j < flows@.len() ==> #[trigger] flows@[i]@[j]
+                0 <= i < final(flows)@.len() && 0 <= j < final(flows)@.len() ==> #[trigger] final(flows)@[i]@[j]
                     == Self::tc_prefix(
                     Self::flow_matrix_view(old(flows)@),
                     old(flows)@.len(),
                     i,
                     j,
                 ),
-            r is Ok ==> forall|i: int| #![auto] 0 <= i < flows@.len() ==> flows@[i]@[i],
+            r is Ok ==> forall|i: int| #![auto] 0 <= i < final(flows)@.len() ==> final(flows)@[i]@[i],
             r is Ok ==> forall|a: int, b: int|
                 #![auto]
-                0 <= a < flows@.len() && 0 <= b < flows@.len() && a != b ==> !(flows@[a][b] && flows@[b][a]),
+                0 <= a < final(flows)@.len() && 0 <= b < final(flows)@.len() && a != b ==> !(final(flows)@[a][b] && final(flows)@[b][a]),
             r is Ok ==> forall|a: int, b: int, c: int|
                 #![auto]
-                0 <= a < flows@.len() && 0 <= b < flows@.len() && 0 <= c < flows@.len()
-                    && flows@[a][b] && flows@[b][c] ==> flows@[a][c],
+                0 <= a < final(flows)@.len() && 0 <= b < final(flows)@.len() && 0 <= c < final(flows)@.len()
+                    && final(flows)@[a][b] && final(flows)@[b][c] ==> final(flows)@[a][c],
     )]
     fn close_and_validate_order(flows: &mut Vec<Vec<bool>>) -> Result<(), FiniteLatticeBuildError> {
         let ghost pre = flows@;
@@ -1256,11 +1256,11 @@ impl FiniteLattice {
             forall|i: int| 0 <= i < old(flows)@.len() ==> #[trigger] old(flows)@[i]@.len()
                 == old(flows)@.len(),
         ensures
-            flows.wf(),
-            flows@.len() == old(flows)@.len(),
-            forall|i: int| 0 <= i < flows@.len() ==> #[trigger] flows@[i]@.len() == flows@.len(),
+            final(flows).wf(),
+            final(flows)@.len() == old(flows)@.len(),
+            forall|i: int| 0 <= i < final(flows)@.len() ==> #[trigger] final(flows)@[i]@.len() == final(flows)@.len(),
             forall|i: int, j: int|
-                0 <= i < flows@.len() && 0 <= j < flows@.len() ==> #[trigger] flows@[i]@[j]
+                0 <= i < final(flows)@.len() && 0 <= j < final(flows)@.len() ==> #[trigger] final(flows)@[i]@[j]
                     == Self::tc_prefix(
                     Self::flow_matrix_view(old(flows)@),
                     old(flows)@.len(),
@@ -1268,13 +1268,13 @@ impl FiniteLattice {
                     j,
                 ),
             forall|i: int, j: int|
-                0 <= i < flows@.len() && 0 <= j < flows@.len()
+                0 <= i < final(flows)@.len() && 0 <= j < final(flows)@.len()
                     && Self::flow_matrix_view(old(flows)@)[i][j]
-                    ==> flows@[i]@[j],
+                    ==> final(flows)@[i]@[j],
             forall|i: int, j: int, k: int|
                 #![auto]
-                0 <= i < flows@.len() && 0 <= j < flows@.len() && 0 <= k < flows@.len()
-                    && flows@[i]@[j] && flows@[j]@[k] ==> flows@[i]@[k],
+                0 <= i < final(flows)@.len() && 0 <= j < final(flows)@.len() && 0 <= k < final(flows)@.len()
+                    && final(flows)@[i]@[j] && final(flows)@[j]@[k] ==> final(flows)@[i]@[k],
     )]
     #[verifier::spinoff_prover]
     fn transitive_closure(flows: &mut Vec<Vec<bool>>) {

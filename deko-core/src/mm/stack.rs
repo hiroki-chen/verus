@@ -185,8 +185,8 @@ impl DekoKernelStack {
             old(self).wf(),
             0 <= index < old(self).alloc@.len(),
         ensures
-            self.alloc@ =~= old(self).alloc@.update(index as int, value),
-            self.wf(),
+            final(self).alloc@ =~= old(self).alloc@.update(index as int, value),
+            final(self).wf(),
     )]
     fn update_vec(&mut self, index: usize, value: Option<(VirtAddr, PhysAddr)>) {
         // &mut self.alloc is currently not supported so we mark this as external_body.
@@ -204,13 +204,13 @@ impl DekoKernelStack {
             private_bit == pgtable_perm.private_bit,
             shared_bit == pgtable_perm.shared_bit,
         ensures
-            self.wf(),
-            self.alloc@.len() == old(self).alloc@.len(),
+            final(self).wf(),
+            final(self).alloc@.len() == old(self).alloc@.len(),
             forall |i: int|
-                #![trigger self.alloc@[i]]
-                0 <= i < self.alloc@.len() ==>
+                #![trigger final(self).alloc@[i]]
+                0 <= i < final(self).alloc@.len() ==>
                     {
-                        &&& self.alloc@[i] matches Some((vaddr, paddr)) &&
+                        &&& final(self).alloc@[i] matches Some((vaddr, paddr)) &&
                             vaddr.wf() && vaddr@ % PAGE_SIZE == 0 &&
                             paddr.wf() && paddr@ % PAGE_SIZE == 0
                     }

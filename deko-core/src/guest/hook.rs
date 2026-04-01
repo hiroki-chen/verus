@@ -36,7 +36,7 @@ verus! {
 
 pub const GUEST_TRAMPOLINE_PML4_HOLE: usize = 500;
 
-pub const GUEST_TRAMPOLINE_MAGIC: &'static [u8; 15] = &[
+pub exec const GUEST_TRAMPOLINE_MAGIC: &'static [u8; 15] = &[
     0x54u8,
     0x52,
     0x41,

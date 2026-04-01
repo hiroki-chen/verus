@@ -111,8 +111,8 @@ impl<V: WellFormed, F: Predicate<V>> BoxInner<V, F> {
             old(perm)@.pptr() == self@@,
             old(perm)@.wf(),
         ensures
-            perm@.pptr() === self@@,
-            perm@.is_init(),
+            final(perm)@.pptr() === self@@,
+            final(perm)@.is_init(),
     {
         self.ptr.write(Tracked(&mut perm.points_to), v);
     }

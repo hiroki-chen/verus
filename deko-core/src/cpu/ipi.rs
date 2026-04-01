@@ -214,7 +214,7 @@ impl DekoIpiRequest {
             old(cpu_areas).wf_with(*old(cpu_areas_perm)),
             index < old(cpu_areas)@.len(),
         ensures
-            cpu_areas.wf_with(*cpu_areas_perm),
+            final(cpu_areas).wf_with(*final(cpu_areas_perm)),
     )]
     pub fn update_shared_area_ipi(
         &self,

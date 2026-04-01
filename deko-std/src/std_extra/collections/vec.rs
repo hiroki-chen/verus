@@ -22,8 +22,8 @@ pub assume_specification<T, A>[ alloc::vec::Vec::<T, A>::as_mut_ptr ](
     v: &mut alloc::vec::Vec<T, A>,
 ) -> (r: *mut T) where A: core::alloc::Allocator
     ensures
-        v@ =~= old(v)@,
-        r.addr() + v@.len() * core::mem::size_of::<T>() <= usize::MAX,
+        final(v)@ =~= old(v)@,
+        r.addr() + final(v)@.len() * core::mem::size_of::<T>() <= usize::MAX,
 ;
 
 } // verus!

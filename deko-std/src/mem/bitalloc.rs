@@ -177,20 +177,20 @@ pub trait DekoBitAlloc: Sized + WellFormed {
             old(self).wf(),
             (align as int) < log(2, Self::cap_spec()),
         ensures
-            self.wf(),
+            final(self).wf(),
             match r {
                 Some(start) => {
                     &&& start % align == 0
                     &&& start + entries <= Self::cap_spec()
-                    &&& self.used_spec() == old(self).used_spec() + entries as int
+                    &&& final(self).used_spec() == old(self).used_spec() + entries as int
                     &&& forall|i: int|
-                        start as int <= i < (start + entries) as int ==> self.is_allocated(i)
+                        start as int <= i < (start + entries) as int ==> final(self).is_allocated(i)
                     &&& old(self).is_range_free(start as int, entries as int)
                     &&& forall|i: int|
                         0 <= i < Self::cap_spec() && !(start <= i < start + entries)
-                            ==> self.is_allocated(i) == old(self).is_allocated(i)
+                            ==> final(self).is_allocated(i) == old(self).is_allocated(i)
                 },
-                None => *self == *old(self),  // nothing has ever changed.
+                None => *final(self) == *old(self),  // nothing has ever changed.
             },
     {
         if entries == 0 {
@@ -282,7 +282,7 @@ pub trait DekoBitAlloc: Sized + WellFormed {
             is_power_of_two_spec(Self::cap_spec() as nat),
             (align as int) < log(2, Self::cap_spec()),
         ensures
-            self.wf(),
+            final(self).wf(),
     ;
 
     fn free(&mut self, start: usize, entries: usize)
@@ -292,7 +292,7 @@ pub trait DekoBitAlloc: Sized + WellFormed {
             entries > 0,
             start + entries <= Self::cap_spec() as usize,
         ensures
-            self.wf(),
+            final(self).wf(),
         opens_invariants none
         no_unwind
     ;
@@ -372,7 +372,7 @@ impl DekoBitAlloc for BitmapAllocator64 {
     #[inline]
     fn alloc(&mut self, entries: usize, align: usize) -> (r: Option<usize>)
         ensures
-            self.wf(),
+            final(self).wf(),
     {
         Self::alloc_aligned(self, entries, align)
     }
@@ -380,29 +380,29 @@ impl DekoBitAlloc for BitmapAllocator64 {
     #[inline]
     fn free(&mut self, start: usize, entries: usize)
         ensures
-            self.wf(),
+            final(self).wf(),
             // Freed entries are now marked as not allocated
-            forall|i: int| #![auto] start <= i < start + entries ==> !self.is_allocated(i),
+            forall|i: int| #![auto] start <= i < start + entries ==> !final(self).is_allocated(i),
             // Other entries remain unchanged
             forall|i: int|
                 #![auto]
-                0 <= i < 64 && !(start <= i < start + entries) ==> self.is_allocated(i) == old(
-                    self,
-                ).is_allocated(i),
+                0 <= i < 64 && !(start <= i < start + entries) ==> final(self).is_allocated(i)
+                    == old(self).is_allocated(i),
     {
         self.set(start, entries, false);
     }
 
     fn set(&mut self, start: usize, entries: usize, value: bool)
         ensures
-            self.wf(),
-            forall|i: int| #![auto] start <= i < start + entries ==> self.is_allocated(i) == value,
+            final(self).wf(),
+            forall|i: int|
+                #![auto]
+                start <= i < start + entries ==> final(self).is_allocated(i) == value,
             // Other entries remain unchanged
             forall|i: int|
                 #![auto]
-                0 <= i < 64 && !(start <= i < start + entries) ==> self.is_allocated(i) == old(
-                    self,
-                ).is_allocated(i),
+                0 <= i < 64 && !(start <= i < start + entries) ==> final(self).is_allocated(i)
+                    == old(self).is_allocated(i),
     {
         proof {
             assert(0 < 1u64 << start <= u64::MAX) by (bit_vector)
@@ -710,20 +710,20 @@ impl<T: DekoBitAlloc + deko_std::fmt::DekoDebug> DekoBitAlloc for DekoBitmapAllo
     #[inline]
     fn alloc(&mut self, entries: usize, align: usize) -> (r: Option<usize>)
         ensures
-            self.wf(),
+            final(self).wf(),
             match r {
                 Some(start) => {
                     &&& start % align == 0
                     &&& start + entries <= Self::cap_spec()
-                    &&& self.used_spec() == old(self).used_spec() + entries as int
+                    &&& final(self).used_spec() == old(self).used_spec() + entries as int
                     &&& forall|i: int|
-                        start as int <= i < (start + entries) as int ==> self.is_allocated(i)
+                        start as int <= i < (start + entries) as int ==> final(self).is_allocated(i)
                     &&& old(self).is_range_free(start as int, entries as int)
                     &&& forall|i: int|
                         0 <= i < Self::cap_spec() && !(start <= i < start + entries)
-                            ==> self.is_allocated(i) == old(self).is_allocated(i)
+                            ==> final(self).is_allocated(i) == old(self).is_allocated(i)
                 },
-                None => *self == *old(self),  // nothing has ever changed.
+                None => *final(self) == *old(self),  // nothing has ever changed.
             },
     {
         Self::alloc_aligned(self, entries, align)
@@ -732,7 +732,7 @@ impl<T: DekoBitAlloc + deko_std::fmt::DekoDebug> DekoBitAlloc for DekoBitmapAllo
     #[inline]
     fn free(&mut self, start: usize, entries: usize)
         ensures
-            self.wf(),
+            final(self).wf(),
     {
         self.set(start, entries, false);
     }
@@ -740,7 +740,7 @@ impl<T: DekoBitAlloc + deko_std::fmt::DekoDebug> DekoBitAlloc for DekoBitmapAllo
     #[verifier::external_body]
     fn set(&mut self, start: usize, entries: usize, value: bool)
         ensures
-            self.wf(),
+            final(self).wf(),
     {
         let mut offset = start % T::cap();
         let mut remain = entries;

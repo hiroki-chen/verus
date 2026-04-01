@@ -440,8 +440,8 @@ impl<'a, V, S: Spin, Pred: RwLockPredicate<V>> WriteHandle<'a, V, S, Pred> {
         ensures
             old(self).rwlock().inv(val),
             val == old(self).view(),
-            !self.is_init(),
-            self.rwlock() == old(self).rwlock(),
+            !final(self).is_init(),
+            final(self).rwlock() == old(self).rwlock(),
     {
         proof {
             use_type_invariant(&*self);

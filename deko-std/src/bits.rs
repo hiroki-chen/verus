@@ -377,8 +377,8 @@ macro_rules! deko_bitflags {
                         old(self).wf(),
                         flag & [<$name _ALL_BITS>] == flag,
                     ensures
-                        self.wf(),
-                        self@ =~= old(self)@.difference(Self::from_bits(flag)),
+                        final(self).wf(),
+                        final(self)@ =~= old(self)@.difference(Self::from_bits(flag)),
                 {
                     // After self.bits & !flag, a bit is set iff it was set before AND *not in flag*
                     self.bits = self.bits & !flag;

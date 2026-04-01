@@ -84,9 +84,9 @@ pub trait Heap: WellFormed + Sized {
             old(self).free_list_valid(),
             old(self).valid_size_and_align(size, align),
         ensures
-            self.wf(),
-            self.free_list_valid(),
-            pt != 0 ==> self.in_heap_range(pt as nat, size as nat),
+            final(self).wf(),
+            final(self).free_list_valid(),
+            pt != 0 ==> final(self).in_heap_range(pt as nat, size as nat),
     ;
 
     fn deallocate(&mut self, ptr: u64, size: u64, align: u64)
@@ -96,8 +96,8 @@ pub trait Heap: WellFormed + Sized {
             old(self).free_list_valid(),
             old(self).in_heap_range(ptr as nat, size as nat),
         ensures
-            self.wf(),
-            self.free_list_valid(),
+            final(self).wf(),
+            final(self).free_list_valid(),
     ;
 
     fn init(&mut self, heap_start: u64, heap_size: u64, order: u64)
@@ -107,9 +107,9 @@ pub trait Heap: WellFormed + Sized {
             old(self).free_list_valid(),
             valid_heap_param(heap_start, heap_size, order),
         ensures
-            self.wf(),
-            self.init_ok(),
-            self.free_list_valid(),
+            final(self).wf(),
+            final(self).init_ok(),
+            final(self).free_list_valid(),
     ;
 
     fn remaining(&self) -> (r: u64)
@@ -254,10 +254,10 @@ impl<const ORDER: usize> Heap for DekoHeap<ORDER> {
     /// Allocates a block of memory from the heap.
     fn allocate(&mut self, size: u64, align: u64) -> (pt: u64)
         ensures
-            self.wf(),
-            self.free_list_valid(),
-            pt != 0 ==> self.in_heap_range(pt as nat, size as nat),
-            self.params_eq(&old(self)),
+            final(self).wf(),
+            final(self).free_list_valid(),
+            pt != 0 ==> final(self).in_heap_range(pt as nat, size as nat),
+            final(self).params_eq(&old(self)),
     {
         // Get the order we will need.
         let order_needed = self.allocation_order(size, align) as usize;
@@ -319,9 +319,9 @@ impl<const ORDER: usize> Heap for DekoHeap<ORDER> {
     /// Deallocate a block allocated using `allocate`.
     fn deallocate(&mut self, ptr: u64, size: u64, align: u64)
         ensures
-            self.wf(),
-            self.free_list_valid(),
-            self.params_eq(&old(self)),
+            final(self).wf(),
+            final(self).free_list_valid(),
+            final(self).params_eq(&old(self)),
     {
         let initial_order = self.allocation_order(size, align);
 
@@ -457,9 +457,9 @@ impl<const ORDER: usize> Heap for DekoHeap<ORDER> {
     /// valid, unused memory region starting at `heap_start` of `heap_size`.
     fn init(&mut self, heap_start: u64, heap_size: u64, order: u64)
         ensures
-            self.wf(),
-            self.init_ok(),
-            self.free_list_valid(),
+            final(self).wf(),
+            final(self).init_ok(),
+            final(self).free_list_valid(),
     {
         self.heap_base = heap_start;
 
@@ -652,8 +652,8 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
             valid_heap_param(heap_start, heap_size, order),
             order == ORDER as u64,
         ensures
-            self.wf(),
-            self.init_ok(),
+            final(self).wf(),
+            final(self).init_ok(),
     {
         // Since we do not have a method to modify the value in place, we need to
         // manually replace the target list in the free_list with an empty one,
@@ -833,9 +833,9 @@ impl<const ORDER: usize> DekoHeap<ORDER> {
             old(self).free_list_valid(),
             old(self).is_init(),
         ensures
-            self.wf(),
-            self.free_list_valid(),
-            self.params_eq(&old(self)),
+            final(self).wf(),
+            final(self).free_list_valid(),
+            final(self).params_eq(&old(self)),
     {
         let addr = block.addr();  // get the address to the block.
         let min_block_size_log2 = self.min_block_size.ilog2() as u64;

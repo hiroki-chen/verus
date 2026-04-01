@@ -173,7 +173,7 @@ impl VmsaPage {
         requires
             old(vmsa).wf(),
         ensures
-            vmsa.wf(),
+            final(vmsa).wf(),
     )]
     fn do_init_for_app(vmsa: &mut VMSA, linux_pt_regs: &PtRegs) -> DekoGuestServResult<()> {
         let DekoAtomicData { data: syscall_trampoline, .. } =
@@ -303,7 +303,7 @@ impl VmsaPage {
             old(vmsa_app).wf(),
             vmsa_user.is_user_regs(),
         ensures
-            vmsa_app.wf(),
+            final(vmsa_app).wf(),
     )]
     fn copy_from_user_context(vmsa_app: &mut VMSA, vmsa_user: &PtRegs) {
         kdebug!("Copying from user context", vmsa_user);
@@ -409,7 +409,7 @@ impl VmsaPage {
             syscall_trampoline_base.wf(),
             syscall_trampoline_base@ >= VADDR_UPPER_MASK,
         ensures
-            vmsa_app.wf(),
+            final(vmsa_app).wf(),
     )]
     fn copy_from_guest_context(
         vmsa_app: &mut VMSA,
@@ -479,10 +479,10 @@ impl VmsaPage {
             old(vmsa_page_perm).ptr_perm.pptr() == old(self).page@,
             linux_pt_regs.is_user_regs(),
         ensures
-            self.wf(),
-            vmsa_page_perm.ptr_perm.wf(),
-            vmsa_page_perm.ptr_perm.is_init(),
-            vmsa_page_perm.ptr_perm.pptr() == self.page@,
+            final(self).wf(),
+            final(vmsa_page_perm).ptr_perm.wf(),
+            final(vmsa_page_perm).ptr_perm.is_init(),
+            final(vmsa_page_perm).ptr_perm.pptr() == final(self).page@,
     )]
     pub fn init_for_app(&mut self, linux_pt_regs: &PtRegs) -> DekoGuestServResult<()> {
         let vmsa = &mut unsafe { &mut *(self.page.addr() as *mut [VMSA; 2]) }[self.idx as usize];
@@ -501,10 +501,10 @@ impl VmsaPage {
             old(vmsa_page_perm).ptr_perm.is_init(),
             old(vmsa_page_perm).ptr_perm.pptr() == old(self).page@,
         ensures
-            self.wf(),
-            vmsa_page_perm.ptr_perm.wf(),
-            vmsa_page_perm.ptr_perm.is_init(),
-            vmsa_page_perm.ptr_perm.pptr() == self.page@,
+            final(self).wf(),
+            final(vmsa_page_perm).ptr_perm.wf(),
+            final(vmsa_page_perm).ptr_perm.is_init(),
+            final(vmsa_page_perm).ptr_perm.pptr() == final(self).page@,
     )]
     pub fn enable_svme(&mut self) {
         let vmsa = &mut unsafe { &mut *(self.page.addr() as *mut [VMSA; 2]) }[self.idx as usize];
@@ -527,10 +527,10 @@ impl VmsaPage {
             old(vmsa_page_perm).ptr_perm.is_init(),
             old(vmsa_page_perm).ptr_perm.pptr() == old(self).page@,
         ensures
-            self.wf(),
-            vmsa_page_perm.ptr_perm.wf(),
-            vmsa_page_perm.ptr_perm.is_init(),
-            vmsa_page_perm.ptr_perm.pptr() == self.page@,
+            final(self).wf(),
+            final(vmsa_page_perm).ptr_perm.wf(),
+            final(vmsa_page_perm).ptr_perm.is_init(),
+            final(vmsa_page_perm).ptr_perm.pptr() == final(self).page@,
     )]
     pub fn set_thread_bases(&mut self, fs_base: u64, gs_base: u64, kernel_gs_base: u64) {
         let vmsa = &mut unsafe { &mut *(self.page.addr() as *mut [VMSA; 2]) }[self.idx as usize];
@@ -574,10 +574,10 @@ impl VmsaPage {
             old(vmsa_page_perm).ptr_perm.is_init(),
             old(vmsa_page_perm).ptr_perm.pptr() == old(self).page@,
         ensures
-            self.wf(),
-            vmsa_page_perm.ptr_perm.wf(),
-            vmsa_page_perm.ptr_perm.is_init(),
-            vmsa_page_perm.ptr_perm.pptr() == self.page@,
+            final(self).wf(),
+            final(vmsa_page_perm).ptr_perm.wf(),
+            final(vmsa_page_perm).ptr_perm.is_init(),
+            final(vmsa_page_perm).ptr_perm.pptr() == final(self).page@,
     )]
     pub fn restore_from_snapshot(&mut self, snapshot: &VMSA) {
         unsafe {
@@ -597,10 +597,10 @@ impl VmsaPage {
             old(vmsa_page_perm).ptr_perm.is_init(),
             old(vmsa_page_perm).ptr_perm.pptr() == old(self).page@,
         ensures
-            self.wf(),
-            vmsa_page_perm.ptr_perm.wf(),
-            vmsa_page_perm.ptr_perm.is_init(),
-            vmsa_page_perm.ptr_perm.pptr() == self.page@,
+            final(self).wf(),
+            final(vmsa_page_perm).ptr_perm.wf(),
+            final(vmsa_page_perm).ptr_perm.is_init(),
+            final(vmsa_page_perm).ptr_perm.pptr() == final(self).page@,
     )]
     pub fn restore_migrated_snapshot(
         &mut self,
@@ -895,7 +895,7 @@ impl DekoUserApp {
             old(self).wf(),
             vmsa.wf(),
         ensures
-            self.wf(),
+            final(self).wf(),
             vmsa.wf(),
     )]
     fn save_vmsa_snapshot(&mut self, vmsa: &VMSA) {
@@ -1003,7 +1003,7 @@ impl DekoUserApp {
             region.start@ % PAGE_SIZE == 0,
             region.end@ <= VADDR_LOWER_MASK, // Linux user-space limit
         ensures
-            self.wf(),
+            final(self).wf(),
     )]
     pub fn add_and_measure(&mut self, region: VaddrRange) -> DekoGuestServResult<()> {
         let len = (region.end.0 - region.start.0 + PAGE_SIZE - 1) / PAGE_SIZE;
@@ -1016,6 +1016,13 @@ impl DekoUserApp {
                 buf@.len() == (PAGE_SIZE + 48) as int,
                 self.ext.measurement@.len() == 48,
                 self.wf(),
+                self.ext.opened_files@ == old(self).ext.opened_files@,
+                self.ext.occupied_regions@ == old(self).ext.occupied_regions@,
+                self.ext.state == old(self).ext.state,
+                self.ext.migration_state == old(self).ext.migration_state,
+                self.ext.saved_vmsa == old(self).ext.saved_vmsa,
+                self.ext.sigactions@ == old(self).ext.sigactions@,
+                self.ext.shared_buf == old(self).ext.shared_buf,
         {
             update_slice(&mut buf, j, self.ext.measurement[j]);
         }
@@ -1031,6 +1038,13 @@ impl DekoUserApp {
                 PAGE_SIZE == 0x1000,
                 VADDR_LOWER_MASK == 0x0000_7FFF_FFFF_FFFF,
                 self.wf(),
+                self.ext.opened_files@ == old(self).ext.opened_files@,
+                self.ext.occupied_regions@ == old(self).ext.occupied_regions@,
+                self.ext.state == old(self).ext.state,
+                self.ext.migration_state == old(self).ext.migration_state,
+                self.ext.saved_vmsa == old(self).ext.saved_vmsa,
+                self.ext.sigactions@ == old(self).ext.sigactions@,
+                self.ext.shared_buf == old(self).ext.shared_buf,
                 decreases
                     len - i,
         )]
@@ -1067,6 +1081,13 @@ impl DekoUserApp {
                     buf@.len() == DEKO_MEASURE_BUF_SIZE as int,
                     hash@.len() == 48,
                     self.wf(),
+                    self.ext.opened_files@ == old(self).ext.opened_files@,
+                    self.ext.occupied_regions@ == old(self).ext.occupied_regions@,
+                    self.ext.state == old(self).ext.state,
+                    self.ext.migration_state == old(self).ext.migration_state,
+                    self.ext.saved_vmsa == old(self).ext.saved_vmsa,
+                    self.ext.sigactions@ == old(self).ext.sigactions@,
+                    self.ext.shared_buf == old(self).ext.shared_buf,
             {
                 let b = hash[j];
                 update_slice(&mut buf, j, b);
@@ -1721,11 +1742,11 @@ pub(crate) fn publish_current_cpu_vmpl1_slot_vmsa(
         old(vmsa_page_perm).ptr_perm.is_init(),
         old(vmsa_page_perm).ptr_perm.pptr() == old(vmsa).page@,
     ensures
-        vmsa.wf(),
-        vmsa_page_perm.ptr_perm.wf(),
-        vmsa_page_perm.ptr_perm.is_init(),
-        vmsa_page_perm.ptr_perm.pptr() == vmsa.page@,
-        r is Ok ==> r.unwrap() ==> vmsa.wf(),
+        final(vmsa).wf(),
+        final(vmsa_page_perm).ptr_perm.wf(),
+        final(vmsa_page_perm).ptr_perm.is_init(),
+        final(vmsa_page_perm).ptr_perm.pptr() == final(vmsa).page@,
+        r is Ok ==> r.unwrap() ==> final(vmsa).wf(),
 )]
 pub(crate) fn restore_app_vmsa_snapshot(
     pid: u32,

@@ -356,9 +356,9 @@ impl Idt {
             ptr@ == old(idt_perm).pptr(),
             old(idt_perm).wf(),
         ensures
-            idt_perm.wf(),
-            idt_perm.is_init(),
-            idt_perm.pptr() == old(idt_perm).pptr(),
+            final(idt_perm).wf(),
+            final(idt_perm).is_init(),
+            final(idt_perm).pptr() == old(idt_perm).pptr(),
     {
         let this = unsafe {
             &mut *(ptr.addr() as *mut Idt)
@@ -415,7 +415,7 @@ impl Idt {
             size <= old(self).entries@.len(),
             old(self).entries.wf(),
         ensures
-            forall|i: int| 0 <= i < size as int ==> #[trigger] self.entries@[i as int].wf(),
+            forall|i: int| 0 <= i < size as int ==> #[trigger] final(self).entries@[i as int].wf(),
     {
         let mut i = 0;
         let addr = addr as usize;
@@ -460,7 +460,7 @@ impl Idt {
     requires
         old(early_idt).entries. wf(),
     ensures
-        early_idt.wf(),
+        final(early_idt).wf(),
 )]
 pub fn init_early_idt(early_idt: &mut Idt) {
     unsafe {
@@ -479,7 +479,7 @@ pub fn init_generic_idt(early_idt: &mut Idt)
         old(early_idt).wf(),  // since we must have called init_early_idt
 
     ensures
-        early_idt.wf(),
+        final(early_idt).wf(),
 {
     unsafe {
         early_idt.init(&stage2_generic_idt_handler as *const u8, core::mem::size_of::<IdtEntry>());

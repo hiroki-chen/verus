@@ -66,8 +66,8 @@ fn validate_trampoline_setup_req(
         old(cpu_perm).wf(),
         old(params).additional_data is Some,
     ensures
-        cpu_perm.wf(),
-        cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
+        final(cpu_perm).wf(),
+        final(cpu_perm).ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
 )]
 fn handle_deko_service_trampoline_setup(params: &mut DekoGuestRequestParams) -> DekoGuestServResult<
     (),
@@ -187,8 +187,8 @@ fn read_guest_bytes(blob_gpa: PhysAddr, blob_len: usize) -> DekoGuestServResult<
     requires
         old(cpu_perm).wf(),
     ensures
-        cpu_perm.wf(),
-        cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
+        final(cpu_perm).wf(),
+        final(cpu_perm).ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
 )]
 fn handle_deko_service_load_policy(params: &mut DekoGuestRequestParams) -> DekoGuestServResult<()> {
     let req_gpa = params.r9;
@@ -264,8 +264,8 @@ fn handle_deko_service_load_policy(params: &mut DekoGuestRequestParams) -> DekoG
     requires
         old(cpu_perm).wf(),
     ensures
-        cpu_perm.wf(),
-        cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
+        final(cpu_perm).wf(),
+        final(cpu_perm).ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
 )]
 fn handle_deko_service_map_ifc(params: &mut DekoGuestRequestParams) -> DekoGuestServResult<()> {
     let gpa = params.rcx & !(PAGE_SIZE as u64 - 1);
@@ -379,8 +379,8 @@ fn handle_deko_service_map_ifc(params: &mut DekoGuestRequestParams) -> DekoGuest
         old(cpu_perm).wf(),
         old(params).additional_data is Some,
     ensures
-        cpu_perm.wf(),
-        cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
+        final(cpu_perm).wf(),
+        final(cpu_perm).ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
 )]
 fn handle_deko_service_launch_app(params: &mut DekoGuestRequestParams) -> DekoGuestServResult<u64> {
     let r9 = params.r9;
@@ -424,8 +424,8 @@ fn handle_deko_service_launch_app(params: &mut DekoGuestRequestParams) -> DekoGu
         old(cpu_perm).wf(),
         old(params).additional_data is Some,
     ensures
-        cpu_perm.wf(),
-        cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
+        final(cpu_perm).wf(),
+        final(cpu_perm).ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
 )]
 fn handle_deko_service_report_app(params: &mut DekoGuestRequestParams) -> DekoGuestServResult<()> {
     let (cpu, Tracked(cpu_perm)) = DekoCpuCtx::this_cpu();
@@ -506,8 +506,8 @@ fn handle_deko_service_report_app(params: &mut DekoGuestRequestParams) -> DekoGu
     requires
         old(cpu_perm).wf(),
     ensures
-        cpu_perm.wf(),
-        cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
+        final(cpu_perm).wf(),
+        final(cpu_perm).ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
 )]
 fn handle_deko_service_task_migrate(params: &mut DekoGuestRequestParams) -> DekoGuestServResult<
     u64,
@@ -605,8 +605,8 @@ fn handle_deko_service_task_migrate(params: &mut DekoGuestRequestParams) -> Deko
         old(cpu_perm).ptr_perm.value().cpu_id == cpu_idx,
         old(params).additional_data is Some,
     ensures
-        cpu_perm.wf(),
-        cpu_perm.ptr_perm.value().cpu_id == cpu_idx,
+        final(cpu_perm).wf(),
+        final(cpu_perm).ptr_perm.value().cpu_id == cpu_idx,
 )]
 pub(super) fn handle_guest_exit_extend_service(
     req: u32,

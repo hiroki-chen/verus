@@ -55,7 +55,7 @@ pub fn update_vec<T>(v: &mut Vec<T>, index: usize, value: T)
     requires
         0 <= index < old(v)@.len(),
     ensures
-        v@ =~= old(v)@.update(index as int, value),
+        final(v)@ =~= old(v)@.update(index as int, value),
 {
     v[index] = value;
 }
@@ -66,7 +66,7 @@ pub fn update_slice<T, const N: usize>(s: &mut [T; N], index: usize, value: T)
     requires
         0 <= index < old(s)@.len(),
     ensures
-        s@ =~= old(s)@.update(index as int, value),
+        final(s)@ =~= old(s)@.update(index as int, value),
 {
     s[index] = value;
 }

@@ -428,8 +428,8 @@ impl DekoGuestExitInformation {
         old(cpu_perm).ptr_perm.value().cpu_id == cpu_idx,
         protocol == DEKO_GUEST_EXIT_PROTOCOL_EXTEND_SERVICE ==> old(params).additional_data is Some,
     ensures
-        cpu_perm.wf(),
-        cpu_perm.ptr_perm.value().cpu_id == cpu_idx,
+        final(cpu_perm).wf(),
+        final(cpu_perm).ptr_perm.value().cpu_id == cpu_idx,
 )]
 pub fn handle_guest_exit(
     protocol: u32,

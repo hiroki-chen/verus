@@ -54,14 +54,14 @@ verus! {
         header.get_elf() matches Some(elf_file) && segment == elf_file.load_segments()[segment_index as int],
         segment.wf_with_load_base(*old(paddr)),
     ensures
-        paddr@ == old(paddr)@ + (r.end@ - r.start@),
-        paddr@ % PAGE_SIZE == 0,
+        final(paddr)@ == old(paddr)@ + (r.end@ - r.start@),
+        final(paddr)@ % PAGE_SIZE == 0,
         r.wf(),
         r.start@ == segment.vaddr_begin()@,
         r.end@ == segment.vaddr_end().page_align_up_spec()@,
         r.start@ % PAGE_SIZE == 0,
         r.end@ % PAGE_SIZE == 0,
-        ctx_perm.pgtable_perm.mapping_space == old(ctx_perm).pgtable_perm.mapping_space,
+        final(ctx_perm).pgtable_perm.mapping_space == old(ctx_perm).pgtable_perm.mapping_space,
         /* Non overflowing properties... */
 )]
 fn load_elf_segment(
@@ -314,17 +314,17 @@ impl<'a> ElfFile<'a> {
             old(paddr)@ % PAGE_SIZE == 0,
             base@ >= VADDR_LOWER_MASK,
         ensures
-            ctx_perm.wf_with(ctx),
-            ctx_perm.pgtable_perm.mapping_space == old(ctx_perm).pgtable_perm.mapping_space,
+            final(ctx_perm).wf_with(ctx),
+            final(ctx_perm).pgtable_perm.mapping_space == old(ctx_perm).pgtable_perm.mapping_space,
             r matches (Some(vaddr_start), vaddr_end) ==> {
                 &&& vaddr_start.wf()
                 &&& vaddr_end.wf()
                 &&& vaddr_start@ % PAGE_SIZE == 0
                 &&& vaddr_end@ % PAGE_SIZE == 0
                 &&& base@ < vaddr_start@ < vaddr_end@ < u64::MAX
-                &&& paddr@ > old(paddr)@
+                &&& final(paddr)@ > old(paddr)@
             },
-            paddr@ % PAGE_SIZE == 0,
+            final(paddr)@ % PAGE_SIZE == 0,
     {
         let mut load_virt_start = None::<VirtAddr>;
         let mut load_virt_end = VirtAddr::from(0u64);

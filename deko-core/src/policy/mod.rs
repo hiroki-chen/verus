@@ -177,9 +177,9 @@ impl DekoPolicyEngine {
             old(self).wf(),
             auth.wf(),
         ensures
-            self.domains@ =~= old(self).domains@,
-            self.default_domain == old(self).default_domain,
-            self.launch_index.wf(),
+            final(self).domains@ =~= old(self).domains@,
+            final(self).default_domain == old(self).default_domain,
+            final(self).launch_index.wf(),
     )]
     fn record_launch_identity(&mut self, identity: &str, auth: &LaunchAuthorization) {
         let key = Self::clone_string(identity);
@@ -196,7 +196,7 @@ impl DekoPolicyEngine {
         requires
             old(self).wf(),
         ensures
-            self.wf(),
+            final(self).wf(),
     )]
     fn load_domain_from_bytes(&mut self, domain_id: DomainId, buf: &[u8]) -> DekoGuestServResult<
         (),

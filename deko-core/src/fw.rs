@@ -416,11 +416,11 @@ pub fn get_fw_regions_from_igvm(igvm_params: &IgvmParams<'_>) -> Vec<PaddrRange>
         igvm_params.wf(),
         old(pgtable_perm).wf(),
     ensures
-        pgtable_perm.wf(),
-        pgtable_perm.pgtable_perm == old(pgtable_perm).pgtable_perm,
-        pgtable_perm.private_bit == old(pgtable_perm).private_bit,
-        pgtable_perm.shared_bit == old(pgtable_perm).shared_bit,
-        pgtable_perm.mapping_space == old(pgtable_perm).mapping_space,
+        final(pgtable_perm).wf(),
+        final(pgtable_perm).pgtable_perm == old(pgtable_perm).pgtable_perm,
+        final(pgtable_perm).private_bit == old(pgtable_perm).private_bit,
+        final(pgtable_perm).shared_bit == old(pgtable_perm).shared_bit,
+        final(pgtable_perm).mapping_space == old(pgtable_perm).mapping_space,
 )]
 pub fn invalidate_early_boot_mem(header: &DekoKernelLaunchInfo, igvm_params: &IgvmParams<'_>) {
     let need_psc = igvm_params.igvm_param_page.environment_info & 0x1 != 0;
@@ -487,11 +487,11 @@ pub fn invalidate_early_boot_mem(header: &DekoKernelLaunchInfo, igvm_params: &Ig
         prange.start@ % PAGE_SIZE == 0,
         prange.end@ % PAGE_SIZE == 0,
     ensures
-        pgtable_perm.wf(),
-        pgtable_perm.pgtable_perm == old(pgtable_perm).pgtable_perm,
-        pgtable_perm.private_bit == old(pgtable_perm).private_bit,
-        pgtable_perm.shared_bit == old(pgtable_perm).shared_bit,
-        pgtable_perm.mapping_space == old(pgtable_perm).mapping_space,
+        final(pgtable_perm).wf(),
+        final(pgtable_perm).pgtable_perm == old(pgtable_perm).pgtable_perm,
+        final(pgtable_perm).private_bit == old(pgtable_perm).private_bit,
+        final(pgtable_perm).shared_bit == old(pgtable_perm).shared_bit,
+        final(pgtable_perm).mapping_space == old(pgtable_perm).mapping_space,
 )]
 fn invalidate_boot_memory(header: &DekoKernelLaunchInfo, prange: PaddrRange, need_psc: bool) {
     kinfo!("Invalidating early memory region:", prange);

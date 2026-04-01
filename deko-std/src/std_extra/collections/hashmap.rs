@@ -94,7 +94,7 @@ impl<K: Eq + Hash, V, A: core::alloc::Allocator> HashMap<K, V, A> {
     #[verifier::external_body]
     #[verus_spec(r =>
         ensures
-            self@ =~= old(self)@.insert(key, value),
+            final(self)@ =~= old(self)@.insert(key, value),
             r == if old(self)@.contains_key(key) {
                 Some(old(self)@[key])
             } else {
@@ -109,7 +109,7 @@ impl<K: Eq + Hash, V, A: core::alloc::Allocator> HashMap<K, V, A> {
     #[verifier::external_body]
     #[verus_spec(r =>
         ensures
-            self@ =~= old(self)@.remove(*key),
+            final(self)@ =~= old(self)@.remove(*key),
             r == old(self)@.get(*key),
     )]
     pub fn remove(&mut self, key: &K) -> Option<V> {

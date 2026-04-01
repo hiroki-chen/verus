@@ -358,9 +358,9 @@ impl VMSA {
             old(cpu_perm).is_init(),
             old(cpu_perm).pptr() == ptr@,
         ensures
-            cpu_perm.wf(),
-            cpu_perm.is_init(),
-            cpu_perm.pptr() == ptr@,
+            final(cpu_perm).wf(),
+            final(cpu_perm).is_init(),
+            final(cpu_perm).pptr() == ptr@,
     )]
     pub fn copy_system_call_registers(ptr: DekoPPtr<Self>, syscall_body: &DekoSyscallBody) {
         unsafe {
@@ -410,10 +410,10 @@ impl VMSA {
             old(ptr_perm).is_init(),
             old(ptr_perm).pptr() == ptr@,
         ensures
-            ptr_perm.value().efer & 0x1000 != 0,
-            ptr_perm.wf(),
-            ptr_perm.is_init(),
-            ptr_perm.pptr() == ptr@,
+            final(ptr_perm).value().efer & 0x1000 != 0,
+            final(ptr_perm).wf(),
+            final(ptr_perm).is_init(),
+            final(ptr_perm).pptr() == ptr@,
     )]
     pub fn enable(ptr: DekoPPtr<Self>) {
         unsafe {
@@ -443,9 +443,9 @@ impl VMSA {
             old(ptr_perm).is_init(),
             old(ptr_perm).pptr() == ptr@,
         ensures
-            ptr_perm.wf(),
-            ptr_perm.is_init(),
-            ptr_perm.pptr() == ptr@,
+            final(ptr_perm).wf(),
+            final(ptr_perm).is_init(),
+            final(ptr_perm).pptr() == ptr@,
     )]
     pub fn check_and_clear_pending_interrupt_event(ptr: DekoPPtr<Self>) -> u8 {
         unsafe {
@@ -483,9 +483,9 @@ impl VMSA {
             old(ptr_perm).is_init(),
             old(ptr_perm).pptr() == ptr@,
         ensures
-            ptr_perm.wf(),
-            ptr_perm.is_init(),
-            ptr_perm.pptr() == ptr@,
+            final(ptr_perm).wf(),
+            final(ptr_perm).is_init(),
+            final(ptr_perm).pptr() == ptr@,
     )]
     pub fn check_and_clear_pending_virtual_interrupt(ptr: DekoPPtr<Self>) -> u8 {
         unsafe {
@@ -515,9 +515,9 @@ impl VMSA {
             old(ptr_perm).is_init(),
             old(ptr_perm).pptr() == ptr@,
         ensures
-            ptr_perm.wf(),
-            ptr_perm.is_init(),
-            ptr_perm.pptr() == ptr@,
+            final(ptr_perm).wf(),
+            final(ptr_perm).is_init(),
+            final(ptr_perm).pptr() == ptr@,
     )]
     pub fn deliver_interrupt_immediately(ptr: DekoPPtr<Self>, irq: u8) -> bool {
         unsafe {
@@ -552,10 +552,10 @@ impl VMSA {
             old(ptr_perm).is_init(),
             old(ptr_perm).pptr() == ptr@,
         ensures
-            ptr_perm.value().lstar == lstar,
-            ptr_perm.wf(),
-            ptr_perm.is_init(),
-            ptr_perm.pptr() == ptr@,
+            final(ptr_perm).value().lstar == lstar,
+            final(ptr_perm).wf(),
+            final(ptr_perm).is_init(),
+            final(ptr_perm).pptr() == ptr@,
     )]
     pub fn set_lstar(ptr: DekoPPtr<Self>, lstar: u64) {
         unsafe {
@@ -585,10 +585,10 @@ impl VMSA {
             old(ptr_perm).is_init(),
             old(ptr_perm).pptr() == ptr@,
         ensures
-            ptr_perm.value().rax == value,
-            ptr_perm.wf(),
-            ptr_perm.is_init(),
-            ptr_perm.pptr() == ptr@,
+            final(ptr_perm).value().rax == value,
+            final(ptr_perm).wf(),
+            final(ptr_perm).is_init(),
+            final(ptr_perm).pptr() == ptr@,
     )]
     pub fn set_rax(ptr: DekoPPtr<Self>, value: u64) {
         unsafe {
@@ -618,10 +618,10 @@ impl VMSA {
             old(ptr_perm).is_init(),
             old(ptr_perm).pptr() == ptr@,
         ensures
-            ptr_perm.value().rcx == value,
-            ptr_perm.wf(),
-            ptr_perm.is_init(),
-            ptr_perm.pptr() == ptr@,
+            final(ptr_perm).value().rcx == value,
+            final(ptr_perm).wf(),
+            final(ptr_perm).is_init(),
+            final(ptr_perm).pptr() == ptr@,
     )]
     pub fn set_rcx(ptr: DekoPPtr<Self>, value: u64) {
         unsafe {
@@ -641,10 +641,10 @@ impl VMSA {
             old(ptr_perm).is_init(),
             old(ptr_perm).pptr() == ptr@,
         ensures
-            ptr_perm.value().rdx == value,
-            ptr_perm.wf(),
-            ptr_perm.is_init(),
-            ptr_perm.pptr() == ptr@,
+            final(ptr_perm).value().rdx == value,
+            final(ptr_perm).wf(),
+            final(ptr_perm).is_init(),
+            final(ptr_perm).pptr() == ptr@,
     )]
     pub fn set_rdx(ptr: DekoPPtr<Self>, value: u64) {
         unsafe {
@@ -664,10 +664,10 @@ impl VMSA {
             old(ptr_perm).is_init(),
             old(ptr_perm).pptr() == ptr@,
         ensures
-            ptr_perm.value().r8 == value,
-            ptr_perm.wf(),
-            ptr_perm.is_init(),
-            ptr_perm.pptr() == ptr@,
+            final(ptr_perm).value().r8 == value,
+            final(ptr_perm).wf(),
+            final(ptr_perm).is_init(),
+            final(ptr_perm).pptr() == ptr@,
     )]
     pub fn set_r8(ptr: DekoPPtr<Self>, value: u64) {
         unsafe {
@@ -687,10 +687,10 @@ impl VMSA {
             old(ptr_perm).is_init(),
             old(ptr_perm).pptr() == ptr@,
         ensures
-            ptr_perm.value().r9 == value,
-            ptr_perm.wf(),
-            ptr_perm.is_init(),
-            ptr_perm.pptr() == ptr@,
+            final(ptr_perm).value().r9 == value,
+            final(ptr_perm).wf(),
+            final(ptr_perm).is_init(),
+            final(ptr_perm).pptr() == ptr@,
     )]
     pub fn set_r9(ptr: DekoPPtr<Self>, value: u64) {
         unsafe {
@@ -723,9 +723,9 @@ impl VMSA {
             deko_ifc_handler@ >= VADDR_UPPER_MASK,
             deko_ifc_handler@ % PAGE_SIZE_2M == 0,
         ensures
-            ptr_perm.wf(),
-            ptr_perm.is_init(),
-            ptr_perm.pptr() == ptr@,
+            final(ptr_perm).wf(),
+            final(ptr_perm).is_init(),
+            final(ptr_perm).pptr() == ptr@,
     )]
     pub fn prepare_application_vmsa(
         ptr: DekoPPtr<Self>,
@@ -756,9 +756,9 @@ impl VMSA {
             old(ptr_perm).is_init(),
             old(ptr_perm).pptr() == ptr@,
         ensures
-            ptr_perm.wf(),
-            ptr_perm.is_init(),
-            ptr_perm.pptr() == ptr@,
+            final(ptr_perm).wf(),
+            final(ptr_perm).is_init(),
+            final(ptr_perm).pptr() == ptr@,
     )]
     pub fn disable(ptr: DekoPPtr<Self>) {
         unsafe {
@@ -794,9 +794,9 @@ impl VMSA {
             old(ptr_perm).is_init(),
             old(ptr_perm).pptr() == ptr@,
         ensures
-            ptr_perm.wf(),
-            ptr_perm.is_init(),
-            ptr_perm.pptr() == ptr@,
+            final(ptr_perm).wf(),
+            final(ptr_perm).is_init(),
+            final(ptr_perm).pptr() == ptr@,
     )]
     pub fn populate_from_igvm_params(ptr: DekoPPtr<Self>, igvm_params: &IgvmParams<'_>) {
         if let Some(guest_ctx) = igvm_params.igvm_guest_context {
@@ -945,13 +945,13 @@ impl VmsaPage {
             rmp.bits() & Rmp_ALL_BITS == rmp.bits(),
             old(pgtable_perm).wf(),
         ensures
-            old(pgtable_perm).pgtable_perm == pgtable_perm.pgtable_perm,
-            old(pgtable_perm).private_bit == pgtable_perm.private_bit,
-            old(pgtable_perm).shared_bit == pgtable_perm.shared_bit,
-            old(pgtable_perm).mapping_space == pgtable_perm.mapping_space,
-            pgtable_perm.pgtable_perm.wf(),
-            pgtable_perm.wf(),
-            pgtable_perm.pgtable_perm.is_init(),
+            old(pgtable_perm).pgtable_perm == final(pgtable_perm).pgtable_perm,
+            old(pgtable_perm).private_bit == final(pgtable_perm).private_bit,
+            old(pgtable_perm).shared_bit == final(pgtable_perm).shared_bit,
+            old(pgtable_perm).mapping_space == final(pgtable_perm).mapping_space,
+            final(pgtable_perm).pgtable_perm.wf(),
+            final(pgtable_perm).wf(),
+            final(pgtable_perm).pgtable_perm.is_init(),
             perm@.ptr_perm.wf(),
             perm@.ptr_perm.pptr() == r.page@,
             perm@.ptr_perm.is_init(),
@@ -1011,9 +1011,9 @@ impl VmsaPage {
             old(perm).ptr_perm.pptr() == self.page@,
             self.wf(),
         ensures
-            perm.ptr_perm.wf(),
-            perm.ptr_perm.pptr() == self.page@,
-            perm.ptr_perm.is_init(),
+            final(perm).ptr_perm.wf(),
+            final(perm).ptr_perm.pptr() == self.page@,
+            final(perm).ptr_perm.is_init(),
     )]
     pub fn init_guest_vmsa(&self, reset_rip: u64) -> u64 {
         // This is similar to init_from, but only initializes the necessary fields
@@ -1082,9 +1082,9 @@ impl VmsaPage {
             old(perm).ptr_perm.pptr() == self.page@,
             self.wf(),
         ensures
-            perm.ptr_perm.wf(),
-            perm.ptr_perm.pptr() == self.page@,
-            perm.ptr_perm.is_init(),
+            final(perm).ptr_perm.wf(),
+            final(perm).ptr_perm.pptr() == self.page@,
+            final(perm).ptr_perm.is_init(),
     )]
     pub fn init_from(&self, ctx: &VmsaInitialContext, vmpl: u8) -> u64 {
         // SAFETY: We have the permission to the VMSA page, and we ensure that

@@ -130,13 +130,13 @@ impl<T: WellFormed, const N: usize> Array<T, N> {
             old(self)@.index(i as int).wf(),
             f.requires((old(self)@.index(i as int),)),
         ensures
-            self.wf(),
-            f.ensures((old(self)@.index(i as int),), (t, self@.index(i as int))),
-            self@.len() == old(self)@.len(),
-            self@.index(i as int).wf(),
+            final(self).wf(),
+            f.ensures((old(self)@.index(i as int),), (t, final(self)@.index(i as int))),
+            final(self)@.len() == old(self)@.len(),
+            final(self)@.index(i as int).wf(),
             // others remain unchanged.
             forall|j: int|
-                0 <= j < old(self)@.len() as int && j != i as int ==> self@.index(j) == old(
+                0 <= j < old(self)@.len() as int && j != i as int ==> final(self)@.index(j) == old(
                     self,
                 )@.index(j),
     {
@@ -157,9 +157,9 @@ impl<T: WellFormed, const N: usize> Array<T, N> {
             value.wf(),
         ensures
             old(self)@.index(i as int) == t,
-            self@.index(i as int) == value,
-            self.wf(),
-            self@ == old(self)@.update(i as int, value),
+            final(self)@.index(i as int) == value,
+            final(self).wf(),
+            final(self)@ == old(self)@.update(i as int, value),
     {
         // not supported by verus yet
         core::mem::replace(&mut self.0[i], value)

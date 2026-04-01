@@ -225,8 +225,8 @@ pub fn validate_ghcb(
         old(ctx_perm).ghcb_perm.wf(),
         is_vmpl1 ==> old(ctx_perm).ptr_perm.value().ext_vmpl1 is Some,
     ensures
-        ctx_perm.wf_with(ctx),
-        old(ctx_perm).ptr_perm.value().ext_vmpl1 == ctx_perm.ptr_perm.value().ext_vmpl1,
+        final(ctx_perm).wf_with(ctx),
+        old(ctx_perm).ptr_perm.value().ext_vmpl1 == final(ctx_perm).ptr_perm.value().ext_vmpl1,
 {
     let ctx = ctx.borrow(Tracked(&ctx_perm.ptr_perm));
     let pgtable = ctx.pgtable();
@@ -1108,9 +1108,9 @@ impl GuestHostCommunicationBlock {
             old(perm).pptr() == ptr@,
             offset + data.len() <= GHCB_BUFFER_SIZE,
         ensures
-            perm.wf(),
-            perm.is_init(),
-            perm.pptr() == ptr@,
+            final(perm).wf(),
+            final(perm).is_init(),
+            final(perm).pptr() == ptr@,
     {
         let ghcb = ptr.borrow(Tracked(perm));
         let shared_buffer = &ghcb.shared_buffer;

@@ -1140,11 +1140,11 @@ impl Page {
             value.wf(),
         ensures
             old(perm).value().0@.index(i as int) == t,
-            perm.value().0@.index(i as int) == value,
-            perm.wf(),
-            perm.value().0@ == old(perm).value().0@.update(i as int, value),
-            perm.pptr() == self_ptr@,
-            perm.is_init(),
+            final(perm).value().0@.index(i as int) == value,
+            final(perm).wf(),
+            final(perm).value().0@ == old(perm).value().0@.update(i as int, value),
+            final(perm).pptr() == self_ptr@,
+            final(perm).is_init(),
     {
         core::mem::replace(
             unsafe {
@@ -1177,11 +1177,11 @@ impl Page {
             private_bit == old(perm).private_bit,
             shared_bit == old(perm).shared_bit,
         ensures
-            perm.wf(),
-            perm.pgtable_perm.pptr() == old(perm).pgtable_perm.pptr(),
-            perm.mapping_space == old(perm).mapping_space,
-            perm.private_bit == old(perm).private_bit,
-            perm.shared_bit == old(perm).shared_bit,
+            final(perm).wf(),
+            final(perm).pgtable_perm.pptr() == old(perm).pgtable_perm.pptr(),
+            final(perm).mapping_space == old(perm).mapping_space,
+            final(perm).private_bit == old(perm).private_bit,
+            final(perm).shared_bit == old(perm).shared_bit,
     {
         // broadcast use lemma_index_at_level_spec_lt_page_entry_num;
         let mut cur_vaddr = vrange.start.0;
@@ -1247,11 +1247,11 @@ impl Page {
             private_bit == old(perm).private_bit,
             shared_bit == old(perm).shared_bit,
         ensures
-            perm.wf(),
-            perm.pgtable_perm.pptr() == old(perm).pgtable_perm.pptr(),
-            perm.mapping_space == old(perm).mapping_space,
-            perm.private_bit == old(perm).private_bit,
-            perm.shared_bit == old(
+            final(perm).wf(),
+            final(perm).pgtable_perm.pptr() == old(perm).pgtable_perm.pptr(),
+            final(perm).mapping_space == old(perm).mapping_space,
+            final(perm).private_bit == old(perm).private_bit,
+            final(perm).shared_bit == old(
                 perm,
             ).shared_bit,
     // vaddr noe becomes shared
@@ -1419,7 +1419,7 @@ impl Page {
             allocator.wf(),
             rmp_flags.wf(),
         ensures
-            old(perm).allocate_pte_4k_ensures(vaddr, private_bit, shared_bit, r, perm),
+            old(perm).allocate_pte_4k_ensures(vaddr, private_bit, shared_bit, r, final(perm)),
     {
         broadcast use PageTablePath::lemma_from_vaddr_at_level_makes_wf;
         broadcast use PageTablePath::lemma_path_take_fact;
@@ -1492,7 +1492,14 @@ impl Page {
             allocator.wf(),
             rmp_flags.wf(),
         ensures
-            old(perm).allocate_pte_lvl3_ensures(vaddr, private_bit, shared_bit, huge, r, perm),
+            old(perm).allocate_pte_lvl3_ensures(
+                vaddr,
+                private_bit,
+                shared_bit,
+                huge,
+                r,
+                final(perm),
+            ),
     {
         broadcast use PteFlags::lemma_from_bits_single;
         broadcast use PteFlags::lemma_each_bit_is_valid;
@@ -1660,7 +1667,14 @@ impl Page {
             allocator.wf(),
             rmp_flags.wf(),
         ensures
-            old(perm).allocate_pte_lvl2_ensures(vaddr, private_bit, shared_bit, huge, r, perm),
+            old(perm).allocate_pte_lvl2_ensures(
+                vaddr,
+                private_bit,
+                shared_bit,
+                huge,
+                r,
+                final(perm),
+            ),
     {
         broadcast use PteFlags::lemma_from_bits_single;
         broadcast use PteFlags::lemma_each_bit_is_valid;
@@ -1745,7 +1759,14 @@ impl Page {
             allocator.wf(),
             rmp_flags.wf(),
         ensures
-            old(perm).allocate_pte_lvl1_ensures(vaddr, private_bit, shared_bit, huge, r, perm),
+            old(perm).allocate_pte_lvl1_ensures(
+                vaddr,
+                private_bit,
+                shared_bit,
+                huge,
+                r,
+                final(perm),
+            ),
     {
         broadcast use PteFlags::lemma_from_bits_single;
         broadcast use PteFlags::lemma_each_bit_is_valid;
@@ -2183,7 +2204,7 @@ impl Page {
         requires
             old(perm).do_split_page_into_4k_requires(page, idx, ms, private_bit, shared_bit, vaddr),
         ensures
-            old(perm).do_split_page_into_4k_ensures(page, idx, vaddr, perm),
+            old(perm).do_split_page_into_4k_ensures(page, idx, vaddr, final(perm)),
     {
         broadcast use PteFlags::lemma_from_bits_single;
         broadcast use PteFlags::lemma_each_bit_is_valid;
@@ -2340,7 +2361,7 @@ impl Page {
         requires
             old(perm).split_page_into_4k_requires(mapping, ms, private_bit, shared_bit, vaddr),
         ensures
-            old(perm).split_page_into_4k_ensures(vaddr, perm),
+            old(perm).split_page_into_4k_ensures(vaddr, final(perm)),
     {
         match mapping {
             Mapping::Level0(_, _) => {},
@@ -2377,7 +2398,7 @@ impl Page {
         requires
             old(perm).set_shared_4k_requires(page, vaddr, ms, private_bit, shared_bit),
         ensures
-            old(perm).set_shared_4k_ensures(vaddr, private_bit, shared_bit, perm),
+            old(perm).set_shared_4k_ensures(vaddr, private_bit, shared_bit, final(perm)),
     {
         let mapping = Page::walk(page, Tracked(perm), vaddr, ms, private_bit, shared_bit);
         Page::split_page_into_4k(vaddr, mapping, ms, private_bit, shared_bit, Tracked(perm));
@@ -2440,7 +2461,7 @@ impl Page {
                 flags,
                 private_bit,
                 shared_bit,
-                pgtable_perm,
+                final(pgtable_perm),
             ),
     {
         broadcast use lemma_index_at_level_spec_lt_page_entry_num;
@@ -2549,7 +2570,14 @@ impl Page {
         requires
             old(perm).map_page_2m_requires(page, vaddr, paddr, ms, flags, private_bit, shared_bit),
         ensures
-            old(perm).map_page_2m_ensures(vaddr, paddr, flags, private_bit, shared_bit, perm),
+            old(perm).map_page_2m_ensures(
+                vaddr,
+                paddr,
+                flags,
+                private_bit,
+                shared_bit,
+                final(perm),
+            ),
     {
         let mapping = Page::allocate_pte_2m(
             page,
@@ -2650,7 +2678,14 @@ impl Page {
             old(perm).map_page_4k_requires(page, vaddr, paddr, ms, flags, private_bit, shared_bit),
             rmp_flags.wf(),
         ensures
-            old(perm).map_page_4k_ensures(vaddr, paddr, flags, private_bit, shared_bit, perm),
+            old(perm).map_page_4k_ensures(
+                vaddr,
+                paddr,
+                flags,
+                private_bit,
+                shared_bit,
+                final(perm),
+            ),
     {
         broadcast use PteFlags::lemma_from_bits_single;
         broadcast use PteFlags::lemma_each_bit_is_valid;
@@ -2787,7 +2822,14 @@ impl Page {
             old(perm).map_page_4k_requires(page, vaddr, paddr, ms, flags, private_bit, shared_bit),
             rmp_flags.wf(),
         ensures
-            old(perm).map_page_4k_ensures(vaddr, paddr, flags, private_bit, shared_bit, perm),
+            old(perm).map_page_4k_ensures(
+                vaddr,
+                paddr,
+                flags,
+                private_bit,
+                shared_bit,
+                final(perm),
+            ),
     {
         Self::do_map_page_4k(
             page,
@@ -2819,7 +2861,14 @@ impl Page {
         requires
             old(perm).map_page_4k_requires(page, vaddr, paddr, ms, flags, private_bit, shared_bit),
         ensures
-            old(perm).map_page_4k_ensures(vaddr, paddr, flags, private_bit, shared_bit, perm),
+            old(perm).map_page_4k_ensures(
+                vaddr,
+                paddr,
+                flags,
+                private_bit,
+                shared_bit,
+                final(perm),
+            ),
     {
         Self::do_map_page_4k(
             page,
@@ -4983,9 +5032,9 @@ impl Mapping {
         // all_normalized_vaddrs(vaddr_start..vaddr_end),
         // all_in_range_paddrs(&old(ctx_perm).pgtable_perm.mapping_space, paddr, vaddr_start..vaddr_end),
     ensures
-        ctx_perm.wf_with(ctx),
-        ctx_perm.pgtable_perm.mapped_region(vaddr_start..vaddr_end),
-        ctx_perm.pgtable_perm.mapping_space == old(ctx_perm).pgtable_perm.mapping_space,
+        final(ctx_perm).wf_with(ctx),
+        final(ctx_perm).pgtable_perm.mapped_region(vaddr_start..vaddr_end),
+        final(ctx_perm).pgtable_perm.mapping_space == old(ctx_perm).pgtable_perm.mapping_space,
 )]
 pub(crate) fn map_and_validate(
     ctx: DekoPPtr<DekoCpuCtx>,

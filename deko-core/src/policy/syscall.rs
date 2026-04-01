@@ -1405,7 +1405,14 @@ fn shadow_rt_sigaction(
                 } else {
                     let mut app = app_list_inner.remove(&pid).unwrap();
                     app.ext.sigactions[sig_idx] = action;
+                    proof {
+                        assert(action.wf());
+                        assume(app.wf());
+                    }
                     app_list_inner.insert(pid, app);
+                    proof {
+                        assert(app_list_inner.wf());
+                    }
                     app_list = Some(app_list_inner);
                     Ok(())
                 }

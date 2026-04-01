@@ -67,8 +67,8 @@ pub(super) fn write_guest<T>(addr: VirtAddr, val: T) {
         old(cpu_perm).wf(),
         old(cpu_perm).ptr_perm.value().cpu_id == cpu_idx,
     ensures
-        cpu_perm.wf(),
-        cpu_perm.ptr_perm.value().cpu_id == cpu_idx,
+        final(cpu_perm).wf(),
+        final(cpu_perm).ptr_perm.value().cpu_id == cpu_idx,
 )]
 pub(super) fn handle_guest_exit_deko_service(
     req: u32,
@@ -110,8 +110,8 @@ pub(super) fn handle_guest_exit_deko_service(
         old(cpu_perm).wf(),
         old(cpu_perm).ptr_perm.value().cpu_id == cpu_idx,
     ensures
-        cpu_perm.wf(),
-        cpu_perm.ptr_perm.value().cpu_id == cpu_idx,
+        final(cpu_perm).wf(),
+        final(cpu_perm).ptr_perm.value().cpu_id == cpu_idx,
 )]
 pub(super) fn handle_guest_exit_attest_service(
     req: u32,

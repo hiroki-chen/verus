@@ -18,7 +18,7 @@ verus! {
     requires
         old(key).len() == 32,
     ensures
-        old(key)@.len() == key@.len(),
+        old(key)@.len() == final(key)@.len(),
 )]
 pub fn aes_gcm_256_key_gen(key: &mut [u8; 32]) {
     for i in 0..4 {
@@ -44,7 +44,7 @@ pub fn aes_gcm_256_key_gen(key: &mut [u8; 32]) {
         key.len() == 32,
         old(out_buf)@.len() >= plaintext.len() + 16 /* auth tag. */,
     ensures
-        old(out_buf)@.len() == out_buf@.len(),
+        old(out_buf)@.len() == final(out_buf)@.len(),
 )]
 #[verifier::external_body]
 pub fn encrypt(
@@ -74,7 +74,7 @@ pub fn encrypt(
         key.len() == 32,
         old(out_buf)@.len() >= ciphertext_with_tag.len() - 16,
     ensures
-        old(out_buf)@.len() == out_buf@.len(),
+        old(out_buf)@.len() == final(out_buf)@.len(),
 )]
 #[verifier::external_body]
 pub fn decrypt(

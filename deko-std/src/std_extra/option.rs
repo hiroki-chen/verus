@@ -7,7 +7,7 @@ pub assume_specification<T>[ core::option::Option::<T>::replace ](
     value: T,
 ) -> (r: Option<T>)
     ensures
-        *opt == Some(value),
+        *final(opt) == Some(value),
         r == *old(opt),
 ;
 

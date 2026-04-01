@@ -447,11 +447,11 @@ impl HVDoorbell {
         old(hvdb_perm).hv_perm.no_eoi_required_perm.is_for(old(hvdb_perm).ptr_perm.value().no_eoi_required),
         old(hvdb_perm).hv_perm.per_vmpl_events_perm.is_for(old(hvdb_perm).ptr_perm.value().per_vmpl_events),
     ensures
-        hvdb_perm.ptr_perm == old(hvdb_perm).ptr_perm,
-        hvdb_perm.hv_perm.vector_perm.is_for(hvdb_perm.ptr_perm.value().vector),
-        hvdb_perm.hv_perm.flags_perm.is_for(hvdb_perm.ptr_perm.value().flags),
-        hvdb_perm.hv_perm.no_eoi_required_perm.is_for(hvdb_perm.ptr_perm.value().no_eoi_required),
-        hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb_perm.ptr_perm.value().per_vmpl_events),
+        final(hvdb_perm).ptr_perm == old(hvdb_perm).ptr_perm,
+        final(hvdb_perm).hv_perm.vector_perm.is_for(final(hvdb_perm).ptr_perm.value().vector),
+        final(hvdb_perm).hv_perm.flags_perm.is_for(final(hvdb_perm).ptr_perm.value().flags),
+        final(hvdb_perm).hv_perm.no_eoi_required_perm.is_for(final(hvdb_perm).ptr_perm.value().no_eoi_required),
+        final(hvdb_perm).hv_perm.per_vmpl_events_perm.is_for(final(hvdb_perm).ptr_perm.value().per_vmpl_events),
 )]
 pub unsafe extern "C" fn handle_hv_doorbell(hvdb_ptr: DekoPPtr<HVDoorbell>) {
     if is_vmpl1() {
@@ -479,11 +479,11 @@ pub unsafe extern "C" fn handle_hv_doorbell(hvdb_ptr: DekoPPtr<HVDoorbell>) {
         old(hvdb_perm).hv_perm.no_eoi_required_perm.is_for(old(hvdb_perm).ptr_perm.value().no_eoi_required),
         old(hvdb_perm).hv_perm.per_vmpl_events_perm.is_for(old(hvdb_perm).ptr_perm.value().per_vmpl_events),
     ensures
-        hvdb_perm.ptr_perm == old(hvdb_perm).ptr_perm,
-        hvdb_perm.hv_perm.vector_perm.is_for(hvdb_perm.ptr_perm.value().vector),
-        hvdb_perm.hv_perm.flags_perm.is_for(hvdb_perm.ptr_perm.value().flags),
-        hvdb_perm.hv_perm.no_eoi_required_perm.is_for(hvdb_perm.ptr_perm.value().no_eoi_required),
-        hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb_perm.ptr_perm.value().per_vmpl_events),
+        final(hvdb_perm).ptr_perm == old(hvdb_perm).ptr_perm,
+        final(hvdb_perm).hv_perm.vector_perm.is_for(final(hvdb_perm).ptr_perm.value().vector),
+        final(hvdb_perm).hv_perm.flags_perm.is_for(final(hvdb_perm).ptr_perm.value().flags),
+        final(hvdb_perm).hv_perm.no_eoi_required_perm.is_for(final(hvdb_perm).ptr_perm.value().no_eoi_required),
+        final(hvdb_perm).hv_perm.per_vmpl_events_perm.is_for(final(hvdb_perm).ptr_perm.value().per_vmpl_events),
 )]
 fn handle_hv_doorbell_pending(hvdb_ptr: DekoPPtr<HVDoorbell>) {
     if is_vmpl1() {
@@ -507,11 +507,11 @@ fn handle_hv_doorbell_pending(hvdb_ptr: DekoPPtr<HVDoorbell>) {
         old(hvdb_perm).hv_perm.no_eoi_required_perm.is_for(old(hvdb_perm).ptr_perm.value().no_eoi_required),
         old(hvdb_perm).hv_perm.per_vmpl_events_perm.is_for(old(hvdb_perm).ptr_perm.value().per_vmpl_events),
     ensures
-        hvdb_perm.ptr_perm == old(hvdb_perm).ptr_perm,
-        hvdb_perm.hv_perm.vector_perm.is_for(hvdb_perm.ptr_perm.value().vector),
-        hvdb_perm.hv_perm.flags_perm.is_for(hvdb_perm.ptr_perm.value().flags),
-        hvdb_perm.hv_perm.no_eoi_required_perm.is_for(hvdb_perm.ptr_perm.value().no_eoi_required),
-        hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb_perm.ptr_perm.value().per_vmpl_events),
+        final(hvdb_perm).ptr_perm == old(hvdb_perm).ptr_perm,
+        final(hvdb_perm).hv_perm.vector_perm.is_for(final(hvdb_perm).ptr_perm.value().vector),
+        final(hvdb_perm).hv_perm.flags_perm.is_for(final(hvdb_perm).ptr_perm.value().flags),
+        final(hvdb_perm).hv_perm.no_eoi_required_perm.is_for(final(hvdb_perm).ptr_perm.value().no_eoi_required),
+        final(hvdb_perm).hv_perm.per_vmpl_events_perm.is_for(final(hvdb_perm).ptr_perm.value().per_vmpl_events),
 )]
 fn handle_hv_doorbell_pending_vmpl1(hvdb_ptr: DekoPPtr<HVDoorbell>) {
     let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
@@ -533,11 +533,11 @@ fn handle_hv_doorbell_pending_vmpl1(hvdb_ptr: DekoPPtr<HVDoorbell>) {
         old(hvdb_perm).hv_perm.no_eoi_required_perm.is_for(old(hvdb_perm).ptr_perm.value().no_eoi_required),
         old(hvdb_perm).hv_perm.per_vmpl_events_perm.is_for(old(hvdb_perm).ptr_perm.value().per_vmpl_events),
     ensures
-        hvdb_perm.ptr_perm == old(hvdb_perm).ptr_perm,
-        hvdb_perm.hv_perm.vector_perm.is_for(hvdb_perm.ptr_perm.value().vector),
-        hvdb_perm.hv_perm.flags_perm.is_for(hvdb_perm.ptr_perm.value().flags),
-        hvdb_perm.hv_perm.no_eoi_required_perm.is_for(hvdb_perm.ptr_perm.value().no_eoi_required),
-        hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb_perm.ptr_perm.value().per_vmpl_events),
+        final(hvdb_perm).ptr_perm == old(hvdb_perm).ptr_perm,
+        final(hvdb_perm).hv_perm.vector_perm.is_for(final(hvdb_perm).ptr_perm.value().vector),
+        final(hvdb_perm).hv_perm.flags_perm.is_for(final(hvdb_perm).ptr_perm.value().flags),
+        final(hvdb_perm).hv_perm.no_eoi_required_perm.is_for(final(hvdb_perm).ptr_perm.value().no_eoi_required),
+        final(hvdb_perm).hv_perm.per_vmpl_events_perm.is_for(final(hvdb_perm).ptr_perm.value().per_vmpl_events),
 )]
 fn handle_hv_doorbell_pending_vmpl0(hvdb_ptr: DekoPPtr<HVDoorbell>) {
     let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
@@ -563,11 +563,11 @@ fn handle_hv_doorbell_pending_vmpl0(hvdb_ptr: DekoPPtr<HVDoorbell>) {
         old(hvdb_perm).hv_perm.no_eoi_required_perm.is_for(old(hvdb_perm).ptr_perm.value().no_eoi_required),
         old(hvdb_perm).hv_perm.per_vmpl_events_perm.is_for(old(hvdb_perm).ptr_perm.value().per_vmpl_events),
     ensures
-        hvdb_perm.ptr_perm == old(hvdb_perm).ptr_perm,
-        hvdb_perm.hv_perm.vector_perm.is_for(hvdb_perm.ptr_perm.value().vector),
-        hvdb_perm.hv_perm.flags_perm.is_for(hvdb_perm.ptr_perm.value().flags),
-        hvdb_perm.hv_perm.no_eoi_required_perm.is_for(hvdb_perm.ptr_perm.value().no_eoi_required),
-        hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb_perm.ptr_perm.value().per_vmpl_events),
+        final(hvdb_perm).ptr_perm == old(hvdb_perm).ptr_perm,
+        final(hvdb_perm).hv_perm.vector_perm.is_for(final(hvdb_perm).ptr_perm.value().vector),
+        final(hvdb_perm).hv_perm.flags_perm.is_for(final(hvdb_perm).ptr_perm.value().flags),
+        final(hvdb_perm).hv_perm.no_eoi_required_perm.is_for(final(hvdb_perm).ptr_perm.value().no_eoi_required),
+        final(hvdb_perm).hv_perm.per_vmpl_events_perm.is_for(final(hvdb_perm).ptr_perm.value().per_vmpl_events),
 )]
 fn handle_hv_doorbell_vmpl1(hvdb_ptr: DekoPPtr<HVDoorbell>) {
     let (cpu, Tracked(mut cpu_perm)) = DekoCpuCtx::this_cpu();
@@ -617,11 +617,11 @@ fn handle_hv_doorbell_vmpl1(hvdb_ptr: DekoPPtr<HVDoorbell>) {
         old(hvdb_perm).hv_perm.no_eoi_required_perm.is_for(old(hvdb_perm).ptr_perm.value().no_eoi_required),
         old(hvdb_perm).hv_perm.per_vmpl_events_perm.is_for(old(hvdb_perm).ptr_perm.value().per_vmpl_events),
     ensures
-        hvdb_perm.ptr_perm == old(hvdb_perm).ptr_perm,
-        hvdb_perm.hv_perm.vector_perm.is_for(hvdb_perm.ptr_perm.value().vector),
-        hvdb_perm.hv_perm.flags_perm.is_for(hvdb_perm.ptr_perm.value().flags),
-        hvdb_perm.hv_perm.no_eoi_required_perm.is_for(hvdb_perm.ptr_perm.value().no_eoi_required),
-        hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb_perm.ptr_perm.value().per_vmpl_events),
+        final(hvdb_perm).ptr_perm == old(hvdb_perm).ptr_perm,
+        final(hvdb_perm).hv_perm.vector_perm.is_for(final(hvdb_perm).ptr_perm.value().vector),
+        final(hvdb_perm).hv_perm.flags_perm.is_for(final(hvdb_perm).ptr_perm.value().flags),
+        final(hvdb_perm).hv_perm.no_eoi_required_perm.is_for(final(hvdb_perm).ptr_perm.value().no_eoi_required),
+        final(hvdb_perm).hv_perm.per_vmpl_events_perm.is_for(final(hvdb_perm).ptr_perm.value().per_vmpl_events),
 )]
 #[verifier::exec_allows_no_decreases_clause]
 fn handle_hv_doorbell_vmpl0(hvdb_ptr: DekoPPtr<HVDoorbell>) {
@@ -659,12 +659,12 @@ fn handle_hv_doorbell_vmpl0(hvdb_ptr: DekoPPtr<HVDoorbell>) {
         old(hvdb_perm).hv_perm.no_eoi_required_perm.is_for(old(hvdb_perm).ptr_perm.value().no_eoi_required),
         old(hvdb_perm).hv_perm.per_vmpl_events_perm.is_for(old(hvdb_perm).ptr_perm.value().per_vmpl_events),
     ensures
-        hvdb_perm.ptr_perm == old(hvdb_perm).ptr_perm,
-        hvdb_perm.hv_perm.vector_perm.is_for(hvdb_perm.ptr_perm.value().vector),
-        hvdb_perm.hv_perm.flags_perm.is_for(hvdb_perm.ptr_perm.value().flags),
-        hvdb_perm.hv_perm.no_eoi_required_perm.is_for(hvdb_perm.ptr_perm.value().no_eoi_required),
-        hvdb_perm.hv_perm.per_vmpl_events_perm.is_for(hvdb_perm.ptr_perm.value().per_vmpl_events),
-        cpu_perm.wf_with(cpu),
+        final(hvdb_perm).ptr_perm == old(hvdb_perm).ptr_perm,
+        final(hvdb_perm).hv_perm.vector_perm.is_for(final(hvdb_perm).ptr_perm.value().vector),
+        final(hvdb_perm).hv_perm.flags_perm.is_for(final(hvdb_perm).ptr_perm.value().flags),
+        final(hvdb_perm).hv_perm.no_eoi_required_perm.is_for(final(hvdb_perm).ptr_perm.value().no_eoi_required),
+        final(hvdb_perm).hv_perm.per_vmpl_events_perm.is_for(final(hvdb_perm).ptr_perm.value().per_vmpl_events),
+        final(cpu_perm).wf_with(cpu),
 )]
 #[verifier::exec_allows_no_decreases_clause]
 #[verifier::external_body]  // the loop invariant is overly complicated so skip now.

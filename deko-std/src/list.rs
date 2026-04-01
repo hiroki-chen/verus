@@ -151,9 +151,9 @@ impl<V: WellFormed> LinkedList<V> {
             perm@.value().next == None::<DekoPPtr<Node<V>>>,
             v@ == perm@.pptr(),
         ensures
-            self.wf(),
-            self@ =~= old(self)@.push(perm@.value().value),
-            self.inner@.ptrs == old(self).inner@.ptrs.push(v),
+            final(self).wf(),
+            final(self)@ =~= old(self)@.push(perm@.value().value),
+            final(self).inner@.ptrs == old(self).inner@.ptrs.push(v),
     {
         self.tail = Some(v);
         self.head = Some(v);
@@ -181,9 +181,9 @@ impl<V: WellFormed> LinkedList<V> {
         ensures
             res.0 == old(self).inner@.ptrs.index(0),
             res.1@.value().value == old(self)@.index(0),
-            self@ == old(self)@.remove(0),
-            self.inner@.ptrs == old(self).inner@.ptrs.remove(0),
-            self.wf(),
+            final(self)@ == old(self)@.remove(0),
+            final(self).inner@.ptrs == old(self).inner@.ptrs.remove(0),
+            final(self).wf(),
             res.0@ == res.1@.pptr(),
             res.1@.wf(),
             res.1@.is_init(),
@@ -282,9 +282,9 @@ impl<V: WellFormed> LinkedList<V> {
         ensures
             ret.0 == old(self).inner@.ptrs.index(i as int),
             ret.1@.value().value == old(self)@.index(i as int),
-            self@ =~= old(self)@.remove(i as int),
-            self.inner@.ptrs == old(self).inner@.ptrs.remove(i as int),
-            self.wf(),
+            final(self)@ =~= old(self)@.remove(i as int),
+            final(self).inner@.ptrs == old(self).inner@.ptrs.remove(i as int),
+            final(self).wf(),
     {
         // If we are removing the first element, we can use the pop_front_no_alloc method.
         if i == 0 {
@@ -482,9 +482,9 @@ impl<V: WellFormed> LinkedList<V> {
             perm@.is_init(),
             v@ == perm@.pptr(),
         ensures
-            self.wf(),
-            self@ =~= old(self)@.insert(0, perm@.value().value),
-            self.inner@.ptrs == seq![v].add(old(self).inner@.ptrs),
+            final(self).wf(),
+            final(self)@ =~= old(self)@.insert(0, perm@.value().value),
+            final(self).inner@.ptrs == seq![v].add(old(self).inner@.ptrs),
     {
         let Tracked(mut points_to) = perm;
         let val = v.take(Tracked(&mut points_to));
@@ -570,9 +570,9 @@ impl<V: WellFormed> LinkedList<V> {
             perm@.is_init(),
             v@ == perm@.pptr(),
         ensures
-            self.wf(),
-            self@ =~= old(self)@.insert(old(self)@.len() as int, perm@.value().value),
-            self.inner@.ptrs == (old(self).inner@.ptrs).add(seq![v]),
+            final(self).wf(),
+            final(self)@ =~= old(self)@.insert(old(self)@.len() as int, perm@.value().value),
+            final(self).inner@.ptrs == (old(self).inner@.ptrs).add(seq![v]),
     {
         let Tracked(mut points_to) = perm;
         let val = v.take(Tracked(&mut points_to));

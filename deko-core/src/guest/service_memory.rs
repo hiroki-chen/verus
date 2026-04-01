@@ -44,8 +44,8 @@ pub(crate) struct DekoGuestPValidateReq {
         paddr.wf(),
         old(cpu_perm).wf(),
     ensures
-        cpu_perm.wf(),
-        cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
+        final(cpu_perm).wf(),
+        final(cpu_perm).ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
 )]
 fn pvalidate_guest_one_page(paddr: PhysAddr) -> DekoGuestServResult<()> {
     broadcast use RmpFlags::lemma_each_bit_is_valid;
@@ -140,8 +140,8 @@ fn pvalidate_guest_one_page(paddr: PhysAddr) -> DekoGuestServResult<()> {
     requires
         old(cpu_perm).wf(),
     ensures
-        cpu_perm.wf(),
-        cpu_perm.ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
+        final(cpu_perm).wf(),
+        final(cpu_perm).ptr_perm.value().cpu_id == old(cpu_perm).ptr_perm.value().cpu_id,
 )]
 pub(crate) fn handle_deko_service_pvalidate(params: &DekoGuestRequestParams) -> DekoGuestServResult<
     (),
@@ -261,8 +261,8 @@ pub(crate) fn handle_deko_service_pvalidate(params: &DekoGuestRequestParams) -> 
         old(cpu_perm).wf(),
         old(cpu_perm).ptr_perm.value().cpu_id == cpu_idx,
     ensures
-        cpu_perm.wf(),
-        cpu_perm.ptr_perm.value().cpu_id == cpu_idx,
+        final(cpu_perm).wf(),
+        final(cpu_perm).ptr_perm.value().cpu_id == cpu_idx,
 )]
 pub(crate) fn handle_deko_service_remap_ca(
     params: &mut DekoGuestRequestParams,
