@@ -443,7 +443,7 @@ test_verify_one_file! {
         spec fn test1(x: u64) {
             x = 5;
         }
-    } => Err(e) => assert_vir_error_msg(e, "variable `x` is not marked mutable")
+    } => Err(e) => assert_vir_error_msg(e, "assignment is not allowed inside pure context")
 }
 
 test_verify_one_file! {
@@ -608,7 +608,7 @@ test_verify_one_file! {
             let a = |x: i32| x + 3;
             assert(a == 5);
         }
-    } => Err(err) => assert_spec_eq_type_err(err, "nat", "AnonymousClosure(i32) -> i32")
+    } => Err(err) => assert_spec_eq_type_err(err, "nat", "AnonymousClosure(Fn)(i32) -> i32")
 }
 
 test_verify_one_file! {

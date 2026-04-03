@@ -2650,7 +2650,7 @@ pub(crate) fn fix_node_substs<'tcx, 'a>(
     }
 }
 
-fn mk_typ_args<'tcx>(
+pub(crate) fn mk_typ_args<'tcx>(
     bctx: &BodyCtxt<'tcx>,
     substs: &'tcx rustc_middle::ty::List<rustc_middle::ty::GenericArg<'tcx>>,
     _f: DefId,
@@ -2913,7 +2913,10 @@ fn record_spec_fn<'tcx>(bctx: &BodyCtxt<'tcx>, expr: &Expr) {
 
 /// This should only be used for calls that only accept pure spec expressions, with no
 /// possibility of side effects or proof functions.
-/// At minimum any such function should require outer_mode=Spec in modes.rs.
+///
+/// Any such function needs to set 'in_pure' in modes.rs, or some other way of guaranteeing
+/// its contents should be non-meaningful to borrow-checking.
+///
 /// This is suitable for directives like `assert`, but not suitable for most
 /// computational spec fns.
 /// When in doubt, use `record_spec_fn` instead.
