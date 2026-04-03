@@ -3085,12 +3085,52 @@ pub(crate) fn expr_to_vir_innermost<'tcx>(
             // All other cases go through general Index trait
             if !bctx.types.is_method_call(expr) {
                 assert!(idx_ty.is_usize());
-                let kind = match tgt_expr_ty.kind() {
-                    TyKind::Array(..) => vir::ast::ArrayKind::Array,
-                    TyKind::Slice(..) => vir::ast::ArrayKind::Slice,
-                    _ => panic!("expected array or slice, found {tgt_expr_ty}"),
+                let tgt_orig_ty = bctx.types.expr_ty(tgt_expr);
+                let use_slice_unsize = match (tgt_orig_ty.kind(), tgt_expr_ty.kind()) {
+                    (TyKind::Ref(_, t_orig, Mutability::Mut), TyKind::Array(el_ty, _)) => {
+                        matches!(t_orig.kind(), TyKind::Array(orig_el_ty, _) if orig_el_ty == el_ty)
+                    }
+                    _ => false,
                 };
-                let tgt_vir = expr_to_vir_place(bctx, tgt_expr, modifier)?;
+                let (tgt_vir, kind) = if use_slice_unsize {
+                    let tgt_expr_vir = expr_to_vir_consume(bctx, tgt_expr, ExprModifier::REGULAR)?;
+                    let array_typ = match &*tgt_expr_vir.typ {
+                        TypX::MutRef(typ) => typ,
+                        _ => crate::internal_err!(expr.span, "expected TypX::MutRef"),
+                    };
+                    let typ_args = match &**array_typ {
+                        TypX::Primitive(Primitive::Array, typs) => typs.clone(),
+                        _ => crate::internal_err!(expr.span, "expected array"),
+                    };
+                    let fun = vir::fun!("vstd" => "array", "ref_mut_array_unsizing_coercion");
+                    let call_target = CallTarget::Fun(
+                        vir::ast::CallTargetKind::Static,
+                        fun,
+                        typ_args.clone(),
+                        Arc::new(vec![ImplPath::TraitImplPath(vir::def::prefix_spec_fn_type(0))]),
+                        AutospecUsage::Final,
+                        false,
+                    );
+                    let slice_typ = Arc::new(TypX::Primitive(
+                        Primitive::Slice,
+                        Arc::new(vec![typ_args[0].clone()]),
+                    ));
+                    let call_ret_typ = Arc::new(TypX::MutRef(slice_typ));
+                    let args = Arc::new(vec![tgt_expr_vir]);
+                    let x = ExprX::Call(call_target, args, None);
+                    let e = bctx.spanned_typed_new(expr.span, &call_ret_typ, x);
+                    let p = bctx.spanned_typed_new(expr.span, &call_ret_typ, PlaceX::Temporary(e));
+                    let p = deref_mut(bctx, expr.span, &p)?;
+                    (p, vir::ast::ArrayKind::Slice)
+                } else {
+                    let kind = match tgt_expr_ty.kind() {
+                        TyKind::Array(..) => vir::ast::ArrayKind::Array,
+                        TyKind::Slice(..) => vir::ast::ArrayKind::Slice,
+                        _ => panic!("expected array or slice, found {tgt_expr_ty}"),
+                    };
+                    let tgt_vir = expr_to_vir_place(bctx, tgt_expr, modifier)?;
+                    (tgt_vir, kind)
+                };
                 let idx_vir = expr_to_vir(bctx, idx_expr, modifier)?.consume(bctx, idx_ty);
                 let placex = PlaceX::Index(tgt_vir, idx_vir, kind, BoundsCheck::Error);
                 let vir = bctx.spanned_typed_new(expr.span, &expr_typ()?, placex);

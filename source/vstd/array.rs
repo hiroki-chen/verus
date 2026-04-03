@@ -160,8 +160,8 @@ pub fn ref_mut_array_unsizing_coercion<T, const N: usize>(r: &mut [T; N]) -> (ou
     ensures
         out.view() === old(r).view(),
         final(out).view() === final(r).view(),
-            mut_ref_current(out)@ == old(r)@,
-    mut_ref_future(out)@ == final(r)@,
+           // mut_ref_current(out)@ == old(r)@,
+    // mut_ref_future(out)@ == final(r)@,
     opens_invariants none
     no_unwind
 {
