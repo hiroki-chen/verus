@@ -93,6 +93,19 @@ impl<V> PCell<V> {
         self.0.id()
     }
 
+    #[inline(always)]
+    #[verifier::external_body]
+    pub fn as_ptr(&self) -> (r: crate::simple_pptr::PPtr<V>)
+    {
+        let inner = self.0.inner_ref();
+        
+        let addr = unsafe {
+            (*inner.get()).as_ptr() as usize
+        };
+
+        crate::simple_pptr::PPtr(addr, core::marker::PhantomData)
+    }
+
     /// Return an empty ("uninitialized") cell.
     #[inline(always)]
     pub const fn empty() -> (pt: (PCell<V>, Tracked<PointsTo<V>>))
