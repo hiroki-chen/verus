@@ -150,7 +150,7 @@ impl<T: ?Sized> PCell<T> {
     #[inline(always)]
     #[verifier::external]
     pub(crate) fn inner_ref(&self) -> (r: &UnsafeCell<T>) {
-        unsafe { &*self.ucell }
+        &*self.ucell
     }
 
     // TODO: this should be replaced with borrow_mut
