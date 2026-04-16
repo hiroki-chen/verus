@@ -36,13 +36,14 @@
 /// - Refer to `examples/syntax_attr.rs`.
 use proc_macro2::TokenStream;
 use quote::{ToTokens, quote, quote_spanned};
+use syn::parse::Parser;
 use syn::visit_mut::VisitMut;
 use syn::{Expr, Item, ItemConst, parse2, spanned::Spanned};
 
 use crate::{
     EraseGhost,
     attr_block_trait::{AnyAttrBlock, AnyFnOrLoop},
-    syntax::{self, mk_verifier_attr_syn, mk_verus_attr_syn},
+    syntax::{self, has_external_code_syn, mk_verifier_attr_syn, mk_verus_attr_syn},
     syntax_trait,
     unerased_proxies::VERUS_UNERASED_PROXY,
 };
@@ -158,7 +159,7 @@ pub(crate) fn rewrite_verus_attribute(
                 spec_f.sig.ident = ident.clone();
                 spec_f.attrs = vec![mk_verus_attr_syn(f.span(), quote! { spec })];
                 // remove proof-related macros
-                replace_block(EraseGhost::Erase, spec_f.block_mut().unwrap());
+                replace_block(EraseGhost::Erase, spec_f.block_mut().unwrap(), false);
                 spec_fun = Some(spec_f);
 
                 attributes
@@ -193,6 +194,7 @@ pub(crate) fn rewrite_verus_attribute(
 
 struct ExecReplacer {
     erase: EraseGhost,
+    inside_external_code: bool,
 }
 
 impl VisitMut for ExecReplacer {
@@ -201,7 +203,7 @@ impl VisitMut for ExecReplacer {
     fn visit_macro_mut(&mut self, mac: &mut syn::Macro) {
         syn::visit_mut::visit_macro_mut(self, mac);
         // Only replace in verification mode
-        if !self.erase.keep() {
+        if !self.erase.keep() || self.inside_external_code {
             return;
         }
         if let Some(x) = mac.path.segments.first_mut() {
@@ -290,7 +292,7 @@ impl VisitMut for ExecReplacer {
     fn visit_expr_for_loop_mut(&mut self, for_loop: &mut syn::ExprForLoop) {
         syn::visit_mut::visit_expr_for_loop_mut(self, for_loop);
 
-        if !self.erase.keep() {
+        if !self.erase.keep() || self.inside_external_code {
             return;
         }
 
@@ -369,13 +371,17 @@ fn is_verus_proof_stmt(stmt: &syn::Stmt) -> bool {
 // TODO: when tracked/ghost is supported, we need to clear verus-related
 // attributes for expression so that unverfied `cargo build` does not need to
 // enable unstable feature for macro.
-pub(crate) fn replace_block(erase: EraseGhost, fblock: &mut syn::Block) {
-    let mut replacer = ExecReplacer { erase };
+pub(crate) fn replace_block(
+    erase: EraseGhost,
+    fblock: &mut syn::Block,
+    inside_external_code: bool,
+) {
+    let mut replacer = ExecReplacer { erase, inside_external_code };
     replacer.visit_block_mut(fblock);
 }
 
 pub(crate) fn replace_expr(erase: EraseGhost, expr: &mut syn::Expr) {
-    let mut replacer = ExecReplacer { erase };
+    let mut replacer = ExecReplacer { erase, inside_external_code: false };
     replacer.visit_expr_mut(expr);
 }
 
@@ -526,14 +532,92 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
             fun.attrs.retain(|attr| !is_hidden_impl_marker(attr));
 
             let mut new_stream = TokenStream::new();
+            let mut rustdoc_attrs: Vec<syn::Attribute> = vec![];
+            if crate::rustdoc::env_rustdoc() {
+                let mut verus_fun: verus_syn::ItemFn = syn_to_verus_syn(fun.clone());
+                verus_fun.sig.spec = spec_attr.spec.clone();
+
+                // Set return variable name
+                if let Some((verus_syn::Pat::Ident(pat_ident), _)) = &spec_attr.ret_pat {
+                    if let verus_syn::ReturnType::Type(_, _, opt_name, _) =
+                        &mut verus_fun.sig.output
+                    {
+                        *opt_name = Some(Box::new((
+                            verus_syn::token::Paren::default(),
+                            verus_syn::Pat::Ident(pat_ident.clone()),
+                            verus_syn::Token![:](pat_ident.span()),
+                        )));
+                    }
+                }
+
+                crate::rustdoc::process_item_fn(&mut verus_fun);
+
+                for attr in &verus_fun.attrs {
+                    if attr.path().is_ident("doc")
+                        && attr.to_token_stream().to_string().contains("verusdoc_special_attr")
+                    {
+                        if let Ok(doc_attrs) =
+                            syn::Attribute::parse_outer.parse(attr.to_token_stream().into())
+                        {
+                            rustdoc_attrs.extend(doc_attrs);
+                        }
+                    }
+                }
+            }
 
             // Create a copy of unverified function.
             // To avoid misuse of the unverified function,
             // we add `requires false` and thus prevent verified function to use it.
             // Allow unverified code to use the function without changing in/output.
             if let Some(with) = &spec_attr.spec.with {
-                let extra_funs = rewrite_unverified_func(&mut fun, with.with.span(), erase);
+                let mut extra_funs = rewrite_unverified_func(&mut fun, with.with.span(), erase);
+
+                if crate::rustdoc::env_rustdoc() {
+                    if let Some(unverified_fun) = extra_funs.last_mut() {
+                        unverified_fun.attrs.extend(rustdoc_attrs.clone());
+                    }
+                    fun.attrs.push(crate::syntax::mk_rust_attr_syn(
+                        with.with.span(),
+                        "doc",
+                        quote! {hidden},
+                    ));
+                }
                 extra_funs.iter().for_each(|f| f.to_tokens(&mut new_stream));
+            } else if crate::rustdoc::env_rustdoc() {
+                fun.attrs.extend(rustdoc_attrs);
+            }
+
+            // Inject doc attribute in rustdoc mode
+            if crate::rustdoc::env_rustdoc() {
+                let mut verus_fun: verus_syn::ItemFn = syn_to_verus_syn(fun.clone());
+                verus_fun.sig.spec = spec_attr.spec.clone();
+
+                // Set return variable name
+                if let Some((verus_syn::Pat::Ident(pat_ident), _)) = &spec_attr.ret_pat {
+                    if let verus_syn::ReturnType::Type(_, _, opt_name, _) =
+                        &mut verus_fun.sig.output
+                    {
+                        *opt_name = Some(Box::new((
+                            verus_syn::token::Paren::default(),
+                            verus_syn::Pat::Ident(pat_ident.clone()),
+                            verus_syn::Token![:](pat_ident.span()),
+                        )));
+                    }
+                }
+
+                crate::rustdoc::process_item_fn(&mut verus_fun);
+
+                for attr in &verus_fun.attrs {
+                    if attr.path().is_ident("doc")
+                        && attr.to_token_stream().to_string().contains("verusdoc_special_attr")
+                    {
+                        if let Ok(doc_attrs) =
+                            syn::Attribute::parse_outer.parse(attr.to_token_stream().into())
+                        {
+                            fun.attrs.extend(doc_attrs);
+                        }
+                    }
+                }
             }
 
             // Update function signature based on verus_spec.
@@ -558,7 +642,8 @@ pub(crate) fn rewrite_verus_spec_on_fun_or_loop(
             let _ = fun.block_mut().unwrap().stmts.splice(0..0, new_stmts);
 
             // Parse and replace proof_xxx!() inside function and replace panic.
-            replace_block(erase, fun.block_mut().unwrap());
+            let inside_external_code = has_external_code_syn(&fun.attrs);
+            replace_block(erase, fun.block_mut().unwrap(), inside_external_code);
             fun.to_tokens(&mut new_stream);
             proc_macro::TokenStream::from(new_stream)
         }
@@ -895,7 +980,8 @@ fn rewrite_const_ret_proxy(const_fun: &mut syn::ItemFn) -> syn::ItemFn {
     // But just do it to be safe and consistent with verus macro.
     let span = const_fun.sig.constness.unwrap().span();
     let mut proxy_fun = const_fun.clone();
-    replace_block(EraseGhost::Erase, const_fun.block_mut().unwrap());
+    let inside_external_code = has_external_code_syn(&const_fun.attrs);
+    replace_block(EraseGhost::Erase, const_fun.block_mut().unwrap(), inside_external_code);
     const_fun.attrs.push(mk_verifier_attr_syn(span, quote! { external }));
     const_fun.attrs.push(mk_verus_attr_syn(span, quote! { uses_unerased_proxy }));
     const_fun.attrs.push(mk_verus_attr_syn(span, quote! { encoded_const }));
@@ -936,6 +1022,13 @@ fn rewrite_unverified_func(
         Some(syn::token::Semi { spans: [span] }),
     );
     unverified_fun.attrs_mut().push(mk_verus_attr_syn(span, quote! { external_body }));
+    if !crate::rustdoc::env_rustdoc() {
+        unverified_fun.attrs_mut().push(crate::syntax::mk_rust_attr_syn(
+            span,
+            "doc",
+            quote! {hidden},
+        ));
+    }
     if let Some(block) = unverified_fun.block_mut() {
         // For an unverified function, if it is in keep mode,
         // we erase the function body to avoid using

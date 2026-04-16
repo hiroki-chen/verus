@@ -1869,8 +1869,10 @@ fn cleanup_seq(span: &Span, typ: Typ, v: &Vector<Exp>) -> Result<Exp, VirErr> {
         TypX::Datatype(_, typs, _) => {
             // Grab the type the sequence holds
             let inner_type = typs[0].clone();
+            // Clean up any nested Interp nodes in the sequence elements
+            let cleaned: Result<Vector<Exp>, VirErr> = v.iter().map(|e| cleanup_exp(e)).collect();
             // Convert back to a standard SST representation
-            Ok(seq_to_sst(span, inner_type.clone(), v))
+            Ok(seq_to_sst(span, inner_type.clone(), &cleaned?))
         }
         _ => Err(error(
             &span,

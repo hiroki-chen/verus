@@ -2877,6 +2877,15 @@ pub(crate) fn expr_to_vir_innermost<'tcx>(
                 }
             }
         }
+        // This a desugered `await` expression
+        ExprKind::Match(
+            Expr { hir_id: _, kind: ExprKind::Call(_expr, call_args), span: _ },
+            _arms,
+            rustc_hir::MatchSource::AwaitDesugar,
+        ) => {
+            let vir_expr = expr_to_vir_consume(bctx, &call_args[0], modifier)?;
+            mk_expr(ExprX::Await(vir_expr))
+        }
         ExprKind::Match(expr, arms, _match_source) => {
             let vir_place = expr_to_vir_place(bctx, expr, modifier)?;
             let mut vir_arms: Vec<vir::ast::Arm> = Vec::new();
@@ -4480,11 +4489,10 @@ pub(crate) fn deref_mut(bctx: &BodyCtxt, span: Span, place: &Place) -> Result<Pl
         if let Some(local_place) = vir::ast_util::place_get_local(place) {
             let PlaceX::Local(name) = &local_place.x else { unreachable!() };
             if bctx.is_param_for_innermost_fn_or_non_spec_closure(name) {
-                // TODO(new_mut_ref): link to documentation or something
                 return Err(vir::messages::error(
                     &place.span,
                     "to dereference a mutable reference parameter in a postcondition, disambiguate by wrapping it in either `old` or `final`",
-                ));
+                ).help("For information on the new mutable reference support, see: https://github.com/verus-lang/verus/blob/main/source/docs/migration-mut-ref.md"));
             }
         }
     }
