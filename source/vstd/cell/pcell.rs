@@ -113,6 +113,13 @@ impl<T: ?Sized> PointsTo<T> {
 
     /// The contents of the cell.
     pub uninterp spec fn value(&self) -> &T;
+
+    /// Guarantees that two permissions can not be associated with the same `CellId`.
+    pub axiom fn is_exclusive(tracked &mut self, tracked other: & PointsTo<T>)
+    ensures
+        *final(self) == *old(self),
+        final(self).id() != other.id(),
+    ;
 }
 
 impl<T: ?Sized> PCell<T> {
@@ -156,23 +163,18 @@ impl<T: ?Sized> PCell<T> {
     // TODO: this should be replaced with borrow_mut
     #[inline(always)]
     #[verifier::external_body]
-    pub fn replace(&self, Tracked(perm): Tracked<&mut PointsTo<T>>, in_v: T) -> (out_v: T)
-        where T: Sized
+    pub fn borrow_mut<'a>(&'a self, Tracked(perm): Tracked<&'a mut PointsTo<T>>) -> (v: &'a mut T)
         requires
-            self.id() === old(perm).id(),
+            self.id() === perm.id(),
         ensures
-            perm.id() === old(perm).id(),
-            *perm.value() === in_v,
-            out_v === *old(perm).value(),
+            &*v === old(perm).value(),
+            &*final(v) === final(perm).value(),
+            final(perm).id() == self.id(),
         opens_invariants none
         no_unwind
     {
-        let mut m = in_v;
         // SAFETY: We can take a mutable reference since we have the mutable PointsTo
-        unsafe {
-            core::mem::swap(&mut m, &mut *(*self.ucell).get());
-        }
-        m
+        unsafe { &mut (*(*self.ucell).get()) }
     }
 
     #[inline(always)]
@@ -194,13 +196,31 @@ impl<T: ?Sized> PCell<T> {
     ////// Trusted core ends here
 
     #[inline(always)]
+    #[verifier::external_body]
+    pub fn replace(&self, Tracked(perm): Tracked<&mut PointsTo<T>>, in_v: T) -> (out_v: T)
+        where T: Sized
+        requires
+            self.id() === old(perm).id(),
+        ensures
+            final(perm).id() === old(perm).id(),
+            *final(perm).value() === in_v,
+            out_v === *old(perm).value(),
+        opens_invariants none
+        no_unwind
+    {
+        let mut v = in_v;
+        core::mem::swap(&mut v, self.borrow_mut(Tracked(perm)));
+        v
+    }
+
+    #[inline(always)]
     pub fn write(&self, Tracked(perm): Tracked<&mut PointsTo<T>>, in_v: T)
         where T: Sized
         requires
             self.id() === old(perm).id()
         ensures
-            perm.id() === old(perm).id(),
-            *perm.value() === in_v,
+            final(perm).id() === old(perm).id(),
+            *final(perm).value() === in_v,
         opens_invariants none
         no_unwind
     {

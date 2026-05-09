@@ -262,7 +262,7 @@ pub(crate) fn translate_trait<'tcx>(
             let ex_assoc_item = ex_assoc_items.find_by_ident_and_kind(
                 tcx,
                 *ident,
-                assoc_item.as_tag(),
+                assoc_item.tag(),
                 ex_trait_id_for,
             );
             if mode == Mode::Spec {
@@ -345,7 +345,7 @@ pub(crate) fn translate_trait<'tcx>(
                     method_names.push(fun);
                 }
             }
-            TraitItemKind::Const(_ty, body_opt) => {
+            TraitItemKind::Const(_ty, body_opt, _is_type_const) => {
                 let param_names = vec![];
                 let (body_id, has_default) = match body_opt {
                     Some(_) if ex_trait_id_for.is_some() && !is_verus_spec => {
@@ -363,7 +363,7 @@ pub(crate) fn translate_trait<'tcx>(
                     None => (CheckItemFnEither::ParamNames(param_names.as_slice()), false),
                 };
                 let mid_ty = ctxt.tcx.type_of(owner_id.to_def_id()).skip_binder();
-                let typ = ctxt.mid_ty_to_vir(owner_id.to_def_id(), *span, &mid_ty, false, None)?;
+                let typ = ctxt.mid_ty_to_vir(owner_id.to_def_id(), *span, &mid_ty, None)?;
                 let fun = crate::rust_to_vir_func::check_item_fn(
                     ctxt,
                     &mut methods,

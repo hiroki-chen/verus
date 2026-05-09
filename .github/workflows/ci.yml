@@ -1,11 +1,9 @@
 name: ci
 
 on:
-  push:
-    branches:
-      - "main"
-
   workflow_dispatch:
+
+  merge_group:
 
   pull_request:
     types: [opened, synchronize, reopened]
@@ -35,7 +33,7 @@ jobs:
       - name: setup rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.94.0
+          toolchain: 1.95.0
 
       - name: setup verusfmt
         run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/verus-lang/verusfmt/releases/latest/download/verusfmt-installer.sh | sh
@@ -60,7 +58,7 @@ jobs:
       - name: setup rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.94.0
+          toolchain: 1.95.0
           components: clippy
 
       - name: clippy check codebase
@@ -92,7 +90,7 @@ jobs:
             cargo_verus:
               - 'source/cargo-verus/**'
 
-  # run integration tests for cargo-verus
+  # run cargo-verus tests
   cargo-verus-test:
     needs: [fmt, clippy, change_filter]
     runs-on: ubuntu-22.04
@@ -109,12 +107,12 @@ jobs:
         if: needs.change_filter.outputs.cargo_verus == 'true'
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.94.0
+          toolchain: 1.95.0
 
-      - name: cargo-verus integration tests
+      - name: cargo-verus tests
         if: needs.change_filter.outputs.cargo_verus == 'true'
         working-directory: ./source
-        run: cargo test -p cargo-verus --features integration-tests -- --skip z_flag_with_space_is_accepted
+        run: cargo test -p cargo-verus
 
   # check if it builds and runs on macos, running the full test suite
   # (in release mode because it makes a huge difference)
@@ -144,7 +142,7 @@ jobs:
       - name: setup rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.94.0
+          toolchain: 1.95.0
 
       - name: setup nextest
         uses: taiki-e/install-action@nextest
@@ -201,7 +199,7 @@ jobs:
       - name: setup rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.94.0
+          toolchain: 1.95.0
 
       - name: setup nextest
         uses: taiki-e/install-action@nextest
@@ -248,7 +246,7 @@ jobs:
       - name: setup rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.94.0
+          toolchain: 1.95.0
 
       - name: setup nextest
         uses: taiki-e/install-action@nextest
@@ -314,7 +312,7 @@ jobs:
       - name: setup rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.94.0
+          toolchain: 1.95.0
 
       - name: build docs
         working-directory: ./source
@@ -371,7 +369,7 @@ jobs:
       - name: setup rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.94.0
+          toolchain: 1.95.0
 
       - name: build
         working-directory: ./source

@@ -1,7 +1,7 @@
 use crate::ast::{
-    AutospecUsage, CallTarget, CallTargetKind, Constant, Dt, ExprX, Fun, Function, FunctionKind,
-    GenericBoundX, ImplPath, IntRange, Path, SpannedTyped, TraitId, Typ, TypX, Typs, UnaryOpr,
-    VarBinder, VirErr,
+    AutospecUsage, CallTarget, CallTargetKind, Constant, CrateId, Dt, ExprX, Fun, Function,
+    FunctionKind, GenericBoundX, ImplPath, IntRange, Path, SpannedTyped, TraitId, Typ, TypX, Typs,
+    UnaryOpr, VarBinder, VirErr,
 };
 use crate::ast_to_sst::PreLocalDecl;
 use crate::ast_to_sst::expr_to_exp_skip_checks;
@@ -35,7 +35,7 @@ pub enum Node {
     ModuleReveal(Path),
     // Everything in crate c depends on Crate(c)
     // Crate(c) can depend on broadcast_use_by_default_when_this_crate_is_imported from other crates
-    Crate(crate::ast::Ident),
+    Crate(CrateId),
     // This is used to replace an X --> Y edge with X --> SpanInfo --> Y edges
     // to give more precise span information than X or Y alone provide
     SpanInfo { span_infos_index: usize, text: String },
@@ -198,7 +198,7 @@ fn check_decrease_call(
         let decreases_exp = expr_to_exp_skip_checks(
             ctxt.ctx,
             diagnostics,
-            &params_to_pars(&function.x.params, true),
+            &params_to_pars(&function.x.params),
             expr,
         )?;
         let dec_exp = exp_rename_vars(&decreases_exp, &renames);
@@ -376,7 +376,7 @@ fn check_termination<'a>(
 
     // use expr_to_exp_skip_checks here because checks in decreases done by func_def_to_air
     let decreases_exps = vec_map_result(&function.x.decrease, |e| {
-        expr_to_exp_skip_checks(ctx, diagnostics, &params_to_pars(&function.x.params, true), e)
+        expr_to_exp_skip_checks(ctx, diagnostics, &params_to_pars(&function.x.params), e)
     })?;
     let scc_rep = ctx.global.func_call_graph.get_scc_rep(&Node::Fun(function.x.name.clone()));
     let caller_decreases_typs: Vec<Typ> =

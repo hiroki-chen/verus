@@ -305,6 +305,8 @@ pub(crate) trait Visitor<R: Returner, Err, Scope: Scoper> {
                     | UnaryOpr::Field { .. }
                     | UnaryOpr::IntegerTypeBound(..)
                     | UnaryOpr::CustomErr(..)
+                    | UnaryOpr::AutoDecreases
+                    | UnaryOpr::AutoLoopEnsures
                     | UnaryOpr::ProofNote(..) => R::ret(|| op.clone()),
                 }?;
                 R::ret(|| exp_new(ExpX::UnaryOpr(R::get(op), R::get(e1))))
@@ -564,7 +566,6 @@ pub(crate) trait Visitor<R: Returner, Err, Scope: Scoper> {
                     name: par.x.name.clone(),
                     typ: R::get(t),
                     mode: par.x.mode,
-                    is_mut: par.x.is_mut,
                     purpose: par.x.purpose,
                 },
             )

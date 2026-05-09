@@ -190,7 +190,7 @@ impl<V> PCell<V> {
         requires
             old(perm)@ === pcell_points![ self.id() => MemContents::Uninit ],
         ensures
-            perm@ === pcell_points![ self.id() => MemContents::Init(v) ],
+            final(perm)@ === pcell_points![ self.id() => MemContents::Init(v) ],
         opens_invariants none
         no_unwind
     {
@@ -206,8 +206,8 @@ impl<V> PCell<V> {
             self.id() === old(perm)@.pcell,
             old(perm).is_init(),
         ensures
-            perm.id() === old(perm)@.pcell,
-            perm.mem_contents() === MemContents::Uninit,
+            final(perm).id() === old(perm)@.pcell,
+            final(perm).mem_contents() === MemContents::Uninit,
             v === old(perm).value(),
         opens_invariants none
         no_unwind
@@ -226,8 +226,8 @@ impl<V> PCell<V> {
             self.id() === old(perm)@.pcell,
             old(perm).is_init(),
         ensures
-            perm.id() === old(perm)@.pcell,
-            perm.mem_contents() === MemContents::Init(in_v),
+            final(perm).id() === old(perm)@.pcell,
+            final(perm).mem_contents() === MemContents::Init(in_v),
             out_v === old(perm).value(),
         opens_invariants none
         no_unwind
@@ -284,7 +284,6 @@ impl<V> PCell<V> {
     }
 
     #[doc(hidden)]
-    #[verifier::ignore_outside_new_mut_ref_experiment]
     #[inline(always)]
     #[verifier::external_body]
     pub fn borrow_mut<'a>(&'a self, Tracked(perm): Tracked<&'a mut PointsTo<V>>) -> (v: &'a mut V)
@@ -312,8 +311,8 @@ impl<V: Copy> PCell<V> {
             self.id() === old(perm)@.pcell,
             old(perm).is_init(),
         ensures
-            perm.id() === old(perm)@.pcell,
-            perm.mem_contents() === MemContents::Init(in_v),
+            final(perm).id() === old(perm)@.pcell,
+            final(perm).mem_contents() === MemContents::Init(in_v),
         opens_invariants none
         no_unwind
     {

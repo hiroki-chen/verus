@@ -21,11 +21,27 @@ pub type VirErrAs = MessageAs;
 pub type Ident = Arc<String>;
 pub type Idents = Arc<Vec<Ident>>;
 
+/// Crate name, used at the beginning of a Path
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum CrateId {
+    // Verus-generated internal paths with no crate
+    Internal,
+    // Verus treats the Rust core crate specially
+    Core,
+    // Verus treats the Rust alloc crate specially
+    Alloc,
+    // Verus treats the vstd crate specially
+    Vstd,
+    // All other crates have Rust's stable crate id and a user-friendly name
+    // Note: to make sorting via PartialOrd/Ord more stable, the u64 id goes after the Ident
+    Id(Ident, u64),
+}
+
 /// A fully-qualified name, such as a module name, function name, or datatype name
 pub type Path = Arc<PathX>;
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PathX {
-    pub krate: Option<Ident>, // None for local crate
+    pub krate: CrateId,
     pub segments: Idents,
 }
 
@@ -198,9 +214,6 @@ pub enum IntRange {
 pub enum TypDecoration {
     /// &T
     Ref,
-    /// &mut T
-    /// For new-mut-ref, don't use this; use TypX::MutRef instead
-    MutRef,
     /// Box<T>
     /// This is complicated due to the Allocator type argument; see `TypDecorationArg`.
     Box,
@@ -338,10 +351,6 @@ pub enum TriggerAnnotation {
 /// Operations on Ghost and Tracked
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq, ToDebugSNode)]
 pub enum ModeCoercion {
-    /// Mutable borrows (Ghost::borrow_mut and Tracked::borrow_mut) are treated specially by
-    /// the mode checker when checking assignments.
-    /// (Only used outside new-mut-ref)
-    BorrowMut,
     /// This operation behaves like a datatype constructor with a mode annotation
     /// `from_mode` on its field.
     /// (e.g., Tracked(...) is proof -> exec, Ghost(...) is spec -> exec.
@@ -540,6 +549,12 @@ pub enum UnaryOpr {
     IntegerTypeBound(IntegerTypeBoundKind, Mode),
     /// Custom diagnostic message
     CustomErr(Arc<String>),
+    /// Marker for expressions with #[verus::internal(auto_decreases)] attribute
+    /// Used to filter out auto-generated decreases-related invariants
+    AutoDecreases,
+    /// Marker for expressions with #[verus::internal(auto_loop_ensures)] attribute
+    /// Used to filter out auto-generated ensures clauses on for-loops
+    AutoLoopEnsures,
     /// Label from a `proof_note` attribute.
     ProofNote(ProofNoteLabel),
     /// Predicate over any type that indicates its mutable references has resolved.
@@ -1028,9 +1043,8 @@ pub enum ExprX {
     /// Constant
     Const(Constant),
     /// Local variable as a right-hand side
+    /// Note: mostly unused; use PlaceX::Local instead.
     Var(VarIdent),
-    /// Local variable as a left-hand side
-    VarLoc(VarIdent),
     /// Local variable, at a different stage (e.g. a mutable reference in the post-state)
     VarAt(VarIdent, VarAt),
     /// Use of a const variable.  Note: ast_simplify replaces this with Call.
@@ -1039,9 +1053,6 @@ pub enum ExprX {
     ConstVar(Fun, AutospecUsage),
     /// Use of a static variable.
     StaticVar(Fun),
-    /// Location ("l-value") used for mutable references and assignments.
-    /// Not used when new-mut-refs is enabled.
-    Loc(Expr),
     /// Call to a function passing some expression arguments
     /// The optional expression is to be executed *after* the arguments but *before* the call.
     /// This is used for two-phase borrows.
@@ -1091,11 +1102,6 @@ pub enum ExprX {
     Choose { params: VarBinders<Typ>, cond: Expr, body: Expr },
     /// Manually supply triggers for body of quantifier
     WithTriggers { triggers: Arc<Vec<Exprs>>, body: Expr },
-    /// Assign to local variable
-    /// the lhs is assumed to be a memory location, thus it's not wrapped in Loc
-    ///
-    /// Not used when new-mut-refs is enabled.
-    Assign { lhs: Expr, rhs: Expr, op: Option<BinaryOp> },
     /// Assign to the given place.
     ///
     /// If `resolve` is set, then we also emit
@@ -1201,6 +1207,11 @@ pub enum ExprX {
     Old(Expr),
     /// Async await
     Await(Expr),
+    /// Used to check that match guards don't mutate the scrutinee, these are used between
+    /// ast_simplify and ast_to_sst
+    MatchGuardFreeze(Place, Expr),
+    /// Turn tracked &A into &B where B has A as a field
+    ShrRefStructWrap(Expr, Expr, Typ, Typ, Ident, Ident),
 }
 
 #[derive(Debug, Serialize, Deserialize, ToDebugSNode, Clone, Copy)]
@@ -1362,8 +1373,6 @@ pub struct ParamX {
     pub mode: Mode,
     /// Marked 'mut' at the source level?
     pub user_mut: bool,
-    /// An &mut parameter (only used outside new-mut-ref)
-    pub is_mut: bool,
     /// If the parameter uses a Ghost(x) or Tracked(x) pattern to unwrap the value, this is
     /// the mode of the resulting unwrapped x variable (Spec for Ghost(x), Proof for Tracked(x)).
     /// We also save a copy of the original wrapped name for lifetime_generate
@@ -1450,8 +1459,6 @@ pub struct FunctionAttrsX {
     pub no_auto_trigger: bool,
     /// Specify which places we auto-promote == to =~= when verifying this function
     pub auto_ext_equal: AutoExtEqual,
-    /// Custom error message to display when a pre-condition fails
-    pub custom_req_err: Option<String>,
     /// When used in a ghost context, redirect to a specified spec function
     pub autospec: Option<Fun>,
     /// Verify using bitvector theory
@@ -1491,8 +1498,6 @@ pub struct FunctionAttrsX {
     pub exec_assume_termination: bool,
     /// Whether to allow this function to not terminate
     pub exec_allows_no_decreases_clause: bool,
-    /// Is this only for the new_mut_ref experiment
-    pub ignore_outside_new_mut_ref: bool,
     /// Is this function `tracked_swap`, which requires special handling
     pub tracked_swap: bool,
     /// Is this function `Option::tracked_take`, which requires special handling
@@ -1664,7 +1669,7 @@ pub struct RevealGroupX {
     pub owning_module: Option<Path>,
     /// If Some(crate_name), this group is revealed by default for crates that import crate_name.
     /// No more than one such group is allowed in each crate.
-    pub broadcast_use_by_default_when_this_crate_is_imported: Option<Ident>,
+    pub broadcast_use_by_default_when_this_crate_is_imported: Option<CrateId>,
     /// All the subgroups or functions included in this group
     pub members: Arc<Vec<Fun>>,
 }

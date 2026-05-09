@@ -407,7 +407,7 @@ fn visit_and_insert_pars(
     // Parameter types are made Poly for spec functions and trait methods
     let mut new_pars: Vec<Par> = Vec::new();
     for par in pars.iter() {
-        let ParX { name, typ, mode, is_mut, purpose } = &par.x;
+        let ParX { name, typ, mode, purpose } = &par.x;
         let is_poly = match poly {
             InsertPars::Native => false,
             InsertPars::Poly => true,
@@ -416,8 +416,7 @@ fn visit_and_insert_pars(
         let typ =
             if is_poly { coerce_typ_to_poly(ctx, typ) } else { coerce_typ_to_native(ctx, typ) };
         let _ = types.insert(name.clone(), typ.clone());
-        let parx =
-            ParX { name: name.clone(), typ, mode: *mode, is_mut: *is_mut, purpose: *purpose };
+        let parx = ParX { name: name.clone(), typ, mode: *mode, purpose: *purpose };
         new_pars.push(Spanned::new(par.span.clone(), parx));
     }
     Arc::new(new_pars)
@@ -622,7 +621,10 @@ fn visit_exp(ctx: &Ctx, state: &mut State, exp: &Exp) -> Exp {
                     let e1 = coerce_exp_to_native(ctx, &e1);
                     mk_exp(ExpX::UnaryOpr(op.clone(), e1))
                 }
-                UnaryOpr::CustomErr(_) | UnaryOpr::ProofNote(_) => {
+                UnaryOpr::CustomErr(_)
+                | UnaryOpr::ProofNote(_)
+                | UnaryOpr::AutoDecreases
+                | UnaryOpr::AutoLoopEnsures => {
                     mk_exp_typ(&e1.typ, ExpX::UnaryOpr(op.clone(), e1.clone()))
                 }
                 UnaryOpr::ToDyn(_) => {
