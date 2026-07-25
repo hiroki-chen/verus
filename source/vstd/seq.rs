@@ -1099,17 +1099,6 @@ impl<A> Seq<A> {
         unimplemented!()
     }
 
-    #[verifier(external_body)]
-    pub proof fn tracked_remove(tracked &mut self, i: int) -> (tracked ret: A)
-        requires
-            0 <= i < old(self).len(),
-        ensures
-            ret === old(self)[i],
-            final(self).len() == old(self).len() - 1,
-            *final(self) == old(self).remove(i),
-    {
-        unimplemented!()
-    }
 
     #[verifier(external_body)]
     pub proof fn tracked_insert(tracked &mut self, i: int, tracked v: A)
