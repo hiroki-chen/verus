@@ -194,10 +194,8 @@ pub broadcast axiom fn axiom_array_has_resolved<T, const N: usize>(array: [T; N]
 #[cfg_attr(verus_keep_ghost, rustc_diagnostic_item = "verus::vstd::array::ref_mut_array_unsizing_coercion")]
 pub fn ref_mut_array_unsizing_coercion<T, const N: usize>(r: &mut [T; N]) -> (out: &mut [T])
     ensures
-        out.view() === old(r).view(),
-        final(out).view() === final(r).view(),
-           // mut_ref_current(out)@ == old(r)@,
-    // mut_ref_future(out)@ == final(r)@,
+        out.view() == old(r).view(),
+        final(out).view() == final(r).view(),
     opens_invariants none
     no_unwind
 {

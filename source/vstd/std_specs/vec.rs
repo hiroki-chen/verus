@@ -1,5 +1,5 @@
 use super::super::prelude::*;
-use super::iter::IteratorSpec;
+use super::iter::{FromIteratorSpecImpl, IteratorSpec};
 use verus_builtin::*;
 
 use super::super::slice::SliceIndexSpec;
@@ -336,7 +336,7 @@ impl<T, A: Allocator> super::core::IndexSetTrustedSpec<usize> for Vec<T, A> {
     }
 
     open spec fn spec_index_set_ensures(&self, new_container: &Self, index: usize, val: T) -> bool {
-        new_container@ === self@.update(index as int, val)
+        new_container@ == self@.update(index as int, val)
     }
 }
 
@@ -462,13 +462,19 @@ pub assume_specification<'a, T, A: Allocator> [<&'a Vec<T, A> as core::iter::Int
         IteratorSpec::initial_value_relation(&iter, &iter),
 ;
 
+impl<T>  FromIteratorSpecImpl<T> for Vec<T> {
+    open spec fn from_iter_ensures(remaining: Seq<T>, s: Self) -> bool {
+        remaining == s@
+    }
+}
+
 pub broadcast proof fn lemma_vec_obeys_eq_spec<T: PartialEq>()
     requires
         super::super::laws_eq::obeys_eq::<T>(),
     ensures
         #[trigger] super::super::laws_eq::obeys_eq::<Vec<T>>(),
 {
-    broadcast use {axiom_spec_len, super::super::seq::group_seq_axioms};
+    broadcast use {axiom_spec_len, super::super::seq::group_seq_lemmas};
     reveal(super::super::laws_eq::obeys_eq_spec_properties);
 }
 
@@ -479,7 +485,7 @@ pub broadcast proof fn lemma_vec_obeys_view_eq<T: PartialEq + View>()
         #[trigger] super::super::laws_eq::obeys_view_eq::<Vec<T>>(),
 {
     use super::cmp::PartialEqSpec;
-    broadcast use {axiom_spec_len, super::super::seq::group_seq_axioms};
+    broadcast use {axiom_spec_len, super::super::seq::group_seq_lemmas};
     reveal(super::super::laws_eq::obeys_eq_spec_properties);
     reveal(super::super::laws_eq::obeys_concrete_eq);
     reveal(super::super::laws_eq::obeys_view_eq);
@@ -493,7 +499,7 @@ pub broadcast proof fn lemma_vec_obeys_deep_eq<T: PartialEq + DeepView>()
         #[trigger] super::super::laws_eq::obeys_deep_eq::<Vec<T>>(),
 {
     use super::cmp::PartialEqSpec;
-    broadcast use {axiom_spec_len, super::super::seq::group_seq_axioms};
+    broadcast use {axiom_spec_len, super::super::seq::group_seq_lemmas};
     reveal(super::super::laws_eq::obeys_eq_spec_properties);
     reveal(super::super::laws_eq::obeys_deep_eq);
     assert(forall|x: Vec<T>, y: Vec<T>| x.eq_spec(&y) ==> x.deep_view() == y.deep_view());

@@ -2,6 +2,7 @@ use super::super::prelude::*;
 use super::super::slice::SliceIndexSpec;
 use super::core::{IndexSetTrustedSpec, IndexSpec, TrustedSpecSealed};
 use super::iter::IteratorSpec;
+use super::range::{slice_range_end, slice_range_start, slice_range_valid};
 
 use core::ops::{Index, Range};
 use core::slice::{Iter, SliceIndex};
@@ -18,7 +19,7 @@ impl<T, const N: usize> IndexSetTrustedSpec<usize> for [T; N] {
     }
 
     open spec fn spec_index_set_ensures(&self, new_container: &Self, index: usize, val: T) -> bool {
-        new_container@ === self@.update(index as int, val)
+        new_container@ == self@.update(index as int, val)
     }
 }
 
@@ -177,17 +178,17 @@ pub assume_specification<T> [ <[T]>::last ](slice: &[T]) -> (res: Option<&T>)
 #[doc(hidden)]
 pub assume_specification<T> [ <[T]>::first_mut ](slice: &mut [T]) -> (res: Option<&mut T>)
     ensures
-        old(slice).len() == 0 ==> res.is_none() && final(slice)@ === seq![],
+        old(slice).len() == 0 ==> res.is_none() && final(slice)@ == seq![],
         old(slice).len() != 0 ==> res.is_some() && *res.unwrap() == old(slice)[0]
-            && final(slice)@ === old(slice)@.update(0, *final(res.unwrap()))
+            && final(slice)@ == old(slice)@.update(0, *final(res.unwrap()))
 ;
 
 #[doc(hidden)]
 pub assume_specification<T> [ <[T]>::last_mut ](slice: &mut [T]) -> (res: Option<&mut T>)
     ensures
-        old(slice).len() == 0 ==> res.is_none() && final(slice)@ === seq![],
+        old(slice).len() == 0 ==> res.is_none() && final(slice)@ == seq![],
         old(slice).len() != 0 ==> res.is_some() && *res.unwrap() == old(slice)@.last()
-            && final(slice)@ === old(slice)@.update(old(slice).len() - 1, *final(res.unwrap()))
+            && final(slice)@ == old(slice)@.update(old(slice).len() - 1, *final(res.unwrap()))
 ;
 
 pub assume_specification<T> [ <[T]>::split_at ](slice: &[T], mid: usize) -> (ret: (&[T], &[T]))
@@ -206,6 +207,65 @@ pub assume_specification<T> [ <[T]>::split_at_mut ](slice: &mut [T], mid: usize)
         ret.0@ == old(slice)@.subrange(0, mid as int),
         ret.1@ == old(slice)@.subrange(mid as int, old(slice)@.len() as int),
         final(slice)@ == final(ret.0)@ + final(ret.1)@,
+;
+
+// The non-panicking (`Option`-returning) form of `split_at`: `Some((a, b))` split at `mid`
+// when `mid <= len`, else `None`.
+pub assume_specification<T> [ <[T]>::split_at_checked ](slice: &[T], mid: usize) -> (ret: Option<(&[T], &[T])>)
+    ensures
+        mid <= slice.len() ==> (ret matches Some((a, b))
+            && a@ == slice@.subrange(0, mid as int)
+            && b@ == slice@.subrange(mid as int, slice@.len() as int)),
+        mid > slice.len() ==> ret is None,
+;
+
+/// Copy the contents of `src` into `dst`, which must have the same length.
+pub assume_specification<T: Copy>[ <[T]>::copy_from_slice ](dst: &mut [T], src: &[T])
+    requires
+        old(dst)@.len() == src@.len(),
+    ensures
+        final(dst)@ == src@,
+;
+
+/// The sequence resulting from copying `old_slice[src_start..src_end]` to start
+/// at index `dest`, leaving all other positions unchanged. Reads are taken from
+/// `old_slice`, so overlapping source and destination ranges are handled like
+/// std's `<[T]>::copy_within` (which uses `ptr::copy`).
+pub open spec fn copy_within_result<T>(
+    old_slice: Seq<T>,
+    src_start: int,
+    src_end: int,
+    dest: int,
+) -> Seq<T> {
+    let count = src_end - src_start;
+    Seq::new(
+        old_slice.len(),
+        |i: int|
+            if dest <= i && i < dest + count {
+                old_slice[src_start + (i - dest)]
+            } else {
+                old_slice[i]
+            },
+    )
+}
+
+/// Copy the elements in range `src` within the slice to start at index `dest`.
+pub assume_specification<T: Copy, R: core::ops::RangeBounds<usize>>[ <[T]>::copy_within::<R> ](
+    slice: &mut [T],
+    src: R,
+    dest: usize,
+)
+    requires
+        slice_range_valid(&src, old(slice)@.len()),
+        (dest as int) + (slice_range_end(&src, old(slice)@.len()) - slice_range_start(&src))
+            <= old(slice)@.len(),
+    ensures
+        final(slice)@ == copy_within_result(
+            old(slice)@,
+            slice_range_start(&src),
+            slice_range_end(&src, old(slice)@.len()),
+            dest as int,
+        ),
 ;
 
 pub broadcast group group_slice_axioms {
